@@ -19,7 +19,7 @@ pub fn generate_chunk(coord: ChunkCoord, config: &GenerationConfig) -> Chunk {
 /// Generate the full density field for a chunk, including noise + worm carving.
 /// This is the shared density pipeline used by both the full pipeline and CLI commands.
 pub fn generate_density(coord: ChunkCoord, config: &GenerationConfig) -> DensityField {
-    let world_origin = coord.world_origin();
+    let world_origin = coord.world_origin_sized(config.chunk_size);
     let c_seed = seed::chunk_seed(config.seed, coord);
 
     // Step 1: Generate base density from noise
