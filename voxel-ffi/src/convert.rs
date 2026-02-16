@@ -36,10 +36,31 @@ pub fn convert_mesh_to_ue(mesh: &Mesh, scale: f32) -> ConvertedMesh {
     let tri_count = mesh.triangles.len();
     let mut indices = Vec::with_capacity(tri_count * 3);
     for tri in &mesh.triangles {
-        // Swap winding: indices[0] <-> indices[2]
-        indices.push(tri.indices[2]);
-        indices.push(tri.indices[1]);
-        indices.push(tri.indices[0]);
+        let i0 = tri.indices[0] as usize;
+        let i1 = tri.indices[1] as usize;
+        let i2 = tri.indices[2] as usize;
+
+        // Compute geometric face normal from cross product
+        let p0 = mesh.vertices[i0].position;
+        let p1 = mesh.vertices[i1].position;
+        let p2 = mesh.vertices[i2].position;
+        let face_normal = (p1 - p0).cross(p2 - p0);
+
+        // Compare with average vertex normal to determine correct winding
+        let avg_normal = mesh.vertices[i0].normal
+            + mesh.vertices[i1].normal
+            + mesh.vertices[i2].normal;
+
+        if face_normal.dot(avg_normal) < 0.0 {
+            // Face normal opposes vertex normals — flip winding
+            indices.push(tri.indices[2]);
+            indices.push(tri.indices[1]);
+            indices.push(tri.indices[0]);
+        } else {
+            indices.push(tri.indices[0]);
+            indices.push(tri.indices[1]);
+            indices.push(tri.indices[2]);
+        }
     }
 
     ConvertedMesh {
@@ -113,7 +134,8 @@ mod tests {
     }
 
     #[test]
-    fn winding_order_swapped() {
+    fn winding_corrected_by_normal() {
+        // Triangle with CCW winding matching Y-up normal → keep winding
         let mesh = Mesh {
             vertices: vec![
                 Vertex {
@@ -127,7 +149,7 @@ mod tests {
                     material: Material::Limestone,
                 },
                 Vertex {
-                    position: Vec3::new(0.0, 1.0, 0.0),
+                    position: Vec3::new(0.0, 0.0, 1.0),
                     normal: Vec3::Y,
                     material: Material::Limestone,
                 },
@@ -138,7 +160,17 @@ mod tests {
         };
 
         let converted = convert_mesh_to_ue(&mesh, 100.0);
-        // Winding should be reversed: [2, 1, 0]
+        // face_normal = (1,0,0)x(0,0,1) = (0,-1,0), dot with (0,3,0) < 0 → flip
         assert_eq!(converted.indices, vec![2, 1, 0]);
+
+        // Opposite winding → face_normal agrees with vertex normals → keep
+        let mesh2 = Mesh {
+            vertices: mesh.vertices.clone(),
+            triangles: vec![Triangle {
+                indices: [0, 2, 1],
+            }],
+        };
+        let converted2 = convert_mesh_to_ue(&mesh2, 100.0);
+        assert_eq!(converted2.indices, vec![0, 2, 1]);
     }
 }

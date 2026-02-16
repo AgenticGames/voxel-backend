@@ -187,9 +187,9 @@ pub struct OreConfig {
 impl Default for HostRockConfig {
     fn default() -> Self {
         Self {
-            sandstone_depth: 20.0,
-            granite_depth: -30.0,
-            basalt_depth: -80.0,
+            sandstone_depth: 200.0,
+            granite_depth: 160.0,
+            basalt_depth: 20.0,
             slate_depth: -150.0,
             boundary_noise_amplitude: 8.0,
             boundary_noise_frequency: 0.03,
@@ -203,10 +203,10 @@ impl Default for HostRockConfig {
 impl Default for BandedIronConfig {
     fn default() -> Self {
         Self {
-            band_frequency: 0.3,
-            noise_perturbation: 0.15,
-            noise_frequency: 0.12,
-            threshold: 0.7,
+            band_frequency: 0.2,
+            noise_perturbation: 1.0,
+            noise_frequency: 0.15,
+            threshold: 1.2,
             depth_min: -200.0,
             depth_max: 200.0,
         }
@@ -217,7 +217,7 @@ impl Default for KimberlitePipeConfig {
     fn default() -> Self {
         Self {
             pipe_frequency_2d: 0.008,
-            pipe_threshold: 0.92,
+            pipe_threshold: 0.9,
             depth_min: -200.0,
             depth_max: -30.0,
             diamond_threshold: 0.75,
@@ -229,9 +229,9 @@ impl Default for KimberlitePipeConfig {
 impl Default for SulfideBlobConfig {
     fn default() -> Self {
         Self {
-            frequency: 0.06,
-            threshold: 0.55,
-            tin_threshold: 0.72,
+            frequency: 0.5,
+            threshold: 0.2,
+            tin_threshold: 0.5,
             depth_min: -200.0,
             depth_max: -20.0,
         }
@@ -241,10 +241,10 @@ impl Default for SulfideBlobConfig {
 impl Default for GeodeConfig {
     fn default() -> Self {
         Self {
-            frequency: 0.15,
-            center_threshold: 0.88,
-            shell_thickness: 0.05,
-            hollow_factor: -0.3,
+            frequency: 0.009,
+            center_threshold: 0.94,
+            shell_thickness: 0.01,
+            hollow_factor: -0.20,
             depth_min: -200.0,
             depth_max: 200.0,
         }
@@ -256,32 +256,32 @@ impl Default for OreConfig {
         Self {
             iron: BandedIronConfig::default(),
             copper: OreVeinParams {
-                frequency: 0.18,
+                frequency: 0.009,
                 threshold: 0.72,
                 depth_min: -30.0,
                 depth_max: 200.0,
             },
             malachite: OreVeinParams {
-                frequency: 0.10,
-                threshold: 0.55,
+                frequency: 0.8,
+                threshold: 0.1,
                 depth_min: -200.0,
                 depth_max: -30.0,
             },
             quartz: OreVeinParams {
-                frequency: 0.08,
-                threshold: 0.65,
+                frequency: 0.01,
+                threshold: 0.67,
                 depth_min: -200.0,
                 depth_max: 200.0,
             },
             gold: OreVeinParams {
                 frequency: 0.08,
-                threshold: 0.82,
+                threshold: 0.87,
                 depth_min: -200.0,
                 depth_max: 200.0,
             },
             pyrite: OreVeinParams {
-                frequency: 0.18,
-                threshold: 0.60,
+                frequency: 0.05,
+                threshold: 0.92,
                 depth_min: -200.0,
                 depth_max: 200.0,
             },

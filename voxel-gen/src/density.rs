@@ -540,8 +540,8 @@ mod tests {
         let ore = &config.ore;
         let noise = MaterialNoiseSources::new(config.seed);
 
-        // Well above sandstone boundary → Sandstone
-        let mat = select_host_rock(0.0, 100.0, 0.0, &ore.host_rock, &noise);
+        // Well above sandstone boundary (200) → Sandstone
+        let mat = select_host_rock(0.0, 300.0, 0.0, &ore.host_rock, &noise);
         assert_eq!(mat, Material::Sandstone);
 
         // Well below slate boundary → Marble
