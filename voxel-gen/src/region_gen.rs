@@ -309,6 +309,137 @@ pub fn generate_seam_mesh(
     mesh
 }
 
+/// Generate seam quads for a SINGLE chunk in that chunk's LOCAL coordinate space.
+///
+/// Used by the FFI streaming path where each chunk is a separate actor.
+/// Only processes boundary edges owned by `chunk_key`. Vertices from neighbor
+/// chunks are offset relative to the owning chunk (e.g., a neighbor at +X has
+/// its DC vertices shifted by +gs along X).
+pub fn generate_chunk_seam_quads(
+    chunk_key: (i32, i32, i32),
+    all_seam_data: &HashMap<(i32, i32, i32), ChunkSeamData>,
+    gs: usize,
+) -> Mesh {
+    let chunk_data = match all_seam_data.get(&chunk_key) {
+        Some(data) => data,
+        None => return Mesh::new(),
+    };
+
+    let gs_i = gs as i32;
+    let gs_f = gs as f32;
+    let mut mesh = Mesh::new();
+
+    for (edge_key, intersection) in &chunk_data.boundary_edges {
+        let ex = edge_key.x() as i32;
+        let ey = edge_key.y() as i32;
+        let ez = edge_key.z() as i32;
+        let axis = edge_key.axis() as usize;
+
+        let cells = match axis {
+            0 => [
+                (ex, ey - 1, ez - 1),
+                (ex, ey, ez - 1),
+                (ex, ey, ez),
+                (ex, ey - 1, ez),
+            ],
+            1 => [
+                (ex - 1, ey, ez - 1),
+                (ex, ey, ez - 1),
+                (ex, ey, ez),
+                (ex - 1, ey, ez),
+            ],
+            2 => [
+                (ex - 1, ey - 1, ez),
+                (ex, ey - 1, ez),
+                (ex, ey, ez),
+                (ex - 1, ey, ez),
+            ],
+            _ => continue,
+        };
+
+        if cells.iter().any(|&(x, y, z)| x < 0 || y < 0 || z < 0) {
+            continue;
+        }
+
+        let mut positions = [Vec3::ZERO; 4];
+        let mut valid = true;
+
+        for (i, &(cell_x, cell_y, cell_z)) in cells.iter().enumerate() {
+            let chunk_dx = if cell_x >= gs_i { 1 } else { 0 };
+            let chunk_dy = if cell_y >= gs_i { 1 } else { 0 };
+            let chunk_dz = if cell_z >= gs_i { 1 } else { 0 };
+
+            let neighbor_key = (
+                chunk_key.0 + chunk_dx,
+                chunk_key.1 + chunk_dy,
+                chunk_key.2 + chunk_dz,
+            );
+
+            let lx = (cell_x - chunk_dx * gs_i) as usize;
+            let ly = (cell_y - chunk_dy * gs_i) as usize;
+            let lz = (cell_z - chunk_dz * gs_i) as usize;
+
+            if let Some(neighbor) = all_seam_data.get(&neighbor_key) {
+                let cell_idx = lz * gs * gs + ly * gs + lx;
+                if cell_idx >= neighbor.dc_vertices.len() {
+                    valid = false;
+                    break;
+                }
+                let pos = neighbor.dc_vertices[cell_idx];
+                if pos.x.is_nan() {
+                    valid = false;
+                    break;
+                }
+                // Offset neighbor DC vertex into THIS chunk's local space
+                let offset = Vec3::new(
+                    chunk_dx as f32 * gs_f,
+                    chunk_dy as f32 * gs_f,
+                    chunk_dz as f32 * gs_f,
+                );
+                positions[i] = pos + offset;
+            } else {
+                valid = false;
+                break;
+            }
+        }
+
+        if !valid {
+            continue;
+        }
+
+        let base = mesh.vertices.len() as u32;
+        for pos in &positions {
+            mesh.vertices.push(Vertex {
+                position: *pos,
+                normal: intersection.normal,
+                material: intersection.material,
+            });
+        }
+
+        let axis_dir = match axis {
+            0 => Vec3::X,
+            1 => Vec3::Y,
+            _ => Vec3::Z,
+        };
+        let normal_dot = intersection.normal.dot(axis_dir);
+
+        let (tri_a, tri_b) = if normal_dot > 0.0 {
+            ([base, base + 1, base + 2], [base, base + 2, base + 3])
+        } else {
+            ([base + 2, base + 1, base], [base + 3, base + 2, base])
+        };
+
+        if !is_degenerate(&mesh.vertices, tri_a) {
+            mesh.triangles.push(Triangle { indices: tri_a });
+        }
+        if !is_degenerate(&mesh.vertices, tri_b) {
+            mesh.triangles.push(Triangle { indices: tri_b });
+        }
+    }
+
+    mesh
+}
+
 fn is_degenerate(vertices: &[Vertex], indices: [u32; 3]) -> bool {
     let v0 = vertices[indices[0] as usize].position;
     let v1 = vertices[indices[1] as usize].position;

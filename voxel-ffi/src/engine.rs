@@ -39,7 +39,7 @@ impl VoxelEngine {
 
         let (generate_tx, generate_rx) = bounded::<WorkerRequest>(256);
         let (mine_tx, mine_rx) = bounded::<WorkerRequest>(16);
-        let (result_tx, result_rx) = bounded::<WorkerResult>(64);
+        let (result_tx, result_rx) = bounded::<WorkerResult>(128);
 
         let store = Arc::new(RwLock::new(ChunkStore::new()));
         let config = Arc::new(RwLock::new(config));
