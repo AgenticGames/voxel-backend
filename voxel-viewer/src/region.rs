@@ -5,22 +5,13 @@ use voxel_core::chunk::ChunkCoord;
 use voxel_core::dual_contouring::mesh_gen::generate_mesh;
 use voxel_core::dual_contouring::solve::solve_dc_vertices;
 use voxel_core::export::{mesh_to_json_multi, JsonMesh};
-use voxel_core::hermite::{EdgeIntersection, EdgeKey, HermiteData};
+use voxel_core::hermite::HermiteData;
 use voxel_core::material::Material;
-use voxel_core::mesh::{Mesh, Vertex, Triangle};
+use voxel_core::mesh::Mesh;
 use voxel_gen::config::GenerationConfig;
 use voxel_gen::density::DensityField;
 use voxel_gen::hermite_extract::{extract_hermite_data, patch_hermite_data};
-use voxel_gen::worm::carve::carve_worm_into_density;
-use voxel_gen::worm::connect::{find_cavern_centers, plan_worm_connections};
-use voxel_gen::worm::path::generate_worm_path;
-
-/// Per-chunk data kept for seam stitching.
-struct ChunkSeamData {
-    dc_vertices: Vec<Vec3>,
-    world_origin: Vec3,
-    boundary_edges: Vec<(EdgeKey, EdgeIntersection)>,
-}
+use voxel_gen::region_gen::{self, ChunkSeamData};
 
 /// Keeps density fields alive for re-meshing after mining.
 pub struct GeneratedRegion {
@@ -46,7 +37,6 @@ impl GeneratedRegion {
         closed: bool,
     ) -> Self {
         let gs = config.chunk_size;
-        let chunk_size_f = gs as f32;
 
         // Build coordinate list for all chunks
         let coords: Vec<(i32, i32, i32)> = (range_min.2..range_max.2)
@@ -57,82 +47,8 @@ impl GeneratedRegion {
             })
             .collect();
 
-        // Phase 1: Generate base density fields (PARALLEL)
-        let density_fields: HashMap<(i32, i32, i32), DensityField> = coords
-            .par_iter()
-            .map(|&(cx, cy, cz)| {
-                let coord = ChunkCoord::new(cx, cy, cz);
-                let density = DensityField::generate(&config, coord.world_origin_sized(gs));
-                ((cx, cy, cz), density)
-            })
-            .collect();
-
-        // Phase 2: Collect cavern centers from ALL chunks
-        let all_cavern_centers: Vec<Vec3> = coords
-            .par_iter()
-            .flat_map(|&(cx, cy, cz)| {
-                let density = &density_fields[&(cx, cy, cz)];
-                let coord = ChunkCoord::new(cx, cy, cz);
-                let flat = density.densities();
-                find_cavern_centers(&flat, density.size, coord.world_origin_sized(gs))
-            })
-            .collect();
-
-        // Phase 3: Plan global worm connections
-        let num_chunks = coords.len() as u32;
-        let global_worm_seed = config.seed.wrapping_add(0xF1F0_CAFE);
-        let total_worms = config.worm.worms_per_region * num_chunks;
-        let connections = plan_worm_connections(global_worm_seed, &all_cavern_centers, total_worms);
-
-        // Phase 4: Generate worm paths and carve (must be sequential — shared mutable density)
-        let mut density_fields = density_fields;
-        for (i, (worm_start, _end)) in connections.iter().enumerate() {
-            let worm_seed = config.seed.wrapping_add(0x1000).wrapping_add(i as u64 * 1000);
-            let segments = generate_worm_path(
-                worm_seed,
-                *worm_start,
-                config.worm.step_length,
-                config.worm.max_steps,
-                config.worm.radius_min,
-                config.worm.radius_max,
-            );
-            if segments.is_empty() {
-                continue;
-            }
-
-            let max_r = segments.iter().map(|s| s.radius).fold(0.0f32, f32::max);
-            let mut path_min = segments[0].position;
-            let mut path_max = segments[0].position;
-            for seg in &segments {
-                path_min = path_min.min(seg.position);
-                path_max = path_max.max(seg.position);
-            }
-            path_min -= Vec3::splat(max_r);
-            path_max += Vec3::splat(max_r);
-
-            let min_cx = (path_min.x / chunk_size_f).floor() as i32;
-            let max_cx = (path_max.x / chunk_size_f).floor() as i32;
-            let min_cy = (path_min.y / chunk_size_f).floor() as i32;
-            let max_cy = (path_max.y / chunk_size_f).floor() as i32;
-            let min_cz = (path_min.z / chunk_size_f).floor() as i32;
-            let max_cz = (path_max.z / chunk_size_f).floor() as i32;
-
-            for cz in min_cz..=max_cz {
-                for cy in min_cy..=max_cy {
-                    for cx in min_cx..=max_cx {
-                        if let Some(density) = density_fields.get_mut(&(cx, cy, cz)) {
-                            let coord = ChunkCoord::new(cx, cy, cz);
-                            carve_worm_into_density(
-                                density,
-                                &segments,
-                                coord.world_origin_sized(gs),
-                                config.worm.falloff_power,
-                            );
-                        }
-                    }
-                }
-            }
-        }
+        // Phases 1-4: Generate density fields with global worm carving (shared pipeline)
+        let mut density_fields = region_gen::generate_region_densities(&coords, &config);
 
         // Phase 5: Seal boundary faces
         if closed {
@@ -160,7 +76,7 @@ impl GeneratedRegion {
                 let dc_vertices = solve_dc_vertices(&hermite, cell_size);
                 let mut mesh = generate_mesh(&hermite, &dc_vertices, cell_size, config.max_edge_length);
 
-                let boundary_edges = extract_boundary_edges(&hermite, gs);
+                let boundary_edges = region_gen::extract_boundary_edges(&hermite, gs);
 
                 let world_origin = coord.world_origin_sized(gs);
                 for v in &mut mesh.vertices {
@@ -185,7 +101,7 @@ impl GeneratedRegion {
         }
 
         // Generate seam mesh to fill gaps between adjacent chunks
-        let seam_mesh = generate_seam_mesh(&chunk_seam_data, gs);
+        let seam_mesh = region_gen::generate_seam_mesh(&chunk_seam_data, gs);
 
         GeneratedRegion {
             config,
@@ -372,7 +288,7 @@ impl GeneratedRegion {
             let dc_vertices = solve_dc_vertices(&hermite, cell_size);
             let mut mesh = generate_mesh(&hermite, &dc_vertices, cell_size, self.config.max_edge_length);
 
-            let boundary_edges = extract_boundary_edges(&hermite, gs);
+            let boundary_edges = region_gen::extract_boundary_edges(&hermite, gs);
 
             let world_origin = coord.world_origin_sized(gs);
             for v in &mut mesh.vertices {
@@ -443,7 +359,7 @@ impl GeneratedRegion {
                 let dc_vertices = solve_dc_vertices(&hermite, cell_size);
                 let mut mesh = generate_mesh(&hermite, &dc_vertices, cell_size, max_edge_length);
 
-                let boundary_edges = extract_boundary_edges(&hermite, gs);
+                let boundary_edges = region_gen::extract_boundary_edges(&hermite, gs);
 
                 let world_origin = coord.world_origin_sized(gs);
                 for v in &mut mesh.vertices {
@@ -483,7 +399,7 @@ impl GeneratedRegion {
         let gs = self.config.chunk_size;
 
         // Regenerate full seam mesh (seam gen is cheap compared to hermite/DC).
-        self.seam_mesh = generate_seam_mesh(&self.chunk_seam_data, gs);
+        self.seam_mesh = region_gen::generate_seam_mesh(&self.chunk_seam_data, gs);
     }
 
     /// Get the combined mesh as JSON (direct from chunk meshes + seam, no intermediate copy).
@@ -494,142 +410,6 @@ impl GeneratedRegion {
         meshes.push(&self.seam_mesh);
         mesh_to_json_multi(&meshes)
     }
-}
-
-// ── Seam stitching (ported from voxel-cli/src/commands/generate.rs) ──────────
-
-/// Extract boundary edges from hermite data that need cross-chunk seam quads.
-fn extract_boundary_edges(
-    hermite: &HermiteData,
-    gs: usize,
-) -> Vec<(EdgeKey, EdgeIntersection)> {
-    let mut edges = Vec::new();
-    for (key, intersection) in hermite.edges.iter() {
-        let x = key.x() as usize;
-        let y = key.y() as usize;
-        let z = key.z() as usize;
-        let axis = key.axis();
-
-        let is_boundary = match axis {
-            0 => y == gs || z == gs,
-            1 => x == gs || z == gs,
-            2 => x == gs || y == gs,
-            _ => false,
-        };
-
-        if is_boundary {
-            edges.push((key, intersection.clone()));
-        }
-    }
-    edges
-}
-
-/// Generate seam mesh by emitting quads for boundary edges using DC vertices
-/// from adjacent chunks.
-fn generate_seam_mesh(
-    chunks: &HashMap<(i32, i32, i32), ChunkSeamData>,
-    gs: usize,
-) -> Mesh {
-    let mut mesh = Mesh::new();
-    let gs_i = gs as i32;
-
-    for (&(cx, cy, cz), chunk) in chunks {
-        for (edge_key, intersection) in &chunk.boundary_edges {
-            let ex = edge_key.x() as i32;
-            let ey = edge_key.y() as i32;
-            let ez = edge_key.z() as i32;
-            let axis = edge_key.axis() as usize;
-
-            // Compute the 4 cell positions for this edge's quad
-            let cells = match axis {
-                0 => [(ex, ey - 1, ez - 1), (ex, ey, ez - 1), (ex, ey, ez), (ex, ey - 1, ez)],
-                1 => [(ex - 1, ey, ez - 1), (ex, ey, ez - 1), (ex, ey, ez), (ex - 1, ey, ez)],
-                2 => [(ex - 1, ey - 1, ez), (ex, ey - 1, ez), (ex, ey, ez), (ex - 1, ey, ez)],
-                _ => continue,
-            };
-
-            // Skip if any cell has negative coordinates
-            if cells.iter().any(|&(x, y, z)| x < 0 || y < 0 || z < 0) {
-                continue;
-            }
-
-            // Look up DC vertex for each cell from the appropriate chunk
-            let mut positions = [Vec3::ZERO; 4];
-            let mut valid = true;
-
-            for (i, &(cell_x, cell_y, cell_z)) in cells.iter().enumerate() {
-                let chunk_dx = if cell_x >= gs_i { 1 } else { 0 };
-                let chunk_dy = if cell_y >= gs_i { 1 } else { 0 };
-                let chunk_dz = if cell_z >= gs_i { 1 } else { 0 };
-
-                let neighbor_key = (cx + chunk_dx, cy + chunk_dy, cz + chunk_dz);
-
-                let lx = (cell_x - chunk_dx * gs_i) as usize;
-                let ly = (cell_y - chunk_dy * gs_i) as usize;
-                let lz = (cell_z - chunk_dz * gs_i) as usize;
-
-                if let Some(neighbor) = chunks.get(&neighbor_key) {
-                    let cell_idx = lz * gs * gs + ly * gs + lx;
-                    if cell_idx >= neighbor.dc_vertices.len() {
-                        valid = false;
-                        break;
-                    }
-                    let pos = neighbor.dc_vertices[cell_idx];
-                    if pos.x.is_nan() {
-                        valid = false;
-                        break;
-                    }
-                    positions[i] = pos + neighbor.world_origin;
-                } else {
-                    valid = false;
-                    break;
-                }
-            }
-
-            if !valid {
-                continue;
-            }
-
-            // Emit the quad as 2 triangles
-            let base = mesh.vertices.len() as u32;
-            for pos in &positions {
-                mesh.vertices.push(Vertex {
-                    position: *pos,
-                    normal: intersection.normal,
-                    material: intersection.material,
-                });
-            }
-
-            let axis_dir = match axis {
-                0 => Vec3::X,
-                1 => Vec3::Y,
-                _ => Vec3::Z,
-            };
-            let normal_dot = intersection.normal.dot(axis_dir);
-
-            let (tri_a, tri_b) = if normal_dot > 0.0 {
-                ([base, base + 1, base + 2], [base, base + 2, base + 3])
-            } else {
-                ([base + 2, base + 1, base], [base + 3, base + 2, base])
-            };
-
-            if !is_degenerate(&mesh.vertices, tri_a) {
-                mesh.triangles.push(Triangle { indices: tri_a });
-            }
-            if !is_degenerate(&mesh.vertices, tri_b) {
-                mesh.triangles.push(Triangle { indices: tri_b });
-            }
-        }
-    }
-
-    mesh
-}
-
-fn is_degenerate(vertices: &[Vertex], indices: [u32; 3]) -> bool {
-    let v0 = vertices[indices[0] as usize].position;
-    let v1 = vertices[indices[1] as usize].position;
-    let v2 = vertices[indices[2] as usize].position;
-    (v1 - v0).cross(v2 - v0).length_squared() < 1e-10
 }
 
 fn has_air_neighbor(density: &DensityField, x: usize, y: usize, z: usize) -> bool {

@@ -73,6 +73,7 @@ pub struct FfiEngineConfig {
     pub worm_step_length: f32,
     pub worm_max_steps: u32,
     pub worm_falloff_power: f32,
+    pub region_size: u32,
 }
 
 #[repr(C)]

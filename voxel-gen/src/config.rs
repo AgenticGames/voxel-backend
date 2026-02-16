@@ -10,6 +10,8 @@ pub struct GenerationConfig {
     pub octree_max_depth: u32,
     /// Maximum edge length for triangle filtering (removes stretched artifacts).
     pub max_edge_length: f32,
+    /// Region size in chunks per axis for global worm planning (default 3).
+    pub region_size: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +43,7 @@ impl Default for GenerationConfig {
             ore: OreConfig::default(),
             octree_max_depth: 4,
             max_edge_length: 4.0,
+            region_size: 3,
         }
     }
 }

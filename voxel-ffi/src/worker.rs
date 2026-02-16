@@ -4,11 +4,11 @@ use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender};
 use dashmap::DashMap;
-use voxel_core::chunk::ChunkCoord;
 use voxel_core::dual_contouring::mesh_gen::generate_mesh;
 use voxel_core::dual_contouring::solve::solve_dc_vertices;
 use voxel_gen::config::GenerationConfig;
 use voxel_gen::hermite_extract::extract_hermite_data;
+use voxel_gen::region_gen::{generate_region_densities, region_chunks, region_key};
 
 use crate::convert::{convert_mesh_to_ue, from_ue_normal, from_ue_world_pos};
 use crate::store::ChunkStore;
@@ -65,27 +65,51 @@ fn handle_request(
             }
 
             let cfg = config.read().unwrap().clone();
-            let coord = ChunkCoord::new(chunk.0, chunk.1, chunk.2);
 
-            // Generate density field (includes worm carving)
-            let density = voxel_gen::generate_density(coord, &cfg);
+            // Check if this chunk's density is already cached (from a region batch)
+            let needs_region = {
+                let s = store.read().unwrap();
+                let rk = region_key(chunk.0, chunk.1, chunk.2, cfg.region_size);
+                !s.is_region_generated(&rk)
+            };
 
-            // Extract hermite data
-            let hermite = extract_hermite_data(&density);
-            let cell_size = density.size - 1;
+            if needs_region {
+                // Generate ALL densities for this region with global worms
+                let rk = region_key(chunk.0, chunk.1, chunk.2, cfg.region_size);
+                let coords = region_chunks(rk, cfg.region_size);
+                let densities = generate_region_densities(&coords, &cfg);
 
-            // Solve DC vertices and generate mesh
-            let dc_vertices = solve_dc_vertices(&hermite, cell_size);
-            let mesh = generate_mesh(&hermite, &dc_vertices, cell_size, cfg.max_edge_length);
+                // Store all densities + hermite data
+                let mut s = store.write().unwrap();
+                if !s.is_region_generated(&rk) {
+                    for (key, density) in densities {
+                        if !s.has_density(&key) {
+                            let hermite = extract_hermite_data(&density);
+                            s.insert(key, density, hermite);
+                        }
+                    }
+                    s.mark_region_generated(rk);
+                }
+            }
+
+            // Mesh the requested chunk from cached density
+            let mesh = {
+                let s = store.read().unwrap();
+                let density = match s.density_fields.get(&chunk) {
+                    Some(d) => d,
+                    None => return, // Shouldn't happen, but be safe
+                };
+                let hermite = match s.hermite_data.get(&chunk) {
+                    Some(h) => h,
+                    None => return,
+                };
+                let cell_size = density.size - 1;
+                let dc_vertices = solve_dc_vertices(hermite, cell_size);
+                generate_mesh(hermite, &dc_vertices, cell_size, cfg.max_edge_length)
+            };
 
             // Vertices stay in LOCAL chunk space [0..chunk_size].
             // The UE actor's world position handles the chunk offset.
-
-            // Store density + hermite for future mining
-            {
-                let mut s = store.write().unwrap();
-                s.insert(chunk, density, hermite);
-            }
 
             // Convert to UE coordinates
             let converted = convert_mesh_to_ue(&mesh, world_scale);

@@ -206,6 +206,7 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
         ore: OreConfig::default(),
         octree_max_depth: 4,
         max_edge_length: c.max_edge_length,
+        region_size: if c.region_size == 0 { 3 } else { c.region_size as i32 },
     }
 }
 

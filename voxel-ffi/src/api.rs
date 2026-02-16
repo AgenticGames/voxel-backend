@@ -321,6 +321,7 @@ mod tests {
             worm_step_length: 1.0,
             worm_max_steps: 200,
             worm_falloff_power: 2.0,
+            region_size: 3,
         }
     }
 

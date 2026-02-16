@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use glam::Vec3;
 use voxel_core::dual_contouring::mesh_gen::generate_mesh;
@@ -16,6 +16,8 @@ use crate::types::{ConvertedMesh, FfiMinedMaterials};
 pub struct ChunkStore {
     pub density_fields: HashMap<(i32, i32, i32), DensityField>,
     pub hermite_data: HashMap<(i32, i32, i32), HermiteData>,
+    /// Tracks which regions have had their densities generated (with global worms).
+    generated_regions: HashSet<(i32, i32, i32)>,
 }
 
 impl ChunkStore {
@@ -23,7 +25,20 @@ impl ChunkStore {
         Self {
             density_fields: HashMap::new(),
             hermite_data: HashMap::new(),
+            generated_regions: HashSet::new(),
         }
+    }
+
+    pub fn has_density(&self, key: &(i32, i32, i32)) -> bool {
+        self.density_fields.contains_key(key)
+    }
+
+    pub fn is_region_generated(&self, region_key: &(i32, i32, i32)) -> bool {
+        self.generated_regions.contains(region_key)
+    }
+
+    pub fn mark_region_generated(&mut self, region_key: (i32, i32, i32)) {
+        self.generated_regions.insert(region_key);
     }
 
     pub fn chunks_loaded(&self) -> usize {

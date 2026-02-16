@@ -6,6 +6,7 @@ pub mod hermite_extract;
 pub mod pipeline;
 pub mod chunk_manager;
 pub mod seed;
+pub mod region_gen;
 
 use voxel_core::chunk::{Chunk, ChunkCoord};
 use config::GenerationConfig;
