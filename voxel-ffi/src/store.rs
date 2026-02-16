@@ -21,8 +21,6 @@ pub struct ChunkStore {
     generated_regions: HashSet<(i32, i32, i32)>,
     /// Per-chunk seam data (DC vertices + boundary edges) for seam stitching.
     pub chunk_seam_data: HashMap<(i32, i32, i32), ChunkSeamData>,
-    /// Tracks which chunks in each region have been meshed (for seam batch pass).
-    region_meshed_chunks: HashMap<(i32, i32, i32), HashSet<(i32, i32, i32)>>,
 }
 
 impl ChunkStore {
@@ -32,7 +30,6 @@ impl ChunkStore {
             hermite_data: HashMap::new(),
             generated_regions: HashSet::new(),
             chunk_seam_data: HashMap::new(),
-            region_meshed_chunks: HashMap::new(),
         }
     }
 
@@ -63,31 +60,13 @@ impl ChunkStore {
         self.chunk_seam_data.remove(&key);
     }
 
-    /// Cache seam data for a chunk and mark it as meshed for its region.
+    /// Cache seam data for a chunk.
     pub fn add_seam_data(
         &mut self,
         chunk: (i32, i32, i32),
-        region: (i32, i32, i32),
         seam_data: ChunkSeamData,
     ) {
         self.chunk_seam_data.insert(chunk, seam_data);
-        self.region_meshed_chunks
-            .entry(region)
-            .or_default()
-            .insert(chunk);
-    }
-
-    /// Check if all chunks in a region have been meshed (seam data cached).
-    pub fn is_region_fully_meshed(
-        &self,
-        region: &(i32, i32, i32),
-        region_size: i32,
-    ) -> bool {
-        let expected = (region_size * region_size * region_size) as usize;
-        match self.region_meshed_chunks.get(region) {
-            Some(set) => set.len() >= expected,
-            None => false,
-        }
     }
 
     /// Mine a sphere: set solid voxels within radius to Air.

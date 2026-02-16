@@ -111,22 +111,20 @@ fn handle_request(
                 (m, dc_verts, b_edges)
             };
 
-            // Cache seam data and mark this chunk as meshed for its region
-            let region_complete = {
+            // Cache seam data for this chunk
+            {
                 let mut s = store.write().unwrap();
                 s.add_seam_data(
                     chunk,
-                    rk,
                     ChunkSeamData {
                         dc_vertices,
-                        world_origin: glam::Vec3::ZERO, // not used for local-space seams
+                        world_origin: glam::Vec3::ZERO,
                         boundary_edges,
                     },
                 );
-                s.is_region_fully_meshed(&rk, cfg.region_size)
-            };
+            }
 
-            // Convert to UE coordinates and send result
+            // Convert to UE coordinates and send initial result (no seams yet)
             let converted = convert_mesh_to_ue(&mesh, world_scale);
             let _ = result_tx.send(WorkerResult::ChunkMesh {
                 chunk,
@@ -134,10 +132,8 @@ fn handle_request(
                 generation,
             });
 
-            // If all region chunks are now meshed, do a seam pass
-            if region_complete {
-                seam_pass(rk, &cfg, store, result_tx, world_scale);
-            }
+            // Try to generate seams for this chunk and its neighbors
+            incremental_seam_pass(chunk, &cfg, store, result_tx, world_scale);
         }
         WorkerRequest::Mine { request } => {
             let cfg = config.read().unwrap().clone();
@@ -168,36 +164,54 @@ fn handle_request(
     }
 }
 
-/// After all chunks in a region are meshed, re-mesh each chunk with seam quads
-/// appended and send updated mesh results.
-fn seam_pass(
-    rk: (i32, i32, i32),
+/// After meshing chunk C, attempt seam generation for C and its 6 face-adjacent
+/// neighbors. Any chunk that produces non-empty seam quads gets re-meshed
+/// (from cached hermite) with seams appended and re-sent.
+///
+/// generate_chunk_seam_quads gracefully handles missing neighbors — it simply
+/// skips quads where neighbor data isn't available yet. So calling it repeatedly
+/// as neighbors arrive is safe and produces progressively more complete seams.
+fn incremental_seam_pass(
+    chunk: (i32, i32, i32),
     cfg: &GenerationConfig,
     store: &Arc<RwLock<ChunkStore>>,
     result_tx: &Sender<WorkerResult>,
     world_scale: f32,
 ) {
-    let coords = region_chunks(rk, cfg.region_size);
+    // Collect this chunk + its 6 face-adjacent neighbors to try seam generation
+    let candidates = [
+        chunk,
+        (chunk.0 - 1, chunk.1, chunk.2),
+        (chunk.0 + 1, chunk.1, chunk.2),
+        (chunk.0, chunk.1 - 1, chunk.2),
+        (chunk.0, chunk.1 + 1, chunk.2),
+        (chunk.0, chunk.1, chunk.2 - 1),
+        (chunk.0, chunk.1, chunk.2 + 1),
+    ];
 
-    for &chunk in &coords {
-        // Generate seam quads for this chunk in its local space
+    for &target in &candidates {
+        // Generate seam quads for this target chunk using all available neighbor data
         let seam_mesh = {
             let s = store.read().unwrap();
-            region_gen::generate_chunk_seam_quads(chunk, &s.chunk_seam_data, cfg.chunk_size)
+            // Skip if this chunk doesn't have seam data (hasn't been meshed yet)
+            if !s.chunk_seam_data.contains_key(&target) {
+                continue;
+            }
+            region_gen::generate_chunk_seam_quads(target, &s.chunk_seam_data, cfg.chunk_size)
         };
 
         if seam_mesh.triangles.is_empty() {
             continue;
         }
 
-        // Re-mesh the chunk from cached hermite data, then append seam quads
+        // Re-mesh the chunk from cached hermite data, append seam quads
         let combined = {
             let s = store.read().unwrap();
-            let density = match s.density_fields.get(&chunk) {
+            let density = match s.density_fields.get(&target) {
                 Some(d) => d,
                 None => continue,
             };
-            let hermite = match s.hermite_data.get(&chunk) {
+            let hermite = match s.hermite_data.get(&target) {
                 Some(h) => h,
                 None => continue,
             };
@@ -210,9 +224,9 @@ fn seam_pass(
 
         let converted = convert_mesh_to_ue(&combined, world_scale);
         let _ = result_tx.send(WorkerResult::ChunkMesh {
-            chunk,
+            chunk: target,
             mesh: converted,
-            generation: 0, // Seam update — generation 0 means always accept
+            generation: 0, // Seam update
         });
     }
 }
