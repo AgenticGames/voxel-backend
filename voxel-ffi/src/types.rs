@@ -129,8 +129,7 @@ pub enum WorkerResult {
         mesh: ConvertedMesh,
         generation: u64,
     },
-    MineResults {
-        meshes: Vec<((i32, i32, i32), ConvertedMesh)>,
+    MinedMaterials {
         mined: FfiMinedMaterials,
     },
 }

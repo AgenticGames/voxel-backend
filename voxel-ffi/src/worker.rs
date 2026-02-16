@@ -153,8 +153,19 @@ fn handle_request(
                 );
                 s.mine_peel(center, normal, radius, &cfg, world_scale)
             };
+            drop(s);
 
-            let _ = result_tx.send(WorkerResult::MineResults { meshes, mined });
+            // Send each dirty chunk mesh individually so UE can update existing actors
+            for (key, mesh) in meshes {
+                let _ = result_tx.send(WorkerResult::ChunkMesh {
+                    chunk: key,
+                    mesh,
+                    generation: 0,
+                });
+            }
+
+            // Send mined material counts separately
+            let _ = result_tx.send(WorkerResult::MinedMaterials { mined });
         }
         WorkerRequest::Unload { chunk } => {
             let mut s = store.write().unwrap();

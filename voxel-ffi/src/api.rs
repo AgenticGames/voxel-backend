@@ -113,48 +113,13 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                 let result = convert_mesh_to_ffi_result(chunk, mesh, generation);
                 Box::into_raw(Box::new(result))
             }
-            WorkerResult::MineResults { meshes, mined } => {
-                // For mine results, return the first dirty chunk mesh.
-                // If there are multiple dirty chunks, they'll be returned
-                // in subsequent polls via re-queuing.
-                if meshes.is_empty() {
-                    let result = FfiResult {
-                        result_type: FfiResultType::MineResult,
-                        chunk: FfiChunkCoord { x: 0, y: 0, z: 0 },
-                        mesh: empty_mesh_data(),
-                        mined,
-                        generation: 0,
-                    };
-                    return Box::into_raw(Box::new(result));
-                }
-
-                // Return results one at a time. We send additional results
-                // back to the result channel for subsequent polls.
-                let mut iter = meshes.into_iter();
-                let (first_key, first_mesh) = iter.next().unwrap();
-
-                // Re-queue remaining meshes
-                for (key, mesh) in iter {
-                    // These are already-meshed results, send as ChunkMesh with generation=0
-                    let _ = engine.poll_result(); // drain is handled by caller
-                    // Actually we need to push these back. Since we can't easily
-                    // push back to result channel from here, pack first one with mined data
-                    // and the rest as ChunkMesh results.
-                    // For simplicity, only return the first mesh with mined data.
-                    // The UE side should re-request affected chunks if needed.
-                    let _ = key;
-                    let _ = mesh;
-                }
-
-                let ue_key = rust_chunk_to_ue(first_key.0, first_key.1, first_key.2);
+            WorkerResult::MinedMaterials { mined } => {
+                // Dirty chunk meshes are sent as individual ChunkMesh results.
+                // This result only carries the mined material counts.
                 let result = FfiResult {
                     result_type: FfiResultType::MineResult,
-                    chunk: FfiChunkCoord {
-                        x: ue_key.0,
-                        y: ue_key.1,
-                        z: ue_key.2,
-                    },
-                    mesh: converted_mesh_to_ffi(first_mesh),
+                    chunk: FfiChunkCoord { x: 0, y: 0, z: 0 },
+                    mesh: empty_mesh_data(),
                     mined,
                     generation: 0,
                 };
