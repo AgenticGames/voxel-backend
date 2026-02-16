@@ -1,0 +1,22 @@
+{
+  "total_seeds": 1000,
+  "passed": 997,
+  "failed": 3,
+  "failures": [
+    {
+      "seed": 97,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./test-output-1k/failure_97.obj"
+    },
+    {
+      "seed": 384,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./test-output-1k/failure_384.obj"
+    },
+    {
+      "seed": 804,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./test-output-1k/failure_804.obj"
+    }
+  ]
+}

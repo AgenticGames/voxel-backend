@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voxel Batch Test Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div id="app">
+        <div id="summary-bar">
+            <h1>Voxel Test Dashboard</h1>
+            <div class="stat">Total: <span id="stat-total" class="stat-value blue">--</span></div>
+            <div class="stat">Passed: <span id="stat-passed" class="stat-value green">--</span></div>
+            <div class="stat">Failed: <span id="stat-failed" class="stat-value red">--</span></div>
+            <div class="stat">Pass rate: <span id="stat-rate" class="stat-value blue">--</span></div>
+        </div>
+
+        <div id="left-panel">
+            <div id="generate-panel">
+                <h2>Multi-Chunk Generator</h2>
+                <div class="gen-form">
+                    <div class="gen-row">
+                        <label>Seed <input type="number" id="gen-seed" value="1" min="0"></label>
+                    </div>
+                    <div class="gen-row">
+                        <label>X <input type="number" id="gen-x" value="3" min="1" max="8"></label>
+                        <label>Y <input type="number" id="gen-y" value="3" min="1" max="8"></label>
+                        <label>Z <input type="number" id="gen-z" value="1" min="1" max="8"></label>
+                    </div>
+                    <div class="gen-row">
+                        <label class="toggle-label">
+                            <input type="checkbox" id="gen-closed"> Closed Boundary
+                            <span class="toggle-hint">(seal outer faces for watertight testing)</span>
+                        </label>
+                    </div>
+                    <div class="gen-row">
+                        <label class="toggle-label">
+                            <input type="checkbox" id="gen-keep-camera"> Keep Camera Position
+                        </label>
+                    </div>
+                    <div class="gen-row">
+                        <button id="gen-btn">Generate</button>
+                        <span id="gen-status"></span>
+                    </div>
+
+                    <div class="preset-bar">
+                        <span class="preset-label">Presets</span>
+                        <button class="preset-slot" data-slot="0" title="Empty — click to load, select then Save to store">1</button>
+                        <button class="preset-slot" data-slot="1" title="Empty — click to load, select then Save to store">2</button>
+                        <button class="preset-slot" data-slot="2" title="Empty — click to load, select then Save to store">3</button>
+                        <button class="preset-slot" data-slot="3" title="Empty — click to load, select then Save to store">4</button>
+                        <button class="preset-slot" data-slot="4" title="Empty — click to load, select then Save to store">5</button>
+                        <button id="preset-save" title="Save current settings to the selected preset slot">Save</button>
+                        <button id="preset-delete" title="Delete the selected preset">Del</button>
+                        <button id="preset-reset" title="Clear all settings back to defaults">Reset</button>
+                    </div>
+
+                    <details class="settings-section">
+                        <summary>Noise Settings</summary>
+                        <div class="settings-grid">
+                            <label title="Higher = smaller caverns, Lower = larger caverns">Cavern Frequency <input type="number" id="gen-cavern-freq" step="0.01" placeholder="0.05"></label>
+                            <label title="Higher = less cave area, Lower = more caves">Cavern Threshold <input type="number" id="gen-cavern-threshold" step="0.01" placeholder="0.55"></label>
+                            <label title="More octaves = finer wall detail">Detail Octaves <input type="number" id="gen-detail-octaves" step="1" min="1" placeholder="4"></label>
+                            <label title="Higher = rougher surfaces, Lower = smoother blend between octaves">Detail Persistence <input type="number" id="gen-detail-persistence" step="0.05" placeholder="0.5"></label>
+                            <label title="Higher = more domain warp distortion, more organic shapes">Warp Amplitude <input type="number" id="gen-warp-amplitude" step="0.5" placeholder="5.0"></label>
+                        </div>
+                    </details>
+
+                    <details class="settings-section">
+                        <summary>Worm Settings</summary>
+                        <div class="settings-grid">
+                            <label title="More worms = more tunnel connections">Worms Per Region <input type="number" id="gen-worms-per-region" step="1" min="0" placeholder="5"></label>
+                            <label title="Lower = narrower minimum tunnel width">Radius Min <input type="number" id="gen-worm-radius-min" step="0.5" min="0" placeholder="2.0"></label>
+                            <label title="Higher = wider tunnels">Radius Max <input type="number" id="gen-worm-radius-max" step="0.5" min="0" placeholder="4.0"></label>
+                            <label title="Smaller = smoother turns, Larger = longer straight segments">Step Length <input type="number" id="gen-worm-step-length" step="0.1" min="0.1" placeholder="1.0"></label>
+                            <label title="More steps = longer tunnels">Max Steps <input type="number" id="gen-worm-max-steps" step="10" min="1" placeholder="200"></label>
+                            <label title="Higher = sharper falloff at tunnel edges">Falloff Power <input type="number" id="gen-worm-falloff-power" step="0.5" min="0.1" placeholder="2.0"></label>
+                        </div>
+                    </details>
+
+                    <details class="settings-section">
+                        <summary>Mesh Quality</summary>
+                        <div class="settings-grid">
+                            <label title="Larger = more detail but slower, each chunk is NxNxN voxels">Chunk Size <input type="number" id="gen-chunk-size" step="1" min="4" max="64" placeholder="16"></label>
+                            <label title="Lower = more triangles kept, Higher = removes stretched triangles">Max Edge Length <input type="number" id="gen-max-edge-length" step="0.5" min="1" placeholder="4.0"></label>
+                        </div>
+                    </details>
+
+                    <details class="settings-section">
+                        <summary>Ore Settings</summary>
+                        <div class="ore-subsection">
+                            <span class="ore-label" style="color:#a0a0b8;">Host Rock Layers</span> <em class="ore-hint">depth-layered geology</em>
+                            <div class="settings-grid">
+                                <label title="Depth above which terrain is sandstone">Sandstone Depth <input type="number" id="gen-sandstone-depth" step="5" placeholder="20.0"></label>
+                                <label title="Depth above which terrain is granite">Granite Depth <input type="number" id="gen-granite-depth" step="5" placeholder="-30.0"></label>
+                                <label title="Depth above which terrain is basalt">Basalt Depth <input type="number" id="gen-basalt-depth" step="10" placeholder="-80.0"></label>
+                                <label title="Depth above which terrain is slate">Slate Depth <input type="number" id="gen-slate-depth" step="10" placeholder="-150.0"></label>
+                            </div>
+                        </div>
+                        <div class="ore-subsection">
+                            <span class="ore-label" style="color:#A0522D;">Banded Iron</span> <em class="ore-hint">horizontal sine-wave layers</em>
+                            <div class="settings-grid">
+                                <label title="Higher = thinner iron bands, Lower = wider bands">Band Frequency <input type="number" id="gen-iron-band-freq" step="0.05" placeholder="0.3"></label>
+                                <label title="Higher = smaller deposit features, Lower = larger blobs">Noise Frequency <input type="number" id="gen-iron-noise-freq" step="0.01" placeholder="0.12"></label>
+                                <label title="Higher = noisier band edges">Perturbation <input type="number" id="gen-iron-perturbation" step="0.01" placeholder="0.15"></label>
+                                <label title="Higher = rarer deposits, Lower = more common">Threshold <input type="number" id="gen-iron-threshold" step="0.01" placeholder="0.7"></label>
+                            </div>
+                        </div>
+                        <div class="ore-subsection">
+                            <span class="ore-label" style="color:#B87333;">Copper</span> <em class="ore-hint">dendritic branching tendrils</em>
+                            <div class="settings-grid">
+                                <label title="Higher = smaller deposit features, Lower = larger blobs">Frequency <input type="number" id="gen-copper-freq" step="0.01" placeholder="0.18"></label>
+                                <label title="Higher = rarer deposits, Lower = more common">Threshold <input type="number" id="gen-copper-threshold" step="0.01" placeholder="0.72"></label>
+                            </div>
+                        </div>
+                        <div class="ore-subsection">
+                            <span class="ore-label" style="color:#0BDA51;">Malachite</span> <em class="ore-hint">deep green indicator zones</em>
+                            <div class="settings-grid">
+                                <label title="Higher = smaller deposit features, Lower = larger blobs">Frequency <input type="number" id="gen-malachite-freq" step="0.01" placeholder="0.10"></label>
+                                <label title="Higher = rarer deposits, Lower = more common">Threshold <input type="number" id="gen-malachite-threshold" step="0.01" placeholder="0.55"></label>
+                            </div>
+                        </div>
+                        <div class="ore-subsection">
+                            <span class="ore-label" style="color:#4A3728;">Kimberlite Pipe</span> <em class="ore-hint">rare vertical intrusions</em>
+                            <div class="settings-grid">
+                                <label title="Higher = smaller deposit features, Lower = larger blobs">Pipe Frequency <input type="number" id="gen-kimberlite-pipe-freq" step="0.001" placeholder="0.008"></label>
+                                <label title="Higher = rarer/narrower pipes">Pipe Threshold <input type="number" id="gen-kimberlite-pipe-threshold" step="0.01" placeholder="0.92"></label>
+                                <label title="Higher = smaller deposit features, Lower = larger blobs">Diamond Frequency <input type="number" id="gen-diamond-freq" step="0.01" placeholder="0.2"></label>
+                                <label title="Higher = rarer deposits, Lower = more common">Diamond Threshold <input type="number" id="gen-diamond-threshold" step="0.01" placeholder="0.75"></label>
+                            </div>
+                        </div>
+                        <div class="ore-subsection">
+                            <span class="ore-label" style="color:#8B8000;">Sulfide Blob</span> <em class="ore-hint">massive irregular deposits</em>
+                            <div class="settings-grid">
+                                <label title="Higher = smaller deposit features, Lower = larger blobs">Frequency <input type="number" id="gen-sulfide-freq" step="0.01" placeholder="0.06"></label>
+                                <label title="Higher = rarer deposits, Lower = more common">Threshold <input type="number" id="gen-sulfide-threshold" step="0.01" placeholder="0.55"></label>
+                                <label title="Higher = rarer deposits, Lower = more common">Tin Threshold <input type="number" id="gen-tin-threshold" step="0.01" placeholder="0.72"></label>
+                            </div>
+                        </div>
+                        <div class="ore-subsection">
+                            <span class="ore-label" style="color:#CBA135;">Pyrite</span> <em class="ore-hint">indicator halo near ores</em>
+                            <div class="settings-grid">
+                                <label title="Higher = smaller deposit features, Lower = larger blobs">Frequency <input type="number" id="gen-pyrite-freq" step="0.01" placeholder="0.18"></label>
+                                <label title="Higher = rarer deposits, Lower = more common">Threshold <input type="number" id="gen-pyrite-threshold" step="0.01" placeholder="0.60"></label>
+                            </div>
+                        </div>
+                        <div class="ore-subsection">
+                            <span class="ore-label" style="color:#E8E0D0;">Quartz</span> <em class="ore-hint">reef veins hosting gold</em>
+                            <div class="settings-grid">
+                                <label title="Higher = smaller deposit features, Lower = larger blobs">Frequency <input type="number" id="gen-quartz-freq" step="0.01" placeholder="0.08"></label>
+                                <label title="Higher = rarer deposits, Lower = more common">Threshold <input type="number" id="gen-quartz-threshold" step="0.01" placeholder="0.65"></label>
+                            </div>
+                        </div>
+                        <div class="ore-subsection">
+                            <span class="ore-label" style="color:#FFD700;">Gold</span> <em class="ore-hint">within quartz reef</em>
+                            <div class="settings-grid">
+                                <label title="Higher = rarer deposits, Lower = more common">Threshold <input type="number" id="gen-gold-threshold" step="0.01" placeholder="0.82"></label>
+                            </div>
+                        </div>
+                        <div class="ore-subsection">
+                            <span class="ore-label" style="color:#9B59B6;">Geode</span> <em class="ore-hint">crystal-lined hollow pockets</em>
+                            <div class="settings-grid">
+                                <label title="Higher = smaller deposit features, Lower = larger blobs">Frequency <input type="number" id="gen-geode-freq" step="0.01" placeholder="0.15"></label>
+                                <label title="Higher = rarer deposits, Lower = more common">Center Threshold <input type="number" id="gen-geode-center-threshold" step="0.01" placeholder="0.88"></label>
+                                <label title="Higher = thicker geode shell walls">Shell Thickness <input type="number" id="gen-geode-shell-thickness" step="0.01" placeholder="0.05"></label>
+                                <label title="More negative = more hollow interior">Hollow Factor <input type="number" id="gen-geode-hollow-factor" step="0.1" placeholder="-0.3"></label>
+                            </div>
+                        </div>
+                    </details>
+                </div>
+                <div id="custom-exports"></div>
+            </div>
+
+            <h2>Test Results</h2>
+            <table id="results-table">
+                <thead>
+                    <tr>
+                        <th>Seed</th>
+                        <th>Status</th>
+                        <th>Reason</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody id="results-body">
+                </tbody>
+            </table>
+        </div>
+
+        <div id="right-panel">
+            <div id="viewer-toolbar">
+                <label>
+                    <input type="checkbox" id="wireframe-toggle"> Wireframe
+                </label>
+                <label>
+                    Mode
+                    <select id="mine-mode">
+                        <option value="sphere">Sphere Carve (r=5)</option>
+                        <option value="peel">Surface Peel (r=2)</option>
+                    </select>
+                </label>
+                <label>
+                    Radius
+                    <input type="range" id="mine-radius" min="1" max="10" value="5">
+                    <span id="mine-radius-val">5</span>
+                </label>
+                <span id="mesh-info"></span>
+            </div>
+            <div id="material-legend">
+                <span class="legend-item"><span class="legend-swatch" style="background:#D4C4A8;"></span>Limestone</span>
+                <span class="legend-item"><span class="legend-swatch" style="background:#C2A366;"></span>Sandstone</span>
+                <span class="legend-item"><span class="legend-swatch" style="background:#8B7D6B;"></span>Granite</span>
+                <span class="legend-item"><span class="legend-swatch" style="background:#3B3B3B;"></span>Basalt</span>
+                <span class="legend-item"><span class="legend-swatch" style="background:#5A6B7A;"></span>Slate</span>
+                <span class="legend-item"><span class="legend-swatch" style="background:#E8E0D8;"></span>Marble</span>
+                <span class="legend-item"><span class="legend-swatch" style="background:#A0522D;"></span>Iron</span>
+                <span class="legend-item"><span class="legend-swatch" style="background:#B87333;"></span>Copper</span>
+                <span class="legend-item"><span class="legend-swatch" style="background:#0BDA51;"></span>Malachite</span>
+                <span class="legend-item"><span class="legend-swatch" style="background:#C0C0C0;"></span>Tin</span>
+                <span class="legend-item"><span class="legend-swatch" style="background:#8B8000;"></span>Sulfide</span>
+                <span class="legend-item"><span class="legend-swatch" style="background:#CBA135;"></span>Pyrite</span>
+                <span class="legend-item"><span class="legend-swatch" style="background:#E8E0D0;"></span>Quartz</span>
+                <span class="legend-item"><span class="legend-swatch" style="background:#FFD700;"></span>Gold</span>
+                <span class="legend-item"><span class="legend-swatch" style="background:#4A3728;"></span>Kimberlite</span>
+                <span class="legend-item"><span class="legend-swatch" style="background:#B9F2FF;"></span>Diamond</span>
+                <span class="legend-item"><span class="legend-swatch" style="background:#9B59B6;"></span>Amethyst</span>
+                <span class="legend-item"><span class="legend-swatch" style="background:#85C1E9;"></span>Crystal</span>
+            </div>
+            <div id="viewer-container">
+                <div id="viewer-placeholder">Select a failed seed to view its mesh</div>
+            </div>
+            <div id="run-batch-bar">
+                <button id="run-batch-btn">Run Batch Test</button>
+                <span id="batch-status"></span>
+            </div>
+        </div>
+    </div>
+
+    <div id="toast-container"></div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/OBJLoader.js"></script>
+    <script src="/static/app.js"></script>
+</body>
+</html>

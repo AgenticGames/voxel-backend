@@ -1,0 +1,9 @@
+[package]
+name = "voxel-noise"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+glam.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true

@@ -1,0 +1,9 @@
+[package]
+name = "nav-debug"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+voxel-gen = { path = "../voxel-gen" }
+voxel-core = { path = "../voxel-core" }
+glam = "0.29"

@@ -1,0 +1,13 @@
+[package]
+name = "voxel-gen"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+glam.workspace = true
+rayon.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+serde = { workspace = true }
+voxel-noise = { path = "../voxel-noise" }
+voxel-core = { path = "../voxel-core" }

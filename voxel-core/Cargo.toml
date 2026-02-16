@@ -1,0 +1,13 @@
+[package]
+name = "voxel-core"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+ffi = []
+
+[dependencies]
+glam.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+voxel-noise = { path = "../voxel-noise" }

@@ -1,0 +1,294 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenerationConfig {
+    pub seed: u64,
+    pub chunk_size: usize,
+    pub noise: NoiseConfig,
+    pub worm: WormConfig,
+    pub ore: OreConfig,
+    pub octree_max_depth: u32,
+    /// Maximum edge length for triangle filtering (removes stretched artifacts).
+    pub max_edge_length: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoiseConfig {
+    pub cavern_frequency: f64,
+    pub cavern_threshold: f64,
+    pub detail_octaves: u32,
+    pub detail_persistence: f64,
+    pub warp_amplitude: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WormConfig {
+    pub worms_per_region: u32,
+    pub radius_min: f32,
+    pub radius_max: f32,
+    pub step_length: f32,
+    pub max_steps: u32,
+    pub falloff_power: f32,
+}
+
+impl Default for GenerationConfig {
+    fn default() -> Self {
+        Self {
+            seed: 42,
+            chunk_size: 16,
+            noise: NoiseConfig::default(),
+            worm: WormConfig::default(),
+            ore: OreConfig::default(),
+            octree_max_depth: 4,
+            max_edge_length: 4.0,
+        }
+    }
+}
+
+impl Default for NoiseConfig {
+    fn default() -> Self {
+        Self {
+            cavern_frequency: 0.05,
+            cavern_threshold: 0.55,
+            detail_octaves: 4,
+            detail_persistence: 0.5,
+            warp_amplitude: 5.0,
+        }
+    }
+}
+
+impl Default for WormConfig {
+    fn default() -> Self {
+        Self {
+            worms_per_region: 5,
+            radius_min: 2.0,
+            radius_max: 4.0,
+            step_length: 1.0,
+            max_steps: 200,
+            falloff_power: 2.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OreVeinParams {
+    pub frequency: f64,
+    pub threshold: f64,
+    pub depth_min: f64,
+    pub depth_max: f64,
+}
+
+// ── New config structs for deposit morphologies ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostRockConfig {
+    /// Above this Y → Sandstone
+    pub sandstone_depth: f64,
+    /// Limestone→Granite boundary
+    pub granite_depth: f64,
+    /// Granite→Slate boundary (Basalt is intrusions, not a layer)
+    pub basalt_depth: f64,
+    /// Slate→Marble boundary
+    pub slate_depth: f64,
+    /// Noise amplitude for perturbing layer boundaries
+    pub boundary_noise_amplitude: f64,
+    /// Noise frequency for boundary perturbation
+    pub boundary_noise_frequency: f64,
+    /// 2D noise frequency for basalt intrusion columns
+    pub basalt_intrusion_frequency: f64,
+    /// Threshold for basalt columns (higher = rarer)
+    pub basalt_intrusion_threshold: f64,
+    /// Basalt columns only below this Y
+    pub basalt_intrusion_depth_max: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BandedIronConfig {
+    /// Sine wave frequency for horizontal bands
+    pub band_frequency: f64,
+    /// Noise amplitude added to sine for natural edges
+    pub noise_perturbation: f64,
+    /// Frequency of the perturbation noise
+    pub noise_frequency: f64,
+    /// Combined value must exceed this
+    pub threshold: f64,
+    pub depth_min: f64,
+    pub depth_max: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KimberlitePipeConfig {
+    /// 2D noise frequency for pipe center locations (low = widely spaced)
+    pub pipe_frequency_2d: f64,
+    /// Threshold for pipe centers (very high = rare)
+    pub pipe_threshold: f64,
+    /// Pipes only below this depth
+    pub depth_min: f64,
+    /// Pipes extend up to this depth
+    pub depth_max: f64,
+    /// Additional noise threshold for diamond within pipe
+    pub diamond_threshold: f64,
+    /// Noise frequency for diamond distribution
+    pub diamond_frequency: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SulfideBlobConfig {
+    /// Low frequency for large blobs
+    pub frequency: f64,
+    /// Threshold for sulfide blob boundary
+    pub threshold: f64,
+    /// Higher threshold: tin pockets within sulfide
+    pub tin_threshold: f64,
+    pub depth_min: f64,
+    pub depth_max: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeodeConfig {
+    /// Noise frequency for geode center detection
+    pub frequency: f64,
+    /// Very high threshold = rare small regions
+    pub center_threshold: f64,
+    /// Thickness of the crystal shell (in noise-space units)
+    pub shell_thickness: f64,
+    /// Density value for geode interior (negative = hollow)
+    pub hollow_factor: f32,
+    pub depth_min: f64,
+    pub depth_max: f64,
+}
+
+// ── Main ore config ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OreConfig {
+    /// Banded iron formation — horizontal sine-wave layers
+    pub iron: BandedIronConfig,
+    /// Dendritic copper — branching tendrils (shallow, RidgedMulti)
+    pub copper: OreVeinParams,
+    /// Malachite — green copper indicator zones (deep)
+    pub malachite: OreVeinParams,
+    /// Quartz reef veins — narrow ridged structures (host for gold)
+    pub quartz: OreVeinParams,
+    /// Gold — only inside quartz reef, higher threshold
+    pub gold: OreVeinParams,
+    /// Pyrite — indicator near copper/gold, lower threshold halo
+    pub pyrite: OreVeinParams,
+    /// Kimberlite pipes — vertical cylindrical intrusions with diamonds
+    pub kimberlite: KimberlitePipeConfig,
+    /// Massive sulfide blobs — large irregular deposits with tin pockets
+    pub sulfide: SulfideBlobConfig,
+    /// Geodes — crystal-lined hollow pockets
+    pub geode: GeodeConfig,
+    /// Host rock depth layering
+    pub host_rock: HostRockConfig,
+}
+
+impl Default for HostRockConfig {
+    fn default() -> Self {
+        Self {
+            sandstone_depth: 20.0,
+            granite_depth: -30.0,
+            basalt_depth: -80.0,
+            slate_depth: -150.0,
+            boundary_noise_amplitude: 8.0,
+            boundary_noise_frequency: 0.03,
+            basalt_intrusion_frequency: 0.02,
+            basalt_intrusion_threshold: 0.85,
+            basalt_intrusion_depth_max: 10.0,
+        }
+    }
+}
+
+impl Default for BandedIronConfig {
+    fn default() -> Self {
+        Self {
+            band_frequency: 0.3,
+            noise_perturbation: 0.15,
+            noise_frequency: 0.12,
+            threshold: 0.7,
+            depth_min: -200.0,
+            depth_max: 200.0,
+        }
+    }
+}
+
+impl Default for KimberlitePipeConfig {
+    fn default() -> Self {
+        Self {
+            pipe_frequency_2d: 0.008,
+            pipe_threshold: 0.92,
+            depth_min: -200.0,
+            depth_max: -30.0,
+            diamond_threshold: 0.75,
+            diamond_frequency: 0.2,
+        }
+    }
+}
+
+impl Default for SulfideBlobConfig {
+    fn default() -> Self {
+        Self {
+            frequency: 0.06,
+            threshold: 0.55,
+            tin_threshold: 0.72,
+            depth_min: -200.0,
+            depth_max: -20.0,
+        }
+    }
+}
+
+impl Default for GeodeConfig {
+    fn default() -> Self {
+        Self {
+            frequency: 0.15,
+            center_threshold: 0.88,
+            shell_thickness: 0.05,
+            hollow_factor: -0.3,
+            depth_min: -200.0,
+            depth_max: 200.0,
+        }
+    }
+}
+
+impl Default for OreConfig {
+    fn default() -> Self {
+        Self {
+            iron: BandedIronConfig::default(),
+            copper: OreVeinParams {
+                frequency: 0.18,
+                threshold: 0.72,
+                depth_min: -30.0,
+                depth_max: 200.0,
+            },
+            malachite: OreVeinParams {
+                frequency: 0.10,
+                threshold: 0.55,
+                depth_min: -200.0,
+                depth_max: -30.0,
+            },
+            quartz: OreVeinParams {
+                frequency: 0.08,
+                threshold: 0.65,
+                depth_min: -200.0,
+                depth_max: 200.0,
+            },
+            gold: OreVeinParams {
+                frequency: 0.08,
+                threshold: 0.82,
+                depth_min: -200.0,
+                depth_max: 200.0,
+            },
+            pyrite: OreVeinParams {
+                frequency: 0.18,
+                threshold: 0.60,
+                depth_min: -200.0,
+                depth_max: 200.0,
+            },
+            kimberlite: KimberlitePipeConfig::default(),
+            sulfide: SulfideBlobConfig::default(),
+            geode: GeodeConfig::default(),
+            host_rock: HostRockConfig::default(),
+        }
+    }
+}

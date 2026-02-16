@@ -1,0 +1,608 @@
+{
+  "total_seeds": 100,
+  "passed": 94,
+  "failed": 6,
+  "results": [
+    {
+      "seed": 0,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_0.obj"
+    },
+    {
+      "seed": 1,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_1.obj"
+    },
+    {
+      "seed": 2,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_2.obj"
+    },
+    {
+      "seed": 3,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_3.obj"
+    },
+    {
+      "seed": 4,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_4.obj"
+    },
+    {
+      "seed": 5,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_5.obj"
+    },
+    {
+      "seed": 6,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_6.obj"
+    },
+    {
+      "seed": 7,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_7.obj"
+    },
+    {
+      "seed": 8,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_8.obj"
+    },
+    {
+      "seed": 9,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_9.obj"
+    },
+    {
+      "seed": 10,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_10.obj"
+    },
+    {
+      "seed": 11,
+      "passed": false,
+      "reason": "not navigable, not watertight",
+      "obj_path": "test-output/seed_11.obj"
+    },
+    {
+      "seed": 12,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_12.obj"
+    },
+    {
+      "seed": 13,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_13.obj"
+    },
+    {
+      "seed": 14,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_14.obj"
+    },
+    {
+      "seed": 15,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_15.obj"
+    },
+    {
+      "seed": 16,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_16.obj"
+    },
+    {
+      "seed": 17,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_17.obj"
+    },
+    {
+      "seed": 18,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_18.obj"
+    },
+    {
+      "seed": 19,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_19.obj"
+    },
+    {
+      "seed": 20,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_20.obj"
+    },
+    {
+      "seed": 21,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_21.obj"
+    },
+    {
+      "seed": 22,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_22.obj"
+    },
+    {
+      "seed": 23,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_23.obj"
+    },
+    {
+      "seed": 24,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_24.obj"
+    },
+    {
+      "seed": 25,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_25.obj"
+    },
+    {
+      "seed": 26,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_26.obj"
+    },
+    {
+      "seed": 27,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_27.obj"
+    },
+    {
+      "seed": 28,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_28.obj"
+    },
+    {
+      "seed": 29,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_29.obj"
+    },
+    {
+      "seed": 30,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_30.obj"
+    },
+    {
+      "seed": 31,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_31.obj"
+    },
+    {
+      "seed": 32,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_32.obj"
+    },
+    {
+      "seed": 33,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_33.obj"
+    },
+    {
+      "seed": 34,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_34.obj"
+    },
+    {
+      "seed": 35,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_35.obj"
+    },
+    {
+      "seed": 36,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_36.obj"
+    },
+    {
+      "seed": 37,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_37.obj"
+    },
+    {
+      "seed": 38,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_38.obj"
+    },
+    {
+      "seed": 39,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_39.obj"
+    },
+    {
+      "seed": 40,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_40.obj"
+    },
+    {
+      "seed": 41,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_41.obj"
+    },
+    {
+      "seed": 42,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_42.obj"
+    },
+    {
+      "seed": 43,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_43.obj"
+    },
+    {
+      "seed": 44,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_44.obj"
+    },
+    {
+      "seed": 45,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_45.obj"
+    },
+    {
+      "seed": 46,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_46.obj"
+    },
+    {
+      "seed": 47,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_47.obj"
+    },
+    {
+      "seed": 48,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_48.obj"
+    },
+    {
+      "seed": 49,
+      "passed": false,
+      "reason": "not navigable, not watertight",
+      "obj_path": "test-output/seed_49.obj"
+    },
+    {
+      "seed": 50,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_50.obj"
+    },
+    {
+      "seed": 51,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_51.obj"
+    },
+    {
+      "seed": 52,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_52.obj"
+    },
+    {
+      "seed": 53,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_53.obj"
+    },
+    {
+      "seed": 54,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_54.obj"
+    },
+    {
+      "seed": 55,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_55.obj"
+    },
+    {
+      "seed": 56,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_56.obj"
+    },
+    {
+      "seed": 57,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_57.obj"
+    },
+    {
+      "seed": 58,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_58.obj"
+    },
+    {
+      "seed": 59,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_59.obj"
+    },
+    {
+      "seed": 60,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_60.obj"
+    },
+    {
+      "seed": 61,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_61.obj"
+    },
+    {
+      "seed": 62,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_62.obj"
+    },
+    {
+      "seed": 63,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_63.obj"
+    },
+    {
+      "seed": 64,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_64.obj"
+    },
+    {
+      "seed": 65,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_65.obj"
+    },
+    {
+      "seed": 66,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_66.obj"
+    },
+    {
+      "seed": 67,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_67.obj"
+    },
+    {
+      "seed": 68,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_68.obj"
+    },
+    {
+      "seed": 69,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_69.obj"
+    },
+    {
+      "seed": 70,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_70.obj"
+    },
+    {
+      "seed": 71,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_71.obj"
+    },
+    {
+      "seed": 72,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_72.obj"
+    },
+    {
+      "seed": 73,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_73.obj"
+    },
+    {
+      "seed": 74,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_74.obj"
+    },
+    {
+      "seed": 75,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_75.obj"
+    },
+    {
+      "seed": 76,
+      "passed": false,
+      "reason": "not navigable, not watertight",
+      "obj_path": "test-output/seed_76.obj"
+    },
+    {
+      "seed": 77,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_77.obj"
+    },
+    {
+      "seed": 78,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_78.obj"
+    },
+    {
+      "seed": 79,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_79.obj"
+    },
+    {
+      "seed": 80,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_80.obj"
+    },
+    {
+      "seed": 81,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_81.obj"
+    },
+    {
+      "seed": 82,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_82.obj"
+    },
+    {
+      "seed": 83,
+      "passed": false,
+      "reason": "not navigable, not watertight",
+      "obj_path": "test-output/seed_83.obj"
+    },
+    {
+      "seed": 84,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_84.obj"
+    },
+    {
+      "seed": 85,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_85.obj"
+    },
+    {
+      "seed": 86,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_86.obj"
+    },
+    {
+      "seed": 87,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_87.obj"
+    },
+    {
+      "seed": 88,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_88.obj"
+    },
+    {
+      "seed": 89,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_89.obj"
+    },
+    {
+      "seed": 90,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_90.obj"
+    },
+    {
+      "seed": 91,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_91.obj"
+    },
+    {
+      "seed": 92,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_92.obj"
+    },
+    {
+      "seed": 93,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_93.obj"
+    },
+    {
+      "seed": 94,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_94.obj"
+    },
+    {
+      "seed": 95,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_95.obj"
+    },
+    {
+      "seed": 96,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_96.obj"
+    },
+    {
+      "seed": 97,
+      "passed": false,
+      "reason": "not navigable, not watertight",
+      "obj_path": "test-output/seed_97.obj"
+    },
+    {
+      "seed": 98,
+      "passed": false,
+      "reason": "not navigable, not watertight",
+      "obj_path": "test-output/seed_98.obj"
+    },
+    {
+      "seed": 99,
+      "passed": true,
+      "reason": "",
+      "obj_path": "test-output/seed_99.obj"
+    }
+  ],
+  "failures": []
+}

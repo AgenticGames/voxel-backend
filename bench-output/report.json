@@ -1,0 +1,5007 @@
+{
+  "total_seeds": 1000,
+  "passed": 0,
+  "failed": 1000,
+  "failures": [
+    {
+      "seed": 0,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_0.obj"
+    },
+    {
+      "seed": 1,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_1.obj"
+    },
+    {
+      "seed": 2,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_2.obj"
+    },
+    {
+      "seed": 3,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_3.obj"
+    },
+    {
+      "seed": 4,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_4.obj"
+    },
+    {
+      "seed": 5,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_5.obj"
+    },
+    {
+      "seed": 6,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_6.obj"
+    },
+    {
+      "seed": 7,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_7.obj"
+    },
+    {
+      "seed": 8,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_8.obj"
+    },
+    {
+      "seed": 9,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_9.obj"
+    },
+    {
+      "seed": 10,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_10.obj"
+    },
+    {
+      "seed": 11,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_11.obj"
+    },
+    {
+      "seed": 12,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_12.obj"
+    },
+    {
+      "seed": 13,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_13.obj"
+    },
+    {
+      "seed": 14,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_14.obj"
+    },
+    {
+      "seed": 15,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_15.obj"
+    },
+    {
+      "seed": 16,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_16.obj"
+    },
+    {
+      "seed": 17,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_17.obj"
+    },
+    {
+      "seed": 18,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_18.obj"
+    },
+    {
+      "seed": 19,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_19.obj"
+    },
+    {
+      "seed": 20,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_20.obj"
+    },
+    {
+      "seed": 21,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_21.obj"
+    },
+    {
+      "seed": 22,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_22.obj"
+    },
+    {
+      "seed": 23,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_23.obj"
+    },
+    {
+      "seed": 24,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_24.obj"
+    },
+    {
+      "seed": 25,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_25.obj"
+    },
+    {
+      "seed": 26,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_26.obj"
+    },
+    {
+      "seed": 27,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_27.obj"
+    },
+    {
+      "seed": 28,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_28.obj"
+    },
+    {
+      "seed": 29,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_29.obj"
+    },
+    {
+      "seed": 30,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_30.obj"
+    },
+    {
+      "seed": 31,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_31.obj"
+    },
+    {
+      "seed": 32,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_32.obj"
+    },
+    {
+      "seed": 33,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_33.obj"
+    },
+    {
+      "seed": 34,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_34.obj"
+    },
+    {
+      "seed": 35,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_35.obj"
+    },
+    {
+      "seed": 36,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_36.obj"
+    },
+    {
+      "seed": 37,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_37.obj"
+    },
+    {
+      "seed": 38,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_38.obj"
+    },
+    {
+      "seed": 39,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_39.obj"
+    },
+    {
+      "seed": 40,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_40.obj"
+    },
+    {
+      "seed": 41,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_41.obj"
+    },
+    {
+      "seed": 42,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_42.obj"
+    },
+    {
+      "seed": 43,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_43.obj"
+    },
+    {
+      "seed": 44,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_44.obj"
+    },
+    {
+      "seed": 45,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_45.obj"
+    },
+    {
+      "seed": 46,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_46.obj"
+    },
+    {
+      "seed": 47,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_47.obj"
+    },
+    {
+      "seed": 48,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_48.obj"
+    },
+    {
+      "seed": 49,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_49.obj"
+    },
+    {
+      "seed": 50,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_50.obj"
+    },
+    {
+      "seed": 51,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_51.obj"
+    },
+    {
+      "seed": 52,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_52.obj"
+    },
+    {
+      "seed": 53,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_53.obj"
+    },
+    {
+      "seed": 54,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_54.obj"
+    },
+    {
+      "seed": 55,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_55.obj"
+    },
+    {
+      "seed": 56,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_56.obj"
+    },
+    {
+      "seed": 57,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_57.obj"
+    },
+    {
+      "seed": 58,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_58.obj"
+    },
+    {
+      "seed": 59,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_59.obj"
+    },
+    {
+      "seed": 60,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_60.obj"
+    },
+    {
+      "seed": 61,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_61.obj"
+    },
+    {
+      "seed": 62,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_62.obj"
+    },
+    {
+      "seed": 63,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_63.obj"
+    },
+    {
+      "seed": 64,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_64.obj"
+    },
+    {
+      "seed": 65,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_65.obj"
+    },
+    {
+      "seed": 66,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_66.obj"
+    },
+    {
+      "seed": 67,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_67.obj"
+    },
+    {
+      "seed": 68,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_68.obj"
+    },
+    {
+      "seed": 69,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_69.obj"
+    },
+    {
+      "seed": 70,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_70.obj"
+    },
+    {
+      "seed": 71,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_71.obj"
+    },
+    {
+      "seed": 72,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_72.obj"
+    },
+    {
+      "seed": 73,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_73.obj"
+    },
+    {
+      "seed": 74,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_74.obj"
+    },
+    {
+      "seed": 75,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_75.obj"
+    },
+    {
+      "seed": 76,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_76.obj"
+    },
+    {
+      "seed": 77,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_77.obj"
+    },
+    {
+      "seed": 78,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_78.obj"
+    },
+    {
+      "seed": 79,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_79.obj"
+    },
+    {
+      "seed": 80,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_80.obj"
+    },
+    {
+      "seed": 81,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_81.obj"
+    },
+    {
+      "seed": 82,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_82.obj"
+    },
+    {
+      "seed": 83,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_83.obj"
+    },
+    {
+      "seed": 84,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_84.obj"
+    },
+    {
+      "seed": 85,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_85.obj"
+    },
+    {
+      "seed": 86,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_86.obj"
+    },
+    {
+      "seed": 87,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_87.obj"
+    },
+    {
+      "seed": 88,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_88.obj"
+    },
+    {
+      "seed": 89,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_89.obj"
+    },
+    {
+      "seed": 90,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_90.obj"
+    },
+    {
+      "seed": 91,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_91.obj"
+    },
+    {
+      "seed": 92,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_92.obj"
+    },
+    {
+      "seed": 93,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_93.obj"
+    },
+    {
+      "seed": 94,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_94.obj"
+    },
+    {
+      "seed": 95,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_95.obj"
+    },
+    {
+      "seed": 96,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_96.obj"
+    },
+    {
+      "seed": 97,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_97.obj"
+    },
+    {
+      "seed": 98,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_98.obj"
+    },
+    {
+      "seed": 99,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_99.obj"
+    },
+    {
+      "seed": 100,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_100.obj"
+    },
+    {
+      "seed": 101,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_101.obj"
+    },
+    {
+      "seed": 102,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_102.obj"
+    },
+    {
+      "seed": 103,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_103.obj"
+    },
+    {
+      "seed": 104,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_104.obj"
+    },
+    {
+      "seed": 105,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_105.obj"
+    },
+    {
+      "seed": 106,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_106.obj"
+    },
+    {
+      "seed": 107,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_107.obj"
+    },
+    {
+      "seed": 108,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_108.obj"
+    },
+    {
+      "seed": 109,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_109.obj"
+    },
+    {
+      "seed": 110,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_110.obj"
+    },
+    {
+      "seed": 111,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_111.obj"
+    },
+    {
+      "seed": 112,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_112.obj"
+    },
+    {
+      "seed": 113,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_113.obj"
+    },
+    {
+      "seed": 114,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_114.obj"
+    },
+    {
+      "seed": 115,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_115.obj"
+    },
+    {
+      "seed": 116,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_116.obj"
+    },
+    {
+      "seed": 117,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_117.obj"
+    },
+    {
+      "seed": 118,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_118.obj"
+    },
+    {
+      "seed": 119,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_119.obj"
+    },
+    {
+      "seed": 120,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_120.obj"
+    },
+    {
+      "seed": 121,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_121.obj"
+    },
+    {
+      "seed": 122,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_122.obj"
+    },
+    {
+      "seed": 123,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_123.obj"
+    },
+    {
+      "seed": 124,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_124.obj"
+    },
+    {
+      "seed": 125,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_125.obj"
+    },
+    {
+      "seed": 126,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_126.obj"
+    },
+    {
+      "seed": 127,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_127.obj"
+    },
+    {
+      "seed": 128,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_128.obj"
+    },
+    {
+      "seed": 129,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_129.obj"
+    },
+    {
+      "seed": 130,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_130.obj"
+    },
+    {
+      "seed": 131,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_131.obj"
+    },
+    {
+      "seed": 132,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_132.obj"
+    },
+    {
+      "seed": 133,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_133.obj"
+    },
+    {
+      "seed": 134,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_134.obj"
+    },
+    {
+      "seed": 135,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_135.obj"
+    },
+    {
+      "seed": 136,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_136.obj"
+    },
+    {
+      "seed": 137,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_137.obj"
+    },
+    {
+      "seed": 138,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_138.obj"
+    },
+    {
+      "seed": 139,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_139.obj"
+    },
+    {
+      "seed": 140,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_140.obj"
+    },
+    {
+      "seed": 141,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_141.obj"
+    },
+    {
+      "seed": 142,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_142.obj"
+    },
+    {
+      "seed": 143,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_143.obj"
+    },
+    {
+      "seed": 144,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_144.obj"
+    },
+    {
+      "seed": 145,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_145.obj"
+    },
+    {
+      "seed": 146,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_146.obj"
+    },
+    {
+      "seed": 147,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_147.obj"
+    },
+    {
+      "seed": 148,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_148.obj"
+    },
+    {
+      "seed": 149,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_149.obj"
+    },
+    {
+      "seed": 150,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_150.obj"
+    },
+    {
+      "seed": 151,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_151.obj"
+    },
+    {
+      "seed": 152,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_152.obj"
+    },
+    {
+      "seed": 153,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_153.obj"
+    },
+    {
+      "seed": 154,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_154.obj"
+    },
+    {
+      "seed": 155,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_155.obj"
+    },
+    {
+      "seed": 156,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_156.obj"
+    },
+    {
+      "seed": 157,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_157.obj"
+    },
+    {
+      "seed": 158,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_158.obj"
+    },
+    {
+      "seed": 159,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_159.obj"
+    },
+    {
+      "seed": 160,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_160.obj"
+    },
+    {
+      "seed": 161,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_161.obj"
+    },
+    {
+      "seed": 162,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_162.obj"
+    },
+    {
+      "seed": 163,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_163.obj"
+    },
+    {
+      "seed": 164,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_164.obj"
+    },
+    {
+      "seed": 165,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_165.obj"
+    },
+    {
+      "seed": 166,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_166.obj"
+    },
+    {
+      "seed": 167,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_167.obj"
+    },
+    {
+      "seed": 168,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_168.obj"
+    },
+    {
+      "seed": 169,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_169.obj"
+    },
+    {
+      "seed": 170,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_170.obj"
+    },
+    {
+      "seed": 171,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_171.obj"
+    },
+    {
+      "seed": 172,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_172.obj"
+    },
+    {
+      "seed": 173,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_173.obj"
+    },
+    {
+      "seed": 174,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_174.obj"
+    },
+    {
+      "seed": 175,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_175.obj"
+    },
+    {
+      "seed": 176,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_176.obj"
+    },
+    {
+      "seed": 177,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_177.obj"
+    },
+    {
+      "seed": 178,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_178.obj"
+    },
+    {
+      "seed": 179,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_179.obj"
+    },
+    {
+      "seed": 180,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_180.obj"
+    },
+    {
+      "seed": 181,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_181.obj"
+    },
+    {
+      "seed": 182,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_182.obj"
+    },
+    {
+      "seed": 183,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_183.obj"
+    },
+    {
+      "seed": 184,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_184.obj"
+    },
+    {
+      "seed": 185,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_185.obj"
+    },
+    {
+      "seed": 186,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_186.obj"
+    },
+    {
+      "seed": 187,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_187.obj"
+    },
+    {
+      "seed": 188,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_188.obj"
+    },
+    {
+      "seed": 189,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_189.obj"
+    },
+    {
+      "seed": 190,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_190.obj"
+    },
+    {
+      "seed": 191,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_191.obj"
+    },
+    {
+      "seed": 192,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_192.obj"
+    },
+    {
+      "seed": 193,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_193.obj"
+    },
+    {
+      "seed": 194,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_194.obj"
+    },
+    {
+      "seed": 195,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_195.obj"
+    },
+    {
+      "seed": 196,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_196.obj"
+    },
+    {
+      "seed": 197,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_197.obj"
+    },
+    {
+      "seed": 198,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_198.obj"
+    },
+    {
+      "seed": 199,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_199.obj"
+    },
+    {
+      "seed": 200,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_200.obj"
+    },
+    {
+      "seed": 201,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_201.obj"
+    },
+    {
+      "seed": 202,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_202.obj"
+    },
+    {
+      "seed": 203,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_203.obj"
+    },
+    {
+      "seed": 204,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_204.obj"
+    },
+    {
+      "seed": 205,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_205.obj"
+    },
+    {
+      "seed": 206,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_206.obj"
+    },
+    {
+      "seed": 207,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_207.obj"
+    },
+    {
+      "seed": 208,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_208.obj"
+    },
+    {
+      "seed": 209,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_209.obj"
+    },
+    {
+      "seed": 210,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_210.obj"
+    },
+    {
+      "seed": 211,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_211.obj"
+    },
+    {
+      "seed": 212,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_212.obj"
+    },
+    {
+      "seed": 213,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_213.obj"
+    },
+    {
+      "seed": 214,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_214.obj"
+    },
+    {
+      "seed": 215,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_215.obj"
+    },
+    {
+      "seed": 216,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_216.obj"
+    },
+    {
+      "seed": 217,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_217.obj"
+    },
+    {
+      "seed": 218,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_218.obj"
+    },
+    {
+      "seed": 219,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_219.obj"
+    },
+    {
+      "seed": 220,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_220.obj"
+    },
+    {
+      "seed": 221,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_221.obj"
+    },
+    {
+      "seed": 222,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_222.obj"
+    },
+    {
+      "seed": 223,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_223.obj"
+    },
+    {
+      "seed": 224,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_224.obj"
+    },
+    {
+      "seed": 225,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_225.obj"
+    },
+    {
+      "seed": 226,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_226.obj"
+    },
+    {
+      "seed": 227,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_227.obj"
+    },
+    {
+      "seed": 228,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_228.obj"
+    },
+    {
+      "seed": 229,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_229.obj"
+    },
+    {
+      "seed": 230,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_230.obj"
+    },
+    {
+      "seed": 231,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_231.obj"
+    },
+    {
+      "seed": 232,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_232.obj"
+    },
+    {
+      "seed": 233,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_233.obj"
+    },
+    {
+      "seed": 234,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_234.obj"
+    },
+    {
+      "seed": 235,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_235.obj"
+    },
+    {
+      "seed": 236,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_236.obj"
+    },
+    {
+      "seed": 237,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_237.obj"
+    },
+    {
+      "seed": 238,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_238.obj"
+    },
+    {
+      "seed": 239,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_239.obj"
+    },
+    {
+      "seed": 240,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_240.obj"
+    },
+    {
+      "seed": 241,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_241.obj"
+    },
+    {
+      "seed": 242,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_242.obj"
+    },
+    {
+      "seed": 243,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_243.obj"
+    },
+    {
+      "seed": 244,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_244.obj"
+    },
+    {
+      "seed": 245,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_245.obj"
+    },
+    {
+      "seed": 246,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_246.obj"
+    },
+    {
+      "seed": 247,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_247.obj"
+    },
+    {
+      "seed": 248,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_248.obj"
+    },
+    {
+      "seed": 249,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_249.obj"
+    },
+    {
+      "seed": 250,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_250.obj"
+    },
+    {
+      "seed": 251,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_251.obj"
+    },
+    {
+      "seed": 252,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_252.obj"
+    },
+    {
+      "seed": 253,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_253.obj"
+    },
+    {
+      "seed": 254,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_254.obj"
+    },
+    {
+      "seed": 255,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_255.obj"
+    },
+    {
+      "seed": 256,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_256.obj"
+    },
+    {
+      "seed": 257,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_257.obj"
+    },
+    {
+      "seed": 258,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_258.obj"
+    },
+    {
+      "seed": 259,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_259.obj"
+    },
+    {
+      "seed": 260,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_260.obj"
+    },
+    {
+      "seed": 261,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_261.obj"
+    },
+    {
+      "seed": 262,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_262.obj"
+    },
+    {
+      "seed": 263,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_263.obj"
+    },
+    {
+      "seed": 264,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_264.obj"
+    },
+    {
+      "seed": 265,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_265.obj"
+    },
+    {
+      "seed": 266,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_266.obj"
+    },
+    {
+      "seed": 267,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_267.obj"
+    },
+    {
+      "seed": 268,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_268.obj"
+    },
+    {
+      "seed": 269,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_269.obj"
+    },
+    {
+      "seed": 270,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_270.obj"
+    },
+    {
+      "seed": 271,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_271.obj"
+    },
+    {
+      "seed": 272,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_272.obj"
+    },
+    {
+      "seed": 273,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_273.obj"
+    },
+    {
+      "seed": 274,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_274.obj"
+    },
+    {
+      "seed": 275,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_275.obj"
+    },
+    {
+      "seed": 276,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_276.obj"
+    },
+    {
+      "seed": 277,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_277.obj"
+    },
+    {
+      "seed": 278,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_278.obj"
+    },
+    {
+      "seed": 279,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_279.obj"
+    },
+    {
+      "seed": 280,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_280.obj"
+    },
+    {
+      "seed": 281,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_281.obj"
+    },
+    {
+      "seed": 282,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_282.obj"
+    },
+    {
+      "seed": 283,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_283.obj"
+    },
+    {
+      "seed": 284,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_284.obj"
+    },
+    {
+      "seed": 285,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_285.obj"
+    },
+    {
+      "seed": 286,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_286.obj"
+    },
+    {
+      "seed": 287,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_287.obj"
+    },
+    {
+      "seed": 288,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_288.obj"
+    },
+    {
+      "seed": 289,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_289.obj"
+    },
+    {
+      "seed": 290,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_290.obj"
+    },
+    {
+      "seed": 291,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_291.obj"
+    },
+    {
+      "seed": 292,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_292.obj"
+    },
+    {
+      "seed": 293,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_293.obj"
+    },
+    {
+      "seed": 294,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_294.obj"
+    },
+    {
+      "seed": 295,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_295.obj"
+    },
+    {
+      "seed": 296,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_296.obj"
+    },
+    {
+      "seed": 297,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_297.obj"
+    },
+    {
+      "seed": 298,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_298.obj"
+    },
+    {
+      "seed": 299,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_299.obj"
+    },
+    {
+      "seed": 300,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_300.obj"
+    },
+    {
+      "seed": 301,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_301.obj"
+    },
+    {
+      "seed": 302,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_302.obj"
+    },
+    {
+      "seed": 303,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_303.obj"
+    },
+    {
+      "seed": 304,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_304.obj"
+    },
+    {
+      "seed": 305,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_305.obj"
+    },
+    {
+      "seed": 306,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_306.obj"
+    },
+    {
+      "seed": 307,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_307.obj"
+    },
+    {
+      "seed": 308,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_308.obj"
+    },
+    {
+      "seed": 309,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_309.obj"
+    },
+    {
+      "seed": 310,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_310.obj"
+    },
+    {
+      "seed": 311,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_311.obj"
+    },
+    {
+      "seed": 312,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_312.obj"
+    },
+    {
+      "seed": 313,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_313.obj"
+    },
+    {
+      "seed": 314,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_314.obj"
+    },
+    {
+      "seed": 315,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_315.obj"
+    },
+    {
+      "seed": 316,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_316.obj"
+    },
+    {
+      "seed": 317,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_317.obj"
+    },
+    {
+      "seed": 318,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_318.obj"
+    },
+    {
+      "seed": 319,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_319.obj"
+    },
+    {
+      "seed": 320,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_320.obj"
+    },
+    {
+      "seed": 321,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_321.obj"
+    },
+    {
+      "seed": 322,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_322.obj"
+    },
+    {
+      "seed": 323,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_323.obj"
+    },
+    {
+      "seed": 324,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_324.obj"
+    },
+    {
+      "seed": 325,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_325.obj"
+    },
+    {
+      "seed": 326,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_326.obj"
+    },
+    {
+      "seed": 327,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_327.obj"
+    },
+    {
+      "seed": 328,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_328.obj"
+    },
+    {
+      "seed": 329,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_329.obj"
+    },
+    {
+      "seed": 330,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_330.obj"
+    },
+    {
+      "seed": 331,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_331.obj"
+    },
+    {
+      "seed": 332,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_332.obj"
+    },
+    {
+      "seed": 333,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_333.obj"
+    },
+    {
+      "seed": 334,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_334.obj"
+    },
+    {
+      "seed": 335,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_335.obj"
+    },
+    {
+      "seed": 336,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_336.obj"
+    },
+    {
+      "seed": 337,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_337.obj"
+    },
+    {
+      "seed": 338,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_338.obj"
+    },
+    {
+      "seed": 339,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_339.obj"
+    },
+    {
+      "seed": 340,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_340.obj"
+    },
+    {
+      "seed": 341,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_341.obj"
+    },
+    {
+      "seed": 342,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_342.obj"
+    },
+    {
+      "seed": 343,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_343.obj"
+    },
+    {
+      "seed": 344,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_344.obj"
+    },
+    {
+      "seed": 345,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_345.obj"
+    },
+    {
+      "seed": 346,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_346.obj"
+    },
+    {
+      "seed": 347,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_347.obj"
+    },
+    {
+      "seed": 348,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_348.obj"
+    },
+    {
+      "seed": 349,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_349.obj"
+    },
+    {
+      "seed": 350,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_350.obj"
+    },
+    {
+      "seed": 351,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_351.obj"
+    },
+    {
+      "seed": 352,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_352.obj"
+    },
+    {
+      "seed": 353,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_353.obj"
+    },
+    {
+      "seed": 354,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_354.obj"
+    },
+    {
+      "seed": 355,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_355.obj"
+    },
+    {
+      "seed": 356,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_356.obj"
+    },
+    {
+      "seed": 357,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_357.obj"
+    },
+    {
+      "seed": 358,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_358.obj"
+    },
+    {
+      "seed": 359,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_359.obj"
+    },
+    {
+      "seed": 360,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_360.obj"
+    },
+    {
+      "seed": 361,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_361.obj"
+    },
+    {
+      "seed": 362,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_362.obj"
+    },
+    {
+      "seed": 363,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_363.obj"
+    },
+    {
+      "seed": 364,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_364.obj"
+    },
+    {
+      "seed": 365,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_365.obj"
+    },
+    {
+      "seed": 366,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_366.obj"
+    },
+    {
+      "seed": 367,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_367.obj"
+    },
+    {
+      "seed": 368,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_368.obj"
+    },
+    {
+      "seed": 369,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_369.obj"
+    },
+    {
+      "seed": 370,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_370.obj"
+    },
+    {
+      "seed": 371,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_371.obj"
+    },
+    {
+      "seed": 372,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_372.obj"
+    },
+    {
+      "seed": 373,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_373.obj"
+    },
+    {
+      "seed": 374,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_374.obj"
+    },
+    {
+      "seed": 375,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_375.obj"
+    },
+    {
+      "seed": 376,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_376.obj"
+    },
+    {
+      "seed": 377,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_377.obj"
+    },
+    {
+      "seed": 378,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_378.obj"
+    },
+    {
+      "seed": 379,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_379.obj"
+    },
+    {
+      "seed": 380,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_380.obj"
+    },
+    {
+      "seed": 381,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_381.obj"
+    },
+    {
+      "seed": 382,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_382.obj"
+    },
+    {
+      "seed": 383,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_383.obj"
+    },
+    {
+      "seed": 384,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_384.obj"
+    },
+    {
+      "seed": 385,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_385.obj"
+    },
+    {
+      "seed": 386,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_386.obj"
+    },
+    {
+      "seed": 387,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_387.obj"
+    },
+    {
+      "seed": 388,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_388.obj"
+    },
+    {
+      "seed": 389,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_389.obj"
+    },
+    {
+      "seed": 390,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_390.obj"
+    },
+    {
+      "seed": 391,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_391.obj"
+    },
+    {
+      "seed": 392,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_392.obj"
+    },
+    {
+      "seed": 393,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_393.obj"
+    },
+    {
+      "seed": 394,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_394.obj"
+    },
+    {
+      "seed": 395,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_395.obj"
+    },
+    {
+      "seed": 396,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_396.obj"
+    },
+    {
+      "seed": 397,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_397.obj"
+    },
+    {
+      "seed": 398,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_398.obj"
+    },
+    {
+      "seed": 399,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_399.obj"
+    },
+    {
+      "seed": 400,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_400.obj"
+    },
+    {
+      "seed": 401,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_401.obj"
+    },
+    {
+      "seed": 402,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_402.obj"
+    },
+    {
+      "seed": 403,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_403.obj"
+    },
+    {
+      "seed": 404,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_404.obj"
+    },
+    {
+      "seed": 405,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_405.obj"
+    },
+    {
+      "seed": 406,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_406.obj"
+    },
+    {
+      "seed": 407,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_407.obj"
+    },
+    {
+      "seed": 408,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_408.obj"
+    },
+    {
+      "seed": 409,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_409.obj"
+    },
+    {
+      "seed": 410,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_410.obj"
+    },
+    {
+      "seed": 411,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_411.obj"
+    },
+    {
+      "seed": 412,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_412.obj"
+    },
+    {
+      "seed": 413,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_413.obj"
+    },
+    {
+      "seed": 414,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_414.obj"
+    },
+    {
+      "seed": 415,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_415.obj"
+    },
+    {
+      "seed": 416,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_416.obj"
+    },
+    {
+      "seed": 417,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_417.obj"
+    },
+    {
+      "seed": 418,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_418.obj"
+    },
+    {
+      "seed": 419,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_419.obj"
+    },
+    {
+      "seed": 420,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_420.obj"
+    },
+    {
+      "seed": 421,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_421.obj"
+    },
+    {
+      "seed": 422,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_422.obj"
+    },
+    {
+      "seed": 423,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_423.obj"
+    },
+    {
+      "seed": 424,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_424.obj"
+    },
+    {
+      "seed": 425,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_425.obj"
+    },
+    {
+      "seed": 426,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_426.obj"
+    },
+    {
+      "seed": 427,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_427.obj"
+    },
+    {
+      "seed": 428,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_428.obj"
+    },
+    {
+      "seed": 429,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_429.obj"
+    },
+    {
+      "seed": 430,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_430.obj"
+    },
+    {
+      "seed": 431,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_431.obj"
+    },
+    {
+      "seed": 432,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_432.obj"
+    },
+    {
+      "seed": 433,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_433.obj"
+    },
+    {
+      "seed": 434,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_434.obj"
+    },
+    {
+      "seed": 435,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_435.obj"
+    },
+    {
+      "seed": 436,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_436.obj"
+    },
+    {
+      "seed": 437,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_437.obj"
+    },
+    {
+      "seed": 438,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_438.obj"
+    },
+    {
+      "seed": 439,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_439.obj"
+    },
+    {
+      "seed": 440,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_440.obj"
+    },
+    {
+      "seed": 441,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_441.obj"
+    },
+    {
+      "seed": 442,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_442.obj"
+    },
+    {
+      "seed": 443,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_443.obj"
+    },
+    {
+      "seed": 444,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_444.obj"
+    },
+    {
+      "seed": 445,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_445.obj"
+    },
+    {
+      "seed": 446,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_446.obj"
+    },
+    {
+      "seed": 447,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_447.obj"
+    },
+    {
+      "seed": 448,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_448.obj"
+    },
+    {
+      "seed": 449,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_449.obj"
+    },
+    {
+      "seed": 450,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_450.obj"
+    },
+    {
+      "seed": 451,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_451.obj"
+    },
+    {
+      "seed": 452,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_452.obj"
+    },
+    {
+      "seed": 453,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_453.obj"
+    },
+    {
+      "seed": 454,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_454.obj"
+    },
+    {
+      "seed": 455,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_455.obj"
+    },
+    {
+      "seed": 456,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_456.obj"
+    },
+    {
+      "seed": 457,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_457.obj"
+    },
+    {
+      "seed": 458,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_458.obj"
+    },
+    {
+      "seed": 459,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_459.obj"
+    },
+    {
+      "seed": 460,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_460.obj"
+    },
+    {
+      "seed": 461,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_461.obj"
+    },
+    {
+      "seed": 462,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_462.obj"
+    },
+    {
+      "seed": 463,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_463.obj"
+    },
+    {
+      "seed": 464,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_464.obj"
+    },
+    {
+      "seed": 465,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_465.obj"
+    },
+    {
+      "seed": 466,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_466.obj"
+    },
+    {
+      "seed": 467,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_467.obj"
+    },
+    {
+      "seed": 468,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_468.obj"
+    },
+    {
+      "seed": 469,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_469.obj"
+    },
+    {
+      "seed": 470,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_470.obj"
+    },
+    {
+      "seed": 471,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_471.obj"
+    },
+    {
+      "seed": 472,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_472.obj"
+    },
+    {
+      "seed": 473,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_473.obj"
+    },
+    {
+      "seed": 474,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_474.obj"
+    },
+    {
+      "seed": 475,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_475.obj"
+    },
+    {
+      "seed": 476,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_476.obj"
+    },
+    {
+      "seed": 477,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_477.obj"
+    },
+    {
+      "seed": 478,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_478.obj"
+    },
+    {
+      "seed": 479,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_479.obj"
+    },
+    {
+      "seed": 480,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_480.obj"
+    },
+    {
+      "seed": 481,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_481.obj"
+    },
+    {
+      "seed": 482,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_482.obj"
+    },
+    {
+      "seed": 483,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_483.obj"
+    },
+    {
+      "seed": 484,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_484.obj"
+    },
+    {
+      "seed": 485,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_485.obj"
+    },
+    {
+      "seed": 486,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_486.obj"
+    },
+    {
+      "seed": 487,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_487.obj"
+    },
+    {
+      "seed": 488,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_488.obj"
+    },
+    {
+      "seed": 489,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_489.obj"
+    },
+    {
+      "seed": 490,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_490.obj"
+    },
+    {
+      "seed": 491,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_491.obj"
+    },
+    {
+      "seed": 492,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_492.obj"
+    },
+    {
+      "seed": 493,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_493.obj"
+    },
+    {
+      "seed": 494,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_494.obj"
+    },
+    {
+      "seed": 495,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_495.obj"
+    },
+    {
+      "seed": 496,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_496.obj"
+    },
+    {
+      "seed": 497,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_497.obj"
+    },
+    {
+      "seed": 498,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_498.obj"
+    },
+    {
+      "seed": 499,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_499.obj"
+    },
+    {
+      "seed": 500,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_500.obj"
+    },
+    {
+      "seed": 501,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_501.obj"
+    },
+    {
+      "seed": 502,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_502.obj"
+    },
+    {
+      "seed": 503,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_503.obj"
+    },
+    {
+      "seed": 504,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_504.obj"
+    },
+    {
+      "seed": 505,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_505.obj"
+    },
+    {
+      "seed": 506,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_506.obj"
+    },
+    {
+      "seed": 507,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_507.obj"
+    },
+    {
+      "seed": 508,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_508.obj"
+    },
+    {
+      "seed": 509,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_509.obj"
+    },
+    {
+      "seed": 510,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_510.obj"
+    },
+    {
+      "seed": 511,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_511.obj"
+    },
+    {
+      "seed": 512,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_512.obj"
+    },
+    {
+      "seed": 513,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_513.obj"
+    },
+    {
+      "seed": 514,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_514.obj"
+    },
+    {
+      "seed": 515,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_515.obj"
+    },
+    {
+      "seed": 516,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_516.obj"
+    },
+    {
+      "seed": 517,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_517.obj"
+    },
+    {
+      "seed": 518,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_518.obj"
+    },
+    {
+      "seed": 519,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_519.obj"
+    },
+    {
+      "seed": 520,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_520.obj"
+    },
+    {
+      "seed": 521,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_521.obj"
+    },
+    {
+      "seed": 522,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_522.obj"
+    },
+    {
+      "seed": 523,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_523.obj"
+    },
+    {
+      "seed": 524,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_524.obj"
+    },
+    {
+      "seed": 525,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_525.obj"
+    },
+    {
+      "seed": 526,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_526.obj"
+    },
+    {
+      "seed": 527,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_527.obj"
+    },
+    {
+      "seed": 528,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_528.obj"
+    },
+    {
+      "seed": 529,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_529.obj"
+    },
+    {
+      "seed": 530,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_530.obj"
+    },
+    {
+      "seed": 531,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_531.obj"
+    },
+    {
+      "seed": 532,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_532.obj"
+    },
+    {
+      "seed": 533,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_533.obj"
+    },
+    {
+      "seed": 534,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_534.obj"
+    },
+    {
+      "seed": 535,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_535.obj"
+    },
+    {
+      "seed": 536,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_536.obj"
+    },
+    {
+      "seed": 537,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_537.obj"
+    },
+    {
+      "seed": 538,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_538.obj"
+    },
+    {
+      "seed": 539,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_539.obj"
+    },
+    {
+      "seed": 540,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_540.obj"
+    },
+    {
+      "seed": 541,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_541.obj"
+    },
+    {
+      "seed": 542,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_542.obj"
+    },
+    {
+      "seed": 543,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_543.obj"
+    },
+    {
+      "seed": 544,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_544.obj"
+    },
+    {
+      "seed": 545,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_545.obj"
+    },
+    {
+      "seed": 546,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_546.obj"
+    },
+    {
+      "seed": 547,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_547.obj"
+    },
+    {
+      "seed": 548,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_548.obj"
+    },
+    {
+      "seed": 549,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_549.obj"
+    },
+    {
+      "seed": 550,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_550.obj"
+    },
+    {
+      "seed": 551,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_551.obj"
+    },
+    {
+      "seed": 552,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_552.obj"
+    },
+    {
+      "seed": 553,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_553.obj"
+    },
+    {
+      "seed": 554,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_554.obj"
+    },
+    {
+      "seed": 555,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_555.obj"
+    },
+    {
+      "seed": 556,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_556.obj"
+    },
+    {
+      "seed": 557,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_557.obj"
+    },
+    {
+      "seed": 558,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_558.obj"
+    },
+    {
+      "seed": 559,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_559.obj"
+    },
+    {
+      "seed": 560,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_560.obj"
+    },
+    {
+      "seed": 561,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_561.obj"
+    },
+    {
+      "seed": 562,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_562.obj"
+    },
+    {
+      "seed": 563,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_563.obj"
+    },
+    {
+      "seed": 564,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_564.obj"
+    },
+    {
+      "seed": 565,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_565.obj"
+    },
+    {
+      "seed": 566,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_566.obj"
+    },
+    {
+      "seed": 567,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_567.obj"
+    },
+    {
+      "seed": 568,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_568.obj"
+    },
+    {
+      "seed": 569,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_569.obj"
+    },
+    {
+      "seed": 570,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_570.obj"
+    },
+    {
+      "seed": 571,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_571.obj"
+    },
+    {
+      "seed": 572,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_572.obj"
+    },
+    {
+      "seed": 573,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_573.obj"
+    },
+    {
+      "seed": 574,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_574.obj"
+    },
+    {
+      "seed": 575,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_575.obj"
+    },
+    {
+      "seed": 576,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_576.obj"
+    },
+    {
+      "seed": 577,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_577.obj"
+    },
+    {
+      "seed": 578,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_578.obj"
+    },
+    {
+      "seed": 579,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_579.obj"
+    },
+    {
+      "seed": 580,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_580.obj"
+    },
+    {
+      "seed": 581,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_581.obj"
+    },
+    {
+      "seed": 582,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_582.obj"
+    },
+    {
+      "seed": 583,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_583.obj"
+    },
+    {
+      "seed": 584,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_584.obj"
+    },
+    {
+      "seed": 585,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_585.obj"
+    },
+    {
+      "seed": 586,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_586.obj"
+    },
+    {
+      "seed": 587,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_587.obj"
+    },
+    {
+      "seed": 588,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_588.obj"
+    },
+    {
+      "seed": 589,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_589.obj"
+    },
+    {
+      "seed": 590,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_590.obj"
+    },
+    {
+      "seed": 591,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_591.obj"
+    },
+    {
+      "seed": 592,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_592.obj"
+    },
+    {
+      "seed": 593,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_593.obj"
+    },
+    {
+      "seed": 594,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_594.obj"
+    },
+    {
+      "seed": 595,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_595.obj"
+    },
+    {
+      "seed": 596,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_596.obj"
+    },
+    {
+      "seed": 597,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_597.obj"
+    },
+    {
+      "seed": 598,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_598.obj"
+    },
+    {
+      "seed": 599,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_599.obj"
+    },
+    {
+      "seed": 600,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_600.obj"
+    },
+    {
+      "seed": 601,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_601.obj"
+    },
+    {
+      "seed": 602,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_602.obj"
+    },
+    {
+      "seed": 603,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_603.obj"
+    },
+    {
+      "seed": 604,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_604.obj"
+    },
+    {
+      "seed": 605,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_605.obj"
+    },
+    {
+      "seed": 606,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_606.obj"
+    },
+    {
+      "seed": 607,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_607.obj"
+    },
+    {
+      "seed": 608,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_608.obj"
+    },
+    {
+      "seed": 609,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_609.obj"
+    },
+    {
+      "seed": 610,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_610.obj"
+    },
+    {
+      "seed": 611,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_611.obj"
+    },
+    {
+      "seed": 612,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_612.obj"
+    },
+    {
+      "seed": 613,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_613.obj"
+    },
+    {
+      "seed": 614,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_614.obj"
+    },
+    {
+      "seed": 615,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_615.obj"
+    },
+    {
+      "seed": 616,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_616.obj"
+    },
+    {
+      "seed": 617,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_617.obj"
+    },
+    {
+      "seed": 618,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_618.obj"
+    },
+    {
+      "seed": 619,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_619.obj"
+    },
+    {
+      "seed": 620,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_620.obj"
+    },
+    {
+      "seed": 621,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_621.obj"
+    },
+    {
+      "seed": 622,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_622.obj"
+    },
+    {
+      "seed": 623,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_623.obj"
+    },
+    {
+      "seed": 624,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_624.obj"
+    },
+    {
+      "seed": 625,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_625.obj"
+    },
+    {
+      "seed": 626,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_626.obj"
+    },
+    {
+      "seed": 627,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_627.obj"
+    },
+    {
+      "seed": 628,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_628.obj"
+    },
+    {
+      "seed": 629,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_629.obj"
+    },
+    {
+      "seed": 630,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_630.obj"
+    },
+    {
+      "seed": 631,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_631.obj"
+    },
+    {
+      "seed": 632,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_632.obj"
+    },
+    {
+      "seed": 633,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_633.obj"
+    },
+    {
+      "seed": 634,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_634.obj"
+    },
+    {
+      "seed": 635,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_635.obj"
+    },
+    {
+      "seed": 636,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_636.obj"
+    },
+    {
+      "seed": 637,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_637.obj"
+    },
+    {
+      "seed": 638,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_638.obj"
+    },
+    {
+      "seed": 639,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_639.obj"
+    },
+    {
+      "seed": 640,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_640.obj"
+    },
+    {
+      "seed": 641,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_641.obj"
+    },
+    {
+      "seed": 642,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_642.obj"
+    },
+    {
+      "seed": 643,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_643.obj"
+    },
+    {
+      "seed": 644,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_644.obj"
+    },
+    {
+      "seed": 645,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_645.obj"
+    },
+    {
+      "seed": 646,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_646.obj"
+    },
+    {
+      "seed": 647,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_647.obj"
+    },
+    {
+      "seed": 648,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_648.obj"
+    },
+    {
+      "seed": 649,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_649.obj"
+    },
+    {
+      "seed": 650,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_650.obj"
+    },
+    {
+      "seed": 651,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_651.obj"
+    },
+    {
+      "seed": 652,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_652.obj"
+    },
+    {
+      "seed": 653,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_653.obj"
+    },
+    {
+      "seed": 654,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_654.obj"
+    },
+    {
+      "seed": 655,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_655.obj"
+    },
+    {
+      "seed": 656,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_656.obj"
+    },
+    {
+      "seed": 657,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_657.obj"
+    },
+    {
+      "seed": 658,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_658.obj"
+    },
+    {
+      "seed": 659,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_659.obj"
+    },
+    {
+      "seed": 660,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_660.obj"
+    },
+    {
+      "seed": 661,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_661.obj"
+    },
+    {
+      "seed": 662,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_662.obj"
+    },
+    {
+      "seed": 663,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_663.obj"
+    },
+    {
+      "seed": 664,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_664.obj"
+    },
+    {
+      "seed": 665,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_665.obj"
+    },
+    {
+      "seed": 666,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_666.obj"
+    },
+    {
+      "seed": 667,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_667.obj"
+    },
+    {
+      "seed": 668,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_668.obj"
+    },
+    {
+      "seed": 669,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_669.obj"
+    },
+    {
+      "seed": 670,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_670.obj"
+    },
+    {
+      "seed": 671,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_671.obj"
+    },
+    {
+      "seed": 672,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_672.obj"
+    },
+    {
+      "seed": 673,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_673.obj"
+    },
+    {
+      "seed": 674,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_674.obj"
+    },
+    {
+      "seed": 675,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_675.obj"
+    },
+    {
+      "seed": 676,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_676.obj"
+    },
+    {
+      "seed": 677,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_677.obj"
+    },
+    {
+      "seed": 678,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_678.obj"
+    },
+    {
+      "seed": 679,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_679.obj"
+    },
+    {
+      "seed": 680,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_680.obj"
+    },
+    {
+      "seed": 681,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_681.obj"
+    },
+    {
+      "seed": 682,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_682.obj"
+    },
+    {
+      "seed": 683,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_683.obj"
+    },
+    {
+      "seed": 684,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_684.obj"
+    },
+    {
+      "seed": 685,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_685.obj"
+    },
+    {
+      "seed": 686,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_686.obj"
+    },
+    {
+      "seed": 687,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_687.obj"
+    },
+    {
+      "seed": 688,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_688.obj"
+    },
+    {
+      "seed": 689,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_689.obj"
+    },
+    {
+      "seed": 690,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_690.obj"
+    },
+    {
+      "seed": 691,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_691.obj"
+    },
+    {
+      "seed": 692,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_692.obj"
+    },
+    {
+      "seed": 693,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_693.obj"
+    },
+    {
+      "seed": 694,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_694.obj"
+    },
+    {
+      "seed": 695,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_695.obj"
+    },
+    {
+      "seed": 696,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_696.obj"
+    },
+    {
+      "seed": 697,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_697.obj"
+    },
+    {
+      "seed": 698,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_698.obj"
+    },
+    {
+      "seed": 699,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_699.obj"
+    },
+    {
+      "seed": 700,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_700.obj"
+    },
+    {
+      "seed": 701,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_701.obj"
+    },
+    {
+      "seed": 702,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_702.obj"
+    },
+    {
+      "seed": 703,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_703.obj"
+    },
+    {
+      "seed": 704,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_704.obj"
+    },
+    {
+      "seed": 705,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_705.obj"
+    },
+    {
+      "seed": 706,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_706.obj"
+    },
+    {
+      "seed": 707,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_707.obj"
+    },
+    {
+      "seed": 708,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_708.obj"
+    },
+    {
+      "seed": 709,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_709.obj"
+    },
+    {
+      "seed": 710,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_710.obj"
+    },
+    {
+      "seed": 711,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_711.obj"
+    },
+    {
+      "seed": 712,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_712.obj"
+    },
+    {
+      "seed": 713,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_713.obj"
+    },
+    {
+      "seed": 714,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_714.obj"
+    },
+    {
+      "seed": 715,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_715.obj"
+    },
+    {
+      "seed": 716,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_716.obj"
+    },
+    {
+      "seed": 717,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_717.obj"
+    },
+    {
+      "seed": 718,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_718.obj"
+    },
+    {
+      "seed": 719,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_719.obj"
+    },
+    {
+      "seed": 720,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_720.obj"
+    },
+    {
+      "seed": 721,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_721.obj"
+    },
+    {
+      "seed": 722,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_722.obj"
+    },
+    {
+      "seed": 723,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_723.obj"
+    },
+    {
+      "seed": 724,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_724.obj"
+    },
+    {
+      "seed": 725,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_725.obj"
+    },
+    {
+      "seed": 726,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_726.obj"
+    },
+    {
+      "seed": 727,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_727.obj"
+    },
+    {
+      "seed": 728,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_728.obj"
+    },
+    {
+      "seed": 729,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_729.obj"
+    },
+    {
+      "seed": 730,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_730.obj"
+    },
+    {
+      "seed": 731,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_731.obj"
+    },
+    {
+      "seed": 732,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_732.obj"
+    },
+    {
+      "seed": 733,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_733.obj"
+    },
+    {
+      "seed": 734,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_734.obj"
+    },
+    {
+      "seed": 735,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_735.obj"
+    },
+    {
+      "seed": 736,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_736.obj"
+    },
+    {
+      "seed": 737,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_737.obj"
+    },
+    {
+      "seed": 738,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_738.obj"
+    },
+    {
+      "seed": 739,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_739.obj"
+    },
+    {
+      "seed": 740,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_740.obj"
+    },
+    {
+      "seed": 741,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_741.obj"
+    },
+    {
+      "seed": 742,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_742.obj"
+    },
+    {
+      "seed": 743,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_743.obj"
+    },
+    {
+      "seed": 744,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_744.obj"
+    },
+    {
+      "seed": 745,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_745.obj"
+    },
+    {
+      "seed": 746,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_746.obj"
+    },
+    {
+      "seed": 747,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_747.obj"
+    },
+    {
+      "seed": 748,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_748.obj"
+    },
+    {
+      "seed": 749,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_749.obj"
+    },
+    {
+      "seed": 750,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_750.obj"
+    },
+    {
+      "seed": 751,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_751.obj"
+    },
+    {
+      "seed": 752,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_752.obj"
+    },
+    {
+      "seed": 753,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_753.obj"
+    },
+    {
+      "seed": 754,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_754.obj"
+    },
+    {
+      "seed": 755,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_755.obj"
+    },
+    {
+      "seed": 756,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_756.obj"
+    },
+    {
+      "seed": 757,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_757.obj"
+    },
+    {
+      "seed": 758,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_758.obj"
+    },
+    {
+      "seed": 759,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_759.obj"
+    },
+    {
+      "seed": 760,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_760.obj"
+    },
+    {
+      "seed": 761,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_761.obj"
+    },
+    {
+      "seed": 762,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_762.obj"
+    },
+    {
+      "seed": 763,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_763.obj"
+    },
+    {
+      "seed": 764,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_764.obj"
+    },
+    {
+      "seed": 765,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_765.obj"
+    },
+    {
+      "seed": 766,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_766.obj"
+    },
+    {
+      "seed": 767,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_767.obj"
+    },
+    {
+      "seed": 768,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_768.obj"
+    },
+    {
+      "seed": 769,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_769.obj"
+    },
+    {
+      "seed": 770,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_770.obj"
+    },
+    {
+      "seed": 771,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_771.obj"
+    },
+    {
+      "seed": 772,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_772.obj"
+    },
+    {
+      "seed": 773,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_773.obj"
+    },
+    {
+      "seed": 774,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_774.obj"
+    },
+    {
+      "seed": 775,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_775.obj"
+    },
+    {
+      "seed": 776,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_776.obj"
+    },
+    {
+      "seed": 777,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_777.obj"
+    },
+    {
+      "seed": 778,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_778.obj"
+    },
+    {
+      "seed": 779,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_779.obj"
+    },
+    {
+      "seed": 780,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_780.obj"
+    },
+    {
+      "seed": 781,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_781.obj"
+    },
+    {
+      "seed": 782,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_782.obj"
+    },
+    {
+      "seed": 783,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_783.obj"
+    },
+    {
+      "seed": 784,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_784.obj"
+    },
+    {
+      "seed": 785,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_785.obj"
+    },
+    {
+      "seed": 786,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_786.obj"
+    },
+    {
+      "seed": 787,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_787.obj"
+    },
+    {
+      "seed": 788,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_788.obj"
+    },
+    {
+      "seed": 789,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_789.obj"
+    },
+    {
+      "seed": 790,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_790.obj"
+    },
+    {
+      "seed": 791,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_791.obj"
+    },
+    {
+      "seed": 792,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_792.obj"
+    },
+    {
+      "seed": 793,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_793.obj"
+    },
+    {
+      "seed": 794,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_794.obj"
+    },
+    {
+      "seed": 795,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_795.obj"
+    },
+    {
+      "seed": 796,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_796.obj"
+    },
+    {
+      "seed": 797,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_797.obj"
+    },
+    {
+      "seed": 798,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_798.obj"
+    },
+    {
+      "seed": 799,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_799.obj"
+    },
+    {
+      "seed": 800,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_800.obj"
+    },
+    {
+      "seed": 801,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_801.obj"
+    },
+    {
+      "seed": 802,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_802.obj"
+    },
+    {
+      "seed": 803,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_803.obj"
+    },
+    {
+      "seed": 804,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_804.obj"
+    },
+    {
+      "seed": 805,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_805.obj"
+    },
+    {
+      "seed": 806,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_806.obj"
+    },
+    {
+      "seed": 807,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_807.obj"
+    },
+    {
+      "seed": 808,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_808.obj"
+    },
+    {
+      "seed": 809,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_809.obj"
+    },
+    {
+      "seed": 810,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_810.obj"
+    },
+    {
+      "seed": 811,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_811.obj"
+    },
+    {
+      "seed": 812,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_812.obj"
+    },
+    {
+      "seed": 813,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_813.obj"
+    },
+    {
+      "seed": 814,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_814.obj"
+    },
+    {
+      "seed": 815,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_815.obj"
+    },
+    {
+      "seed": 816,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_816.obj"
+    },
+    {
+      "seed": 817,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_817.obj"
+    },
+    {
+      "seed": 818,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_818.obj"
+    },
+    {
+      "seed": 819,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_819.obj"
+    },
+    {
+      "seed": 820,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_820.obj"
+    },
+    {
+      "seed": 821,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_821.obj"
+    },
+    {
+      "seed": 822,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_822.obj"
+    },
+    {
+      "seed": 823,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_823.obj"
+    },
+    {
+      "seed": 824,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_824.obj"
+    },
+    {
+      "seed": 825,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_825.obj"
+    },
+    {
+      "seed": 826,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_826.obj"
+    },
+    {
+      "seed": 827,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_827.obj"
+    },
+    {
+      "seed": 828,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_828.obj"
+    },
+    {
+      "seed": 829,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_829.obj"
+    },
+    {
+      "seed": 830,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_830.obj"
+    },
+    {
+      "seed": 831,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_831.obj"
+    },
+    {
+      "seed": 832,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_832.obj"
+    },
+    {
+      "seed": 833,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_833.obj"
+    },
+    {
+      "seed": 834,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_834.obj"
+    },
+    {
+      "seed": 835,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_835.obj"
+    },
+    {
+      "seed": 836,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_836.obj"
+    },
+    {
+      "seed": 837,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_837.obj"
+    },
+    {
+      "seed": 838,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_838.obj"
+    },
+    {
+      "seed": 839,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_839.obj"
+    },
+    {
+      "seed": 840,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_840.obj"
+    },
+    {
+      "seed": 841,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_841.obj"
+    },
+    {
+      "seed": 842,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_842.obj"
+    },
+    {
+      "seed": 843,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_843.obj"
+    },
+    {
+      "seed": 844,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_844.obj"
+    },
+    {
+      "seed": 845,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_845.obj"
+    },
+    {
+      "seed": 846,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_846.obj"
+    },
+    {
+      "seed": 847,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_847.obj"
+    },
+    {
+      "seed": 848,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_848.obj"
+    },
+    {
+      "seed": 849,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_849.obj"
+    },
+    {
+      "seed": 850,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_850.obj"
+    },
+    {
+      "seed": 851,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_851.obj"
+    },
+    {
+      "seed": 852,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_852.obj"
+    },
+    {
+      "seed": 853,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_853.obj"
+    },
+    {
+      "seed": 854,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_854.obj"
+    },
+    {
+      "seed": 855,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_855.obj"
+    },
+    {
+      "seed": 856,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_856.obj"
+    },
+    {
+      "seed": 857,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_857.obj"
+    },
+    {
+      "seed": 858,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_858.obj"
+    },
+    {
+      "seed": 859,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_859.obj"
+    },
+    {
+      "seed": 860,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_860.obj"
+    },
+    {
+      "seed": 861,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_861.obj"
+    },
+    {
+      "seed": 862,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_862.obj"
+    },
+    {
+      "seed": 863,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_863.obj"
+    },
+    {
+      "seed": 864,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_864.obj"
+    },
+    {
+      "seed": 865,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_865.obj"
+    },
+    {
+      "seed": 866,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_866.obj"
+    },
+    {
+      "seed": 867,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_867.obj"
+    },
+    {
+      "seed": 868,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_868.obj"
+    },
+    {
+      "seed": 869,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_869.obj"
+    },
+    {
+      "seed": 870,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_870.obj"
+    },
+    {
+      "seed": 871,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_871.obj"
+    },
+    {
+      "seed": 872,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_872.obj"
+    },
+    {
+      "seed": 873,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_873.obj"
+    },
+    {
+      "seed": 874,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_874.obj"
+    },
+    {
+      "seed": 875,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_875.obj"
+    },
+    {
+      "seed": 876,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_876.obj"
+    },
+    {
+      "seed": 877,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_877.obj"
+    },
+    {
+      "seed": 878,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_878.obj"
+    },
+    {
+      "seed": 879,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_879.obj"
+    },
+    {
+      "seed": 880,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_880.obj"
+    },
+    {
+      "seed": 881,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_881.obj"
+    },
+    {
+      "seed": 882,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_882.obj"
+    },
+    {
+      "seed": 883,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_883.obj"
+    },
+    {
+      "seed": 884,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_884.obj"
+    },
+    {
+      "seed": 885,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_885.obj"
+    },
+    {
+      "seed": 886,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_886.obj"
+    },
+    {
+      "seed": 887,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_887.obj"
+    },
+    {
+      "seed": 888,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_888.obj"
+    },
+    {
+      "seed": 889,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_889.obj"
+    },
+    {
+      "seed": 890,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_890.obj"
+    },
+    {
+      "seed": 891,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_891.obj"
+    },
+    {
+      "seed": 892,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_892.obj"
+    },
+    {
+      "seed": 893,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_893.obj"
+    },
+    {
+      "seed": 894,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_894.obj"
+    },
+    {
+      "seed": 895,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_895.obj"
+    },
+    {
+      "seed": 896,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_896.obj"
+    },
+    {
+      "seed": 897,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_897.obj"
+    },
+    {
+      "seed": 898,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_898.obj"
+    },
+    {
+      "seed": 899,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_899.obj"
+    },
+    {
+      "seed": 900,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_900.obj"
+    },
+    {
+      "seed": 901,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_901.obj"
+    },
+    {
+      "seed": 902,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_902.obj"
+    },
+    {
+      "seed": 903,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_903.obj"
+    },
+    {
+      "seed": 904,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_904.obj"
+    },
+    {
+      "seed": 905,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_905.obj"
+    },
+    {
+      "seed": 906,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_906.obj"
+    },
+    {
+      "seed": 907,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_907.obj"
+    },
+    {
+      "seed": 908,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_908.obj"
+    },
+    {
+      "seed": 909,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_909.obj"
+    },
+    {
+      "seed": 910,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_910.obj"
+    },
+    {
+      "seed": 911,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_911.obj"
+    },
+    {
+      "seed": 912,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_912.obj"
+    },
+    {
+      "seed": 913,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_913.obj"
+    },
+    {
+      "seed": 914,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_914.obj"
+    },
+    {
+      "seed": 915,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_915.obj"
+    },
+    {
+      "seed": 916,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_916.obj"
+    },
+    {
+      "seed": 917,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_917.obj"
+    },
+    {
+      "seed": 918,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_918.obj"
+    },
+    {
+      "seed": 919,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_919.obj"
+    },
+    {
+      "seed": 920,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_920.obj"
+    },
+    {
+      "seed": 921,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_921.obj"
+    },
+    {
+      "seed": 922,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_922.obj"
+    },
+    {
+      "seed": 923,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_923.obj"
+    },
+    {
+      "seed": 924,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_924.obj"
+    },
+    {
+      "seed": 925,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_925.obj"
+    },
+    {
+      "seed": 926,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_926.obj"
+    },
+    {
+      "seed": 927,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_927.obj"
+    },
+    {
+      "seed": 928,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_928.obj"
+    },
+    {
+      "seed": 929,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_929.obj"
+    },
+    {
+      "seed": 930,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_930.obj"
+    },
+    {
+      "seed": 931,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_931.obj"
+    },
+    {
+      "seed": 932,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_932.obj"
+    },
+    {
+      "seed": 933,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_933.obj"
+    },
+    {
+      "seed": 934,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_934.obj"
+    },
+    {
+      "seed": 935,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_935.obj"
+    },
+    {
+      "seed": 936,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_936.obj"
+    },
+    {
+      "seed": 937,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_937.obj"
+    },
+    {
+      "seed": 938,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_938.obj"
+    },
+    {
+      "seed": 939,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_939.obj"
+    },
+    {
+      "seed": 940,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_940.obj"
+    },
+    {
+      "seed": 941,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_941.obj"
+    },
+    {
+      "seed": 942,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_942.obj"
+    },
+    {
+      "seed": 943,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_943.obj"
+    },
+    {
+      "seed": 944,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_944.obj"
+    },
+    {
+      "seed": 945,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_945.obj"
+    },
+    {
+      "seed": 946,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_946.obj"
+    },
+    {
+      "seed": 947,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_947.obj"
+    },
+    {
+      "seed": 948,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_948.obj"
+    },
+    {
+      "seed": 949,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_949.obj"
+    },
+    {
+      "seed": 950,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_950.obj"
+    },
+    {
+      "seed": 951,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_951.obj"
+    },
+    {
+      "seed": 952,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_952.obj"
+    },
+    {
+      "seed": 953,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_953.obj"
+    },
+    {
+      "seed": 954,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_954.obj"
+    },
+    {
+      "seed": 955,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_955.obj"
+    },
+    {
+      "seed": 956,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_956.obj"
+    },
+    {
+      "seed": 957,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_957.obj"
+    },
+    {
+      "seed": 958,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_958.obj"
+    },
+    {
+      "seed": 959,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_959.obj"
+    },
+    {
+      "seed": 960,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_960.obj"
+    },
+    {
+      "seed": 961,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_961.obj"
+    },
+    {
+      "seed": 962,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_962.obj"
+    },
+    {
+      "seed": 963,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_963.obj"
+    },
+    {
+      "seed": 964,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_964.obj"
+    },
+    {
+      "seed": 965,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_965.obj"
+    },
+    {
+      "seed": 966,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_966.obj"
+    },
+    {
+      "seed": 967,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_967.obj"
+    },
+    {
+      "seed": 968,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_968.obj"
+    },
+    {
+      "seed": 969,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_969.obj"
+    },
+    {
+      "seed": 970,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_970.obj"
+    },
+    {
+      "seed": 971,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_971.obj"
+    },
+    {
+      "seed": 972,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_972.obj"
+    },
+    {
+      "seed": 973,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_973.obj"
+    },
+    {
+      "seed": 974,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_974.obj"
+    },
+    {
+      "seed": 975,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_975.obj"
+    },
+    {
+      "seed": 976,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_976.obj"
+    },
+    {
+      "seed": 977,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_977.obj"
+    },
+    {
+      "seed": 978,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_978.obj"
+    },
+    {
+      "seed": 979,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_979.obj"
+    },
+    {
+      "seed": 980,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_980.obj"
+    },
+    {
+      "seed": 981,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_981.obj"
+    },
+    {
+      "seed": 982,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_982.obj"
+    },
+    {
+      "seed": 983,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_983.obj"
+    },
+    {
+      "seed": 984,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_984.obj"
+    },
+    {
+      "seed": 985,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_985.obj"
+    },
+    {
+      "seed": 986,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_986.obj"
+    },
+    {
+      "seed": 987,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_987.obj"
+    },
+    {
+      "seed": 988,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_988.obj"
+    },
+    {
+      "seed": 989,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_989.obj"
+    },
+    {
+      "seed": 990,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_990.obj"
+    },
+    {
+      "seed": 991,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_991.obj"
+    },
+    {
+      "seed": 992,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_992.obj"
+    },
+    {
+      "seed": 993,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_993.obj"
+    },
+    {
+      "seed": 994,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_994.obj"
+    },
+    {
+      "seed": 995,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_995.obj"
+    },
+    {
+      "seed": 996,
+      "reason": "not watertight",
+      "obj_path": "./bench-output/failure_996.obj"
+    },
+    {
+      "seed": 997,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_997.obj"
+    },
+    {
+      "seed": 998,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_998.obj"
+    },
+    {
+      "seed": 999,
+      "reason": "not navigable, not watertight",
+      "obj_path": "./bench-output/failure_999.obj"
+    }
+  ]
+}
