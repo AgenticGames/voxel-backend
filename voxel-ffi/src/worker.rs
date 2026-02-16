@@ -66,7 +66,6 @@ fn handle_request(
 
             let cfg = config.read().unwrap().clone();
             let coord = ChunkCoord::new(chunk.0, chunk.1, chunk.2);
-            let gs = cfg.chunk_size;
 
             // Generate density field (includes worm carving)
             let density = voxel_gen::generate_density(coord, &cfg);
@@ -77,13 +76,10 @@ fn handle_request(
 
             // Solve DC vertices and generate mesh
             let dc_vertices = solve_dc_vertices(&hermite, cell_size);
-            let mut mesh = generate_mesh(&hermite, &dc_vertices, cell_size, cfg.max_edge_length);
+            let mesh = generate_mesh(&hermite, &dc_vertices, cell_size, cfg.max_edge_length);
 
-            // Offset vertices by world origin
-            let world_origin = coord.world_origin_sized(gs);
-            for v in &mut mesh.vertices {
-                v.position += world_origin;
-            }
+            // Vertices stay in LOCAL chunk space [0..chunk_size].
+            // The UE actor's world position handles the chunk offset.
 
             // Store density + hermite for future mining
             {

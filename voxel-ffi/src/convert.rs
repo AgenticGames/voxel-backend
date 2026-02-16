@@ -60,6 +60,19 @@ pub fn from_ue_normal(x: f32, y: f32, z: f32) -> glam::Vec3 {
     glam::Vec3::new(x, z, -y)
 }
 
+/// Convert UE chunk coordinates to Rust chunk coordinates.
+/// UE is Z-up left-hand, Rust is Y-up right-hand.
+/// UE (x, y, z) -> Rust (x, z, -y)
+pub fn ue_chunk_to_rust(cx: i32, cy: i32, cz: i32) -> (i32, i32, i32) {
+    (cx, cz, -cy)
+}
+
+/// Convert Rust chunk coordinates back to UE chunk coordinates.
+/// Rust (x, y, z) -> UE (x, -z, y)
+pub fn rust_chunk_to_ue(cx: i32, cy: i32, cz: i32) -> (i32, i32, i32) {
+    (cx, -cz, cy)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

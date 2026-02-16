@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use glam::Vec3;
-use voxel_core::chunk::ChunkCoord;
 use voxel_core::dual_contouring::mesh_gen::generate_mesh;
 use voxel_core::dual_contouring::solve::solve_dc_vertices;
 use voxel_core::hermite::HermiteData;
@@ -233,7 +232,6 @@ impl ChunkStore {
         config: &GenerationConfig,
         world_scale: f32,
     ) -> Vec<((i32, i32, i32), ConvertedMesh)> {
-        let gs = config.chunk_size;
         let max_edge_length = config.max_edge_length;
         let mut results = Vec::with_capacity(dirty_chunks.len());
 
@@ -257,14 +255,9 @@ impl ChunkStore {
 
             let cell_size = density.size - 1;
             let dc_vertices = solve_dc_vertices(hermite, cell_size);
-            let mut mesh = generate_mesh(hermite, &dc_vertices, cell_size, max_edge_length);
+            let mesh = generate_mesh(hermite, &dc_vertices, cell_size, max_edge_length);
 
-            let coord = ChunkCoord::new(key.0, key.1, key.2);
-            let world_origin = coord.world_origin_sized(gs);
-            for v in &mut mesh.vertices {
-                v.position += world_origin;
-            }
-
+            // Vertices stay in LOCAL chunk space. Actor position handles world offset.
             let converted = convert_mesh_to_ue(&mesh, world_scale);
             results.push((key, converted));
         }

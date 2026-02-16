@@ -6,6 +6,7 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use dashmap::DashMap;
 use voxel_gen::config::{GenerationConfig, NoiseConfig, OreConfig, WormConfig};
 
+use crate::convert::ue_chunk_to_rust;
 use crate::store::ChunkStore;
 use crate::types::*;
 use crate::worker::worker_loop;
@@ -83,9 +84,10 @@ impl VoxelEngine {
         }
     }
 
-    /// Queue a single chunk for generation. Returns 1 on success, 0 if queue full.
+    /// Queue a single chunk for generation. Coords are UE space, converted internally.
+    /// Returns 1 on success, 0 if queue full.
     pub fn request_generate(&self, cx: i32, cy: i32, cz: i32) -> u32 {
-        let key = (cx, cy, cz);
+        let key = ue_chunk_to_rust(cx, cy, cz);
         let generation = self
             .generation_counters
             .entry(key)
@@ -123,9 +125,9 @@ impl VoxelEngine {
         }
     }
 
-    /// Request unloading a chunk's cached data.
+    /// Request unloading a chunk's cached data. Coords are UE space.
     pub fn request_unload(&self, cx: i32, cy: i32, cz: i32) -> u32 {
-        let key = (cx, cy, cz);
+        let key = ue_chunk_to_rust(cx, cy, cz);
         match self
             .generate_tx
             .try_send(WorkerRequest::Unload { chunk: key })
@@ -136,9 +138,9 @@ impl VoxelEngine {
     }
 
     /// Cancel any pending generation for a chunk by bumping its generation counter.
-    /// Workers will see the stale generation and skip.
+    /// Workers will see the stale generation and skip. Coords are UE space.
     pub fn cancel_chunk(&self, cx: i32, cy: i32, cz: i32) {
-        let key = (cx, cy, cz);
+        let key = ue_chunk_to_rust(cx, cy, cz);
         self.generation_counters
             .entry(key)
             .or_insert_with(|| AtomicU64::new(0))

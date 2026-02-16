@@ -1,6 +1,7 @@
 use std::ffi::c_void;
 use std::ptr;
 
+use crate::convert::rust_chunk_to_ue;
 use crate::engine::VoxelEngine;
 use crate::types::*;
 
@@ -145,12 +146,13 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     let _ = mesh;
                 }
 
+                let ue_key = rust_chunk_to_ue(first_key.0, first_key.1, first_key.2);
                 let result = FfiResult {
                     result_type: FfiResultType::MineResult,
                     chunk: FfiChunkCoord {
-                        x: first_key.0,
-                        y: first_key.1,
-                        z: first_key.2,
+                        x: ue_key.0,
+                        y: ue_key.1,
+                        z: ue_key.2,
                     },
                     mesh: converted_mesh_to_ffi(first_mesh),
                     mined,
@@ -238,12 +240,14 @@ fn convert_mesh_to_ffi_result(
     mesh: ConvertedMesh,
     generation: u64,
 ) -> FfiResult {
+    // Convert Rust chunk coords back to UE space for the caller
+    let ue = rust_chunk_to_ue(chunk.0, chunk.1, chunk.2);
     FfiResult {
         result_type: FfiResultType::ChunkMesh,
         chunk: FfiChunkCoord {
-            x: chunk.0,
-            y: chunk.1,
-            z: chunk.2,
+            x: ue.0,
+            y: ue.1,
+            z: ue.2,
         },
         mesh: converted_mesh_to_ffi(mesh),
         mined: FfiMinedMaterials { counts: [0; 19] },
