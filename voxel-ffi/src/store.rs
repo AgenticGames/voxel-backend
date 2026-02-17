@@ -121,7 +121,10 @@ impl ChunkStore {
                                         let sample = density.get_mut(x, y, z);
                                         if sample.material.is_solid() {
                                             mined_counts[sample.material as u8 as usize] += 1;
-                                            sample.density = -1.0;
+                                            // SDF: smooth gradient following sphere curvature
+                                            // instead of flat -1.0 which kills DC normals
+                                            let sdf = dist2.sqrt() - radius;
+                                            sample.density = sdf.min(sample.density);
                                             sample.material = Material::Air;
                                             changed = true;
                                         }
@@ -222,11 +225,15 @@ impl ChunkStore {
                             }
                         }
 
-                        // Second pass: apply peeling
+                        // Second pass: apply peeling with SDF gradient
                         for (x, y, z) in to_peel {
+                            let world_pos =
+                                origin + Vec3::new(x as f32, y as f32, z as f32);
+                            let dist = (world_pos - adjusted_center).length();
+                            let sdf = dist - radius;
                             let sample = density.get_mut(x, y, z);
                             mined_counts[sample.material as u8 as usize] += 1;
-                            sample.density = -1.0;
+                            sample.density = sdf.min(sample.density);
                             sample.material = Material::Air;
                             changed = true;
                         }

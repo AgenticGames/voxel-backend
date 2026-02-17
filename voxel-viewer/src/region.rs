@@ -156,7 +156,8 @@ impl GeneratedRegion {
                                         let sample = density.get_mut(x, y, z);
                                         if sample.material.is_solid() {
                                             *mined.entry(sample.material).or_insert(0) += 1;
-                                            sample.density = -1.0;
+                                            let sdf = dist2.sqrt() - radius;
+                                            sample.density = sdf.min(sample.density);
                                             sample.material = Material::Air;
                                             changed = true;
                                         }
@@ -248,11 +249,14 @@ impl GeneratedRegion {
                             }
                         }
 
-                        // Second pass: apply peeling
+                        // Second pass: apply peeling with SDF gradient
                         for (x, y, z) in to_peel {
+                            let world_pos = origin + Vec3::new(x as f32, y as f32, z as f32);
+                            let dist = (world_pos - adjusted_center).length();
+                            let sdf = dist - radius;
                             let sample = density.get_mut(x, y, z);
                             *mined.entry(sample.material).or_insert(0) += 1;
-                            sample.density = -1.0;
+                            sample.density = sdf.min(sample.density);
                             sample.material = Material::Air;
                             changed = true;
                         }
