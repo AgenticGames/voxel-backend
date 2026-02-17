@@ -74,6 +74,69 @@ pub struct FfiEngineConfig {
     pub worm_max_steps: u32,
     pub worm_falloff_power: f32,
     pub region_size: u32,
+    // ── Ore Config (52 fields) ──
+    // Host Rock (9)
+    pub host_sandstone_depth: f64,
+    pub host_granite_depth: f64,
+    pub host_basalt_depth: f64,
+    pub host_slate_depth: f64,
+    pub host_boundary_noise_amp: f64,
+    pub host_boundary_noise_freq: f64,
+    pub host_basalt_intrusion_freq: f64,
+    pub host_basalt_intrusion_thresh: f64,
+    pub host_basalt_intrusion_depth_max: f64,
+    // Banded Iron (6)
+    pub iron_band_frequency: f64,
+    pub iron_noise_perturbation: f64,
+    pub iron_noise_frequency: f64,
+    pub iron_threshold: f64,
+    pub iron_depth_min: f64,
+    pub iron_depth_max: f64,
+    // Copper (4)
+    pub copper_frequency: f64,
+    pub copper_threshold: f64,
+    pub copper_depth_min: f64,
+    pub copper_depth_max: f64,
+    // Malachite (4)
+    pub malachite_frequency: f64,
+    pub malachite_threshold: f64,
+    pub malachite_depth_min: f64,
+    pub malachite_depth_max: f64,
+    // Quartz (4)
+    pub quartz_frequency: f64,
+    pub quartz_threshold: f64,
+    pub quartz_depth_min: f64,
+    pub quartz_depth_max: f64,
+    // Gold (4)
+    pub gold_frequency: f64,
+    pub gold_threshold: f64,
+    pub gold_depth_min: f64,
+    pub gold_depth_max: f64,
+    // Pyrite (4)
+    pub pyrite_frequency: f64,
+    pub pyrite_threshold: f64,
+    pub pyrite_depth_min: f64,
+    pub pyrite_depth_max: f64,
+    // Kimberlite (6)
+    pub kimb_pipe_freq_2d: f64,
+    pub kimb_pipe_threshold: f64,
+    pub kimb_depth_min: f64,
+    pub kimb_depth_max: f64,
+    pub kimb_diamond_threshold: f64,
+    pub kimb_diamond_frequency: f64,
+    // Sulfide (5)
+    pub sulfide_frequency: f64,
+    pub sulfide_threshold: f64,
+    pub sulfide_tin_threshold: f64,
+    pub sulfide_depth_min: f64,
+    pub sulfide_depth_max: f64,
+    // Geode (6)
+    pub geode_frequency: f64,
+    pub geode_center_threshold: f64,
+    pub geode_shell_thickness: f64,
+    pub geode_hollow_factor: f32,
+    pub geode_depth_min: f64,
+    pub geode_depth_max: f64,
 }
 
 #[repr(C)]

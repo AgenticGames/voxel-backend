@@ -4,7 +4,10 @@ use std::thread::{self, JoinHandle};
 
 use crossbeam_channel::{bounded, Receiver, Sender};
 use dashmap::DashMap;
-use voxel_gen::config::{GenerationConfig, NoiseConfig, OreConfig, WormConfig};
+use voxel_gen::config::{
+    BandedIronConfig, GenerationConfig, GeodeConfig, HostRockConfig, KimberlitePipeConfig,
+    NoiseConfig, OreConfig, OreVeinParams, SulfideBlobConfig, WormConfig,
+};
 
 use crate::convert::ue_chunk_to_rust;
 use crate::store::ChunkStore;
@@ -203,7 +206,80 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
             max_steps: c.worm_max_steps,
             falloff_power: c.worm_falloff_power,
         },
-        ore: OreConfig::default(),
+        ore: OreConfig {
+            host_rock: HostRockConfig {
+                sandstone_depth: c.host_sandstone_depth,
+                granite_depth: c.host_granite_depth,
+                basalt_depth: c.host_basalt_depth,
+                slate_depth: c.host_slate_depth,
+                boundary_noise_amplitude: c.host_boundary_noise_amp,
+                boundary_noise_frequency: c.host_boundary_noise_freq,
+                basalt_intrusion_frequency: c.host_basalt_intrusion_freq,
+                basalt_intrusion_threshold: c.host_basalt_intrusion_thresh,
+                basalt_intrusion_depth_max: c.host_basalt_intrusion_depth_max,
+            },
+            iron: BandedIronConfig {
+                band_frequency: c.iron_band_frequency,
+                noise_perturbation: c.iron_noise_perturbation,
+                noise_frequency: c.iron_noise_frequency,
+                threshold: c.iron_threshold,
+                depth_min: c.iron_depth_min,
+                depth_max: c.iron_depth_max,
+            },
+            copper: OreVeinParams {
+                frequency: c.copper_frequency,
+                threshold: c.copper_threshold,
+                depth_min: c.copper_depth_min,
+                depth_max: c.copper_depth_max,
+            },
+            malachite: OreVeinParams {
+                frequency: c.malachite_frequency,
+                threshold: c.malachite_threshold,
+                depth_min: c.malachite_depth_min,
+                depth_max: c.malachite_depth_max,
+            },
+            quartz: OreVeinParams {
+                frequency: c.quartz_frequency,
+                threshold: c.quartz_threshold,
+                depth_min: c.quartz_depth_min,
+                depth_max: c.quartz_depth_max,
+            },
+            gold: OreVeinParams {
+                frequency: c.gold_frequency,
+                threshold: c.gold_threshold,
+                depth_min: c.gold_depth_min,
+                depth_max: c.gold_depth_max,
+            },
+            pyrite: OreVeinParams {
+                frequency: c.pyrite_frequency,
+                threshold: c.pyrite_threshold,
+                depth_min: c.pyrite_depth_min,
+                depth_max: c.pyrite_depth_max,
+            },
+            kimberlite: KimberlitePipeConfig {
+                pipe_frequency_2d: c.kimb_pipe_freq_2d,
+                pipe_threshold: c.kimb_pipe_threshold,
+                depth_min: c.kimb_depth_min,
+                depth_max: c.kimb_depth_max,
+                diamond_threshold: c.kimb_diamond_threshold,
+                diamond_frequency: c.kimb_diamond_frequency,
+            },
+            sulfide: SulfideBlobConfig {
+                frequency: c.sulfide_frequency,
+                threshold: c.sulfide_threshold,
+                tin_threshold: c.sulfide_tin_threshold,
+                depth_min: c.sulfide_depth_min,
+                depth_max: c.sulfide_depth_max,
+            },
+            geode: GeodeConfig {
+                frequency: c.geode_frequency,
+                center_threshold: c.geode_center_threshold,
+                shell_thickness: c.geode_shell_thickness,
+                hollow_factor: c.geode_hollow_factor,
+                depth_min: c.geode_depth_min,
+                depth_max: c.geode_depth_max,
+            },
+        },
         octree_max_depth: 4,
         max_edge_length: c.max_edge_length,
         region_size: if c.region_size == 0 { 3 } else { c.region_size as i32 },

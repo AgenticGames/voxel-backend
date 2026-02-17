@@ -287,6 +287,68 @@ mod tests {
             worm_max_steps: 200,
             worm_falloff_power: 2.0,
             region_size: 3,
+            // Host Rock
+            host_sandstone_depth: 200.0,
+            host_granite_depth: 160.0,
+            host_basalt_depth: 20.0,
+            host_slate_depth: -150.0,
+            host_boundary_noise_amp: 8.0,
+            host_boundary_noise_freq: 0.03,
+            host_basalt_intrusion_freq: 0.02,
+            host_basalt_intrusion_thresh: 0.85,
+            host_basalt_intrusion_depth_max: 10.0,
+            // Banded Iron
+            iron_band_frequency: 0.2,
+            iron_noise_perturbation: 1.0,
+            iron_noise_frequency: 0.15,
+            iron_threshold: 1.2,
+            iron_depth_min: -200.0,
+            iron_depth_max: 200.0,
+            // Copper
+            copper_frequency: 0.009,
+            copper_threshold: 0.72,
+            copper_depth_min: -30.0,
+            copper_depth_max: 200.0,
+            // Malachite
+            malachite_frequency: 0.8,
+            malachite_threshold: 0.1,
+            malachite_depth_min: -200.0,
+            malachite_depth_max: -30.0,
+            // Quartz
+            quartz_frequency: 0.01,
+            quartz_threshold: 0.67,
+            quartz_depth_min: -200.0,
+            quartz_depth_max: 200.0,
+            // Gold
+            gold_frequency: 0.08,
+            gold_threshold: 0.87,
+            gold_depth_min: -200.0,
+            gold_depth_max: 200.0,
+            // Pyrite
+            pyrite_frequency: 0.05,
+            pyrite_threshold: 0.92,
+            pyrite_depth_min: -200.0,
+            pyrite_depth_max: 200.0,
+            // Kimberlite
+            kimb_pipe_freq_2d: 0.008,
+            kimb_pipe_threshold: 0.9,
+            kimb_depth_min: -200.0,
+            kimb_depth_max: -30.0,
+            kimb_diamond_threshold: 0.75,
+            kimb_diamond_frequency: 0.2,
+            // Sulfide
+            sulfide_frequency: 0.5,
+            sulfide_threshold: 0.2,
+            sulfide_tin_threshold: 0.5,
+            sulfide_depth_min: -200.0,
+            sulfide_depth_max: -20.0,
+            // Geode
+            geode_frequency: 0.009,
+            geode_center_threshold: 0.94,
+            geode_shell_thickness: 0.01,
+            geode_hollow_factor: -0.20,
+            geode_depth_min: -200.0,
+            geode_depth_max: 200.0,
         }
     }
 
