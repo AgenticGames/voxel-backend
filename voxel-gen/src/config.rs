@@ -42,7 +42,7 @@ impl Default for GenerationConfig {
             worm: WormConfig::default(),
             ore: OreConfig::default(),
             octree_max_depth: 4,
-            max_edge_length: 4.0,
+            max_edge_length: 5.0,
             region_size: 3,
         }
     }

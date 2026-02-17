@@ -274,7 +274,7 @@ mod tests {
             chunk_size: 16,
             worker_threads: 2,
             world_scale: 100.0,
-            max_edge_length: 4.0,
+            max_edge_length: 5.0,
             cavern_frequency: 0.05,
             cavern_threshold: 0.55,
             detail_octaves: 4,

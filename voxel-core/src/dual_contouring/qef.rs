@@ -114,9 +114,29 @@ impl QefData {
         mass_point + v * scaled
     }
 
-    /// Solve the QEF with clamping to a bounding box defined by min_bound and max_bound
+    /// Solve the QEF with clamping to a bounding box defined by min_bound and max_bound.
+    /// When the unclamped solution is far from the cell, blends toward mass_point
+    /// to avoid corner-jammed vertices that create spiky triangles.
     pub fn solve_clamped(&self, min_bound: Vec3, max_bound: Vec3) -> Vec3 {
-        self.solve().clamp(min_bound, max_bound)
+        if self.count == 0 {
+            return (min_bound + max_bound) * 0.5;
+        }
+
+        let unclamped = self.solve();
+        let clamped = unclamped.clamp(min_bound, max_bound);
+        let clamp_dist = (unclamped - clamped).length();
+
+        // If barely clamped, QEF solution is good
+        if clamp_dist < 0.5 {
+            return clamped;
+        }
+
+        // Heavy clamping: QEF is poorly constrained (e.g. mine boundary with
+        // conflicting surface normals). Blend toward mass_point which lies on
+        // the actual surface, avoiding corner-jammed vertices.
+        let mass_point = (self.mass_point_sum / self.count as f32).clamp(min_bound, max_bound);
+        let blend = ((clamp_dist - 0.5) * 2.0).min(1.0);
+        clamped.lerp(mass_point, blend)
     }
 
     /// Compute the error for a given position

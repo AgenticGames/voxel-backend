@@ -49,19 +49,18 @@ pub fn generate_mesh(hermite: &HermiteData, dc_vertices: &[glam::Vec3], grid_siz
             None => continue,
         };
 
-        // Get or create vertex indices for each of the 4 cells
+        // Get or create vertex indices for each of the 4 cells.
+        // Track which cells are valid (have a DC vertex).
         let mut quad_verts = [0u32; 4];
-        let mut valid = true;
+        let mut valid_mask = [false; 4];
+        let mut valid_count = 0u32;
         for (i, &cell_idx) in cell_indices.iter().enumerate() {
             if cell_idx >= dc_vertices.len() {
-                valid = false;
-                break;
+                continue;
             }
             let pos = dc_vertices[cell_idx];
-            // Skip cells with no DC vertex (NAN sentinel from solve)
             if pos.x.is_nan() {
-                valid = false;
-                break;
+                continue;
             }
             let vi = *vertex_map.entry(cell_idx).or_insert_with(|| {
                 let idx = mesh.vertices.len() as u32;
@@ -73,30 +72,55 @@ pub fn generate_mesh(hermite: &HermiteData, dc_vertices: &[glam::Vec3], grid_siz
                 idx
             });
             quad_verts[i] = vi;
+            valid_mask[i] = true;
+            valid_count += 1;
         }
-
-        if !valid {
-            continue;
-        }
-
-        // Determine winding order based on sign of the edge endpoints
-        // Split quad into two triangles, skipping degenerate ones
-        let normal_dot = intersection.normal.dot(axis_direction(axis));
-        let (tri_a, tri_b) = if normal_dot > 0.0 {
-            ([quad_verts[0], quad_verts[1], quad_verts[2]],
-             [quad_verts[0], quad_verts[2], quad_verts[3]])
-        } else {
-            ([quad_verts[2], quad_verts[1], quad_verts[0]],
-             [quad_verts[3], quad_verts[2], quad_verts[0]])
-        };
 
         let max_edge_sq = max_edge_length * max_edge_length;
-        if !is_degenerate_tri(&mesh.vertices, tri_a) && !is_stretched_tri(&mesh.vertices, tri_a, max_edge_sq) {
-            mesh.triangles.push(Triangle { indices: tri_a });
+
+        if valid_count == 4 {
+            // Full quad: split into two triangles
+            let normal_dot = intersection.normal.dot(axis_direction(axis));
+            let (tri_a, tri_b) = if normal_dot > 0.0 {
+                ([quad_verts[0], quad_verts[1], quad_verts[2]],
+                 [quad_verts[0], quad_verts[2], quad_verts[3]])
+            } else {
+                ([quad_verts[2], quad_verts[1], quad_verts[0]],
+                 [quad_verts[3], quad_verts[2], quad_verts[0]])
+            };
+
+            if !is_degenerate_tri(&mesh.vertices, tri_a) && !is_stretched_tri(&mesh.vertices, tri_a, max_edge_sq) {
+                mesh.triangles.push(Triangle { indices: tri_a });
+            }
+            if !is_degenerate_tri(&mesh.vertices, tri_b) && !is_stretched_tri(&mesh.vertices, tri_b, max_edge_sq) {
+                mesh.triangles.push(Triangle { indices: tri_b });
+            }
+        } else if valid_count == 3 {
+            // Partial quad: one cell is fully air (no DC vertex).
+            // Emit a single triangle from the 3 valid vertices to fill the gap.
+            let mut tri = [0u32; 3];
+            let mut j = 0;
+            for i in 0..4 {
+                if valid_mask[i] {
+                    tri[j] = quad_verts[i];
+                    j += 1;
+                }
+            }
+
+            // Ensure correct winding: face normal should agree with intersection normal
+            let v0 = mesh.vertices[tri[0] as usize].position;
+            let v1 = mesh.vertices[tri[1] as usize].position;
+            let v2 = mesh.vertices[tri[2] as usize].position;
+            let face_normal = (v1 - v0).cross(v2 - v0);
+            if face_normal.dot(intersection.normal) < 0.0 {
+                tri.swap(1, 2);
+            }
+
+            if !is_degenerate_tri(&mesh.vertices, tri) && !is_stretched_tri(&mesh.vertices, tri, max_edge_sq) {
+                mesh.triangles.push(Triangle { indices: tri });
+            }
         }
-        if !is_degenerate_tri(&mesh.vertices, tri_b) && !is_stretched_tri(&mesh.vertices, tri_b, max_edge_sq) {
-            mesh.triangles.push(Triangle { indices: tri_b });
-        }
+        // else: 2 or fewer valid vertices, skip entirely
     }
 
     mesh
