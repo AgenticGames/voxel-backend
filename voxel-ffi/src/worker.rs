@@ -155,6 +155,9 @@ fn handle_request(
             };
             drop(s);
 
+            // Collect dirty chunk keys for seam regeneration
+            let dirty_keys: Vec<(i32, i32, i32)> = meshes.iter().map(|(k, _)| *k).collect();
+
             // Send each dirty chunk mesh individually so UE can update existing actors
             for (key, mesh) in meshes {
                 let _ = result_tx.send(WorkerResult::ChunkMesh {
@@ -166,6 +169,11 @@ fn handle_request(
 
             // Send mined material counts separately
             let _ = result_tx.send(WorkerResult::MinedMaterials { mined });
+
+            // Regenerate seams for dirty chunks and their neighbors
+            for key in dirty_keys {
+                incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
+            }
         }
         WorkerRequest::Unload { chunk } => {
             let mut s = store.write().unwrap();

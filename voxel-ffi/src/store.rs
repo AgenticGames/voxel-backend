@@ -8,7 +8,7 @@ use voxel_core::material::Material;
 use voxel_gen::config::GenerationConfig;
 use voxel_gen::density::DensityField;
 use voxel_gen::hermite_extract::{extract_hermite_data, patch_hermite_data};
-use voxel_gen::region_gen::ChunkSeamData;
+use voxel_gen::region_gen::{self, ChunkSeamData};
 
 use crate::convert::convert_mesh_to_ue;
 use crate::types::{ConvertedMesh, FfiMinedMaterials};
@@ -255,6 +255,7 @@ impl ChunkStore {
 
     /// Re-mesh dirty chunks using incremental hermite patching.
     /// Returns converted meshes in UE coordinate space.
+    /// Also updates seam data so seam stitching reflects post-mining geometry.
     fn remesh_dirty(
         &mut self,
         dirty_chunks: &[((i32, i32, i32), usize, usize, usize, usize, usize, usize)],
@@ -262,6 +263,7 @@ impl ChunkStore {
         world_scale: f32,
     ) -> Vec<((i32, i32, i32), ConvertedMesh)> {
         let max_edge_length = config.max_edge_length;
+        let chunk_size = config.chunk_size;
         let mut results = Vec::with_capacity(dirty_chunks.len());
 
         for &(key, min_x, min_y, min_z, max_x, max_y, max_z) in dirty_chunks {
@@ -286,7 +288,17 @@ impl ChunkStore {
             let dc_vertices = solve_dc_vertices(hermite, cell_size);
             let mesh = generate_mesh(hermite, &dc_vertices, cell_size, max_edge_length);
 
-            // Vertices stay in LOCAL chunk space. Actor position handles world offset.
+            // Update seam data so seam stitching uses post-mining geometry
+            let boundary_edges = region_gen::extract_boundary_edges(hermite, chunk_size);
+            self.chunk_seam_data.insert(
+                key,
+                ChunkSeamData {
+                    dc_vertices,
+                    world_origin: Vec3::ZERO,
+                    boundary_edges,
+                },
+            );
+
             let converted = convert_mesh_to_ue(&mesh, world_scale);
             results.push((key, converted));
         }
