@@ -194,6 +194,44 @@ impl VoxelEngine {
         }
     }
 
+    /// Inject fluid at a UE world position. Computes chunk + local cell automatically.
+    /// fluid_type: 1=Water, 2=Lava. Returns 1 on success, 0 on failure.
+    pub fn add_fluid(&self, world_x: f32, world_y: f32, world_z: f32,
+                     fluid_type: u8, is_source: bool, world_scale: f32) -> u32 {
+        use crate::convert::from_ue_world_pos;
+        use voxel_fluid::cell::FluidType;
+
+        let chunk_size = self.config.read().map(|c| c.chunk_size).unwrap_or(16);
+        let cs = chunk_size as f32;
+
+        // Convert UE world pos -> Rust voxel pos
+        let rust_pos = from_ue_world_pos(world_x, world_y, world_z, world_scale);
+
+        // Compute chunk coord and local cell
+        let cx = (rust_pos.x / cs).floor() as i32;
+        let cy = (rust_pos.y / cs).floor() as i32;
+        let cz = (rust_pos.z / cs).floor() as i32;
+
+        let lx = ((rust_pos.x - cx as f32 * cs) as i32).clamp(0, chunk_size as i32 - 1) as u8;
+        let ly = ((rust_pos.y - cy as f32 * cs) as i32).clamp(0, chunk_size as i32 - 1) as u8;
+        let lz = ((rust_pos.z - cz as f32 * cs) as i32).clamp(0, chunk_size as i32 - 1) as u8;
+
+        let ft = if fluid_type == 2 { FluidType::Lava } else { FluidType::Water };
+
+        match self.fluid_event_tx.try_send(FluidEvent::AddFluid {
+            chunk: (cx, cy, cz),
+            x: lx,
+            y: ly,
+            z: lz,
+            fluid_type: ft,
+            level: voxel_fluid::cell::MAX_LEVEL,
+            is_source,
+        }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
     /// Hot-reload configuration (affects future generation requests).
     pub fn update_config(&self, ffi_config: &FfiEngineConfig) {
         let new_config = ffi_config_to_generation(ffi_config);

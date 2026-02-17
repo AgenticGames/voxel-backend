@@ -246,6 +246,26 @@ pub unsafe extern "C" fn voxel_update_config(engine: *mut c_void, config: *const
     engine.update_config(&*config);
 }
 
+/// Inject fluid at a UE world position.
+/// fluid_type: 1=Water, 2=Lava. is_source: 1=infinite source, 0=finite.
+/// Returns 1 on success, 0 if queue full.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_add_fluid(
+    engine: *mut c_void,
+    world_x: f32,
+    world_y: f32,
+    world_z: f32,
+    fluid_type: u8,
+    is_source: u8,
+    world_scale: f32,
+) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.add_fluid(world_x, world_y, world_z, fluid_type, is_source != 0, world_scale)
+}
+
 // ── Internal helpers ──
 
 fn convert_mesh_to_ffi_result(

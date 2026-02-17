@@ -53,6 +53,16 @@ pub enum FluidEvent {
     ChunkUnloaded {
         chunk: (i32, i32, i32),
     },
+    /// Inject fluid at a specific cell (debug / scripted spawning).
+    AddFluid {
+        chunk: (i32, i32, i32),
+        x: u8,
+        y: u8,
+        z: u8,
+        fluid_type: cell::FluidType,
+        level: f32,
+        is_source: bool,
+    },
 }
 
 /// Results sent from the fluid simulation thread back to the engine.

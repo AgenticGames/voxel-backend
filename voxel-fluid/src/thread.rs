@@ -144,5 +144,23 @@ fn handle_event(
         FluidEvent::ChunkUnloaded { chunk } => {
             chunks.remove(&chunk);
         }
+        FluidEvent::AddFluid { chunk, x, y, z, fluid_type, level, is_source } => {
+            let grid = chunks
+                .entry(chunk)
+                .or_insert_with(|| ChunkFluidGrid::new(chunk_size));
+            let xu = x as usize;
+            let yu = y as usize;
+            let zu = z as usize;
+            if xu < chunk_size && yu < chunk_size && zu < chunk_size && !grid.is_solid(xu, yu, zu) {
+                let cell = grid.get_mut(xu, yu, zu);
+                cell.fluid_type = fluid_type;
+                cell.level = level;
+                if is_source {
+                    // Sources stay at MAX_LEVEL via regen_sources
+                    cell.level = crate::cell::MAX_LEVEL;
+                }
+                grid.dirty = true;
+            }
+        }
     }
 }
