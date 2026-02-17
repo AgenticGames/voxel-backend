@@ -30,6 +30,9 @@ pub fn generate_worm_path(
     let mut yaw: f32 = 0.0;
     let mut pitch: f32 = 0.0;
 
+    // Taper zone: first/last 15% of steps fade radius to zero
+    let taper_steps = (max_steps as f32 * 0.15).max(3.0);
+
     for step in 0..max_steps {
         let t = step as f64 * 0.05; // time parameter for noise sampling
 
@@ -51,11 +54,17 @@ pub fn generate_worm_path(
 
         // Vary radius along path
         let r_t = radius_noise.sample(t * 0.5, 0.0, 0.0) as f32;
-        let radius = radius_min + (radius_max - radius_min) * (r_t * 0.5 + 0.5).clamp(0.0, 1.0);
+        let base_radius = radius_min + (radius_max - radius_min) * (r_t * 0.5 + 0.5).clamp(0.0, 1.0);
+
+        // Taper at both ends: smoothstep ramp from 0→1 at start, 1→0 at end
+        let start_fade = (step as f32 / taper_steps).clamp(0.0, 1.0);
+        let end_fade = ((max_steps - 1 - step) as f32 / taper_steps).clamp(0.0, 1.0);
+        let taper = (start_fade * start_fade * (3.0 - 2.0 * start_fade))
+                   * (end_fade * end_fade * (3.0 - 2.0 * end_fade));
 
         segments.push(WormSegment {
             position: pos,
-            radius,
+            radius: base_radius * taper,
         });
 
         pos += dir * step_length;
@@ -88,9 +97,16 @@ mod tests {
     fn test_worm_path_radius_bounds() {
         let path = generate_worm_path(42, Vec3::ZERO, 1.0, 100, 1.5, 3.5);
         for seg in &path {
-            assert!(seg.radius >= 1.5, "radius too small: {}", seg.radius);
+            // Radius can be 0 at tapered ends, but never exceeds max
+            assert!(seg.radius >= 0.0, "radius negative: {}", seg.radius);
             assert!(seg.radius <= 3.5, "radius too large: {}", seg.radius);
         }
+        // Middle segments should have non-trivial radius
+        let mid = &path[path.len() / 2];
+        assert!(mid.radius > 0.5, "mid radius too small: {}", mid.radius);
+        // End segments should be tapered near zero
+        assert!(path[0].radius < 0.1, "start should be tapered, got {}", path[0].radius);
+        assert!(path[path.len() - 1].radius < 0.1, "end should be tapered, got {}", path[path.len() - 1].radius);
     }
 
     #[test]
