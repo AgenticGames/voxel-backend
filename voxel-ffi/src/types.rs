@@ -41,6 +41,19 @@ pub enum FfiResultType {
     ChunkMesh = 1,
     MineResult = 2,
     Error = 3,
+    FluidMesh = 4,
+    SolidifyRequest = 5,
+}
+
+/// SoA layout for fluid mesh data. Pointers owned by Rust, freed via `voxel_free_result`.
+#[repr(C)]
+pub struct FfiFluidMeshData {
+    pub positions: *mut FfiVec3,
+    pub normals: *mut FfiVec3,
+    pub fluid_types: *mut u8,
+    pub vertex_count: u32,
+    pub indices: *mut u32,
+    pub index_count: u32,
 }
 
 #[repr(C)]
@@ -50,6 +63,7 @@ pub struct FfiResult {
     pub mesh: FfiMeshData,
     pub mined: FfiMinedMaterials,
     pub generation: u64,
+    pub fluid_mesh: FfiFluidMeshData,
 }
 
 #[repr(C)]
@@ -137,6 +151,12 @@ pub struct FfiEngineConfig {
     pub geode_hollow_factor: f32,
     pub geode_depth_min: f64,
     pub geode_depth_max: f64,
+    // ── Fluid Config (5 fields) ──
+    pub fluid_tick_rate: f32,
+    pub fluid_lava_tick_divisor: u8,
+    pub fluid_water_spring_threshold: f64,
+    pub fluid_lava_source_threshold: f64,
+    pub fluid_lava_depth_max: f64,
 }
 
 #[repr(C)]
@@ -171,6 +191,14 @@ pub struct ConvertedMesh {
     pub indices: Vec<u32>,
 }
 
+/// Converted fluid mesh data in UE coordinate space.
+pub struct ConvertedFluidMesh {
+    pub positions: Vec<FfiVec3>,
+    pub normals: Vec<FfiVec3>,
+    pub fluid_types: Vec<u8>,
+    pub indices: Vec<u32>,
+}
+
 /// Messages sent to worker threads.
 pub enum WorkerRequest {
     Generate {
@@ -194,5 +222,12 @@ pub enum WorkerResult {
     },
     MinedMaterials {
         mined: FfiMinedMaterials,
+    },
+    FluidMesh {
+        chunk: (i32, i32, i32),
+        mesh: ConvertedFluidMesh,
+    },
+    SolidifyRequest {
+        positions: Vec<((i32, i32, i32), usize, usize, usize)>,
     },
 }

@@ -4,6 +4,8 @@ use std::thread::{self, JoinHandle};
 
 use crossbeam_channel::{bounded, Receiver, Sender};
 use dashmap::DashMap;
+use voxel_fluid::FluidConfig;
+use voxel_fluid::FluidEvent;
 use voxel_gen::config::{
     BandedIronConfig, GenerationConfig, GeodeConfig, HostRockConfig, KimberlitePipeConfig,
     NoiseConfig, OreConfig, OreVeinParams, SulfideBlobConfig, WormConfig,
@@ -20,6 +22,10 @@ pub struct VoxelEngine {
     mine_tx: Sender<WorkerRequest>,
     result_rx: Receiver<WorkerResult>,
 
+    // Fluid
+    fluid_event_tx: Sender<FluidEvent>,
+    fluid_thread: Option<JoinHandle<()>>,
+
     // Shared state
     store: Arc<RwLock<ChunkStore>>,
     config: Arc<RwLock<GenerationConfig>>,
@@ -33,6 +39,7 @@ pub struct VoxelEngine {
 impl VoxelEngine {
     pub fn new(ffi_config: &FfiEngineConfig) -> Self {
         let config = ffi_config_to_generation(ffi_config);
+        let fluid_config = ffi_config_to_fluid(ffi_config);
         let world_scale = ffi_config.world_scale;
         let num_workers = if ffi_config.worker_threads == 0 {
             num_cpus()
@@ -42,13 +49,30 @@ impl VoxelEngine {
 
         let (generate_tx, generate_rx) = bounded::<WorkerRequest>(256);
         let (mine_tx, mine_rx) = bounded::<WorkerRequest>(16);
-        let (result_tx, result_rx) = bounded::<WorkerResult>(128);
+        let (result_tx, result_rx) = bounded::<WorkerResult>(256);
+
+        // Fluid event channel
+        let (fluid_event_tx, fluid_event_rx) = bounded::<FluidEvent>(512);
 
         let store = Arc::new(RwLock::new(ChunkStore::new()));
         let config = Arc::new(RwLock::new(config));
         let generation_counters: Arc<DashMap<(i32, i32, i32), AtomicU64>> =
             Arc::new(DashMap::new());
         let shutdown = Arc::new(AtomicBool::new(false));
+
+        // Spawn fluid simulation thread
+        let fluid_result_tx = result_tx.clone();
+        let fluid_shutdown = Arc::clone(&shutdown);
+        let fluid_world_scale = world_scale;
+        let fluid_thread = thread::spawn(move || {
+            fluid_sim_loop_wrapper(
+                fluid_shutdown,
+                fluid_event_rx,
+                fluid_result_tx,
+                fluid_config,
+                fluid_world_scale,
+            );
+        });
 
         let mut workers = Vec::with_capacity(num_workers);
         for _ in 0..num_workers {
@@ -59,6 +83,7 @@ impl VoxelEngine {
             let store = Arc::clone(&store);
             let config = Arc::clone(&config);
             let gen_counters = Arc::clone(&generation_counters);
+            let fluid_tx = fluid_event_tx.clone();
 
             let handle = thread::spawn(move || {
                 worker_loop(
@@ -70,6 +95,7 @@ impl VoxelEngine {
                     config,
                     gen_counters,
                     world_scale,
+                    fluid_tx,
                 );
             });
             workers.push(handle);
@@ -79,6 +105,8 @@ impl VoxelEngine {
             generate_tx,
             mine_tx,
             result_rx,
+            fluid_event_tx,
+            fluid_thread: Some(fluid_thread),
             store,
             config,
             generation_counters,
@@ -175,12 +203,16 @@ impl VoxelEngine {
     }
 
     /// Gracefully shut down all workers and wait for them to finish.
-    pub fn shutdown(self) {
+    pub fn shutdown(mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
         // Drop senders to unblock recv_timeout
         drop(self.generate_tx);
         drop(self.mine_tx);
+        drop(self.fluid_event_tx);
         for handle in self.workers {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.fluid_thread.take() {
             let _ = handle.join();
         }
     }
@@ -283,6 +315,108 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
         octree_max_depth: 4,
         max_edge_length: c.max_edge_length,
         region_size: if c.region_size == 0 { 3 } else { c.region_size as i32 },
+    }
+}
+
+/// Convert FFI config to FluidConfig.
+fn ffi_config_to_fluid(c: &FfiEngineConfig) -> FluidConfig {
+    FluidConfig {
+        seed: c.seed,
+        chunk_size: c.chunk_size as usize,
+        tick_rate: if c.fluid_tick_rate > 0.0 { c.fluid_tick_rate } else { 15.0 },
+        lava_tick_divisor: if c.fluid_lava_tick_divisor > 0 { c.fluid_lava_tick_divisor } else { 4 },
+        water_spring_threshold: if c.fluid_water_spring_threshold > 0.0 { c.fluid_water_spring_threshold } else { 0.97 },
+        lava_source_threshold: if c.fluid_lava_source_threshold > 0.0 { c.fluid_lava_source_threshold } else { 0.98 },
+        lava_depth_max: if c.fluid_lava_depth_max != 0.0 { c.fluid_lava_depth_max } else { -50.0 },
+    }
+}
+
+/// Wrapper for the fluid simulation loop that converts FluidResults to WorkerResults
+/// with coordinate transformation from Rust space to UE space.
+fn fluid_sim_loop_wrapper(
+    shutdown: Arc<AtomicBool>,
+    event_rx: Receiver<FluidEvent>,
+    result_tx: Sender<WorkerResult>,
+    config: FluidConfig,
+    world_scale: f32,
+) {
+    use voxel_fluid::FluidResult;
+    use voxel_fluid::thread::fluid_sim_loop;
+
+    let chunk_size = config.chunk_size;
+
+    // Create internal channels for the fluid sim
+    let (internal_tx, internal_rx) = bounded::<FluidResult>(128);
+
+    let sim_shutdown = Arc::clone(&shutdown);
+    let sim_config = config.clone();
+    let sim_handle = thread::spawn(move || {
+        fluid_sim_loop(sim_shutdown, event_rx, internal_tx, sim_config);
+    });
+
+    // Relay loop: convert FluidResult -> WorkerResult with coord transform
+    while !shutdown.load(Ordering::Relaxed) {
+        match internal_rx.recv_timeout(std::time::Duration::from_millis(50)) {
+            Ok(fluid_result) => match fluid_result {
+                FluidResult::FluidMesh { chunk, mesh } => {
+                    let converted = convert_fluid_mesh_to_ue(&mesh, chunk, chunk_size, world_scale);
+                    let _ = result_tx.send(WorkerResult::FluidMesh {
+                        chunk,
+                        mesh: converted,
+                    });
+                }
+                FluidResult::SolidifyRequest { positions } => {
+                    let _ = result_tx.send(WorkerResult::SolidifyRequest { positions });
+                }
+            },
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    let _ = sim_handle.join();
+}
+
+/// Convert a fluid mesh from Rust space to UE space.
+fn convert_fluid_mesh_to_ue(
+    mesh: &voxel_fluid::mesh::FluidMeshData,
+    chunk: (i32, i32, i32),
+    chunk_size: usize,
+    scale: f32,
+) -> ConvertedFluidMesh {
+    let cs = chunk_size as f32;
+    let origin_x = chunk.0 as f32 * cs;
+    let origin_y = chunk.1 as f32 * cs;
+    let origin_z = chunk.2 as f32 * cs;
+
+    let mut positions = Vec::with_capacity(mesh.positions.len());
+    let mut normals = Vec::with_capacity(mesh.normals.len());
+
+    for p in &mesh.positions {
+        let wx = origin_x + p[0];
+        let wy = origin_y + p[1];
+        let wz = origin_z + p[2];
+        // Rust Y-up -> UE Z-up: (x, -z, y) * scale
+        positions.push(FfiVec3 {
+            x: wx * scale,
+            y: -wz * scale,
+            z: wy * scale,
+        });
+    }
+
+    for n in &mesh.normals {
+        normals.push(FfiVec3 {
+            x: n[0],
+            y: -n[2],
+            z: n[1],
+        });
+    }
+
+    ConvertedFluidMesh {
+        positions,
+        normals,
+        fluid_types: mesh.fluid_types.clone(),
+        indices: mesh.indices.clone(),
     }
 }
 

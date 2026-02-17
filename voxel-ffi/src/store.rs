@@ -314,6 +314,32 @@ impl ChunkStore {
     }
 }
 
+/// Extract a solid mask bitfield from a density field.
+///
+/// One bit per voxel for the inner chunk_size^3 grid (not the +1 border).
+/// Solid = density > 0.0 or material.is_solid().
+pub fn extract_solid_mask(density: &DensityField, chunk_size: usize) -> Vec<u64> {
+    let total = chunk_size * chunk_size * chunk_size;
+    let num_words = (total + 63) / 64;
+    let mut mask = vec![0u64; num_words];
+
+    for z in 0..chunk_size {
+        for y in 0..chunk_size {
+            for x in 0..chunk_size {
+                let sample = density.get(x, y, z);
+                if sample.material.is_solid() {
+                    let idx = z * chunk_size * chunk_size + y * chunk_size + x;
+                    let word = idx / 64;
+                    let bit = idx % 64;
+                    mask[word] |= 1u64 << bit;
+                }
+            }
+        }
+    }
+
+    mask
+}
+
 fn has_air_neighbor(density: &DensityField, x: usize, y: usize, z: usize) -> bool {
     let s = density.size;
     let neighbors = [

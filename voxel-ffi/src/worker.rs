@@ -6,6 +6,7 @@ use crossbeam_channel::{Receiver, Sender};
 use dashmap::DashMap;
 use voxel_core::dual_contouring::mesh_gen::generate_mesh;
 use voxel_core::dual_contouring::solve::solve_dc_vertices;
+use voxel_fluid::FluidEvent;
 use voxel_gen::config::GenerationConfig;
 use voxel_gen::hermite_extract::extract_hermite_data;
 use voxel_gen::region_gen::{
@@ -13,7 +14,7 @@ use voxel_gen::region_gen::{
 };
 
 use crate::convert::{convert_mesh_to_ue, from_ue_normal, from_ue_world_pos};
-use crate::store::ChunkStore;
+use crate::store::{extract_solid_mask, ChunkStore};
 use crate::types::{WorkerRequest, WorkerResult};
 
 /// Worker thread main loop. Each worker pulls from shared channels.
@@ -26,12 +27,13 @@ pub fn worker_loop(
     config: Arc<RwLock<GenerationConfig>>,
     generation_counters: Arc<DashMap<(i32, i32, i32), AtomicU64>>,
     world_scale: f32,
+    fluid_event_tx: Sender<FluidEvent>,
 ) {
     while !shutdown.load(Ordering::Relaxed) {
         // Priority 1: mine requests (non-blocking)
         if let Ok(req) = mine_rx.try_recv() {
             handle_request(
-                req, &result_tx, &store, &config, &generation_counters, world_scale,
+                req, &result_tx, &store, &config, &generation_counters, world_scale, &fluid_event_tx,
             );
             continue;
         }
@@ -40,7 +42,7 @@ pub fn worker_loop(
         match generate_rx.recv_timeout(Duration::from_millis(50)) {
             Ok(req) => {
                 handle_request(
-                    req, &result_tx, &store, &config, &generation_counters, world_scale,
+                    req, &result_tx, &store, &config, &generation_counters, world_scale, &fluid_event_tx,
                 );
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
@@ -56,6 +58,7 @@ fn handle_request(
     config: &Arc<RwLock<GenerationConfig>>,
     generation_counters: &Arc<DashMap<(i32, i32, i32), AtomicU64>>,
     world_scale: f32,
+    fluid_event_tx: &Sender<FluidEvent>,
 ) {
     match req {
         WorkerRequest::Generate { chunk, generation } => {
@@ -124,6 +127,19 @@ fn handle_request(
                 );
             }
 
+            // Extract solid mask and send to fluid thread
+            {
+                let s = store.read().unwrap();
+                if let Some(density) = s.density_fields.get(&chunk) {
+                    let mask = extract_solid_mask(density, cfg.chunk_size);
+                    let _ = fluid_event_tx.send(FluidEvent::SolidMaskUpdate {
+                        chunk,
+                        mask,
+                    });
+                    let _ = fluid_event_tx.send(FluidEvent::PlaceSources { chunk });
+                }
+            }
+
             // Convert to UE coordinates and send initial result (no seams yet)
             let converted = convert_mesh_to_ue(&mesh, world_scale);
             let _ = result_tx.send(WorkerResult::ChunkMesh {
@@ -170,6 +186,20 @@ fn handle_request(
             // Send mined material counts separately
             let _ = result_tx.send(WorkerResult::MinedMaterials { mined });
 
+            // Send terrain modifications to fluid thread
+            {
+                let s = store.read().unwrap();
+                for &key in &dirty_keys {
+                    if let Some(density) = s.density_fields.get(&key) {
+                        let mask = extract_solid_mask(density, cfg.chunk_size);
+                        let _ = fluid_event_tx.send(FluidEvent::TerrainModified {
+                            chunk: key,
+                            mask,
+                        });
+                    }
+                }
+            }
+
             // Regenerate seams for dirty chunks and their neighbors
             for key in dirty_keys {
                 incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
@@ -179,6 +209,7 @@ fn handle_request(
             let mut s = store.write().unwrap();
             s.unload(chunk);
             generation_counters.remove(&chunk);
+            let _ = fluid_event_tx.send(FluidEvent::ChunkUnloaded { chunk });
         }
     }
 }

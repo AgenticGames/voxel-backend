@@ -114,16 +114,31 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                 Box::into_raw(Box::new(result))
             }
             WorkerResult::MinedMaterials { mined } => {
-                // Dirty chunk meshes are sent as individual ChunkMesh results.
-                // This result only carries the mined material counts.
                 let result = FfiResult {
                     result_type: FfiResultType::MineResult,
                     chunk: FfiChunkCoord { x: 0, y: 0, z: 0 },
                     mesh: empty_mesh_data(),
                     mined,
                     generation: 0,
+                    fluid_mesh: empty_fluid_mesh_data(),
                 };
                 Box::into_raw(Box::new(result))
+            }
+            WorkerResult::FluidMesh { chunk, mesh } => {
+                let ue = rust_chunk_to_ue(chunk.0, chunk.1, chunk.2);
+                let result = FfiResult {
+                    result_type: FfiResultType::FluidMesh,
+                    chunk: FfiChunkCoord { x: ue.0, y: ue.1, z: ue.2 },
+                    mesh: empty_mesh_data(),
+                    mined: FfiMinedMaterials { counts: [0; 19] },
+                    generation: 0,
+                    fluid_mesh: converted_fluid_mesh_to_ffi(mesh),
+                };
+                Box::into_raw(Box::new(result))
+            }
+            WorkerResult::SolidifyRequest { .. } => {
+                // SolidifyRequest is handled engine-internally; skip for now
+                ptr::null_mut()
             }
         },
     }
@@ -167,6 +182,39 @@ pub unsafe extern "C" fn voxel_free_result(result: *mut FfiResult) {
             mesh.indices,
             mesh.index_count as usize,
             mesh.index_count as usize,
+        ));
+    }
+
+    // Free fluid mesh data if present
+    let fluid = &result.fluid_mesh;
+    if fluid.vertex_count > 0 {
+        if !fluid.positions.is_null() {
+            drop(Vec::from_raw_parts(
+                fluid.positions,
+                fluid.vertex_count as usize,
+                fluid.vertex_count as usize,
+            ));
+        }
+        if !fluid.normals.is_null() {
+            drop(Vec::from_raw_parts(
+                fluid.normals,
+                fluid.vertex_count as usize,
+                fluid.vertex_count as usize,
+            ));
+        }
+        if !fluid.fluid_types.is_null() {
+            drop(Vec::from_raw_parts(
+                fluid.fluid_types,
+                fluid.vertex_count as usize,
+                fluid.vertex_count as usize,
+            ));
+        }
+    }
+    if fluid.index_count > 0 && !fluid.indices.is_null() {
+        drop(Vec::from_raw_parts(
+            fluid.indices,
+            fluid.index_count as usize,
+            fluid.index_count as usize,
         ));
     }
 
@@ -217,6 +265,7 @@ fn convert_mesh_to_ffi_result(
         mesh: converted_mesh_to_ffi(mesh),
         mined: FfiMinedMaterials { counts: [0; 19] },
         generation,
+        fluid_mesh: empty_fluid_mesh_data(),
     }
 }
 
@@ -259,6 +308,46 @@ fn empty_mesh_data() -> FfiMeshData {
         vertex_count: 0,
         indices: ptr::null_mut(),
         index_count: 0,
+    }
+}
+
+fn empty_fluid_mesh_data() -> FfiFluidMeshData {
+    FfiFluidMeshData {
+        positions: ptr::null_mut(),
+        normals: ptr::null_mut(),
+        fluid_types: ptr::null_mut(),
+        vertex_count: 0,
+        indices: ptr::null_mut(),
+        index_count: 0,
+    }
+}
+
+fn converted_fluid_mesh_to_ffi(mesh: ConvertedFluidMesh) -> FfiFluidMeshData {
+    let vertex_count = mesh.positions.len() as u32;
+    let index_count = mesh.indices.len() as u32;
+
+    let mut positions = mesh.positions.into_boxed_slice();
+    let mut normals = mesh.normals.into_boxed_slice();
+    let mut fluid_types = mesh.fluid_types.into_boxed_slice();
+    let mut indices = mesh.indices.into_boxed_slice();
+
+    let positions_ptr = positions.as_mut_ptr();
+    let normals_ptr = normals.as_mut_ptr();
+    let fluid_types_ptr = fluid_types.as_mut_ptr();
+    let indices_ptr = indices.as_mut_ptr();
+
+    std::mem::forget(positions);
+    std::mem::forget(normals);
+    std::mem::forget(fluid_types);
+    std::mem::forget(indices);
+
+    FfiFluidMeshData {
+        positions: positions_ptr,
+        normals: normals_ptr,
+        fluid_types: fluid_types_ptr,
+        vertex_count,
+        indices: indices_ptr,
+        index_count,
     }
 }
 
@@ -349,6 +438,12 @@ mod tests {
             geode_hollow_factor: -0.20,
             geode_depth_min: -200.0,
             geode_depth_max: 200.0,
+            // Fluid
+            fluid_tick_rate: 15.0,
+            fluid_lava_tick_divisor: 4,
+            fluid_water_spring_threshold: 0.97,
+            fluid_lava_source_threshold: 0.98,
+            fluid_lava_depth_max: -50.0,
         }
     }
 
