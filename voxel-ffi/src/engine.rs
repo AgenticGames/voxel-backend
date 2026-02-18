@@ -445,30 +445,24 @@ fn fluid_sim_loop_wrapper(
     let _ = sim_handle.join();
 }
 
-/// Convert a fluid mesh from Rust space to UE space.
+/// Convert a fluid mesh from Rust local chunk space to UE local chunk space.
+/// Positions are local [0, chunk_size] — the chunk actor provides the world offset.
 fn convert_fluid_mesh_to_ue(
     mesh: &voxel_fluid::mesh::FluidMeshData,
-    chunk: (i32, i32, i32),
-    chunk_size: usize,
+    _chunk: (i32, i32, i32),
+    _chunk_size: usize,
     scale: f32,
 ) -> ConvertedFluidMesh {
-    let cs = chunk_size as f32;
-    let origin_x = chunk.0 as f32 * cs;
-    let origin_y = chunk.1 as f32 * cs;
-    let origin_z = chunk.2 as f32 * cs;
-
     let mut positions = Vec::with_capacity(mesh.positions.len());
     let mut normals = Vec::with_capacity(mesh.normals.len());
 
     for p in &mesh.positions {
-        let wx = origin_x + p[0];
-        let wy = origin_y + p[1];
-        let wz = origin_z + p[2];
         // Rust Y-up -> UE Z-up: (x, -z, y) * scale
+        // Positions are local to the chunk (no origin offset needed)
         positions.push(FfiVec3 {
-            x: wx * scale,
-            y: -wz * scale,
-            z: wy * scale,
+            x: p[0] * scale,
+            y: -p[2] * scale,
+            z: p[1] * scale,
         });
     }
 
