@@ -312,6 +312,95 @@ impl ChunkStore {
 
         results
     }
+
+    /// Find the best spring location (wall seep / ceiling drip) near the player.
+    /// Scans all loaded density fields for open cavern cells adjacent to a wall.
+    /// Returns the world-space (Rust coords) position of the best candidate.
+    pub fn find_spring_location(&self, player_pos: Vec3, chunk_size: usize) -> Option<Vec3> {
+        let cs = chunk_size as f32;
+        let mut best_score: f32 = -1.0;
+        let mut best_pos: Option<Vec3> = None;
+
+        for (&(cx, cy, cz), density) in &self.density_fields {
+            let origin = Vec3::new(cx as f32 * cs, cy as f32 * cs, cz as f32 * cs);
+
+            // Skip border cells (1..chunk_size-1) to avoid neighbor OOB on the +1 grid
+            for z in 1..(chunk_size - 1) {
+                for y in 1..(chunk_size - 1) {
+                    for x in 1..(chunk_size - 1) {
+                        let sample = density.get(x, y, z);
+                        // Must be air
+                        if sample.material.is_solid() {
+                            continue;
+                        }
+
+                        // Count air neighbors in 3x3x3 Moore neighborhood
+                        let mut air_count: u32 = 0;
+                        for dz in -1i32..=1 {
+                            for dy in -1i32..=1 {
+                                for dx in -1i32..=1 {
+                                    if dx == 0 && dy == 0 && dz == 0 {
+                                        continue;
+                                    }
+                                    let nx = (x as i32 + dx) as usize;
+                                    let ny = (y as i32 + dy) as usize;
+                                    let nz = (z as i32 + dz) as usize;
+                                    if !density.get(nx, ny, nz).material.is_solid() {
+                                        air_count += 1;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Cavern test: need >= 15 air neighbors out of 26
+                        if air_count < 15 {
+                            continue;
+                        }
+
+                        // Check face neighbors for wall/ceiling adjacency
+                        let solid_above = density.get(x, y + 1, z).material.is_solid();
+                        let solid_below = density.get(x, y.wrapping_sub(1), z).material.is_solid();
+                        let solid_xp = density.get(x + 1, y, z).material.is_solid();
+                        let solid_xn = density.get(x.wrapping_sub(1), y, z).material.is_solid();
+                        let solid_zp = density.get(x, y, z + 1).material.is_solid();
+                        let solid_zn = density.get(x, y, z.wrapping_sub(1)).material.is_solid();
+
+                        let has_solid_side = solid_xp || solid_xn || solid_zp || solid_zn;
+                        let air_below = !solid_below;
+
+                        // Must have at least one solid face neighbor
+                        if !solid_above && !has_solid_side {
+                            continue;
+                        }
+
+                        // Scoring
+                        let wall_bonus = if has_solid_side && !solid_above {
+                            2.0_f32 // wall seep (preferred)
+                        } else if solid_above {
+                            1.5 // ceiling drip
+                        } else {
+                            1.0
+                        };
+
+                        let air_below_bonus = if air_below { 1.5_f32 } else { 1.0 };
+
+                        let world_pos = origin + Vec3::new(x as f32, y as f32, z as f32);
+                        let distance = (world_pos - player_pos).length();
+
+                        let score = (air_count as f32) * wall_bonus * air_below_bonus
+                            / (1.0 + distance);
+
+                        if score > best_score {
+                            best_score = score;
+                            best_pos = Some(world_pos);
+                        }
+                    }
+                }
+            }
+        }
+
+        best_pos
+    }
 }
 
 /// Extract a solid mask bitfield from a density field.

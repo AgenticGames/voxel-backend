@@ -40,7 +40,7 @@ impl Default for FluidConfig {
             chunk_size: 16,
             tick_rate: 15.0,
             lava_tick_divisor: 4,
-            water_spring_threshold: 0.97,
+            water_spring_threshold: 2.0,
             lava_source_threshold: 0.98,
             lava_depth_max: -50.0,
             water_noise_frequency: 0.05,

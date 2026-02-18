@@ -266,6 +266,35 @@ pub unsafe extern "C" fn voxel_add_fluid(
     engine.add_fluid(world_x, world_y, world_z, fluid_type, is_source != 0, world_scale)
 }
 
+/// Find the best cavern spring location near the player.
+/// Returns 1 if found (out pointers written), 0 if no suitable location.
+/// All coordinates are UE world space.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_find_spring(
+    engine: *mut c_void,
+    player_x: f32,
+    player_y: f32,
+    player_z: f32,
+    world_scale: f32,
+    out_x: *mut f32,
+    out_y: *mut f32,
+    out_z: *mut f32,
+) -> u32 {
+    if engine.is_null() || out_x.is_null() || out_y.is_null() || out_z.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    match engine.find_spring(player_x, player_y, player_z, world_scale) {
+        Some((x, y, z)) => {
+            *out_x = x;
+            *out_y = y;
+            *out_z = z;
+            1
+        }
+        None => 0,
+    }
+}
+
 // ── Internal helpers ──
 
 fn convert_mesh_to_ffi_result(
@@ -461,7 +490,7 @@ mod tests {
             // Fluid
             fluid_tick_rate: 15.0,
             fluid_lava_tick_divisor: 4,
-            fluid_water_spring_threshold: 0.97,
+            fluid_water_spring_threshold: 2.0,
             fluid_lava_source_threshold: 0.98,
             fluid_lava_depth_max: -50.0,
             fluid_water_noise_frequency: 0.05,

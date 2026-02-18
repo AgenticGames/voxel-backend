@@ -232,6 +232,25 @@ impl VoxelEngine {
         }
     }
 
+    /// Find the best spring location near the player.
+    /// Takes UE world coords, returns UE world coords via Option.
+    pub fn find_spring(&self, ue_x: f32, ue_y: f32, ue_z: f32, world_scale: f32) -> Option<(f32, f32, f32)> {
+        use crate::convert::from_ue_world_pos;
+
+        let chunk_size = self.config.read().map(|c| c.chunk_size).unwrap_or(16);
+        let rust_pos = from_ue_world_pos(ue_x, ue_y, ue_z, world_scale);
+
+        let store = self.store.read().ok()?;
+        let best = store.find_spring_location(rust_pos, chunk_size)?;
+
+        // Convert Rust pos back to UE: (x * scale, -z * scale, y * scale)
+        Some((
+            best.x * world_scale,
+            -best.z * world_scale,
+            best.y * world_scale,
+        ))
+    }
+
     /// Hot-reload configuration (affects future generation requests).
     pub fn update_config(&self, ffi_config: &FfiEngineConfig) {
         let new_config = ffi_config_to_generation(ffi_config);
@@ -363,7 +382,7 @@ fn ffi_config_to_fluid(c: &FfiEngineConfig) -> FluidConfig {
         chunk_size: c.chunk_size as usize,
         tick_rate: if c.fluid_tick_rate > 0.0 { c.fluid_tick_rate } else { 15.0 },
         lava_tick_divisor: if c.fluid_lava_tick_divisor > 0 { c.fluid_lava_tick_divisor } else { 4 },
-        water_spring_threshold: if c.fluid_water_spring_threshold > 0.0 { c.fluid_water_spring_threshold } else { 0.97 },
+        water_spring_threshold: if c.fluid_water_spring_threshold > 0.0 { c.fluid_water_spring_threshold } else { 2.0 },
         lava_source_threshold: if c.fluid_lava_source_threshold > 0.0 { c.fluid_lava_source_threshold } else { 0.98 },
         lava_depth_max: if c.fluid_lava_depth_max != 0.0 { c.fluid_lava_depth_max } else { -50.0 },
         water_noise_frequency: if c.fluid_water_noise_frequency > 0.0 { c.fluid_water_noise_frequency } else { 0.05 },
