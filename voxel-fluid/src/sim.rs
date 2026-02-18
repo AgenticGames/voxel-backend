@@ -78,10 +78,7 @@ fn tick_chunk(
                     continue;
                 }
 
-                // Source blocks don't lose fluid
-                if cell.is_source() {
-                    continue;
-                }
+                let is_source = cell.is_source();
 
                 let flow_rate = if is_lava { config.lava_flow_rate } else { config.water_flow_rate };
                 let horizontal_spread = if is_lava { config.lava_spread_rate } else { config.water_spread_rate };
@@ -95,7 +92,10 @@ fn tick_chunk(
                         if below_space > MIN_LEVEL {
                             let transfer = cell.level.min(below_space).min(flow_rate * 2.0);
                             if transfer > MIN_LEVEL {
-                                new_cells[idx].level -= transfer;
+                                // Sources emit fluid without losing any
+                                if !is_source {
+                                    new_cells[idx].level -= transfer;
+                                }
                                 new_cells[below_idx].level += transfer;
                                 new_cells[below_idx].fluid_type = cell.fluid_type;
                                 changed = true;
@@ -119,7 +119,9 @@ fn tick_chunk(
                             if below_space > MIN_LEVEL {
                                 let transfer = new_cells[idx].level.min(below_space).min(flow_rate * 2.0);
                                 if transfer > MIN_LEVEL {
-                                    new_cells[idx].level -= transfer;
+                                    if !is_source {
+                                        new_cells[idx].level -= transfer;
+                                    }
                                     changed = true;
                                     // Note: we don't modify the neighbor chunk here to avoid
                                     // borrow issues. Cross-chunk flow is approximate.
@@ -153,7 +155,10 @@ fn tick_chunk(
                             let diff = remaining - n_level;
                             let transfer = (diff * horizontal_spread).min(flow_rate);
                             if transfer > MIN_LEVEL {
-                                new_cells[idx].level -= transfer;
+                                // Sources emit fluid without losing any
+                                if !is_source {
+                                    new_cells[idx].level -= transfer;
+                                }
                                 new_cells[ni].level += transfer;
                                 new_cells[ni].fluid_type = cell.fluid_type;
                                 changed = true;
