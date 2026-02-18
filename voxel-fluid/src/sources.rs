@@ -35,26 +35,63 @@ pub fn place_sources(
                 let wy = origin_y + y as f64;
                 let wz = origin_z + z as f64;
 
+                // Compute bias terms once per cell
+                let air_count = count_air_neighbors(grid, x, y, z);
+                let solid_dirs = count_solid_face_directions(grid, x, y, z);
+
                 // Water springs: air cell adjacent to solid with high noise
                 if has_solid_neighbor(grid, x, y, z) {
-                    let freq = 0.05;
-                    let val = water_noise.sample(wx * freq, wy * freq, wz * freq);
-                    let norm = val * 0.5 + 0.5;
-                    if norm > config.water_spring_threshold {
-                        let cell = grid.get_mut(x, y, z);
-                        cell.level = SOURCE_LEVEL;
-                        cell.fluid_type = FluidType::Water;
-                        grid.dirty = true;
-                        continue;
+                    // Water depth filtering
+                    if wy < config.water_depth_min || wy > config.water_depth_max {
+                        // Skip water placement outside depth range
+                    } else {
+                        let freq = config.water_noise_frequency;
+                        let val = water_noise.sample(wx * freq, wy * freq, wz * freq);
+                        let norm = val * 0.5 + 0.5;
+
+                        let mut effective_threshold = config.water_spring_threshold;
+                        // Apply cavern bias
+                        effective_threshold -= config.cavern_source_bias * (air_count as f64 / 26.0);
+                        // Apply tunnel bend bias
+                        if solid_dirs >= 3 {
+                            effective_threshold -= config.tunnel_bend_threshold * ((solid_dirs - 2) as f64 / 4.0);
+                        }
+                        if effective_threshold < 0.0 {
+                            effective_threshold = 0.0;
+                        }
+
+                        if norm > effective_threshold {
+                            let cell = grid.get_mut(x, y, z);
+                            cell.level = SOURCE_LEVEL;
+                            cell.fluid_type = FluidType::Water;
+                            grid.dirty = true;
+                            continue;
+                        }
                     }
                 }
 
                 // Lava sources: deep underground with high noise
+                // Apply lava depth filtering
+                if wy < config.lava_depth_min {
+                    continue;
+                }
                 if wy < config.lava_depth_max {
-                    let freq = 0.03;
+                    let freq = config.lava_noise_frequency;
                     let val = lava_noise.sample(wx * freq, wy * freq, wz * freq);
                     let norm = val * 0.5 + 0.5;
-                    if norm > config.lava_source_threshold {
+
+                    let mut effective_threshold = config.lava_source_threshold;
+                    // Apply cavern bias
+                    effective_threshold -= config.cavern_source_bias * (air_count as f64 / 26.0);
+                    // Apply tunnel bend bias
+                    if solid_dirs >= 3 {
+                        effective_threshold -= config.tunnel_bend_threshold * ((solid_dirs - 2) as f64 / 4.0);
+                    }
+                    if effective_threshold < 0.0 {
+                        effective_threshold = 0.0;
+                    }
+
+                    if norm > effective_threshold {
                         let cell = grid.get_mut(x, y, z);
                         cell.level = SOURCE_LEVEL;
                         cell.fluid_type = FluidType::Lava;
@@ -86,6 +123,57 @@ fn has_solid_neighbor(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> bo
         }
     }
     false
+}
+
+/// Count air cells in the 3x3x3 Moore neighborhood (26 surrounding cells).
+/// Air = not solid in the solid mask.
+fn count_air_neighbors(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> u8 {
+    let size = grid.size as i32;
+    let mut count: u8 = 0;
+    for dz in -1i32..=1 {
+        for dy in -1i32..=1 {
+            for dx in -1i32..=1 {
+                if dx == 0 && dy == 0 && dz == 0 {
+                    continue;
+                }
+                let nx = x as i32 + dx;
+                let ny = y as i32 + dy;
+                let nz = z as i32 + dz;
+                if nx >= 0 && nx < size && ny >= 0 && ny < size && nz >= 0 && nz < size {
+                    if !grid.is_solid(nx as usize, ny as usize, nz as usize) {
+                        count += 1;
+                    }
+                }
+                // Out-of-bounds neighbors are not counted
+            }
+        }
+    }
+    count
+}
+
+/// Count how many of the 6 face directions have a solid neighbor.
+fn count_solid_face_directions(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> u8 {
+    let size = grid.size as i32;
+    let directions: [(i32, i32, i32); 6] = [
+        (1, 0, 0),
+        (-1, 0, 0),
+        (0, 1, 0),
+        (0, -1, 0),
+        (0, 0, 1),
+        (0, 0, -1),
+    ];
+    let mut count: u8 = 0;
+    for (dx, dy, dz) in directions {
+        let nx = x as i32 + dx;
+        let ny = y as i32 + dy;
+        let nz = z as i32 + dz;
+        if nx >= 0 && nx < size && ny >= 0 && ny < size && nz >= 0 && nz < size {
+            if grid.is_solid(nx as usize, ny as usize, nz as usize) {
+                count += 1;
+            }
+        }
+    }
+    count
 }
 
 #[cfg(test)]

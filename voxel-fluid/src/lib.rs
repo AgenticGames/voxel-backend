@@ -17,6 +17,20 @@ pub struct FluidConfig {
     pub water_spring_threshold: f64,
     pub lava_source_threshold: f64,
     pub lava_depth_max: f64,
+    // Water
+    pub water_noise_frequency: f64,
+    pub water_depth_min: f64,
+    pub water_depth_max: f64,
+    pub water_flow_rate: f32,
+    pub water_spread_rate: f32,
+    // Lava
+    pub lava_noise_frequency: f64,
+    pub lava_depth_min: f64,
+    pub lava_flow_rate: f32,
+    pub lava_spread_rate: f32,
+    // General
+    pub cavern_source_bias: f64,
+    pub tunnel_bend_threshold: f64,
 }
 
 impl Default for FluidConfig {
@@ -29,6 +43,17 @@ impl Default for FluidConfig {
             water_spring_threshold: 0.97,
             lava_source_threshold: 0.98,
             lava_depth_max: -50.0,
+            water_noise_frequency: 0.05,
+            water_depth_min: -9999.0,
+            water_depth_max: 9999.0,
+            water_flow_rate: 0.25,
+            water_spread_rate: 0.125,
+            lava_noise_frequency: 0.03,
+            lava_depth_min: -9999.0,
+            lava_flow_rate: 0.1,
+            lava_spread_rate: 0.125,
+            cavern_source_bias: 0.0,
+            tunnel_bend_threshold: 0.0,
         }
     }
 }

@@ -56,9 +56,9 @@ pub fn fluid_sim_loop(
 
         // Tick water every tick, lava every N ticks
         let is_lava_tick = tick_count % lava_divisor == 0;
-        let dirty_water = tick_fluid(&mut chunks, chunk_size, false);
+        let dirty_water = tick_fluid(&mut chunks, chunk_size, false, &config);
         let dirty_lava = if is_lava_tick {
-            tick_fluid(&mut chunks, chunk_size, true)
+            tick_fluid(&mut chunks, chunk_size, true, &config)
         } else {
             Vec::new()
         };

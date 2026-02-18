@@ -464,6 +464,17 @@ mod tests {
             fluid_water_spring_threshold: 0.97,
             fluid_lava_source_threshold: 0.98,
             fluid_lava_depth_max: -50.0,
+            fluid_water_noise_frequency: 0.05,
+            fluid_water_depth_min: -9999.0,
+            fluid_water_depth_max: 9999.0,
+            fluid_water_flow_rate: 0.25,
+            fluid_water_spread_rate: 0.125,
+            fluid_lava_noise_frequency: 0.03,
+            fluid_lava_depth_min: -9999.0,
+            fluid_lava_flow_rate: 0.1,
+            fluid_lava_spread_rate: 0.125,
+            fluid_cavern_source_bias: 0.0,
+            fluid_tunnel_bend_threshold: 0.0,
         }
     }
 

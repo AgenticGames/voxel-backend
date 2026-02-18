@@ -151,12 +151,24 @@ pub struct FfiEngineConfig {
     pub geode_hollow_factor: f32,
     pub geode_depth_min: f64,
     pub geode_depth_max: f64,
-    // ── Fluid Config (5 fields) ──
+    // ── Fluid Config (16 fields) ──
     pub fluid_tick_rate: f32,
     pub fluid_lava_tick_divisor: u8,
     pub fluid_water_spring_threshold: f64,
     pub fluid_lava_source_threshold: f64,
     pub fluid_lava_depth_max: f64,
+    // New fluid fields
+    pub fluid_water_noise_frequency: f64,
+    pub fluid_water_depth_min: f64,
+    pub fluid_water_depth_max: f64,
+    pub fluid_water_flow_rate: f32,
+    pub fluid_water_spread_rate: f32,
+    pub fluid_lava_noise_frequency: f64,
+    pub fluid_lava_depth_min: f64,
+    pub fluid_lava_flow_rate: f32,
+    pub fluid_lava_spread_rate: f32,
+    pub fluid_cavern_source_bias: f64,
+    pub fluid_tunnel_bend_threshold: f64,
 }
 
 #[repr(C)]

@@ -1,13 +1,7 @@
 use std::collections::HashMap;
 
 use crate::cell::{ChunkFluidGrid, FluidType, MAX_LEVEL, MIN_LEVEL, SOURCE_LEVEL};
-
-/// Flow rate per tick for water.
-const WATER_FLOW_RATE: f32 = 0.25;
-/// Flow rate per tick for lava (slower).
-const LAVA_FLOW_RATE: f32 = 0.1;
-/// Horizontal spread fraction.
-const HORIZONTAL_SPREAD: f32 = 0.125;
+use crate::FluidConfig;
 
 /// Simulate one tick of fluid for all loaded chunks.
 ///
@@ -19,6 +13,7 @@ pub fn tick_fluid(
     chunks: &mut HashMap<(i32, i32, i32), ChunkFluidGrid>,
     chunk_size: usize,
     is_lava_tick: bool,
+    config: &FluidConfig,
 ) -> Vec<(i32, i32, i32)> {
     let mut dirty = Vec::new();
 
@@ -26,7 +21,7 @@ pub fn tick_fluid(
     let keys: Vec<(i32, i32, i32)> = chunks.keys().copied().collect();
 
     for key in keys {
-        let changed = tick_chunk(chunks, key, chunk_size, is_lava_tick);
+        let changed = tick_chunk(chunks, key, chunk_size, is_lava_tick, config);
         if changed {
             dirty.push(key);
         }
@@ -41,6 +36,7 @@ fn tick_chunk(
     key: (i32, i32, i32),
     _chunk_size: usize,
     is_lava_tick: bool,
+    config: &FluidConfig,
 ) -> bool {
     let grid = match chunks.get(&key) {
         Some(g) => g,
@@ -87,7 +83,8 @@ fn tick_chunk(
                     continue;
                 }
 
-                let flow_rate = if is_lava { LAVA_FLOW_RATE } else { WATER_FLOW_RATE };
+                let flow_rate = if is_lava { config.lava_flow_rate } else { config.water_flow_rate };
+                let horizontal_spread = if is_lava { config.lava_spread_rate } else { config.water_spread_rate };
 
                 // Gravity: try to flow down
                 if y > 0 {
@@ -154,7 +151,7 @@ fn tick_chunk(
                         let n_level = new_cells[ni].level;
                         if remaining > n_level + MIN_LEVEL {
                             let diff = remaining - n_level;
-                            let transfer = (diff * HORIZONTAL_SPREAD).min(flow_rate);
+                            let transfer = (diff * horizontal_spread).min(flow_rate);
                             if transfer > MIN_LEVEL {
                                 new_cells[idx].level -= transfer;
                                 new_cells[ni].level += transfer;
@@ -268,8 +265,9 @@ mod tests {
         grid.get_mut(8, 8, 8).fluid_type = FluidType::Water;
         chunks.insert(key, grid);
 
+        let config = crate::FluidConfig::default();
         // Single tick should move water one step down
-        tick_fluid(&mut chunks, 16, false);
+        tick_fluid(&mut chunks, 16, false, &config);
 
         // Check that water exists anywhere below y=8
         let grid = &chunks[&key];
@@ -292,8 +290,9 @@ mod tests {
         grid.get_mut(8, 8, 8).fluid_type = FluidType::Water;
         chunks.insert(key, grid);
 
+        let config = crate::FluidConfig::default();
         // Tick
-        tick_fluid(&mut chunks, 16, false);
+        tick_fluid(&mut chunks, 16, false, &config);
 
         // Source should still be at SOURCE_LEVEL
         regen_sources(&mut chunks);
@@ -313,7 +312,8 @@ mod tests {
         grid.set_solid(8, 7, 8, true);
         chunks.insert(key, grid);
 
-        tick_fluid(&mut chunks, 16, false);
+        let config = crate::FluidConfig::default();
+        tick_fluid(&mut chunks, 16, false, &config);
 
         let grid = &chunks[&key];
         assert_eq!(grid.get(8, 7, 8).level, 0.0, "Water should not enter solid cell");
