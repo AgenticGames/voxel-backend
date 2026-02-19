@@ -6,9 +6,10 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use dashmap::DashMap;
 use voxel_fluid::FluidConfig;
 use voxel_fluid::FluidEvent;
+use voxel_core::stress::StressField;
 use voxel_gen::config::{
     BandedIronConfig, GenerationConfig, GeodeConfig, HostRockConfig, KimberlitePipeConfig,
-    NoiseConfig, OreConfig, OreVeinParams, SulfideBlobConfig, WormConfig,
+    NoiseConfig, OreConfig, OreVeinParams, StressConfig, SulfideBlobConfig, WormConfig,
 };
 
 use crate::convert::ue_chunk_to_rust;
@@ -29,6 +30,7 @@ pub struct VoxelEngine {
     // Shared state
     store: Arc<RwLock<ChunkStore>>,
     config: Arc<RwLock<GenerationConfig>>,
+    stress_config: Arc<RwLock<StressConfig>>,
     generation_counters: Arc<DashMap<(i32, i32, i32), AtomicU64>>,
     shutdown: Arc<AtomicBool>,
 
@@ -56,6 +58,7 @@ impl VoxelEngine {
 
         let store = Arc::new(RwLock::new(ChunkStore::new()));
         let config = Arc::new(RwLock::new(config));
+        let stress_config = Arc::new(RwLock::new(StressConfig::default()));
         let generation_counters: Arc<DashMap<(i32, i32, i32), AtomicU64>> =
             Arc::new(DashMap::new());
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -82,6 +85,7 @@ impl VoxelEngine {
             let result_tx = result_tx.clone();
             let store = Arc::clone(&store);
             let config = Arc::clone(&config);
+            let stress_cfg = Arc::clone(&stress_config);
             let gen_counters = Arc::clone(&generation_counters);
             let fluid_tx = fluid_event_tx.clone();
 
@@ -93,6 +97,7 @@ impl VoxelEngine {
                     result_tx,
                     store,
                     config,
+                    stress_cfg,
                     gen_counters,
                     world_scale,
                     fluid_tx,
@@ -109,6 +114,7 @@ impl VoxelEngine {
             fluid_thread: Some(fluid_thread),
             store,
             config,
+            stress_config,
             generation_counters,
             shutdown,
             workers,
@@ -249,6 +255,59 @@ impl VoxelEngine {
             -best.z * world_scale,
             best.y * world_scale,
         ))
+    }
+
+    /// Query the stress field for a chunk. Returns a cloned StressField if loaded.
+    pub fn query_stress(&self, chunk: (i32, i32, i32)) -> Option<StressField> {
+        let store = self.store.read().ok()?;
+        store.stress_fields.get(&chunk).cloned()
+    }
+
+    /// Query stress at a single world voxel position.
+    pub fn query_stress_at(&self, wx: i32, wy: i32, wz: i32, chunk_size: usize) -> f32 {
+        let cs = chunk_size as i32;
+        let cx = wx.div_euclid(cs);
+        let cy = wy.div_euclid(cs);
+        let cz = wz.div_euclid(cs);
+        let lx = wx.rem_euclid(cs) as usize;
+        let ly = wy.rem_euclid(cs) as usize;
+        let lz = wz.rem_euclid(cs) as usize;
+
+        let store = match self.store.read() {
+            Ok(s) => s,
+            Err(_) => return 0.0,
+        };
+        store.stress_fields
+            .get(&(cx, cy, cz))
+            .map(|sf| sf.get(lx, ly, lz))
+            .unwrap_or(0.0)
+    }
+
+    /// Queue a support placement request.
+    pub fn request_place_support(&self, world_x: i32, world_y: i32, world_z: i32, support_type: u8) -> u32 {
+        match self.mine_tx.try_send(WorkerRequest::PlaceSupport {
+            world_x, world_y, world_z, support_type,
+        }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
+    /// Queue a support removal request.
+    pub fn request_remove_support(&self, world_x: i32, world_y: i32, world_z: i32) -> u32 {
+        match self.mine_tx.try_send(WorkerRequest::RemoveSupport {
+            world_x, world_y, world_z,
+        }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
+    /// Update the stress configuration.
+    pub fn update_stress_config(&self, new_config: StressConfig) {
+        if let Ok(mut cfg) = self.stress_config.write() {
+            *cfg = new_config;
+        }
     }
 
     /// Hot-reload configuration (affects future generation requests).

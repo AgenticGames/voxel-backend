@@ -6,8 +6,9 @@ use crossbeam_channel::{Receiver, Sender};
 use dashmap::DashMap;
 use voxel_core::dual_contouring::mesh_gen::generate_mesh;
 use voxel_core::dual_contouring::solve::solve_dc_vertices;
+use voxel_core::stress::SupportType;
 use voxel_fluid::FluidEvent;
-use voxel_gen::config::GenerationConfig;
+use voxel_gen::config::{GenerationConfig, StressConfig};
 use voxel_gen::hermite_extract::extract_hermite_data;
 use voxel_gen::region_gen::{
     self, generate_region_densities, region_chunks, region_key, ChunkSeamData,
@@ -15,7 +16,7 @@ use voxel_gen::region_gen::{
 
 use crate::convert::{convert_mesh_to_ue, from_ue_normal, from_ue_world_pos};
 use crate::store::{extract_solid_mask, ChunkStore};
-use crate::types::{WorkerRequest, WorkerResult};
+use crate::types::{FfiCollapseEvent, WorkerRequest, WorkerResult};
 
 /// Worker thread main loop. Each worker pulls from shared channels.
 pub fn worker_loop(
@@ -25,6 +26,7 @@ pub fn worker_loop(
     result_tx: Sender<WorkerResult>,
     store: Arc<RwLock<ChunkStore>>,
     config: Arc<RwLock<GenerationConfig>>,
+    stress_config: Arc<RwLock<StressConfig>>,
     generation_counters: Arc<DashMap<(i32, i32, i32), AtomicU64>>,
     world_scale: f32,
     fluid_event_tx: Sender<FluidEvent>,
@@ -33,7 +35,7 @@ pub fn worker_loop(
         // Priority 1: mine requests (non-blocking)
         if let Ok(req) = mine_rx.try_recv() {
             handle_request(
-                req, &result_tx, &store, &config, &generation_counters, world_scale, &fluid_event_tx,
+                req, &result_tx, &store, &config, &stress_config, &generation_counters, world_scale, &fluid_event_tx,
             );
             continue;
         }
@@ -42,7 +44,7 @@ pub fn worker_loop(
         match generate_rx.recv_timeout(Duration::from_millis(50)) {
             Ok(req) => {
                 handle_request(
-                    req, &result_tx, &store, &config, &generation_counters, world_scale, &fluid_event_tx,
+                    req, &result_tx, &store, &config, &stress_config, &generation_counters, world_scale, &fluid_event_tx,
                 );
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
@@ -56,6 +58,7 @@ fn handle_request(
     result_tx: &Sender<WorkerResult>,
     store: &Arc<RwLock<ChunkStore>>,
     config: &Arc<RwLock<GenerationConfig>>,
+    stress_config: &Arc<RwLock<StressConfig>>,
     generation_counters: &Arc<DashMap<(i32, i32, i32), AtomicU64>>,
     world_scale: f32,
     fluid_event_tx: &Sender<FluidEvent>,
@@ -186,6 +189,39 @@ fn handle_request(
             // Send mined material counts separately
             let _ = result_tx.send(WorkerResult::MinedMaterials { mined });
 
+            // Post-mine stress update: recalc stress + cascade collapses
+            let stress_cfg = stress_config.read().unwrap().clone();
+            {
+                let mut s = store.write().unwrap();
+                let (collapse_events, collapse_dirty) = s.post_mine_stress_update(
+                    center, &stress_cfg, cfg.chunk_size,
+                );
+
+                // If collapses happened, remesh affected chunks and send collapse events
+                if !collapse_events.is_empty() {
+                    let ffi_events: Vec<FfiCollapseEvent> = collapse_events.iter().map(|e| {
+                        // Convert center from Rust coords to UE coords for the FFI
+                        FfiCollapseEvent {
+                            center_x: e.center.0 * world_scale,
+                            center_y: -e.center.2 * world_scale,
+                            center_z: e.center.1 * world_scale,
+                            volume: e.volume,
+                        }
+                    }).collect();
+
+                    // Remesh collapse-dirty chunks
+                    let collapse_bounds: Vec<_> = collapse_dirty.iter().map(|&key| {
+                        (key, 0usize, 0usize, 0usize, cfg.chunk_size, cfg.chunk_size, cfg.chunk_size)
+                    }).collect();
+                    let collapse_meshes = s.remesh_dirty(&collapse_bounds, &cfg, world_scale);
+
+                    let _ = result_tx.send(WorkerResult::CollapseResult {
+                        events: ffi_events,
+                        meshes: collapse_meshes,
+                    });
+                }
+            }
+
             // Send terrain modifications to fluid thread
             {
                 let s = store.read().unwrap();
@@ -210,6 +246,85 @@ fn handle_request(
             s.unload(chunk);
             generation_counters.remove(&chunk);
             let _ = fluid_event_tx.send(FluidEvent::ChunkUnloaded { chunk });
+        }
+        WorkerRequest::PlaceSupport { world_x, world_y, world_z, support_type } => {
+            let cfg = config.read().unwrap().clone();
+            let stress_cfg = stress_config.read().unwrap().clone();
+            let st = SupportType::from_u8(support_type);
+
+            let mut s = store.write().unwrap();
+            let (success, collapse_events, dirty_bounds) = s.place_support(
+                (world_x, world_y, world_z), st, &stress_cfg, cfg.chunk_size,
+            );
+
+            // Remesh affected chunks
+            let remesh_bounds: Vec<_> = dirty_bounds.iter().map(|&(key, (min_x, min_y, min_z, max_x, max_y, max_z))| {
+                (key, min_x, min_y, min_z, max_x, max_y, max_z)
+            }).collect();
+            let meshes = s.remesh_dirty(&remesh_bounds, &cfg, world_scale);
+            drop(s);
+
+            // Send collapse events if any
+            if !collapse_events.is_empty() {
+                let ffi_events: Vec<FfiCollapseEvent> = collapse_events.iter().map(|e| {
+                    FfiCollapseEvent {
+                        center_x: e.center.0 * world_scale,
+                        center_y: -e.center.2 * world_scale,
+                        center_z: e.center.1 * world_scale,
+                        volume: e.volume,
+                    }
+                }).collect();
+                let _ = result_tx.send(WorkerResult::CollapseResult {
+                    events: ffi_events,
+                    meshes: Vec::new(),
+                });
+            }
+
+            // Send support result with remeshed chunks
+            let mesh_pairs: Vec<_> = meshes.into_iter().collect();
+            let _ = result_tx.send(WorkerResult::SupportResult {
+                success,
+                meshes: mesh_pairs,
+            });
+        }
+        WorkerRequest::RemoveSupport { world_x, world_y, world_z } => {
+            let cfg = config.read().unwrap().clone();
+            let stress_cfg = stress_config.read().unwrap().clone();
+
+            let mut s = store.write().unwrap();
+            let (removed, collapse_events, dirty_bounds) = s.remove_support(
+                (world_x, world_y, world_z), &stress_cfg, cfg.chunk_size,
+            );
+
+            // Remesh affected chunks
+            let remesh_bounds: Vec<_> = dirty_bounds.iter().map(|&(key, (min_x, min_y, min_z, max_x, max_y, max_z))| {
+                (key, min_x, min_y, min_z, max_x, max_y, max_z)
+            }).collect();
+            let meshes = s.remesh_dirty(&remesh_bounds, &cfg, world_scale);
+            drop(s);
+
+            // Send collapse events if any
+            if !collapse_events.is_empty() {
+                let ffi_events: Vec<FfiCollapseEvent> = collapse_events.iter().map(|e| {
+                    FfiCollapseEvent {
+                        center_x: e.center.0 * world_scale,
+                        center_y: -e.center.2 * world_scale,
+                        center_z: e.center.1 * world_scale,
+                        volume: e.volume,
+                    }
+                }).collect();
+                let _ = result_tx.send(WorkerResult::CollapseResult {
+                    events: ffi_events,
+                    meshes: Vec::new(),
+                });
+            }
+
+            // Send support result
+            let mesh_pairs: Vec<_> = meshes.into_iter().collect();
+            let _ = result_tx.send(WorkerResult::SupportResult {
+                success: removed.is_some(),
+                meshes: mesh_pairs,
+            });
         }
     }
 }

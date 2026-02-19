@@ -4,3 +4,4 @@ pub mod store;
 pub mod worker;
 pub mod engine;
 pub mod api;
+pub mod stress;

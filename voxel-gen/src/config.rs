@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use voxel_core::stress::DEFAULT_MATERIAL_HARDNESS;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenerationConfig {
@@ -292,6 +293,54 @@ impl Default for OreConfig {
             sulfide: SulfideBlobConfig::default(),
             geode: GeodeConfig::default(),
             host_rock: HostRockConfig::default(),
+        }
+    }
+}
+
+/// Configuration for the structural stress and collapse system.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StressConfig {
+    /// Per-material hardness thresholds (indexed by Material as u8).
+    pub material_hardness: [f32; 19],
+    /// Weight per solid voxel above (column load factor).
+    pub gravity_weight: f32,
+    /// Contribution factor for lateral (side) neighbors.
+    pub lateral_support_factor: f32,
+    /// Contribution factor for voxel directly below.
+    pub vertical_support_factor: f32,
+    /// Effect radius of support structures.
+    pub support_radius: u32,
+    /// BFS recalc radius around changed voxels.
+    pub propagation_radius: u32,
+    /// Maximum voxels per single collapse event.
+    pub max_collapse_volume: u32,
+    /// Whether rubble placement is enabled.
+    pub rubble_enabled: bool,
+    /// Fraction of collapsed volume placed as rubble below.
+    pub rubble_fill_ratio: f32,
+    /// Stress threshold for dust warning (60%).
+    pub warn_dust_threshold: f32,
+    /// Stress threshold for creak warning (80%).
+    pub warn_creak_threshold: f32,
+    /// Stress threshold for shake warning (90%).
+    pub warn_shake_threshold: f32,
+}
+
+impl Default for StressConfig {
+    fn default() -> Self {
+        Self {
+            material_hardness: DEFAULT_MATERIAL_HARDNESS,
+            gravity_weight: 0.15,
+            lateral_support_factor: 0.3,
+            vertical_support_factor: 1.0,
+            support_radius: 3,
+            propagation_radius: 8,
+            max_collapse_volume: 200,
+            rubble_enabled: true,
+            rubble_fill_ratio: 0.4,
+            warn_dust_threshold: 0.6,
+            warn_creak_threshold: 0.8,
+            warn_shake_threshold: 0.9,
         }
     }
 }

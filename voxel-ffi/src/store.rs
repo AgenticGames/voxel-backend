@@ -5,12 +5,14 @@ use voxel_core::dual_contouring::mesh_gen::generate_mesh;
 use voxel_core::dual_contouring::solve::solve_dc_vertices;
 use voxel_core::hermite::HermiteData;
 use voxel_core::material::Material;
-use voxel_gen::config::GenerationConfig;
+use voxel_core::stress::{StressField, SupportField, SupportType};
+use voxel_gen::config::{GenerationConfig, StressConfig};
 use voxel_gen::density::DensityField;
 use voxel_gen::hermite_extract::{extract_hermite_data, patch_hermite_data};
 use voxel_gen::region_gen::{self, ChunkSeamData};
 
 use crate::convert::convert_mesh_to_ue;
+use crate::stress::{CollapseEvent, post_change_stress_update};
 use crate::types::{ConvertedMesh, FfiMinedMaterials};
 
 /// Per-chunk cached data needed for mining and re-meshing.
@@ -21,6 +23,10 @@ pub struct ChunkStore {
     generated_regions: HashSet<(i32, i32, i32)>,
     /// Per-chunk seam data (DC vertices + boundary edges) for seam stitching.
     pub chunk_seam_data: HashMap<(i32, i32, i32), ChunkSeamData>,
+    /// Per-chunk stress data for the collapse system.
+    pub stress_fields: HashMap<(i32, i32, i32), StressField>,
+    /// Per-chunk support structure data.
+    pub support_fields: HashMap<(i32, i32, i32), SupportField>,
 }
 
 impl ChunkStore {
@@ -30,6 +36,8 @@ impl ChunkStore {
             hermite_data: HashMap::new(),
             generated_regions: HashSet::new(),
             chunk_seam_data: HashMap::new(),
+            stress_fields: HashMap::new(),
+            support_fields: HashMap::new(),
         }
     }
 
@@ -50,14 +58,20 @@ impl ChunkStore {
     }
 
     pub fn insert(&mut self, key: (i32, i32, i32), density: DensityField, hermite: HermiteData) {
+        let size = density.size;
         self.density_fields.insert(key, density);
         self.hermite_data.insert(key, hermite);
+        // Initialize stress and support fields if not already present
+        self.stress_fields.entry(key).or_insert_with(|| StressField::new(size));
+        self.support_fields.entry(key).or_insert_with(|| SupportField::new(size));
     }
 
     pub fn unload(&mut self, key: (i32, i32, i32)) {
         self.density_fields.remove(&key);
         self.hermite_data.remove(&key);
         self.chunk_seam_data.remove(&key);
+        self.stress_fields.remove(&key);
+        self.support_fields.remove(&key);
     }
 
     /// Cache seam data for a chunk.
@@ -263,7 +277,7 @@ impl ChunkStore {
     /// Re-mesh dirty chunks using incremental hermite patching.
     /// Returns converted meshes in UE coordinate space.
     /// Also updates seam data so seam stitching reflects post-mining geometry.
-    fn remesh_dirty(
+    pub fn remesh_dirty(
         &mut self,
         dirty_chunks: &[((i32, i32, i32), usize, usize, usize, usize, usize, usize)],
         config: &GenerationConfig,
@@ -311,6 +325,141 @@ impl ChunkStore {
         }
 
         results
+    }
+
+    /// Run stress recalculation after mining, with collapse cascade.
+    /// Returns collapse events and dirty chunks that need remeshing due to collapses.
+    pub fn post_mine_stress_update(
+        &mut self,
+        center: Vec3,
+        stress_config: &StressConfig,
+        chunk_size: usize,
+    ) -> (Vec<CollapseEvent>, Vec<(i32, i32, i32)>) {
+        let world_pos = (center.x as i32, center.y as i32, center.z as i32);
+        let (events, dirty) = post_change_stress_update(
+            &mut self.density_fields,
+            &mut self.stress_fields,
+            &self.support_fields,
+            stress_config,
+            world_pos,
+            chunk_size,
+        );
+        (events, dirty.into_iter().collect())
+    }
+
+    /// Place a support structure at a world position.
+    /// WoodBeam/MetalBeam: target must be Air.
+    /// Reinforcement: target must be solid.
+    /// Returns (success, collapse_events, dirty_chunks_with_bounds).
+    pub fn place_support(
+        &mut self,
+        world_pos: (i32, i32, i32),
+        support_type: SupportType,
+        stress_config: &StressConfig,
+        chunk_size: usize,
+    ) -> (bool, Vec<CollapseEvent>, Vec<((i32, i32, i32), (usize, usize, usize, usize, usize, usize))>) {
+        let cs = chunk_size as i32;
+        let cx = world_pos.0.div_euclid(cs);
+        let cy = world_pos.1.div_euclid(cs);
+        let cz = world_pos.2.div_euclid(cs);
+        let lx = world_pos.0.rem_euclid(cs) as usize;
+        let ly = world_pos.1.rem_euclid(cs) as usize;
+        let lz = world_pos.2.rem_euclid(cs) as usize;
+        let key = (cx, cy, cz);
+
+        // Check placement validity
+        let is_solid = self.density_fields
+            .get(&key)
+            .map(|df| df.get(lx, ly, lz).material.is_solid())
+            .unwrap_or(false);
+
+        let valid = match support_type {
+            SupportType::WoodBeam | SupportType::MetalBeam => !is_solid,
+            SupportType::Reinforcement => is_solid,
+            SupportType::None => false,
+        };
+
+        if !valid {
+            return (false, Vec::new(), Vec::new());
+        }
+
+        // Place support
+        if let Some(sf) = self.support_fields.get_mut(&key) {
+            sf.set(lx, ly, lz, support_type);
+        } else {
+            let size = chunk_size + 1;
+            let mut sf = SupportField::new(size);
+            sf.set(lx, ly, lz, support_type);
+            self.support_fields.insert(key, sf);
+        }
+
+        // Recalculate stress (support reduces stress, may prevent collapses)
+        let (events, dirty_chunks) = post_change_stress_update(
+            &mut self.density_fields,
+            &mut self.stress_fields,
+            &self.support_fields,
+            stress_config,
+            world_pos,
+            chunk_size,
+        );
+
+        // Build dirty bounds for remeshing (full chunk for simplicity)
+        let dirty_with_bounds: Vec<_> = dirty_chunks
+            .into_iter()
+            .map(|ck| (ck, (0usize, 0usize, 0usize, chunk_size, chunk_size, chunk_size)))
+            .collect();
+
+        (true, events, dirty_with_bounds)
+    }
+
+    /// Remove a support structure at a world position.
+    /// Returns (removed_type, collapse_events, dirty_chunks_with_bounds).
+    pub fn remove_support(
+        &mut self,
+        world_pos: (i32, i32, i32),
+        stress_config: &StressConfig,
+        chunk_size: usize,
+    ) -> (Option<SupportType>, Vec<CollapseEvent>, Vec<((i32, i32, i32), (usize, usize, usize, usize, usize, usize))>) {
+        let cs = chunk_size as i32;
+        let cx = world_pos.0.div_euclid(cs);
+        let cy = world_pos.1.div_euclid(cs);
+        let cz = world_pos.2.div_euclid(cs);
+        let lx = world_pos.0.rem_euclid(cs) as usize;
+        let ly = world_pos.1.rem_euclid(cs) as usize;
+        let lz = world_pos.2.rem_euclid(cs) as usize;
+        let key = (cx, cy, cz);
+
+        // Get current support type
+        let old_type = self.support_fields
+            .get(&key)
+            .map(|sf| sf.get(lx, ly, lz))
+            .unwrap_or(SupportType::None);
+
+        if old_type == SupportType::None {
+            return (None, Vec::new(), Vec::new());
+        }
+
+        // Remove support
+        if let Some(sf) = self.support_fields.get_mut(&key) {
+            sf.set(lx, ly, lz, SupportType::None);
+        }
+
+        // Recalculate stress (removing support increases stress, may trigger collapses!)
+        let (events, dirty_chunks) = post_change_stress_update(
+            &mut self.density_fields,
+            &mut self.stress_fields,
+            &self.support_fields,
+            stress_config,
+            world_pos,
+            chunk_size,
+        );
+
+        let dirty_with_bounds: Vec<_> = dirty_chunks
+            .into_iter()
+            .map(|ck| (ck, (0usize, 0usize, 0usize, chunk_size, chunk_size, chunk_size)))
+            .collect();
+
+        (Some(old_type), events, dirty_with_bounds)
     }
 
     /// Find the best spring location (wall seep / ceiling drip) near the player.

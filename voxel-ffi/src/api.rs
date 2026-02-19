@@ -140,6 +140,52 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                 // SolidifyRequest is handled engine-internally; skip for now
                 ptr::null_mut()
             }
+            WorkerResult::CollapseResult { events, meshes } => {
+                // Send each collapse-remeshed chunk as a ChunkMesh result first
+                for (chunk, mesh) in meshes {
+                    let r = convert_mesh_to_ffi_result(chunk, mesh, 0);
+                    let _ = Box::into_raw(Box::new(r));
+                    // Note: in practice these go through the result channel,
+                    // but for the poll API we emit the collapse event.
+                }
+
+                if events.is_empty() {
+                    return ptr::null_mut();
+                }
+
+                // Return the first collapse event (UE polls repeatedly)
+                let ev = events[0];
+                let result = FfiResult {
+                    result_type: FfiResultType::CollapseResult,
+                    chunk: FfiChunkCoord {
+                        x: ev.center_x as i32,
+                        y: ev.center_y as i32,
+                        z: ev.center_z as i32,
+                    },
+                    mesh: empty_mesh_data(),
+                    mined: FfiMinedMaterials { counts: [0; 19] },
+                    generation: ev.volume as u64,
+                    fluid_mesh: empty_fluid_mesh_data(),
+                };
+                Box::into_raw(Box::new(result))
+            }
+            WorkerResult::SupportResult { success, meshes } => {
+                // Send each remeshed chunk as a ChunkMesh
+                for (chunk, mesh) in meshes {
+                    let r = convert_mesh_to_ffi_result(chunk, mesh, 0);
+                    let _ = Box::into_raw(Box::new(r));
+                }
+                // Return as a mine result with success indicator
+                let result = FfiResult {
+                    result_type: FfiResultType::MineResult,
+                    chunk: FfiChunkCoord { x: 0, y: 0, z: 0 },
+                    mesh: empty_mesh_data(),
+                    mined: FfiMinedMaterials { counts: [if success { 1 } else { 0 }; 19] },
+                    generation: 0,
+                    fluid_mesh: empty_fluid_mesh_data(),
+                };
+                Box::into_raw(Box::new(result))
+            }
         },
     }
 }
@@ -293,6 +339,172 @@ pub unsafe extern "C" fn voxel_find_spring(
         }
         None => 0,
     }
+}
+
+/// Query the stress field for a chunk. Returns heap-allocated stress data.
+/// Caller MUST call `voxel_free_stress_data` on the result.
+/// Chunk coords are UE space.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_query_stress(
+    engine: *mut c_void,
+    chunk_x: i32,
+    chunk_y: i32,
+    chunk_z: i32,
+) -> FfiStressData {
+    use crate::convert::ue_chunk_to_rust;
+
+    if engine.is_null() {
+        return FfiStressData {
+            stress_values: ptr::null_mut(),
+            count: 0,
+            valid: 0,
+        };
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let key = ue_chunk_to_rust(chunk_x, chunk_y, chunk_z);
+
+    match engine.query_stress(key) {
+        Some(sf) => {
+            let count = sf.stress.len() as u32;
+            let mut data = sf.stress.into_boxed_slice();
+            let ptr = data.as_mut_ptr();
+            std::mem::forget(data);
+            FfiStressData {
+                stress_values: ptr,
+                count,
+                valid: 1,
+            }
+        }
+        None => FfiStressData {
+            stress_values: ptr::null_mut(),
+            count: 0,
+            valid: 0,
+        },
+    }
+}
+
+/// Free stress data returned by `voxel_query_stress`.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_free_stress_data(data: FfiStressData) {
+    if !data.stress_values.is_null() && data.count > 0 {
+        drop(Vec::from_raw_parts(
+            data.stress_values,
+            data.count as usize,
+            data.count as usize,
+        ));
+    }
+}
+
+/// Query stress at a single world position (UE coords).
+/// Returns normalized stress value (>= 1.0 means overstressed).
+#[no_mangle]
+pub unsafe extern "C" fn voxel_query_stress_at(
+    engine: *mut c_void,
+    world_x: f32,
+    world_y: f32,
+    world_z: f32,
+) -> f32 {
+    use crate::convert::from_ue_world_pos;
+
+    if engine.is_null() {
+        return 0.0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+
+    // Get world scale and chunk size from the engine config
+    let chunk_size = 16usize; // Standard chunk size
+    let world_scale = 100.0f32; // Standard world scale
+
+    let rust_pos = from_ue_world_pos(world_x, world_y, world_z, world_scale);
+    engine.query_stress_at(
+        rust_pos.x as i32,
+        rust_pos.y as i32,
+        rust_pos.z as i32,
+        chunk_size,
+    )
+}
+
+/// Place a support structure at a UE world position.
+/// support_type: 1=WoodBeam, 2=MetalBeam, 3=Reinforcement.
+/// Returns 1 on success (queued), 0 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_place_support(
+    engine: *mut c_void,
+    world_x: f32,
+    world_y: f32,
+    world_z: f32,
+    support_type: u8,
+) -> u32 {
+    use crate::convert::from_ue_world_pos;
+
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let world_scale = 100.0f32;
+    let rust_pos = from_ue_world_pos(world_x, world_y, world_z, world_scale);
+    engine.request_place_support(
+        rust_pos.x as i32,
+        rust_pos.y as i32,
+        rust_pos.z as i32,
+        support_type,
+    )
+}
+
+/// Remove a support structure at a UE world position.
+/// Returns 1 on success (queued), 0 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_remove_support(
+    engine: *mut c_void,
+    world_x: f32,
+    world_y: f32,
+    world_z: f32,
+) -> u32 {
+    use crate::convert::from_ue_world_pos;
+
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let world_scale = 100.0f32;
+    let rust_pos = from_ue_world_pos(world_x, world_y, world_z, world_scale);
+    engine.request_remove_support(
+        rust_pos.x as i32,
+        rust_pos.y as i32,
+        rust_pos.z as i32,
+    )
+}
+
+/// Set the stress configuration. Takes a pointer to FfiStressConfig.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_set_stress_config(
+    engine: *mut c_void,
+    config: *const FfiStressConfig,
+) {
+    use voxel_gen::config::StressConfig;
+
+    if engine.is_null() || config.is_null() {
+        return;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let ffi_cfg = &*config;
+
+    let stress_config = StressConfig {
+        material_hardness: ffi_cfg.material_hardness,
+        gravity_weight: ffi_cfg.gravity_weight,
+        lateral_support_factor: ffi_cfg.lateral_support_factor,
+        vertical_support_factor: ffi_cfg.vertical_support_factor,
+        support_radius: ffi_cfg.support_radius,
+        propagation_radius: ffi_cfg.propagation_radius,
+        max_collapse_volume: ffi_cfg.max_collapse_volume,
+        rubble_enabled: ffi_cfg.rubble_enabled != 0,
+        rubble_fill_ratio: ffi_cfg.rubble_fill_ratio,
+        warn_dust_threshold: ffi_cfg.warn_dust_threshold,
+        warn_creak_threshold: ffi_cfg.warn_creak_threshold,
+        warn_shake_threshold: ffi_cfg.warn_shake_threshold,
+    };
+
+    engine.update_stress_config(stress_config);
 }
 
 // ── Internal helpers ──

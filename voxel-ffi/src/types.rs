@@ -43,6 +43,7 @@ pub enum FfiResultType {
     Error = 3,
     FluidMesh = 4,
     SolidifyRequest = 5,
+    CollapseResult = 6,
 }
 
 /// SoA layout for fluid mesh data. Pointers owned by Rust, freed via `voxel_free_result`.
@@ -193,6 +194,40 @@ pub struct FfiEngineStats {
     pub worker_threads_active: u32,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct FfiStressData {
+    pub stress_values: *mut f32,
+    pub count: u32,
+    pub valid: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiCollapseEvent {
+    pub center_x: f32,
+    pub center_y: f32,
+    pub center_z: f32,
+    pub volume: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiStressConfig {
+    pub material_hardness: [f32; 19],
+    pub gravity_weight: f32,
+    pub lateral_support_factor: f32,
+    pub vertical_support_factor: f32,
+    pub support_radius: u32,
+    pub propagation_radius: u32,
+    pub max_collapse_volume: u32,
+    pub rubble_enabled: u32,  // bool as u32 for C ABI
+    pub rubble_fill_ratio: f32,
+    pub warn_dust_threshold: f32,
+    pub warn_creak_threshold: f32,
+    pub warn_shake_threshold: f32,
+}
+
 // ── Internal (non-FFI) types ──
 
 /// Converted mesh data in UE coordinate space, ready to be handed out via FFI.
@@ -223,6 +258,17 @@ pub enum WorkerRequest {
     Unload {
         chunk: (i32, i32, i32),
     },
+    PlaceSupport {
+        world_x: i32,
+        world_y: i32,
+        world_z: i32,
+        support_type: u8,
+    },
+    RemoveSupport {
+        world_x: i32,
+        world_y: i32,
+        world_z: i32,
+    },
 }
 
 /// Results sent back from worker threads.
@@ -241,5 +287,13 @@ pub enum WorkerResult {
     },
     SolidifyRequest {
         positions: Vec<((i32, i32, i32), usize, usize, usize)>,
+    },
+    CollapseResult {
+        events: Vec<FfiCollapseEvent>,
+        meshes: Vec<((i32, i32, i32), ConvertedMesh)>,
+    },
+    SupportResult {
+        success: bool,
+        meshes: Vec<((i32, i32, i32), ConvertedMesh)>,
     },
 }

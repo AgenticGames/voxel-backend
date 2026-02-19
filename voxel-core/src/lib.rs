@@ -5,6 +5,7 @@ pub mod dual_contouring;
 pub mod chunk;
 pub mod mesh;
 pub mod export;
+pub mod stress;
 
 #[cfg(feature = "ffi")]
 pub mod ffi;
