@@ -186,6 +186,11 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                 };
                 Box::into_raw(Box::new(result))
             }
+            WorkerResult::SleepComplete { .. } => {
+                // This should have been intercepted by engine.poll_result().
+                // If it somehow reaches here, ignore it.
+                ptr::null_mut()
+            }
         },
     }
 }
@@ -505,6 +510,87 @@ pub unsafe extern "C" fn voxel_set_stress_config(
     };
 
     engine.update_stress_config(stress_config);
+}
+
+/// Start a deep sleep cycle. player_chunk coordinates are in UE space.
+/// Returns 1 on success, 0 if queue full.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_start_sleep(
+    engine: *mut c_void,
+    player_cx: i32,
+    player_cy: i32,
+    player_cz: i32,
+    sleep_count: u32,
+) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let player_chunk = crate::convert::ue_chunk_to_rust(player_cx, player_cy, player_cz);
+    engine.start_sleep(player_chunk, sleep_count)
+}
+
+/// Poll for a completed sleep result.
+/// Returns an FfiSleepResult with success=1 if a result is available, success=0 otherwise.
+/// Dirty chunk meshes and collapse events are delivered through the normal voxel_poll_result
+/// pipeline; this function only returns the summary statistics.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_poll_sleep_result(engine: *mut c_void) -> FfiSleepResult {
+    let empty = FfiSleepResult {
+        success: 0,
+        chunks_changed: 0,
+        voxels_metamorphosed: 0,
+        minerals_grown: 0,
+        supports_degraded: 0,
+        collapses_triggered: 0,
+        dirty_chunks: ptr::null_mut(),
+        dirty_chunk_count: 0,
+        collapse_events: ptr::null_mut(),
+        collapse_event_count: 0,
+    };
+    if engine.is_null() {
+        return empty;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    match engine.poll_sleep_complete() {
+        Some(data) => FfiSleepResult {
+            success: 1,
+            chunks_changed: data.chunks_changed,
+            voxels_metamorphosed: data.voxels_metamorphosed,
+            minerals_grown: data.minerals_grown,
+            supports_degraded: data.supports_degraded,
+            collapses_triggered: data.collapses_triggered,
+            dirty_chunks: ptr::null_mut(),
+            dirty_chunk_count: 0,
+            collapse_events: ptr::null_mut(),
+            collapse_event_count: 0,
+        },
+        None => empty,
+    }
+}
+
+/// Free a sleep result's allocated memory (dirty_chunks and collapse_events arrays).
+/// Safe to call with null pointers or zero counts.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_free_sleep_result(result: *mut FfiSleepResult) {
+    if result.is_null() {
+        return;
+    }
+    let r = &*result;
+    if !r.dirty_chunks.is_null() && r.dirty_chunk_count > 0 {
+        let _ = Vec::from_raw_parts(
+            r.dirty_chunks,
+            r.dirty_chunk_count as usize,
+            r.dirty_chunk_count as usize,
+        );
+    }
+    if !r.collapse_events.is_null() && r.collapse_event_count > 0 {
+        let _ = Vec::from_raw_parts(
+            r.collapse_events,
+            r.collapse_event_count as usize,
+            r.collapse_event_count as usize,
+        );
+    }
 }
 
 // ── Internal helpers ──

@@ -1,5 +1,6 @@
 mod region;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use voxel_gen::config::GenerationConfig;
@@ -76,6 +77,7 @@ fn main() {
             ("GET", path) if path.starts_with("/api/obj/") => serve_obj(request, path, &output_dir),
             ("POST", "/api/generate") => serve_generate(request, &state),
             ("POST", "/api/mine") => serve_mine(request, &state),
+            ("POST", "/api/sleep") => serve_sleep(request, &state),
             ("POST", "/api/run-batch") => serve_run_batch(request, &output_dir),
             _ => serve_not_found(request),
         };
@@ -524,6 +526,88 @@ fn serve_mine(
     let response_json = serde_json::json!({
         "mesh": mesh_json,
         "mined": mined,
+    });
+
+    let json_str = serde_json::to_string(&response_json)?;
+    let header = tiny_http::Header::from_bytes(b"Content-Type", b"application/json")
+        .map_err(|_| "invalid header")?;
+    let response = tiny_http::Response::from_string(json_str).with_header(header);
+    request.respond(response)?;
+    Ok(())
+}
+
+/// Sleep endpoint: run deep sleep on the stored region, return updated mesh + transform log.
+fn serve_sleep(
+    request: tiny_http::Request,
+    state: &Arc<Mutex<AppState>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut app = state.lock().unwrap();
+    let region = match app.region.as_mut() {
+        Some(r) => r,
+        None => {
+            drop(app);
+            return serve_error(request, 400, "No region generated yet. Generate first.");
+        }
+    };
+
+    println!("Running deep sleep cycle...");
+    let start = std::time::Instant::now();
+
+    let (sleep_result, mesh_json) = region.apply_sleep();
+
+    let elapsed = start.elapsed();
+    println!("  Sleep completed in {:.2?}: {} chunks changed, {} metamorphosed, {} minerals grown, {} supports degraded, {} collapses",
+        elapsed,
+        sleep_result.chunks_changed,
+        sleep_result.voxels_metamorphosed,
+        sleep_result.minerals_grown,
+        sleep_result.supports_degraded,
+        sleep_result.collapses_triggered,
+    );
+
+    // Build transform log for UI
+    let transform_log: Vec<serde_json::Value> = sleep_result.transform_log.iter()
+        .map(|entry| serde_json::json!({
+            "description": entry.description,
+            "count": entry.count,
+        }))
+        .collect();
+
+    // Build material count diff (before/after comparison)
+    // Count current materials across all density fields
+    let mut material_counts: HashMap<String, i64> = HashMap::new();
+    for df in region.density_fields.values() {
+        for z in 0..region.config.chunk_size {
+            for y in 0..region.config.chunk_size {
+                for x in 0..region.config.chunk_size {
+                    let mat = df.get(x, y, z).material;
+                    if mat.is_solid() {
+                        *material_counts.entry(mat.display_name().to_string()).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    let material_diff: Vec<serde_json::Value> = material_counts.iter()
+        .map(|(name, count)| serde_json::json!({
+            "material": name,
+            "count": count,
+        }))
+        .collect();
+
+    let response_json = serde_json::json!({
+        "ok": true,
+        "mesh": mesh_json,
+        "stats": {
+            "chunks_changed": sleep_result.chunks_changed,
+            "voxels_metamorphosed": sleep_result.voxels_metamorphosed,
+            "minerals_grown": sleep_result.minerals_grown,
+            "supports_degraded": sleep_result.supports_degraded,
+            "collapses_triggered": sleep_result.collapses_triggered,
+        },
+        "transform_log": transform_log,
+        "material_diff": material_diff,
     });
 
     let json_str = serde_json::to_string(&response_json)?;

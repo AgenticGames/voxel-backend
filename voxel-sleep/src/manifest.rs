@@ -1,0 +1,307 @@
+use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use voxel_core::density::DensityField;
+use voxel_core::material::Material;
+use voxel_core::stress::{SupportField, SupportType};
+
+/// Records a single voxel change.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoxelChange {
+    /// Local coordinates within the chunk
+    pub lx: usize,
+    pub ly: usize,
+    pub lz: usize,
+    pub old_material: u8,
+    pub old_density: f32,
+    pub new_material: u8,
+    pub new_density: f32,
+}
+
+/// Records a single support change.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SupportChange {
+    pub lx: usize,
+    pub ly: usize,
+    pub lz: usize,
+    pub old_support: u8,
+    pub new_support: u8,
+}
+
+/// All changes for a single chunk.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChunkDelta {
+    pub voxel_changes: Vec<VoxelChange>,
+    pub support_changes: Vec<SupportChange>,
+}
+
+/// Custom serde module for HashMap<(i32,i32,i32), ChunkDelta> using string keys.
+/// JSON requires string keys, so we serialize tuple keys as "x,y,z".
+mod chunk_deltas_serde {
+    use super::{ChunkDelta, HashMap};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        map: &HashMap<(i32, i32, i32), ChunkDelta>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let string_map: HashMap<String, &ChunkDelta> = map
+            .iter()
+            .map(|((x, y, z), v)| (format!("{},{},{}", x, y, z), v))
+            .collect();
+        string_map.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<HashMap<(i32, i32, i32), ChunkDelta>, D::Error> {
+        let string_map: HashMap<String, ChunkDelta> = HashMap::deserialize(deserializer)?;
+        string_map
+            .into_iter()
+            .map(|(k, v)| {
+                let parts: Vec<&str> = k.split(',').collect();
+                if parts.len() != 3 {
+                    return Err(serde::de::Error::custom(format!(
+                        "invalid chunk key: '{}'", k
+                    )));
+                }
+                let x = parts[0].parse::<i32>().map_err(serde::de::Error::custom)?;
+                let y = parts[1].parse::<i32>().map_err(serde::de::Error::custom)?;
+                let z = parts[2].parse::<i32>().map_err(serde::de::Error::custom)?;
+                Ok(((x, y, z), v))
+            })
+            .collect()
+    }
+}
+
+/// Manifest tracking all world modifications across sleep cycles.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChangeManifest {
+    #[serde(with = "chunk_deltas_serde")]
+    pub chunk_deltas: HashMap<(i32, i32, i32), ChunkDelta>,
+    pub sleep_count: u32,
+}
+
+impl ChangeManifest {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a voxel change in the manifest.
+    pub fn record_voxel_change(
+        &mut self,
+        chunk: (i32, i32, i32),
+        lx: usize, ly: usize, lz: usize,
+        old_material: Material, old_density: f32,
+        new_material: Material, new_density: f32,
+    ) {
+        let delta = self.chunk_deltas.entry(chunk).or_default();
+        delta.voxel_changes.push(VoxelChange {
+            lx, ly, lz,
+            old_material: old_material as u8,
+            old_density,
+            new_material: new_material as u8,
+            new_density,
+        });
+    }
+
+    /// Record a support change in the manifest.
+    pub fn record_support_change(
+        &mut self,
+        chunk: (i32, i32, i32),
+        lx: usize, ly: usize, lz: usize,
+        old_support: SupportType, new_support: SupportType,
+    ) {
+        let delta = self.chunk_deltas.entry(chunk).or_default();
+        delta.support_changes.push(SupportChange {
+            lx, ly, lz,
+            old_support: old_support as u8,
+            new_support: new_support as u8,
+        });
+    }
+
+    /// Merge another manifest's changes (from a sleep result) into this one.
+    pub fn merge_sleep_changes(&mut self, other: &ChangeManifest) {
+        for (chunk, delta) in &other.chunk_deltas {
+            let target = self.chunk_deltas.entry(*chunk).or_default();
+            target.voxel_changes.extend(delta.voxel_changes.iter().cloned());
+            target.support_changes.extend(delta.support_changes.iter().cloned());
+        }
+        self.sleep_count += other.sleep_count;
+    }
+
+    /// Apply this manifest's deltas on top of a freshly generated density field.
+    pub fn apply_to_chunk(&self, chunk: (i32, i32, i32), density: &mut DensityField) {
+        if let Some(delta) = self.chunk_deltas.get(&chunk) {
+            for change in &delta.voxel_changes {
+                let sample = density.get_mut(change.lx, change.ly, change.lz);
+                sample.material = material_from_u8(change.new_material);
+                sample.density = change.new_density;
+            }
+        }
+    }
+
+    /// Apply support changes on top of a freshly initialized support field.
+    pub fn apply_supports_to_chunk(&self, chunk: (i32, i32, i32), supports: &mut SupportField) {
+        if let Some(delta) = self.chunk_deltas.get(&chunk) {
+            for change in &delta.support_changes {
+                supports.set(change.lx, change.ly, change.lz, SupportType::from_u8(change.new_support));
+            }
+        }
+    }
+
+    /// Compact: coalesce multiple changes to the same voxel, keeping only the final state.
+    pub fn compact(&mut self) {
+        for delta in self.chunk_deltas.values_mut() {
+            // For voxel changes: keep only the last change per (lx, ly, lz)
+            let mut seen: HashMap<(usize, usize, usize), usize> = HashMap::new();
+            let mut compacted = Vec::new();
+            for (i, change) in delta.voxel_changes.iter().enumerate() {
+                let key = (change.lx, change.ly, change.lz);
+                seen.insert(key, i);
+            }
+            let mut indices: Vec<usize> = seen.values().copied().collect();
+            indices.sort();
+            for i in indices {
+                compacted.push(delta.voxel_changes[i].clone());
+            }
+            delta.voxel_changes = compacted;
+
+            // Same for support changes
+            let mut seen_s: HashMap<(usize, usize, usize), usize> = HashMap::new();
+            let mut compacted_s = Vec::new();
+            for (i, change) in delta.support_changes.iter().enumerate() {
+                let key = (change.lx, change.ly, change.lz);
+                seen_s.insert(key, i);
+            }
+            let mut indices_s: Vec<usize> = seen_s.values().copied().collect();
+            indices_s.sort();
+            for i in indices_s {
+                compacted_s.push(delta.support_changes[i].clone());
+            }
+            delta.support_changes = compacted_s;
+        }
+    }
+
+    /// Serialize to JSON string.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+
+    /// Deserialize from JSON string.
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+}
+
+fn material_from_u8(v: u8) -> Material {
+    match v {
+        0 => Material::Air,
+        1 => Material::Sandstone,
+        2 => Material::Limestone,
+        3 => Material::Granite,
+        4 => Material::Basalt,
+        5 => Material::Slate,
+        6 => Material::Marble,
+        7 => Material::Iron,
+        8 => Material::Copper,
+        9 => Material::Malachite,
+        10 => Material::Tin,
+        11 => Material::Gold,
+        12 => Material::Diamond,
+        13 => Material::Kimberlite,
+        14 => Material::Sulfide,
+        15 => Material::Quartz,
+        16 => Material::Pyrite,
+        17 => Material::Amethyst,
+        18 => Material::Crystal,
+        _ => Material::Air,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_record_and_apply() {
+        let mut manifest = ChangeManifest::new();
+        manifest.record_voxel_change(
+            (0, 0, 0), 5, 5, 5,
+            Material::Limestone, 1.0,
+            Material::Marble, 1.0,
+        );
+
+        let mut df = DensityField::new(17);
+        // Fill with limestone
+        for s in df.samples.iter_mut() {
+            s.density = 1.0;
+            s.material = Material::Limestone;
+        }
+
+        manifest.apply_to_chunk((0, 0, 0), &mut df);
+        assert_eq!(df.get(5, 5, 5).material, Material::Marble);
+        // Other voxels unchanged
+        assert_eq!(df.get(0, 0, 0).material, Material::Limestone);
+    }
+
+    #[test]
+    fn test_compact() {
+        let mut manifest = ChangeManifest::new();
+        // Two changes to same voxel -- compact should keep only the last
+        manifest.record_voxel_change(
+            (0, 0, 0), 3, 3, 3,
+            Material::Limestone, 1.0,
+            Material::Granite, 1.0,
+        );
+        manifest.record_voxel_change(
+            (0, 0, 0), 3, 3, 3,
+            Material::Granite, 1.0,
+            Material::Marble, 0.8,
+        );
+
+        manifest.compact();
+        let delta = manifest.chunk_deltas.get(&(0, 0, 0)).unwrap();
+        assert_eq!(delta.voxel_changes.len(), 1);
+        assert_eq!(delta.voxel_changes[0].new_material, Material::Marble as u8);
+    }
+
+    #[test]
+    fn test_json_roundtrip() {
+        let mut manifest = ChangeManifest::new();
+        manifest.sleep_count = 3;
+        manifest.record_voxel_change(
+            (1, 2, 3), 5, 5, 5,
+            Material::Copper, 1.0,
+            Material::Malachite, 1.0,
+        );
+
+        let json = manifest.to_json().unwrap();
+        let restored = ChangeManifest::from_json(&json).unwrap();
+        assert_eq!(restored.sleep_count, 3);
+        assert!(restored.chunk_deltas.contains_key(&(1, 2, 3)));
+    }
+
+    #[test]
+    fn test_merge() {
+        let mut m1 = ChangeManifest::new();
+        m1.sleep_count = 1;
+        m1.record_voxel_change(
+            (0, 0, 0), 1, 1, 1,
+            Material::Limestone, 1.0,
+            Material::Marble, 1.0,
+        );
+
+        let mut m2 = ChangeManifest::new();
+        m2.sleep_count = 1;
+        m2.record_voxel_change(
+            (0, 0, 0), 2, 2, 2,
+            Material::Copper, 1.0,
+            Material::Malachite, 1.0,
+        );
+
+        m1.merge_sleep_changes(&m2);
+        assert_eq!(m1.sleep_count, 2);
+        let delta = m1.chunk_deltas.get(&(0, 0, 0)).unwrap();
+        assert_eq!(delta.voxel_changes.len(), 2);
+    }
+}

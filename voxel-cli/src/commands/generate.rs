@@ -141,7 +141,7 @@ pub fn run(args: &[String]) {
         for cy in range_min.1..range_max.1 {
             for cx in range_min.0..range_max.0 {
                 let coord = ChunkCoord::new(cx, cy, cz);
-                let density = DensityField::generate(&config, coord.world_origin_sized(gs));
+                let density = voxel_gen::density::generate_density_field(&config, coord.world_origin_sized(gs));
                 density_fields.insert((cx, cy, cz), density);
             }
         }

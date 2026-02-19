@@ -24,7 +24,7 @@ pub fn generate_density(coord: ChunkCoord, config: &GenerationConfig) -> Density
     let c_seed = seed::chunk_seed(config.seed, coord);
 
     // Step 1: Generate base density from noise
-    let mut density = DensityField::generate(config, world_origin);
+    let mut density = density::generate_density_field(config, world_origin);
 
     // Step 2: Find cavern centers and plan worm connections
     let densities = density.densities();

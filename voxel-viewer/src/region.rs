@@ -8,6 +8,7 @@ use voxel_core::export::{mesh_to_json_multi, JsonMesh};
 use voxel_core::hermite::HermiteData;
 use voxel_core::material::Material;
 use voxel_core::mesh::Mesh;
+use voxel_core::stress::{StressField, SupportField};
 use voxel_gen::config::GenerationConfig;
 use voxel_gen::density::DensityField;
 use voxel_gen::hermite_extract::{extract_hermite_data, patch_hermite_data};
@@ -21,6 +22,8 @@ pub struct GeneratedRegion {
     hermite_data: HashMap<(i32, i32, i32), HermiteData>,
     chunk_seam_data: HashMap<(i32, i32, i32), ChunkSeamData>,
     seam_mesh: Mesh,
+    pub stress_fields: HashMap<(i32, i32, i32), StressField>,
+    pub support_fields: HashMap<(i32, i32, i32), SupportField>,
 }
 
 pub struct MineResult {
@@ -103,6 +106,16 @@ impl GeneratedRegion {
         // Generate seam mesh to fill gaps between adjacent chunks
         let seam_mesh = region_gen::generate_seam_mesh(&chunk_seam_data, gs);
 
+        // Initialize stress and support fields for sleep system
+        let chunk_size = config.chunk_size;
+        let grid_size = chunk_size + 1;
+        let mut stress_fields = HashMap::with_capacity(coords.len());
+        let mut support_fields = HashMap::with_capacity(coords.len());
+        for &key in density_fields.keys() {
+            stress_fields.insert(key, StressField::new(grid_size));
+            support_fields.insert(key, SupportField::new(grid_size));
+        }
+
         GeneratedRegion {
             config,
             density_fields,
@@ -110,7 +123,42 @@ impl GeneratedRegion {
             hermite_data,
             chunk_seam_data,
             seam_mesh,
+            stress_fields,
+            support_fields,
         }
+    }
+
+    /// Run a deep sleep cycle on this region.
+    /// Returns (sleep_result, updated_mesh_json).
+    pub fn apply_sleep(&mut self) -> (voxel_sleep::SleepResult, JsonMesh) {
+        let sleep_config = voxel_sleep::SleepConfig::default();
+
+        // Use center chunk as player position
+        let player_chunk = (0, 0, 0);
+
+        let result = voxel_sleep::execute_sleep(
+            &sleep_config,
+            &mut self.density_fields,
+            &mut self.stress_fields,
+            &mut self.support_fields,
+            player_chunk,
+            1, // sleep_count
+            None, // no progress channel
+        );
+
+        // Re-mesh all dirty chunks
+        if !result.dirty_chunks.is_empty() {
+            // Build full-chunk dirty bounds for each dirty chunk
+            let gs = self.config.chunk_size;
+            let dirty_bounds: Vec<_> = result.dirty_chunks.iter()
+                .filter(|key| self.density_fields.contains_key(key))
+                .map(|&key| (key, 0, 0, 0, gs, gs, gs))
+                .collect();
+            self.remesh_dirty_parallel(&dirty_bounds);
+        }
+
+        let mesh_json = self.to_json_mesh();
+        (result, mesh_json)
     }
 
     /// Mine a sphere: set solid voxels within radius to Air, return what was mined.

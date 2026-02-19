@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 
 use crossbeam_channel::{bounded, Receiver, Sender};
@@ -17,6 +17,15 @@ use crate::store::ChunkStore;
 use crate::types::*;
 use crate::worker::worker_loop;
 
+/// Data returned when a sleep cycle completes.
+pub struct SleepCompleteData {
+    pub chunks_changed: u32,
+    pub voxels_metamorphosed: u32,
+    pub minerals_grown: u32,
+    pub supports_degraded: u32,
+    pub collapses_triggered: u32,
+}
+
 pub struct VoxelEngine {
     // Channels
     generate_tx: Sender<WorkerRequest>,
@@ -33,6 +42,9 @@ pub struct VoxelEngine {
     stress_config: Arc<RwLock<StressConfig>>,
     generation_counters: Arc<DashMap<(i32, i32, i32), AtomicU64>>,
     shutdown: Arc<AtomicBool>,
+
+    // Sleep
+    sleep_complete: Arc<Mutex<Option<SleepCompleteData>>>,
 
     // Worker threads
     workers: Vec<JoinHandle<()>>,
@@ -117,6 +129,7 @@ impl VoxelEngine {
             stress_config,
             generation_counters,
             shutdown,
+            sleep_complete: Arc::new(Mutex::new(None)),
             workers,
         }
     }
@@ -185,8 +198,51 @@ impl VoxelEngine {
     }
 
     /// Non-blocking poll for a completed result. Returns None if nothing ready.
+    /// SleepComplete results are intercepted and stored internally; they are
+    /// retrieved via `poll_sleep_complete()` instead.
     pub fn poll_result(&self) -> Option<WorkerResult> {
-        self.result_rx.try_recv().ok()
+        match self.result_rx.try_recv() {
+            Ok(WorkerResult::SleepComplete {
+                chunks_changed,
+                voxels_metamorphosed,
+                minerals_grown,
+                supports_degraded,
+                collapses_triggered,
+            }) => {
+                if let Ok(mut sc) = self.sleep_complete.lock() {
+                    *sc = Some(SleepCompleteData {
+                        chunks_changed,
+                        voxels_metamorphosed,
+                        minerals_grown,
+                        supports_degraded,
+                        collapses_triggered,
+                    });
+                }
+                // Don't expose to the FfiResult pipeline; UE polls via voxel_poll_sleep_result
+                None
+            }
+            Ok(other) => Some(other),
+            Err(_) => None,
+        }
+    }
+
+    /// Start a deep sleep cycle. Sends request through the mine channel
+    /// (which has exclusive write-lock priority).
+    /// Returns 1 on success, 0 if queue full.
+    pub fn start_sleep(&self, player_chunk: (i32, i32, i32), sleep_count: u32) -> u32 {
+        match self.mine_tx.try_send(WorkerRequest::Sleep {
+            player_chunk,
+            sleep_count,
+        }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
+    /// Poll for a completed sleep result. Returns None if no sleep has completed yet.
+    pub fn poll_sleep_complete(&self) -> Option<SleepCompleteData> {
+        let mut sc = self.sleep_complete.lock().ok()?;
+        sc.take()
     }
 
     /// Get current engine statistics.

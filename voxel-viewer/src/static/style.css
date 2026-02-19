@@ -629,3 +629,179 @@ body {
     80% { opacity: 1; }
     100% { opacity: 0; }
 }
+
+/* Deep Sleep section */
+.sleep-section {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px solid #0f3460;
+}
+
+.sleep-heading {
+    font-size: 13px;
+    font-weight: 600;
+    color: #a0a0b8;
+    margin-bottom: 8px;
+}
+
+.action-btn {
+    padding: 5px 14px;
+    background: #0f3460;
+    color: #e0e0e0;
+    border: 1px solid #4fc3f7;
+    border-radius: 3px;
+    font-size: 12px;
+    cursor: pointer;
+    font-weight: 600;
+    transition: background 0.15s, color 0.15s;
+}
+
+.action-btn:hover {
+    background: #4fc3f7;
+    color: #1a1a2e;
+}
+
+.action-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+#toggle-before-after-btn {
+    background: #16213e;
+    border-color: #a0a0b8;
+    color: #a0a0b8;
+}
+
+#toggle-before-after-btn:hover {
+    background: #a0a0b8;
+    color: #1a1a2e;
+}
+
+#toggle-before-after-btn.showing-before {
+    border-color: #ffb74d;
+    color: #ffb74d;
+}
+
+#toggle-before-after-btn.showing-before:hover {
+    background: #ffb74d;
+    color: #1a1a2e;
+}
+
+#sleep-status {
+    font-size: 12px;
+    color: #a0a0b8;
+}
+
+/* Sleep transform log */
+#sleep-log {
+    margin-top: 8px;
+    max-height: 200px;
+    overflow-y: auto;
+    background: #111122;
+    border: 1px solid #0f3460;
+    border-radius: 4px;
+    padding: 8px 10px;
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 12px;
+}
+
+#sleep-log::-webkit-scrollbar {
+    width: 5px;
+}
+
+#sleep-log::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+#sleep-log::-webkit-scrollbar-thumb {
+    background: #0f3460;
+    border-radius: 3px;
+}
+
+.sleep-log-entry {
+    padding: 2px 0;
+    color: #c0c0d0;
+    border-bottom: 1px solid rgba(255,255,255,0.03);
+}
+
+.sleep-log-entry:last-child {
+    border-bottom: none;
+}
+
+.sleep-log-count {
+    color: #4fc3f7;
+    font-weight: 600;
+    margin-right: 4px;
+}
+
+/* Sleep stats summary */
+.sleep-stats {
+    margin-top: 6px;
+    padding: 6px 10px;
+    background: rgba(79,195,247,0.05);
+    border: 1px solid rgba(79,195,247,0.1);
+    border-radius: 4px;
+    font-size: 12px;
+    color: #a0a0b8;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.sleep-stat-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.sleep-stat-value {
+    color: #4fc3f7;
+    font-weight: 600;
+}
+
+/* Sleep material diff table */
+#sleep-diff {
+    margin-top: 8px;
+}
+
+#sleep-diff table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+#sleep-diff thead th {
+    text-align: left;
+    padding: 4px 8px;
+    background: #16213e;
+    color: #a0a0b8;
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    border-bottom: 1px solid #0f3460;
+}
+
+#sleep-diff tbody td {
+    padding: 3px 8px;
+    border-bottom: 1px solid rgba(255,255,255,0.03);
+    color: #c0c0d0;
+}
+
+#sleep-diff tbody tr:hover {
+    background: rgba(79,195,247,0.05);
+}
+
+.diff-positive {
+    color: #4ecca3;
+    font-weight: 600;
+}
+
+.diff-negative {
+    color: #e94560;
+    font-weight: 600;
+}
+
+.diff-zero {
+    color: #555;
+}

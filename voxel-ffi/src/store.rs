@@ -74,6 +74,18 @@ impl ChunkStore {
         self.support_fields.remove(&key);
     }
 
+    /// Return mutable references to density, stress, and support fields simultaneously.
+    /// Needed by the sleep system which requires write access to all three at once.
+    pub fn sleep_fields_mut(
+        &mut self,
+    ) -> (
+        &mut HashMap<(i32, i32, i32), DensityField>,
+        &mut HashMap<(i32, i32, i32), StressField>,
+        &mut HashMap<(i32, i32, i32), SupportField>,
+    ) {
+        (&mut self.density_fields, &mut self.stress_fields, &mut self.support_fields)
+    }
+
     /// Cache seam data for a chunk.
     pub fn add_seam_data(
         &mut self,

@@ -326,6 +326,74 @@ fn handle_request(
                 meshes: mesh_pairs,
             });
         }
+        WorkerRequest::Sleep { player_chunk, sleep_count } => {
+            let cfg = config.read().unwrap().clone();
+            let sleep_config = voxel_sleep::SleepConfig::default();
+
+            let mut s = store.write().unwrap();
+
+            // Use helper to get three simultaneous &mut borrows (borrow checker
+            // cannot split borrows through method calls on the same struct).
+            let (density_fields, stress_fields, support_fields) = s.sleep_fields_mut();
+
+            // Execute the sleep cycle on the mutable store fields
+            let sleep_result = voxel_sleep::execute_sleep(
+                &sleep_config,
+                density_fields,
+                stress_fields,
+                support_fields,
+                player_chunk,
+                sleep_count,
+                None, // No progress channel for now
+            );
+
+            // Remesh all dirty chunks (full chunk bounds)
+            let dirty_bounds: Vec<_> = sleep_result.dirty_chunks.iter().map(|&key| {
+                (key, 0usize, 0usize, 0usize, cfg.chunk_size, cfg.chunk_size, cfg.chunk_size)
+            }).collect();
+            let meshes = s.remesh_dirty(&dirty_bounds, &cfg, world_scale);
+            drop(s);
+
+            // Send each dirty chunk mesh through the normal ChunkMesh pipeline
+            // so UE auto-remeshes existing chunk actors
+            for (chunk, mesh) in meshes {
+                let _ = result_tx.send(WorkerResult::ChunkMesh {
+                    chunk,
+                    mesh,
+                    generation: 0, // Sleep remesh
+                });
+            }
+
+            // Send collapse events through the normal CollapseResult pipeline
+            if !sleep_result.collapse_events.is_empty() {
+                let ffi_events: Vec<FfiCollapseEvent> = sleep_result.collapse_events.iter().map(|e| {
+                    FfiCollapseEvent {
+                        center_x: e.center.0 * world_scale,
+                        center_y: -e.center.2 * world_scale,  // Rust Y-up -> UE Z-up
+                        center_z: e.center.1 * world_scale,
+                        volume: e.volume,
+                    }
+                }).collect();
+                let _ = result_tx.send(WorkerResult::CollapseResult {
+                    events: ffi_events,
+                    meshes: Vec::new(), // Meshes already sent above
+                });
+            }
+
+            // Send sleep completion stats (intercepted by engine.poll_result)
+            let _ = result_tx.send(WorkerResult::SleepComplete {
+                chunks_changed: sleep_result.chunks_changed,
+                voxels_metamorphosed: sleep_result.voxels_metamorphosed,
+                minerals_grown: sleep_result.minerals_grown,
+                supports_degraded: sleep_result.supports_degraded,
+                collapses_triggered: sleep_result.collapses_triggered,
+            });
+
+            // Regenerate seams for dirty chunks
+            for &key in &sleep_result.dirty_chunks {
+                incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
+            }
+        }
     }
 }
 

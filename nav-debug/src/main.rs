@@ -1,5 +1,4 @@
 use voxel_gen::config::GenerationConfig;
-use voxel_gen::density::DensityField;
 use voxel_core::chunk::ChunkCoord;
 use std::collections::VecDeque;
 
@@ -59,7 +58,7 @@ fn main() {
         };
         let coord = ChunkCoord::new(0, 0, 0);
         let world_origin = coord.world_origin();
-        let density = DensityField::generate(&config, world_origin);
+        let density = voxel_gen::density::generate_density_field(&config, world_origin);
         let densities = density.densities();
         let (air, mut components) = count_components(&densities, density.size);
         components.sort_by(|a, b| b.cmp(a));

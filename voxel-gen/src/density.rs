@@ -1,17 +1,12 @@
 use crate::config::{GenerationConfig, HostRockConfig, OreConfig};
 use voxel_core::material::Material;
-use voxel_core::octree::node::VoxelSample;
 use voxel_noise::fbm::Fbm;
 use voxel_noise::ridged::RidgedMulti;
 use voxel_noise::simplex::Simplex3D;
 use voxel_noise::NoiseSource;
 
-/// Flat density field: (chunk_size+1)^3 samples in Z-Y-X order
-#[derive(Debug, Clone)]
-pub struct DensityField {
-    pub samples: Vec<VoxelSample>,
-    pub size: usize, // chunk_size + 1
-}
+// Re-export DensityField from voxel-core for backward compatibility
+pub use voxel_core::density::DensityField;
 
 /// Bundles all noise sources for material assignment.
 /// Each deposit type uses a different seed offset to avoid correlation.
@@ -55,198 +50,136 @@ impl MaterialNoiseSources {
     }
 }
 
-impl DensityField {
-    pub fn new(size: usize) -> Self {
-        Self {
-            samples: vec![VoxelSample::default(); size * size * size],
-            size,
-        }
-    }
+/// Generate density field from noise composition.
+///
+/// Uses:
+/// - Simplex3D -> FBM for large cavern carving
+/// - Simplex3D -> FBM for wall detail
+/// - Domain warp via separate simplex sources for organic shapes
+/// - 11 material noise sources for geological deposit morphologies
+///
+/// Base density is 1.0 (solid). Where combined noise exceeds the threshold,
+/// density goes negative (air). Geodes override density for hollow interiors.
+pub fn generate_density_field(config: &GenerationConfig, world_origin: glam::Vec3) -> DensityField {
+    let size = config.chunk_size + 1;
+    let mut field = DensityField::new(size);
 
-    #[inline]
-    pub fn index(&self, x: usize, y: usize, z: usize) -> usize {
-        z * self.size * self.size + y * self.size + x
-    }
+    // Use GLOBAL seed for all noise sources so that noise is continuous
+    // across chunk boundaries. Every chunk samples the same noise field
+    // at different world-space positions.
+    let global_seed = config.seed;
 
-    #[inline]
-    pub fn get(&self, x: usize, y: usize, z: usize) -> &VoxelSample {
-        &self.samples[self.index(x, y, z)]
-    }
+    // Cavern noise sources
+    let cavern_base = Simplex3D::new(global_seed);
+    let cavern_noise = Fbm::new(cavern_base, 3, 2.0, 0.5);
 
-    #[inline]
-    pub fn get_mut(&mut self, x: usize, y: usize, z: usize) -> &mut VoxelSample {
-        let idx = self.index(x, y, z);
-        &mut self.samples[idx]
-    }
+    let detail_base = Simplex3D::new(global_seed.wrapping_add(1));
+    let detail_noise = Fbm::new(
+        detail_base,
+        config.noise.detail_octaves,
+        2.0,
+        config.noise.detail_persistence,
+    );
 
-    /// Generate density field from noise composition.
-    ///
-    /// Uses:
-    /// - Simplex3D -> FBM for large cavern carving
-    /// - Simplex3D -> FBM for wall detail
-    /// - Domain warp via separate simplex sources for organic shapes
-    /// - 11 material noise sources for geological deposit morphologies
-    ///
-    /// Base density is 1.0 (solid). Where combined noise exceeds the threshold,
-    /// density goes negative (air). Geodes override density for hollow interiors.
-    pub fn generate(config: &GenerationConfig, world_origin: glam::Vec3) -> Self {
-        let size = config.chunk_size + 1;
-        let mut field = Self::new(size);
+    // Domain warp sources for organic shape variation
+    let warp_x_noise = Simplex3D::new(global_seed.wrapping_add(2));
+    let warp_y_noise = Simplex3D::new(global_seed.wrapping_add(3));
+    let warp_z_noise = Simplex3D::new(global_seed.wrapping_add(4));
+    let warp_amplitude = config.noise.warp_amplitude;
 
-        // Use GLOBAL seed for all noise sources so that noise is continuous
-        // across chunk boundaries. Every chunk samples the same noise field
-        // at different world-space positions.
-        let global_seed = config.seed;
+    // Material noise sources (all 11 deposit types)
+    let mat_noise = MaterialNoiseSources::new(global_seed);
 
-        // Cavern noise sources
-        let cavern_base = Simplex3D::new(global_seed);
-        let cavern_noise = Fbm::new(cavern_base, 3, 2.0, 0.5);
+    let freq = config.noise.cavern_frequency;
+    let threshold = config.noise.cavern_threshold;
 
-        let detail_base = Simplex3D::new(global_seed.wrapping_add(1));
-        let detail_noise = Fbm::new(
-            detail_base,
-            config.noise.detail_octaves,
-            2.0,
-            config.noise.detail_persistence,
-        );
+    for z in 0..size {
+        for y in 0..size {
+            for x in 0..size {
+                let wx = world_origin.x as f64 + x as f64;
+                let wy = world_origin.y as f64 + y as f64;
+                let wz = world_origin.z as f64 + z as f64;
 
-        // Domain warp sources for organic shape variation
-        let warp_x_noise = Simplex3D::new(global_seed.wrapping_add(2));
-        let warp_y_noise = Simplex3D::new(global_seed.wrapping_add(3));
-        let warp_z_noise = Simplex3D::new(global_seed.wrapping_add(4));
-        let warp_amplitude = config.noise.warp_amplitude;
+                let sx = wx * freq;
+                let sy = wy * freq;
+                let sz = wz * freq;
 
-        // Material noise sources (all 11 deposit types)
-        let mat_noise = MaterialNoiseSources::new(global_seed);
+                // Domain warp for organic shapes
+                let dx = warp_x_noise.sample(sx * 0.5, sy * 0.5, sz * 0.5)
+                    * warp_amplitude
+                    * freq;
+                let dy = warp_y_noise.sample(sx * 0.5, sy * 0.5, sz * 0.5)
+                    * warp_amplitude
+                    * freq;
+                let dz = warp_z_noise.sample(sx * 0.5, sy * 0.5, sz * 0.5)
+                    * warp_amplitude
+                    * freq;
 
-        let freq = config.noise.cavern_frequency;
-        let threshold = config.noise.cavern_threshold;
+                // Primary cavern: FBM noise, range ~[-1,1], shift to [0,1]
+                let cavern_raw = cavern_noise.sample(sx + dx, sy + dy, sz + dz);
+                let cavern_val = cavern_raw * 0.5 + 0.5;
 
-        for z in 0..size {
-            for y in 0..size {
-                for x in 0..size {
-                    let wx = world_origin.x as f64 + x as f64;
-                    let wy = world_origin.y as f64 + y as f64;
-                    let wz = world_origin.z as f64 + z as f64;
+                // Wall detail at higher frequency
+                let detail_val =
+                    detail_noise.sample(sx * 2.0, sy * 2.0, sz * 2.0) * 0.05;
 
-                    let sx = wx * freq;
-                    let sy = wy * freq;
-                    let sz = wz * freq;
+                let combined = cavern_val + detail_val;
 
-                    // Domain warp for organic shapes
-                    let dx = warp_x_noise.sample(sx * 0.5, sy * 0.5, sz * 0.5)
-                        * warp_amplitude
-                        * freq;
-                    let dy = warp_y_noise.sample(sx * 0.5, sy * 0.5, sz * 0.5)
-                        * warp_amplitude
-                        * freq;
-                    let dz = warp_z_noise.sample(sx * 0.5, sy * 0.5, sz * 0.5)
-                        * warp_amplitude
-                        * freq;
+                // Base density: carve where noise exceeds threshold
+                let mut density = if combined > threshold {
+                    -(combined - threshold) as f32 / (1.0 - threshold as f32).max(0.01)
+                } else {
+                    (1.0 - combined / threshold) as f32
+                };
 
-                    // Primary cavern: FBM noise, range ~[-1,1], shift to [0,1]
-                    let cavern_raw = cavern_noise.sample(sx + dx, sy + dy, sz + dz);
-                    let cavern_val = cavern_raw * 0.5 + 0.5;
+                // ── Geode check (modifies density for hollow interior) ──
+                // Geodes are unique: they create crystal-lined hollow pockets
+                // by overriding density in their interior.
+                let mut geode_shell = false;
+                let geode_cfg = &config.ore.geode;
+                if wy >= geode_cfg.depth_min && wy <= geode_cfg.depth_max {
+                    let gf = geode_cfg.frequency;
+                    let geode_val =
+                        mat_noise.geode_noise.sample(wx * gf, wy * gf, wz * gf);
+                    let geode_norm = geode_val * 0.5 + 0.5;
 
-                    // Wall detail at higher frequency
-                    let detail_val =
-                        detail_noise.sample(sx * 2.0, sy * 2.0, sz * 2.0) * 0.05;
-
-                    let combined = cavern_val + detail_val;
-
-                    // Base density: carve where noise exceeds threshold
-                    let mut density = if combined > threshold {
-                        -(combined - threshold) as f32 / (1.0 - threshold as f32).max(0.01)
-                    } else {
-                        (1.0 - combined / threshold) as f32
-                    };
-
-                    // ── Geode check (modifies density for hollow interior) ──
-                    // Geodes are unique: they create crystal-lined hollow pockets
-                    // by overriding density in their interior.
-                    let mut geode_shell = false;
-                    let geode_cfg = &config.ore.geode;
-                    if wy >= geode_cfg.depth_min && wy <= geode_cfg.depth_max {
-                        let gf = geode_cfg.frequency;
-                        let geode_val =
-                            mat_noise.geode_noise.sample(wx * gf, wy * gf, wz * gf);
-                        let geode_norm = geode_val * 0.5 + 0.5;
-
-                        if geode_norm > geode_cfg.center_threshold {
-                            let excess = geode_norm - geode_cfg.center_threshold;
-                            if excess < geode_cfg.shell_thickness {
-                                // Crystal/Amethyst shell — force solid
-                                geode_shell = true;
-                                if density <= 0.0 {
-                                    density = 0.5;
-                                }
-                            } else {
-                                // Hollow interior
-                                density = geode_cfg.hollow_factor;
+                    if geode_norm > geode_cfg.center_threshold {
+                        let excess = geode_norm - geode_cfg.center_threshold;
+                        if excess < geode_cfg.shell_thickness {
+                            // Crystal/Amethyst shell — force solid
+                            geode_shell = true;
+                            if density <= 0.0 {
+                                density = 0.5;
                             }
-                        }
-                    }
-
-                    // Assign material
-                    let material = if density <= 0.0 {
-                        Material::Air
-                    } else if geode_shell {
-                        // Alternate Crystal/Amethyst based on position
-                        if ((wx * 7.3 + wz * 13.7) as i64) % 2 == 0 {
-                            Material::Crystal
                         } else {
-                            Material::Amethyst
+                            // Hollow interior
+                            density = geode_cfg.hollow_factor;
                         }
-                    } else {
-                        assign_material(wx, wy, wz, &config.ore, &mat_noise)
-                    };
-
-                    let sample = field.get_mut(x, y, z);
-                    sample.density = density;
-                    sample.material = material;
-                }
-            }
-        }
-
-        field
-    }
-
-    /// Get flat density array (for octree builder compatibility)
-    pub fn densities(&self) -> Vec<f32> {
-        self.samples.iter().map(|s| s.density).collect()
-    }
-
-    /// Force boundary faces to solid, sealing the chunk on specified faces.
-    ///
-    /// Used with closed-boundary generation to make outer region faces watertight.
-    pub fn clamp_boundary_faces(
-        &mut self,
-        neg_x: bool,
-        pos_x: bool,
-        neg_y: bool,
-        pos_y: bool,
-        neg_z: bool,
-        pos_z: bool,
-    ) {
-        let s = self.size;
-        for z in 0..s {
-            for y in 0..s {
-                for x in 0..s {
-                    let on_face = (neg_x && x == 0)
-                        || (pos_x && x == s - 1)
-                        || (neg_y && y == 0)
-                        || (pos_y && y == s - 1)
-                        || (neg_z && z == 0)
-                        || (pos_z && z == s - 1);
-                    if on_face {
-                        let sample = self.get_mut(x, y, z);
-                        sample.density = 1.0;
-                        sample.material = Material::Limestone;
                     }
                 }
+
+                // Assign material
+                let material = if density <= 0.0 {
+                    Material::Air
+                } else if geode_shell {
+                    // Alternate Crystal/Amethyst based on position
+                    if ((wx * 7.3 + wz * 13.7) as i64) % 2 == 0 {
+                        Material::Crystal
+                    } else {
+                        Material::Amethyst
+                    }
+                } else {
+                    assign_material(wx, wy, wz, &config.ore, &mat_noise)
+                };
+
+                let sample = field.get_mut(x, y, z);
+                sample.density = density;
+                sample.material = material;
             }
         }
     }
+
+    field
 }
 
 /// Assign material using geological deposit morphologies.
@@ -434,7 +367,7 @@ mod tests {
     fn test_density_field_generate() {
         let config = GenerationConfig::default();
         let origin = glam::Vec3::ZERO;
-        let field = DensityField::generate(&config, origin);
+        let field = generate_density_field(&config, origin);
         // size should be chunk_size + 1 = 17
         assert_eq!(field.size, 17);
         assert_eq!(field.samples.len(), 17 * 17 * 17);
@@ -444,8 +377,8 @@ mod tests {
     fn test_density_field_deterministic() {
         let config = GenerationConfig::default();
         let origin = glam::Vec3::new(16.0, 0.0, 16.0);
-        let field1 = DensityField::generate(&config, origin);
-        let field2 = DensityField::generate(&config, origin);
+        let field1 = generate_density_field(&config, origin);
+        let field2 = generate_density_field(&config, origin);
         for i in 0..field1.samples.len() {
             assert_eq!(field1.samples[i].density, field2.samples[i].density);
         }
@@ -455,7 +388,7 @@ mod tests {
     fn test_densities_extraction() {
         let config = GenerationConfig::default();
         let origin = glam::Vec3::ZERO;
-        let field = DensityField::generate(&config, origin);
+        let field = generate_density_field(&config, origin);
         let densities = field.densities();
         assert_eq!(densities.len(), field.samples.len());
     }
@@ -515,9 +448,9 @@ mod tests {
         let config = GenerationConfig::default();
         let chunk_size = config.chunk_size as f32;
 
-        let field_a = DensityField::generate(&config, glam::Vec3::ZERO);
+        let field_a = generate_density_field(&config, glam::Vec3::ZERO);
         let field_b =
-            DensityField::generate(&config, glam::Vec3::new(chunk_size, 0.0, 0.0));
+            generate_density_field(&config, glam::Vec3::new(chunk_size, 0.0, 0.0));
 
         // field_a's x=chunk_size edge should match field_b's x=0 edge
         let size = field_a.size;
@@ -553,7 +486,7 @@ mod tests {
     fn test_material_variety() {
         // Generate a chunk and verify we get more than just 2 material types
         let config = GenerationConfig::default();
-        let field = DensityField::generate(&config, glam::Vec3::ZERO);
+        let field = generate_density_field(&config, glam::Vec3::ZERO);
         let mut seen = std::collections::HashSet::new();
         for s in &field.samples {
             seen.insert(s.material);

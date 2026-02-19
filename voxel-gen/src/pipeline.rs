@@ -3,7 +3,6 @@ use voxel_core::octree::builder::build_octree;
 use voxel_core::octree::lod::build_lod;
 use voxel_core::octree::node::OctreeConfig;
 use crate::config::GenerationConfig;
-use crate::density::DensityField;
 use crate::hermite_extract::extract_hermite_data;
 use crate::seed::{chunk_seed, region_seed};
 use crate::worm::carve::carve_worm_into_density;
@@ -26,7 +25,7 @@ pub fn generate(coord: ChunkCoord, config: &GenerationConfig) -> Chunk {
     let c_seed = chunk_seed(config.seed, coord);
 
     // Step 1-2: Generate density field from noise composition
-    let mut density = DensityField::generate(config, world_origin);
+    let mut density = crate::density::generate_density_field(config, world_origin);
 
     // Step 3: Find cavern centers and plan worm connections
     let densities = density.densities();

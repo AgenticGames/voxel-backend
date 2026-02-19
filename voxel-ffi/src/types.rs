@@ -228,6 +228,32 @@ pub struct FfiStressConfig {
     pub warn_shake_threshold: f32,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiSleepProgress {
+    pub phase: u8,            // 0=metamorphism, 1=minerals, 2=collapse, 3=done
+    pub progress_pct: f32,    // 0.0 - 1.0
+    pub chunks_processed: u32,
+    pub chunks_total: u32,
+    pub glimpse_chunk: FfiChunkCoord,  // Chunk where interesting transform happened
+    pub glimpse_type: u8,     // 0=none, 1=metamorphism, 2=mineral, 3=collapse
+}
+
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct FfiSleepResult {
+    pub success: u32,
+    pub chunks_changed: u32,
+    pub voxels_metamorphosed: u32,
+    pub minerals_grown: u32,
+    pub supports_degraded: u32,
+    pub collapses_triggered: u32,
+    pub dirty_chunks: *mut FfiChunkCoord,
+    pub dirty_chunk_count: u32,
+    pub collapse_events: *mut FfiCollapseEvent,
+    pub collapse_event_count: u32,
+}
+
 // ── Internal (non-FFI) types ──
 
 /// Converted mesh data in UE coordinate space, ready to be handed out via FFI.
@@ -269,6 +295,10 @@ pub enum WorkerRequest {
         world_y: i32,
         world_z: i32,
     },
+    Sleep {
+        player_chunk: (i32, i32, i32),
+        sleep_count: u32,
+    },
 }
 
 /// Results sent back from worker threads.
@@ -295,5 +325,12 @@ pub enum WorkerResult {
     SupportResult {
         success: bool,
         meshes: Vec<((i32, i32, i32), ConvertedMesh)>,
+    },
+    SleepComplete {
+        chunks_changed: u32,
+        voxels_metamorphosed: u32,
+        minerals_grown: u32,
+        supports_degraded: u32,
+        collapses_triggered: u32,
     },
 }

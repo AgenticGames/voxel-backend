@@ -1,5 +1,5 @@
 [workspace]
-members = ["voxel-noise", "voxel-core", "voxel-gen", "voxel-cli", "voxel-viewer", "nav-debug", "voxel-ffi", "voxel-fluid"]
+members = ["voxel-noise", "voxel-core", "voxel-gen", "voxel-cli", "voxel-viewer", "nav-debug", "voxel-ffi", "voxel-fluid", "voxel-sleep"]
 resolver = "2"
 
 [workspace.dependencies]

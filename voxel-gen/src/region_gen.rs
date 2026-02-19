@@ -12,7 +12,7 @@ use voxel_core::hermite::{EdgeIntersection, EdgeKey, HermiteData};
 use voxel_core::mesh::{Mesh, Triangle, Vertex};
 
 use crate::config::GenerationConfig;
-use crate::density::DensityField;
+use crate::density::{DensityField, generate_density_field};
 use crate::worm;
 
 /// Compute the deterministic region key for a chunk coordinate.
@@ -63,7 +63,7 @@ pub fn generate_region_densities(
         .par_iter()
         .map(|&(cx, cy, cz)| {
             let coord = ChunkCoord::new(cx, cy, cz);
-            let density = DensityField::generate(config, coord.world_origin_sized(gs));
+            let density = generate_density_field(config, coord.world_origin_sized(gs));
             ((cx, cy, cz), density)
         })
         .collect();

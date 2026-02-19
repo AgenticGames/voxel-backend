@@ -255,7 +255,7 @@ mod tests {
     fn test_extract_from_generated_field() {
         let config = crate::config::GenerationConfig::default();
         let origin = glam::Vec3::ZERO;
-        let field = DensityField::generate(&config, origin);
+        let field = crate::density::generate_density_field(&config, origin);
         let data = extract_hermite_data(&field);
         // Should produce some hermite data (depends on noise, but should be consistent)
         // At minimum, verify it runs without panic

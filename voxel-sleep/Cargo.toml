@@ -1,14 +1,16 @@
 [package]
-name = "voxel-cli"
+name = "voxel-sleep"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 glam.workspace = true
-rayon.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
-voxel-noise = { path = "../voxel-noise" }
+rand.workspace = true
+rand_chacha.workspace = true
+crossbeam-channel.workspace = true
 voxel-core = { path = "../voxel-core" }
+
+[dev-dependencies]
 voxel-gen = { path = "../voxel-gen" }
-voxel-sleep = { path = "../voxel-sleep" }

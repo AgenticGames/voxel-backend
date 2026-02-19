@@ -13,6 +13,8 @@ rand.workspace = true
 rand_chacha.workspace = true
 voxel-core = { path = "../voxel-core" }
 voxel-gen = { path = "../voxel-gen" }
+voxel-sleep = { path = "../voxel-sleep" }
+crossbeam-channel.workspace = true
 
 [[bin]]
 name = "voxel-viewer"

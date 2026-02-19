@@ -393,6 +393,172 @@
         });
     }
 
+    // ── Deep Sleep ─────────────────────────────────────────────────
+    var sleepBtn = document.getElementById("sleep-btn");
+    var toggleBeforeAfterBtn = document.getElementById("toggle-before-after-btn");
+    var sleepLog = document.getElementById("sleep-log");
+    var sleepDiff = document.getElementById("sleep-diff");
+    var sleepStatus = document.getElementById("sleep-status");
+    var preSleepMeshData = null;   // JSON mesh data snapshot before sleep
+    var postSleepMeshData = null;  // JSON mesh data snapshot after sleep
+    var showingBefore = false;     // toggle state for before/after
+
+    function renderSleepLog(transformLog) {
+        sleepLog.innerHTML = "";
+        if (!transformLog || transformLog.length === 0) {
+            sleepLog.style.display = "none";
+            return;
+        }
+        for (var i = 0; i < transformLog.length; i++) {
+            var entry = transformLog[i];
+            var div = document.createElement("div");
+            div.className = "sleep-log-entry";
+            div.innerHTML = '<span class="sleep-log-count">' + entry.count + 'x</span> ' + escapeHtml(entry.description);
+            sleepLog.appendChild(div);
+        }
+        sleepLog.style.display = "block";
+    }
+
+    function renderSleepDiff(materialDiff) {
+        sleepDiff.innerHTML = "";
+        if (!materialDiff || Object.keys(materialDiff).length === 0) {
+            sleepDiff.style.display = "none";
+            return;
+        }
+
+        // Sort materials: losses first (negative), then gains (positive)
+        var entries = [];
+        for (var mat in materialDiff) {
+            if (materialDiff.hasOwnProperty(mat)) {
+                entries.push({ name: mat, diff: materialDiff[mat] });
+            }
+        }
+        entries.sort(function (a, b) {
+            return a.diff - b.diff; // negatives first
+        });
+
+        var html = '<table><thead><tr><th>Material</th><th>Change</th></tr></thead><tbody>';
+        for (var i = 0; i < entries.length; i++) {
+            var e = entries[i];
+            var diffClass, diffText;
+            if (e.diff > 0) {
+                diffClass = "diff-positive";
+                diffText = "+" + e.diff;
+            } else if (e.diff < 0) {
+                diffClass = "diff-negative";
+                diffText = String(e.diff);
+            } else {
+                diffClass = "diff-zero";
+                diffText = "0";
+            }
+            html += '<tr><td>' + escapeHtml(e.name) + '</td>'
+                + '<td class="' + diffClass + '">' + diffText + '</td></tr>';
+        }
+        html += '</tbody></table>';
+        sleepDiff.innerHTML = html;
+        sleepDiff.style.display = "block";
+    }
+
+    function renderSleepStats(stats) {
+        if (!stats) return;
+        // Insert a stats summary bar after the log, before the diff
+        var existing = document.querySelector(".sleep-stats");
+        if (existing) existing.parentNode.removeChild(existing);
+
+        var div = document.createElement("div");
+        div.className = "sleep-stats";
+
+        var items = [
+            { label: "Chunks changed", value: stats.chunks_changed },
+            { label: "Metamorphosed", value: stats.voxels_metamorphosed },
+            { label: "Minerals grown", value: stats.minerals_grown },
+            { label: "Supports degraded", value: stats.supports_degraded },
+            { label: "Collapses", value: stats.collapses_triggered }
+        ];
+
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].value === undefined) continue;
+            var span = document.createElement("span");
+            span.className = "sleep-stat-item";
+            span.innerHTML = items[i].label + ': <span class="sleep-stat-value">' + items[i].value + '</span>';
+            div.appendChild(span);
+        }
+
+        // Insert after sleep-log
+        sleepLog.parentNode.insertBefore(div, sleepDiff);
+    }
+
+    async function performSleep() {
+        sleepBtn.disabled = true;
+        sleepStatus.textContent = "Simulating deep sleep...";
+        toggleBeforeAfterBtn.style.display = "none";
+        showingBefore = false;
+        toggleBeforeAfterBtn.classList.remove("showing-before");
+        toggleBeforeAfterBtn.textContent = "Before/After";
+
+        try {
+            var resp = await fetch("/api/sleep", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" }
+            });
+            if (!resp.ok) throw new Error("Sleep request failed (" + resp.status + ")");
+            var data = await resp.json();
+
+            // Store pre-sleep mesh (the mesh that was displayed before)
+            // We need to capture it before we overwrite it
+            // preSleepMeshData was already stored when generate or prior sleep ran
+
+            // Store post-sleep mesh
+            postSleepMeshData = data.mesh;
+
+            // Display the post-sleep mesh
+            if (data.mesh) {
+                displayJsonMesh(data.mesh, { resetCamera: false, reuseTransform: true });
+            }
+
+            // Render transform log
+            renderSleepLog(data.transform_log);
+
+            // Render stats
+            renderSleepStats(data.stats);
+
+            // Render material diff
+            renderSleepDiff(data.material_diff);
+
+            // Show the before/after toggle if we have a pre-sleep snapshot
+            if (preSleepMeshData) {
+                toggleBeforeAfterBtn.style.display = "inline-block";
+            }
+
+            sleepStatus.textContent = "";
+        } catch (err) {
+            sleepStatus.textContent = "Error: " + err.message;
+        } finally {
+            sleepBtn.disabled = false;
+        }
+    }
+
+    sleepBtn.addEventListener("click", function () {
+        // Snapshot the current mesh data as pre-sleep state before performing sleep
+        // We store it from the last generate or sleep result
+        performSleep();
+    });
+
+    toggleBeforeAfterBtn.addEventListener("click", function () {
+        if (!preSleepMeshData || !postSleepMeshData) return;
+
+        showingBefore = !showingBefore;
+        if (showingBefore) {
+            displayJsonMesh(preSleepMeshData, { resetCamera: false, reuseTransform: true });
+            toggleBeforeAfterBtn.textContent = "Showing: Before";
+            toggleBeforeAfterBtn.classList.add("showing-before");
+        } else {
+            displayJsonMesh(postSleepMeshData, { resetCamera: false, reuseTransform: true });
+            toggleBeforeAfterBtn.textContent = "Showing: After";
+            toggleBeforeAfterBtn.classList.remove("showing-before");
+        }
+    });
+
     // ── Toast notifications ──────────────────────────────────────────
     function showMineToast(mined) {
         if (!mined || mined.length === 0) return;
@@ -885,6 +1051,16 @@
             if (result.mesh) {
                 var keepCam = document.getElementById("gen-keep-camera").checked;
                 displayJsonMesh(result.mesh, { resetCamera: !keepCam });
+                // Snapshot for deep sleep before/after comparison
+                preSleepMeshData = result.mesh;
+                postSleepMeshData = null;
+                showingBefore = false;
+                toggleBeforeAfterBtn.style.display = "none";
+                toggleBeforeAfterBtn.classList.remove("showing-before");
+                sleepLog.style.display = "none";
+                sleepDiff.style.display = "none";
+                var oldStats = document.querySelector(".sleep-stats");
+                if (oldStats) oldStats.parentNode.removeChild(oldStats);
                 genStatus.textContent = "";
             } else {
                 // Fallback: old OBJ file path (backward compat)
