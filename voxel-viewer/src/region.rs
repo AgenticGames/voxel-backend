@@ -12,6 +12,7 @@ use voxel_core::stress::{StressField, SupportField};
 use voxel_gen::config::GenerationConfig;
 use voxel_gen::density::DensityField;
 use voxel_gen::hermite_extract::{extract_hermite_data, patch_hermite_data};
+use voxel_gen::pools::{self, PoolDescriptor};
 use voxel_gen::region_gen::{self, ChunkSeamData};
 
 /// Keeps density fields alive for re-meshing after mining.
@@ -24,6 +25,7 @@ pub struct GeneratedRegion {
     seam_mesh: Mesh,
     pub stress_fields: HashMap<(i32, i32, i32), StressField>,
     pub support_fields: HashMap<(i32, i32, i32), SupportField>,
+    pub pool_descriptors: Vec<PoolDescriptor>,
 }
 
 pub struct MineResult {
@@ -50,8 +52,8 @@ impl GeneratedRegion {
             })
             .collect();
 
-        // Phases 1-4: Generate density fields with global worm carving (shared pipeline)
-        let mut density_fields = region_gen::generate_region_densities(&coords, &config);
+        // Phases 1-5: Generate density fields with global worm carving + pools (shared pipeline)
+        let (mut density_fields, pool_descriptors) = region_gen::generate_region_densities(&coords, &config);
 
         // Phase 5: Seal boundary faces
         if closed {
@@ -125,6 +127,7 @@ impl GeneratedRegion {
             seam_mesh,
             stress_fields,
             support_fields,
+            pool_descriptors,
         }
     }
 
@@ -451,6 +454,24 @@ impl GeneratedRegion {
 
         // Regenerate full seam mesh (seam gen is cheap compared to hermite/DC).
         self.seam_mesh = region_gen::generate_seam_mesh(&self.chunk_seam_data, gs);
+    }
+
+    /// Check pool containment after mining — remove drained pools.
+    /// A pool is drained if any of its rim voxels have been mined to air.
+    pub fn check_pool_containment(&mut self) {
+        let cs = self.config.chunk_size as f32;
+        self.pool_descriptors.retain(|pool| {
+            // Find which chunk this pool belongs to
+            let cx = (pool.world_x / cs).floor() as i32;
+            let cy = (pool.world_y / cs).floor() as i32;
+            let cz = (pool.world_z / cs).floor() as i32;
+            if let Some(density) = self.density_fields.get(&(cx, cy, cz)) {
+                let world_origin = Vec3::new(cx as f32 * cs, cy as f32 * cs, cz as f32 * cs);
+                pools::is_pool_contained(density, pool, world_origin)
+            } else {
+                false // chunk not found, pool can't exist
+            }
+        });
     }
 
     /// Get the combined mesh as JSON (direct from chunk meshes + seam, no intermediate copy).

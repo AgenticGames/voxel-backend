@@ -34,6 +34,7 @@ pub struct GenerationConfig {
     pub worm: WormConfig,
     pub ore: OreConfig,
     pub formations: FormationConfig,
+    pub pools: PoolConfig,
     pub mine: MineConfig,
     pub octree_max_depth: u32,
     /// Maximum edge length for triangle filtering (removes stretched artifacts).
@@ -89,6 +90,7 @@ impl Default for GenerationConfig {
             worm: WormConfig::default(),
             ore: OreConfig::default(),
             formations: FormationConfig::default(),
+            pools: PoolConfig::default(),
             mine: MineConfig::default(),
             octree_max_depth: 4,
             max_edge_length: 5.0,
@@ -348,6 +350,50 @@ pub struct FormationConfig {
     pub min_clearance: usize,
     /// Density blending factor
     pub smoothness: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolConfig {
+    /// Master switch for cave pool generation
+    pub enabled: bool,
+    /// Noise frequency for site selection (world-coherent)
+    pub placement_frequency: f64,
+    /// Noise threshold for site selection (higher = fewer pools)
+    pub placement_threshold: f64,
+    /// Per-site RNG roll probability (0-1)
+    pub pool_chance: f32,
+    /// Minimum floor cells to qualify as a pool site
+    pub min_area: usize,
+    /// Maximum pool radius in voxels
+    pub max_radius: usize,
+    /// Voxels carved below floor for basin
+    pub basin_depth: usize,
+    /// Solid rim height above floor
+    pub rim_height: usize,
+    /// Fraction of pools that become lava (0-1)
+    pub lava_fraction: f32,
+    /// Lava only below this world Y
+    pub lava_depth_max: f64,
+    /// Minimum air voxels above pool surface
+    pub min_air_above: usize,
+}
+
+impl Default for PoolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            placement_frequency: 0.08,
+            placement_threshold: 0.75,
+            pool_chance: 0.3,
+            min_area: 6,
+            max_radius: 4,
+            basin_depth: 2,
+            rim_height: 1,
+            lava_fraction: 0.25,
+            lava_depth_max: -30.0,
+            min_air_above: 3,
+        }
+    }
 }
 
 impl Default for FormationConfig {

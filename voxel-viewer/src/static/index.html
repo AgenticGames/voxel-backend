@@ -170,6 +170,23 @@
                     </details>
 
                     <details class="settings-section">
+                        <summary>Pool Settings</summary>
+                        <div class="settings-grid">
+                            <label title="Master on/off for cave pools (water/lava lakes)">Enabled <select id="gen-pools-enabled"><option value="">default (on)</option><option value="1">On</option><option value="0">Off</option></select></label>
+                            <label title="Noise frequency for pool site selection (higher = more variation)">Placement Frequency <input type="number" id="gen-pool-placement-freq" step="0.01" placeholder="0.08"></label>
+                            <label title="Noise threshold for site selection (higher = fewer pools)">Placement Threshold <input type="number" id="gen-pool-placement-threshold" step="0.05" placeholder="0.75"></label>
+                            <label title="Per-site probability of placing a pool (0-1)">Pool Chance <input type="number" id="gen-pool-chance" step="0.05" placeholder="0.3"></label>
+                            <label title="Minimum floor cells to qualify as a pool site">Min Area <input type="number" id="gen-pool-min-area" step="1" min="2" placeholder="6"></label>
+                            <label title="Maximum pool radius in voxels">Max Radius <input type="number" id="gen-pool-max-radius" step="1" min="1" placeholder="4"></label>
+                            <label title="Voxels carved below floor for the basin">Basin Depth <input type="number" id="gen-pool-basin-depth" step="1" min="1" placeholder="2"></label>
+                            <label title="Solid rim height above floor level">Rim Height <input type="number" id="gen-pool-rim-height" step="1" min="0" placeholder="1"></label>
+                            <label title="Fraction of pools that become lava (0-1)">Lava Fraction <input type="number" id="gen-pool-lava-fraction" step="0.05" placeholder="0.25"></label>
+                            <label title="Lava pools only below this world Y coordinate">Lava Depth Max <input type="number" id="gen-pool-lava-depth-max" step="5" placeholder="-30"></label>
+                            <label title="Minimum air voxels above pool surface">Min Air Above <input type="number" id="gen-pool-min-air-above" step="1" min="1" placeholder="3"></label>
+                        </div>
+                    </details>
+
+                    <details class="settings-section">
                         <summary>Formation Settings</summary>
                         <div class="settings-grid">
                             <label title="Master on/off for cave formations (stalactites, stalagmites, columns, flowstone)">Enabled <select id="gen-formations-enabled"><option value="">default (on)</option><option value="1">On</option><option value="0">Off</option></select></label>
@@ -278,6 +295,8 @@
                 <span class="legend-item"><span class="legend-swatch" style="background:#B9F2FF;"></span>Diamond</span>
                 <span class="legend-item"><span class="legend-swatch" style="background:#9B59B6;"></span>Amethyst</span>
                 <span class="legend-item"><span class="legend-swatch" style="background:#85C1E9;"></span>Crystal</span>
+                <span class="legend-item"><span class="legend-swatch" style="background:rgba(30,120,255,0.5);border:1px solid #1e78ff;"></span>Water Pool</span>
+                <span class="legend-item"><span class="legend-swatch" style="background:rgba(255,80,20,0.5);border:1px solid #ff5014;"></span>Lava Pool</span>
             </div>
             <div id="viewer-container">
                 <div id="viewer-placeholder">Select a failed seed to view its mesh</div>

@@ -3,6 +3,7 @@ pub mod density;
 pub mod worm;
 pub mod blend;
 pub mod formations;
+pub mod pools;
 pub mod hermite_extract;
 pub mod pipeline;
 pub mod chunk_manager;
@@ -12,15 +13,17 @@ pub mod region_gen;
 use voxel_core::chunk::{Chunk, ChunkCoord};
 use config::GenerationConfig;
 use density::DensityField;
+pub use pools::PoolDescriptor;
 
 /// Top-level function to generate a single chunk
 pub fn generate_chunk(coord: ChunkCoord, config: &GenerationConfig) -> Chunk {
     pipeline::generate(coord, config)
 }
 
-/// Generate the full density field for a chunk, including noise + worm carving.
+/// Generate the full density field for a chunk, including noise + worm carving + pools.
 /// This is the shared density pipeline used by both the full pipeline and CLI commands.
-pub fn generate_density(coord: ChunkCoord, config: &GenerationConfig) -> DensityField {
+/// Returns the density field and any pool descriptors placed in this chunk.
+pub fn generate_density(coord: ChunkCoord, config: &GenerationConfig) -> (DensityField, Vec<PoolDescriptor>) {
     let world_origin = coord.world_origin_sized(config.chunk_size);
     let c_seed = seed::chunk_seed(config.seed, coord);
 
@@ -63,10 +66,19 @@ pub fn generate_density(coord: ChunkCoord, config: &GenerationConfig) -> Density
         );
     }
 
+    // Step 3b: Place cave pools (water/lava lakes on cave floors)
+    let pool_descriptors = pools::place_pools(
+        &mut density,
+        &config.pools,
+        world_origin,
+        config.seed,
+        c_seed,
+    );
+
     // Step 4: Place cave formations (stalactites, stalagmites, columns, flowstone)
     if config.formations.enabled {
         formations::place_formations(&mut density, &config.formations, world_origin, config.seed, c_seed);
     }
 
-    density
+    (density, pool_descriptors)
 }

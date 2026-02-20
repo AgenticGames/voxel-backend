@@ -22,6 +22,9 @@
     var meshCenter = null;  // THREE.Vector3
     var meshScale = 1;
 
+    // Pool rendering group
+    var poolGroup = null;
+
     // DOM refs
     var summaryTotal = document.getElementById("stat-total");
     var summaryPassed = document.getElementById("stat-passed");
@@ -62,6 +65,12 @@
         "gen-gold-threshold",
         "gen-geode-freq", "gen-geode-center-threshold",
         "gen-geode-shell-thickness", "gen-geode-hollow-factor",
+        // Pool settings
+        "gen-pools-enabled",
+        "gen-pool-placement-freq", "gen-pool-placement-threshold",
+        "gen-pool-chance", "gen-pool-min-area", "gen-pool-max-radius",
+        "gen-pool-basin-depth", "gen-pool-rim-height",
+        "gen-pool-lava-fraction", "gen-pool-lava-depth-max", "gen-pool-min-air-above",
         // Formation settings
         "gen-formations-enabled",
         "gen-form-placement-threshold", "gen-form-stalactite-chance",
@@ -396,6 +405,7 @@
             })
             .then(function (data) {
                 displayJsonMesh(data.mesh, { resetCamera: false, reuseTransform: true });
+                renderPoolSurfaces(data.pools);
                 showMineToast(data.mined);
             })
             .catch(function (err) {
@@ -589,6 +599,56 @@
         }, 3100);
     }
 
+    // ── Pool surface rendering ─────────────────────────────────────
+    function clearPoolGroup() {
+        if (poolGroup) {
+            scene.remove(poolGroup);
+            poolGroup.traverse(function (child) {
+                if (child.geometry) child.geometry.dispose();
+                if (child.material) child.material.dispose();
+            });
+            poolGroup = null;
+        }
+    }
+
+    function renderPoolSurfaces(pools) {
+        clearPoolGroup();
+        if (!pools || pools.length === 0 || !meshCenter) return;
+
+        poolGroup = new THREE.Group();
+
+        for (var i = 0; i < pools.length; i++) {
+            var pool = pools[i];
+            var isLava = pool.fluid_type === "Lava";
+            var color = isLava ? 0xff5014 : 0x1e78ff;
+            var opacity = isLava ? 0.6 : 0.5;
+
+            var geometry = new THREE.CircleGeometry(pool.radius, 24);
+            // Rotate circle to lie flat (XZ plane) — default CircleGeometry faces +Z
+            geometry.rotateX(-Math.PI / 2);
+
+            var material = new THREE.MeshBasicMaterial({
+                color: color,
+                transparent: true,
+                opacity: opacity,
+                side: THREE.DoubleSide,
+                depthWrite: false,
+            });
+
+            var circle = new THREE.Mesh(geometry, material);
+            // Position in original voxel coords, then apply meshCenter/meshScale transform
+            circle.position.set(
+                (pool.world_x - meshCenter.x) * meshScale,
+                (pool.surface_y - meshCenter.y) * meshScale,
+                (pool.world_z - meshCenter.z) * meshScale
+            );
+            circle.scale.setScalar(meshScale);
+            poolGroup.add(circle);
+        }
+
+        scene.add(poolGroup);
+    }
+
     // ── Display JSON mesh in the viewer ──────────────────────────────
     // opts: { resetCamera: bool, reuseTransform: bool }
     function displayJsonMesh(data, opts) {
@@ -610,6 +670,7 @@
             });
             currentMesh = null;
         }
+        clearPoolGroup();
 
         viewerPlaceholder.style.display = "none";
 
@@ -1045,6 +1106,18 @@
             appendParam(parts, "geode_center_threshold", "gen-geode-center-threshold");
             appendParam(parts, "geode_shell_thickness", "gen-geode-shell-thickness");
             appendParam(parts, "geode_hollow_factor", "gen-geode-hollow-factor");
+            // Pool settings
+            appendParam(parts, "pools_enabled", "gen-pools-enabled");
+            appendParam(parts, "pool_placement_freq", "gen-pool-placement-freq");
+            appendParam(parts, "pool_placement_threshold", "gen-pool-placement-threshold");
+            appendParam(parts, "pool_chance", "gen-pool-chance");
+            appendParam(parts, "pool_min_area", "gen-pool-min-area");
+            appendParam(parts, "pool_max_radius", "gen-pool-max-radius");
+            appendParam(parts, "pool_basin_depth", "gen-pool-basin-depth");
+            appendParam(parts, "pool_rim_height", "gen-pool-rim-height");
+            appendParam(parts, "pool_lava_fraction", "gen-pool-lava-fraction");
+            appendParam(parts, "pool_lava_depth_max", "gen-pool-lava-depth-max");
+            appendParam(parts, "pool_min_air_above", "gen-pool-min-air-above");
             // Formation settings
             appendParam(parts, "formations_enabled", "gen-formations-enabled");
             appendParam(parts, "form_placement_threshold", "gen-form-placement-threshold");
@@ -1087,6 +1160,8 @@
             if (result.mesh) {
                 var keepCam = document.getElementById("gen-keep-camera").checked;
                 displayJsonMesh(result.mesh, { resetCamera: !keepCam });
+                // Render pool surfaces
+                renderPoolSurfaces(result.pools);
                 // Snapshot for deep sleep before/after comparison
                 preSleepMeshData = result.mesh;
                 postSleepMeshData = null;

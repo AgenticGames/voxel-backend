@@ -84,7 +84,7 @@ fn handle_request(
             if needs_region {
                 // Generate ALL densities for this region with global worms
                 let coords = region_chunks(rk, cfg.region_size);
-                let densities = generate_region_densities(&coords, &cfg);
+                let (densities, _pools) = generate_region_densities(&coords, &cfg);
 
                 // Store all densities + hermite data
                 let mut s = store.write().unwrap();

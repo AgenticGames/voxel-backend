@@ -62,7 +62,7 @@ pub fn run(args: &[String]) {
     let start = Instant::now();
 
     // Generate density field (includes worm carving)
-    let density = voxel_gen::generate_density(coord, &config);
+    let (density, _pools) = voxel_gen::generate_density(coord, &config);
     let density_time = start.elapsed();
 
     // Extract hermite data

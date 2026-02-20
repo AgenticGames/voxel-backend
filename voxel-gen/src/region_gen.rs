@@ -13,6 +13,7 @@ use voxel_core::mesh::{Mesh, Triangle, Vertex};
 
 use crate::config::GenerationConfig;
 use crate::density::{DensityField, generate_density_field};
+use crate::pools::PoolDescriptor;
 use crate::worm;
 
 /// Compute the deterministic region key for a chunk coordinate.
@@ -54,7 +55,7 @@ pub fn region_chunks(region: (i32, i32, i32), region_size: i32) -> Vec<(i32, i32
 pub fn generate_region_densities(
     coords: &[(i32, i32, i32)],
     config: &GenerationConfig,
-) -> HashMap<(i32, i32, i32), DensityField> {
+) -> (HashMap<(i32, i32, i32), DensityField>, Vec<PoolDescriptor>) {
     let eb = config.effective_bounds();
     let chunk_size_f = eb;
 
@@ -138,7 +139,28 @@ pub fn generate_region_densities(
         }
     }
 
-    // Phase 5: Place cave formations per chunk
+    // Phase 5: Place cave pools per chunk (sort keys for determinism)
+    let mut all_pool_descriptors = Vec::new();
+    if config.pools.enabled {
+        let mut sorted_keys: Vec<_> = density_fields.keys().copied().collect();
+        sorted_keys.sort();
+        for &(cx, cy, cz) in &sorted_keys {
+            let coord = ChunkCoord::new(cx, cy, cz);
+            let c_seed = crate::seed::chunk_seed(config.seed, coord);
+            if let Some(density) = density_fields.get_mut(&(cx, cy, cz)) {
+                let mut pools = crate::pools::place_pools(
+                    density,
+                    &config.pools,
+                    coord.world_origin_bounds(eb),
+                    config.seed,
+                    c_seed,
+                );
+                all_pool_descriptors.append(&mut pools);
+            }
+        }
+    }
+
+    // Phase 6: Place cave formations per chunk
     if config.formations.enabled {
         for (&(cx, cy, cz), density) in density_fields.iter_mut() {
             let coord = ChunkCoord::new(cx, cy, cz);
@@ -153,7 +175,7 @@ pub fn generate_region_densities(
         }
     }
 
-    density_fields
+    (density_fields, all_pool_descriptors)
 }
 
 /// Compute a deterministic worm seed for a set of coordinates.
@@ -492,7 +514,7 @@ mod tests {
             ..GenerationConfig::default()
         };
         let coords = region_chunks((0, 0, 0), 2);
-        let densities = generate_region_densities(&coords, &config);
+        let (densities, _pools) = generate_region_densities(&coords, &config);
         assert_eq!(densities.len(), 8);
         for &c in &coords {
             assert!(densities.contains_key(&c));

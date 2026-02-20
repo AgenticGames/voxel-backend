@@ -9,8 +9,8 @@ use voxel_fluid::FluidEvent;
 use voxel_core::stress::StressField;
 use voxel_gen::config::{
     BandedIronConfig, FormationConfig, GenerationConfig, GeodeConfig, HostRockConfig,
-    KimberlitePipeConfig, MineConfig, NoiseConfig, OreConfig, OreVeinParams, StressConfig,
-    SulfideBlobConfig, WormConfig,
+    KimberlitePipeConfig, MineConfig, NoiseConfig, OreConfig, OreVeinParams, PoolConfig,
+    StressConfig, SulfideBlobConfig, WormConfig,
 };
 
 use crate::convert::ue_chunk_to_rust;
@@ -522,6 +522,7 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
             },
         },
         formations: FormationConfig::default(),
+        pools: PoolConfig::default(),
         mine: MineConfig {
             smooth_iterations: if c.mine_smooth_iterations == 0 && c.mine_smooth_strength == 0.0 {
                 2 // default

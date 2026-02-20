@@ -320,6 +320,18 @@ fn serve_generate(
     let mut geode_center_threshold: Option<f64> = None;
     let mut geode_shell_thickness: Option<f64> = None;
     let mut geode_hollow_factor: Option<f32> = None;
+    // Pool settings
+    let mut pools_enabled: Option<bool> = None;
+    let mut pool_placement_freq: Option<f64> = None;
+    let mut pool_placement_threshold: Option<f64> = None;
+    let mut pool_chance: Option<f32> = None;
+    let mut pool_min_area: Option<usize> = None;
+    let mut pool_max_radius: Option<usize> = None;
+    let mut pool_basin_depth: Option<usize> = None;
+    let mut pool_rim_height: Option<usize> = None;
+    let mut pool_lava_fraction: Option<f32> = None;
+    let mut pool_lava_depth_max: Option<f64> = None;
+    let mut pool_min_air_above: Option<usize> = None;
     // Formation settings
     let mut formations_enabled: Option<bool> = None;
     let mut form_placement_threshold: Option<f64> = None;
@@ -397,6 +409,18 @@ fn serve_generate(
             "geode_center_threshold" => { geode_center_threshold = val.parse().ok(); }
             "geode_shell_thickness" => { geode_shell_thickness = val.parse().ok(); }
             "geode_hollow_factor" => { geode_hollow_factor = val.parse().ok(); }
+            // Pool settings
+            "pools_enabled" => { pools_enabled = Some(val == "1" || val == "true"); }
+            "pool_placement_freq" => { pool_placement_freq = val.parse().ok(); }
+            "pool_placement_threshold" => { pool_placement_threshold = val.parse().ok(); }
+            "pool_chance" => { pool_chance = val.parse().ok(); }
+            "pool_min_area" => { pool_min_area = val.parse().ok(); }
+            "pool_max_radius" => { pool_max_radius = val.parse().ok(); }
+            "pool_basin_depth" => { pool_basin_depth = val.parse().ok(); }
+            "pool_rim_height" => { pool_rim_height = val.parse().ok(); }
+            "pool_lava_fraction" => { pool_lava_fraction = val.parse().ok(); }
+            "pool_lava_depth_max" => { pool_lava_depth_max = val.parse().ok(); }
+            "pool_min_air_above" => { pool_min_air_above = val.parse().ok(); }
             // Formation settings
             "formations_enabled" => { formations_enabled = Some(val == "1" || val == "true"); }
             "form_placement_threshold" => { form_placement_threshold = val.parse().ok(); }
@@ -485,6 +509,18 @@ fn serve_generate(
     if let Some(v) = geode_center_threshold { config.ore.geode.center_threshold = v; }
     if let Some(v) = geode_shell_thickness { config.ore.geode.shell_thickness = v; }
     if let Some(v) = geode_hollow_factor { config.ore.geode.hollow_factor = v; }
+    // Pool settings
+    if let Some(v) = pools_enabled { config.pools.enabled = v; }
+    if let Some(v) = pool_placement_freq { config.pools.placement_frequency = v; }
+    if let Some(v) = pool_placement_threshold { config.pools.placement_threshold = v; }
+    if let Some(v) = pool_chance { config.pools.pool_chance = v; }
+    if let Some(v) = pool_min_area { config.pools.min_area = v; }
+    if let Some(v) = pool_max_radius { config.pools.max_radius = v; }
+    if let Some(v) = pool_basin_depth { config.pools.basin_depth = v; }
+    if let Some(v) = pool_rim_height { config.pools.rim_height = v; }
+    if let Some(v) = pool_lava_fraction { config.pools.lava_fraction = v; }
+    if let Some(v) = pool_lava_depth_max { config.pools.lava_depth_max = v; }
+    if let Some(v) = pool_min_air_above { config.pools.min_air_above = v; }
     // Formation settings
     if let Some(v) = formations_enabled { config.formations.enabled = v; }
     if let Some(v) = form_placement_threshold { config.formations.placement_threshold = v; }
@@ -537,14 +573,21 @@ fn serve_generate(
         app.sleep_config = sleep_cfg;
     }
 
+    // Collect pool descriptors from the region
+    let pool_descriptors = {
+        let app = state.lock().unwrap();
+        app.region.as_ref().map(|r| r.pool_descriptors.clone()).unwrap_or_default()
+    };
+
     // Serialize and respond
-    let output_msg = format!("Generated {}x{}x{} in {:.2?}: {} verts, {} tris",
-        chunks_x, chunks_y, chunks_z, elapsed, verts, tris);
+    let output_msg = format!("Generated {}x{}x{} in {:.2?}: {} verts, {} tris, {} pools",
+        chunks_x, chunks_y, chunks_z, elapsed, verts, tris, pool_descriptors.len());
 
     let response_json = serde_json::json!({
         "ok": true,
         "mesh": mesh_json,
         "output": output_msg,
+        "pools": pool_descriptors,
     });
 
     let json_str = serde_json::to_string(&response_json)?;
@@ -593,6 +636,10 @@ fn serve_mine(
         _ => region.mine_sphere(center, radius),
     };
 
+    // Check pool containment after mining (drainable pools)
+    region.check_pool_containment();
+    let surviving_pools = region.pool_descriptors.clone();
+
     let mesh_json = region.to_json_mesh();
 
     // Build mined materials array
@@ -610,6 +657,7 @@ fn serve_mine(
     let response_json = serde_json::json!({
         "mesh": mesh_json,
         "mined": mined,
+        "pools": surviving_pools,
     });
 
     let json_str = serde_json::to_string(&response_json)?;
