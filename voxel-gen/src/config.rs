@@ -4,6 +4,29 @@ use serde::{Deserialize, Serialize};
 pub use voxel_core::stress::StressConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MineConfig {
+    /// Laplacian blur passes after mining (default: 2)
+    pub smooth_iterations: u32,
+    /// Per-pass blend factor 0.0-1.0 (default: 0.3)
+    pub smooth_strength: f32,
+    /// Reject triangles below this area (default: 0.01)
+    pub min_triangle_area: f32,
+    /// Extra voxels to expand dirty region (default: 2)
+    pub dirty_expand: u32,
+}
+
+impl Default for MineConfig {
+    fn default() -> Self {
+        Self {
+            smooth_iterations: 2,
+            smooth_strength: 0.3,
+            min_triangle_area: 0.01,
+            dirty_expand: 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenerationConfig {
     pub seed: u64,
     pub chunk_size: usize,
@@ -11,11 +34,31 @@ pub struct GenerationConfig {
     pub worm: WormConfig,
     pub ore: OreConfig,
     pub formations: FormationConfig,
+    pub mine: MineConfig,
     pub octree_max_depth: u32,
     /// Maximum edge length for triangle filtering (removes stretched artifacts).
     pub max_edge_length: f32,
     /// Region size in chunks per axis for global worm planning (default 3).
     pub region_size: i32,
+    /// World-space extent per chunk. 0.0 means use chunk_size (backward compatible).
+    pub bounds_size: f32,
+}
+
+impl GenerationConfig {
+    /// Effective world-space extent per chunk.
+    pub fn effective_bounds(&self) -> f32 {
+        if self.bounds_size > 0.0 {
+            self.bounds_size
+        } else {
+            self.chunk_size as f32
+        }
+    }
+
+    /// Ratio of world-space extent to grid voxel count.
+    /// Each grid step covers voxel_scale() world units.
+    pub fn voxel_scale(&self) -> f32 {
+        self.effective_bounds() / self.chunk_size as f32
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,9 +89,11 @@ impl Default for GenerationConfig {
             worm: WormConfig::default(),
             ore: OreConfig::default(),
             formations: FormationConfig::default(),
+            mine: MineConfig::default(),
             octree_max_depth: 4,
             max_edge_length: 5.0,
             region_size: 3,
+            bounds_size: 0.0,
         }
     }
 }

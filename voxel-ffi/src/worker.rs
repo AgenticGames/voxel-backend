@@ -14,7 +14,7 @@ use voxel_gen::region_gen::{
     self, generate_region_densities, region_chunks, region_key, ChunkSeamData,
 };
 
-use crate::convert::{convert_mesh_to_ue, from_ue_normal, from_ue_world_pos};
+use crate::convert::{convert_mesh_to_ue_scaled, from_ue_normal, from_ue_world_pos};
 use crate::store::{extract_solid_mask, ChunkStore};
 use crate::types::{FfiCollapseEvent, WorkerRequest, WorkerResult};
 
@@ -112,7 +112,7 @@ fn handle_request(
                 };
                 let cell_size = density.size - 1;
                 let dc_verts = solve_dc_vertices(hermite, cell_size);
-                let m = generate_mesh(hermite, &dc_verts, cell_size, cfg.max_edge_length);
+                let m = generate_mesh(hermite, &dc_verts, cell_size, cfg.max_edge_length, cfg.mine.min_triangle_area);
                 let b_edges = region_gen::extract_boundary_edges(hermite, cfg.chunk_size);
                 (m, dc_verts, b_edges)
             };
@@ -144,7 +144,7 @@ fn handle_request(
             }
 
             // Convert to UE coordinates and send initial result (no seams yet)
-            let converted = convert_mesh_to_ue(&mesh, world_scale);
+            let converted = convert_mesh_to_ue_scaled(&mesh, cfg.voxel_scale(), world_scale);
             let _ = result_tx.send(WorkerResult::ChunkMesh {
                 chunk,
                 mesh: converted,
@@ -450,12 +450,12 @@ fn incremental_seam_pass(
             };
             let cell_size = density.size - 1;
             let dc_vertices = solve_dc_vertices(hermite, cell_size);
-            let mut mesh = generate_mesh(hermite, &dc_vertices, cell_size, cfg.max_edge_length);
+            let mut mesh = generate_mesh(hermite, &dc_vertices, cell_size, cfg.max_edge_length, cfg.mine.min_triangle_area);
             mesh.append(seam_mesh);
             mesh
         };
 
-        let converted = convert_mesh_to_ue(&combined, world_scale);
+        let converted = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
         let _ = result_tx.send(WorkerResult::ChunkMesh {
             chunk: target,
             mesh: converted,

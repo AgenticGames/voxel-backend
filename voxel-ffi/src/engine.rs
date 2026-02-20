@@ -9,8 +9,8 @@ use voxel_fluid::FluidEvent;
 use voxel_core::stress::StressField;
 use voxel_gen::config::{
     BandedIronConfig, FormationConfig, GenerationConfig, GeodeConfig, HostRockConfig,
-    KimberlitePipeConfig, NoiseConfig, OreConfig, OreVeinParams, StressConfig, SulfideBlobConfig,
-    WormConfig,
+    KimberlitePipeConfig, MineConfig, NoiseConfig, OreConfig, OreVeinParams, StressConfig,
+    SulfideBlobConfig, WormConfig,
 };
 
 use crate::convert::ue_chunk_to_rust;
@@ -264,8 +264,10 @@ impl VoxelEngine {
         use crate::convert::from_ue_world_pos;
         use voxel_fluid::cell::FluidType;
 
-        let chunk_size = self.config.read().map(|c| c.chunk_size).unwrap_or(16);
-        let cs = chunk_size as f32;
+        let (chunk_size, eb) = self.config.read()
+            .map(|c| (c.chunk_size, c.effective_bounds()))
+            .unwrap_or((16, 16.0));
+        let cs = eb;
 
         // Convert UE world pos -> Rust voxel pos
         let rust_pos = from_ue_world_pos(world_x, world_y, world_z, world_scale);
@@ -300,11 +302,14 @@ impl VoxelEngine {
     pub fn find_spring(&self, ue_x: f32, ue_y: f32, ue_z: f32, world_scale: f32) -> Option<(f32, f32, f32)> {
         use crate::convert::from_ue_world_pos;
 
-        let chunk_size = self.config.read().map(|c| c.chunk_size).unwrap_or(16);
+        let cfg = self.config.read().ok()?;
+        let chunk_size = cfg.chunk_size;
+        let eb = cfg.effective_bounds();
+        drop(cfg);
         let rust_pos = from_ue_world_pos(ue_x, ue_y, ue_z, world_scale);
 
         let store = self.store.read().ok()?;
-        let best = store.find_spring_location(rust_pos, chunk_size)?;
+        let best = store.find_spring_location(rust_pos, chunk_size, eb)?;
 
         // Convert Rust pos back to UE: (x * scale, -z * scale, y * scale)
         Some((
@@ -325,14 +330,17 @@ impl VoxelEngine {
     ) -> Option<(f32, f32, f32)> {
         use crate::convert::from_ue_world_pos;
 
-        let chunk_size = self.config.read().map(|c| c.chunk_size).unwrap_or(16);
+        let cfg = self.config.read().ok()?;
+        let chunk_size = cfg.chunk_size;
+        let eb = cfg.effective_bounds();
+        drop(cfg);
         let target = from_ue_world_pos(ue_x, ue_y, ue_z, world_scale);
         let exclude = from_ue_world_pos(exclude_ue_x, exclude_ue_y, exclude_ue_z, world_scale);
         // Convert UE-unit radius to voxel-unit radius
         let voxel_radius = exclude_radius / world_scale;
 
         let store = self.store.read().ok()?;
-        let best = store.find_wall_location_near(target, exclude, voxel_radius, chunk_size)?;
+        let best = store.find_wall_location_near(target, exclude, voxel_radius, chunk_size, eb)?;
 
         // Convert Rust pos back to UE: (x * scale, -z * scale, y * scale)
         Some((
@@ -514,9 +522,20 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
             },
         },
         formations: FormationConfig::default(),
+        mine: MineConfig {
+            smooth_iterations: if c.mine_smooth_iterations == 0 && c.mine_smooth_strength == 0.0 {
+                2 // default
+            } else {
+                c.mine_smooth_iterations
+            },
+            smooth_strength: if c.mine_smooth_strength > 0.0 { c.mine_smooth_strength } else { 0.3 },
+            min_triangle_area: if c.mine_min_triangle_area > 0.0 { c.mine_min_triangle_area } else { 0.01 },
+            dirty_expand: if c.mine_dirty_expand > 0 { c.mine_dirty_expand } else { 2 },
+        },
         octree_max_depth: 4,
         max_edge_length: c.max_edge_length,
         region_size: if c.region_size == 0 { 3 } else { c.region_size as i32 },
+        bounds_size: c.bounds_size,
     }
 }
 

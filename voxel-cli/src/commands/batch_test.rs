@@ -97,7 +97,7 @@ pub fn run(args: &[String]) {
             let hermite = extract_hermite_data(&density);
             let cell_size = density.size - 1;
             let dc_vertices = solve_dc_vertices(&hermite, cell_size);
-            let mesh = generate_mesh(&hermite, &dc_vertices, cell_size, config.max_edge_length);
+            let mesh = generate_mesh(&hermite, &dc_vertices, cell_size, config.max_edge_length, 0.0);
 
             // Validate mesh
             let mesh_valid = validate_mesh(&mesh);

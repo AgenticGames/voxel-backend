@@ -839,6 +839,13 @@ mod tests {
             fluid_lava_spread_rate: 0.125,
             fluid_cavern_source_bias: 0.0,
             fluid_tunnel_bend_threshold: 0.0,
+            // Mine
+            mine_smooth_iterations: 2,
+            mine_smooth_strength: 0.3,
+            mine_min_triangle_area: 0.01,
+            mine_dirty_expand: 2,
+            // Bounds
+            bounds_size: 0.0,
         }
     }
 

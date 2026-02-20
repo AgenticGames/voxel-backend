@@ -93,12 +93,14 @@ pub fn generate_density_field(config: &GenerationConfig, world_origin: glam::Vec
     let freq = config.noise.cavern_frequency;
     let threshold = config.noise.cavern_threshold;
 
+    let vs = config.voxel_scale() as f64;
+
     for z in 0..size {
         for y in 0..size {
             for x in 0..size {
-                let wx = world_origin.x as f64 + x as f64;
-                let wy = world_origin.y as f64 + y as f64;
-                let wz = world_origin.z as f64 + z as f64;
+                let wx = world_origin.x as f64 + x as f64 * vs;
+                let wy = world_origin.y as f64 + y as f64 * vs;
+                let wz = world_origin.z as f64 + z as f64 * vs;
 
                 let sx = wx * freq;
                 let sy = wy * freq;

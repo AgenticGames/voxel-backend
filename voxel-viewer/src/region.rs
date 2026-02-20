@@ -77,7 +77,7 @@ impl GeneratedRegion {
                 let hermite = extract_hermite_data(density);
                 let cell_size = density.size - 1;
                 let dc_vertices = solve_dc_vertices(&hermite, cell_size);
-                let mut mesh = generate_mesh(&hermite, &dc_vertices, cell_size, config.max_edge_length);
+                let mut mesh = generate_mesh(&hermite, &dc_vertices, cell_size, config.max_edge_length, 0.0);
 
                 let boundary_edges = region_gen::extract_boundary_edges(&hermite, gs);
 
@@ -337,7 +337,7 @@ impl GeneratedRegion {
             let hermite = extract_hermite_data(density);
             let cell_size = density.size - 1;
             let dc_vertices = solve_dc_vertices(&hermite, cell_size);
-            let mut mesh = generate_mesh(&hermite, &dc_vertices, cell_size, self.config.max_edge_length);
+            let mut mesh = generate_mesh(&hermite, &dc_vertices, cell_size, self.config.max_edge_length, 0.0);
 
             let boundary_edges = region_gen::extract_boundary_edges(&hermite, gs);
 
@@ -408,7 +408,7 @@ impl GeneratedRegion {
 
                 let cell_size = density.size - 1;
                 let dc_vertices = solve_dc_vertices(&hermite, cell_size);
-                let mut mesh = generate_mesh(&hermite, &dc_vertices, cell_size, max_edge_length);
+                let mut mesh = generate_mesh(&hermite, &dc_vertices, cell_size, max_edge_length, 0.0);
 
                 let boundary_edges = region_gen::extract_boundary_edges(&hermite, gs);
 

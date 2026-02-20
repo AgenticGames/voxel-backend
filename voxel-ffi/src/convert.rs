@@ -10,6 +10,14 @@ use voxel_core::mesh::Mesh;
 /// Normal transform: swap Y<->Z, negate new Y (no scale).
 /// Winding: swap indices[0] and indices[2] to flip triangle facing.
 pub fn convert_mesh_to_ue(mesh: &Mesh, scale: f32) -> ConvertedMesh {
+    convert_mesh_to_ue_scaled(mesh, 1.0, scale)
+}
+
+/// Convert mesh with independent voxel_scale and world_scale.
+/// Vertex positions are in grid-space [0, chunk_size]. They get scaled by
+/// voxel_scale first (to world-space voxel units), then by world_scale (to UE units).
+pub fn convert_mesh_to_ue_scaled(mesh: &Mesh, voxel_scale: f32, world_scale: f32) -> ConvertedMesh {
+    let combined_scale = voxel_scale * world_scale;
     let vert_count = mesh.vertices.len();
     let mut positions = Vec::with_capacity(vert_count);
     let mut normals = Vec::with_capacity(vert_count);
@@ -18,9 +26,9 @@ pub fn convert_mesh_to_ue(mesh: &Mesh, scale: f32) -> ConvertedMesh {
     for v in &mesh.vertices {
         let p = v.position;
         positions.push(FfiVec3 {
-            x: p.x * scale,
-            y: -p.z * scale,
-            z: p.y * scale,
+            x: p.x * combined_scale,
+            y: -p.z * combined_scale,
+            z: p.y * combined_scale,
         });
 
         let n = v.normal;

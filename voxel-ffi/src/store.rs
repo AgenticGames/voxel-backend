@@ -11,7 +11,7 @@ use voxel_gen::density::DensityField;
 use voxel_gen::hermite_extract::{extract_hermite_data, patch_hermite_data};
 use voxel_gen::region_gen::{self, ChunkSeamData};
 
-use crate::convert::convert_mesh_to_ue;
+use crate::convert::convert_mesh_to_ue_scaled;
 use crate::stress::{CollapseEvent, post_change_stress_update};
 use crate::types::{ConvertedMesh, FfiMinedMaterials};
 
@@ -104,16 +104,17 @@ impl ChunkStore {
         config: &GenerationConfig,
         world_scale: f32,
     ) -> (Vec<((i32, i32, i32), ConvertedMesh)>, FfiMinedMaterials) {
-        let cs = config.chunk_size as f32;
+        let eb = config.effective_bounds();
+        let vs = config.voxel_scale();
         let r2 = radius * radius;
         let mut mined_counts = [0u32; 19];
 
-        let min_cx = ((center.x - radius) / cs).floor() as i32;
-        let max_cx = ((center.x + radius) / cs).floor() as i32;
-        let min_cy = ((center.y - radius) / cs).floor() as i32;
-        let max_cy = ((center.y + radius) / cs).floor() as i32;
-        let min_cz = ((center.z - radius) / cs).floor() as i32;
-        let max_cz = ((center.z + radius) / cs).floor() as i32;
+        let min_cx = ((center.x - radius) / eb).floor() as i32;
+        let max_cx = ((center.x + radius) / eb).floor() as i32;
+        let min_cy = ((center.y - radius) / eb).floor() as i32;
+        let max_cy = ((center.y + radius) / eb).floor() as i32;
+        let min_cz = ((center.z - radius) / eb).floor() as i32;
+        let max_cz = ((center.z + radius) / eb).floor() as i32;
 
         let mut dirty_chunks: Vec<((i32, i32, i32), usize, usize, usize, usize, usize, usize)> =
             Vec::new();
@@ -123,25 +124,27 @@ impl ChunkStore {
                 for cx in min_cx..=max_cx {
                     if let Some(density) = self.density_fields.get_mut(&(cx, cy, cz)) {
                         let origin =
-                            Vec3::new(cx as f32 * cs, cy as f32 * cs, cz as f32 * cs);
+                            Vec3::new(cx as f32 * eb, cy as f32 * eb, cz as f32 * eb);
                         let mut changed = false;
 
-                        let local_center = center - origin;
-                        let lo_x = ((local_center.x - radius).floor() as i32).max(0) as usize;
+                        // Convert world-space center to grid-space for this chunk
+                        let grid_center = (center - origin) / vs;
+                        let grid_radius = radius / vs;
+                        let lo_x = ((grid_center.x - grid_radius).floor() as i32).max(0) as usize;
                         let hi_x =
-                            ((local_center.x + radius).ceil() as usize + 1).min(density.size);
-                        let lo_y = ((local_center.y - radius).floor() as i32).max(0) as usize;
+                            ((grid_center.x + grid_radius).ceil() as usize + 1).min(density.size);
+                        let lo_y = ((grid_center.y - grid_radius).floor() as i32).max(0) as usize;
                         let hi_y =
-                            ((local_center.y + radius).ceil() as usize + 1).min(density.size);
-                        let lo_z = ((local_center.z - radius).floor() as i32).max(0) as usize;
+                            ((grid_center.y + grid_radius).ceil() as usize + 1).min(density.size);
+                        let lo_z = ((grid_center.z - grid_radius).floor() as i32).max(0) as usize;
                         let hi_z =
-                            ((local_center.z + radius).ceil() as usize + 1).min(density.size);
+                            ((grid_center.z + grid_radius).ceil() as usize + 1).min(density.size);
 
                         for z in lo_z..hi_z {
                             for y in lo_y..hi_y {
                                 for x in lo_x..hi_x {
                                     let world_pos =
-                                        origin + Vec3::new(x as f32, y as f32, z as f32);
+                                        origin + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
                                     let dist2 = (world_pos - center).length_squared();
                                     if dist2 <= r2 {
                                         let sample = density.get_mut(x, y, z);
@@ -160,12 +163,13 @@ impl ChunkStore {
                         }
 
                         if changed {
-                            let d_min_x = lo_x.saturating_sub(1);
-                            let d_min_y = lo_y.saturating_sub(1);
-                            let d_min_z = lo_z.saturating_sub(1);
-                            let d_max_x = hi_x.min(density.size - 1);
-                            let d_max_y = hi_y.min(density.size - 1);
-                            let d_max_z = hi_z.min(density.size - 1);
+                            let expand = config.mine.dirty_expand as usize;
+                            let d_min_x = lo_x.saturating_sub(expand);
+                            let d_min_y = lo_y.saturating_sub(expand);
+                            let d_min_z = lo_z.saturating_sub(expand);
+                            let d_max_x = (hi_x + expand).min(density.size - 1);
+                            let d_max_y = (hi_y + expand).min(density.size - 1);
+                            let d_max_z = (hi_z + expand).min(density.size - 1);
                             dirty_chunks.push((
                                 (cx, cy, cz),
                                 d_min_x, d_min_y, d_min_z,
@@ -174,6 +178,18 @@ impl ChunkStore {
                         }
                     }
                 }
+            }
+        }
+
+        // Post-mine Laplacian density smoothing
+        for &(key, min_x, min_y, min_z, max_x, max_y, max_z) in &dirty_chunks {
+            if let Some(density) = self.density_fields.get_mut(&key) {
+                smooth_mine_boundary(
+                    density,
+                    min_x, min_y, min_z, max_x, max_y, max_z,
+                    config.mine.smooth_iterations,
+                    config.mine.smooth_strength,
+                );
             }
         }
 
@@ -190,17 +206,18 @@ impl ChunkStore {
         config: &GenerationConfig,
         world_scale: f32,
     ) -> (Vec<((i32, i32, i32), ConvertedMesh)>, FfiMinedMaterials) {
-        let cs = config.chunk_size as f32;
+        let eb = config.effective_bounds();
+        let vs = config.voxel_scale();
         let r2 = radius * radius;
         let mut mined_counts = [0u32; 19];
         let adjusted_center = center - normal * 0.5;
 
-        let min_cx = ((adjusted_center.x - radius) / cs).floor() as i32;
-        let max_cx = ((adjusted_center.x + radius) / cs).floor() as i32;
-        let min_cy = ((adjusted_center.y - radius) / cs).floor() as i32;
-        let max_cy = ((adjusted_center.y + radius) / cs).floor() as i32;
-        let min_cz = ((adjusted_center.z - radius) / cs).floor() as i32;
-        let max_cz = ((adjusted_center.z + radius) / cs).floor() as i32;
+        let min_cx = ((adjusted_center.x - radius) / eb).floor() as i32;
+        let max_cx = ((adjusted_center.x + radius) / eb).floor() as i32;
+        let min_cy = ((adjusted_center.y - radius) / eb).floor() as i32;
+        let max_cy = ((adjusted_center.y + radius) / eb).floor() as i32;
+        let min_cz = ((adjusted_center.z - radius) / eb).floor() as i32;
+        let max_cz = ((adjusted_center.z + radius) / eb).floor() as i32;
 
         let mut dirty_chunks: Vec<((i32, i32, i32), usize, usize, usize, usize, usize, usize)> =
             Vec::new();
@@ -210,19 +227,20 @@ impl ChunkStore {
                 for cx in min_cx..=max_cx {
                     if let Some(density) = self.density_fields.get_mut(&(cx, cy, cz)) {
                         let origin =
-                            Vec3::new(cx as f32 * cs, cy as f32 * cs, cz as f32 * cs);
+                            Vec3::new(cx as f32 * eb, cy as f32 * eb, cz as f32 * eb);
                         let mut changed = false;
 
-                        let local_center = adjusted_center - origin;
-                        let lo_x = ((local_center.x - radius).floor() as i32).max(0) as usize;
+                        let grid_center = (adjusted_center - origin) / vs;
+                        let grid_radius = radius / vs;
+                        let lo_x = ((grid_center.x - grid_radius).floor() as i32).max(0) as usize;
                         let hi_x =
-                            ((local_center.x + radius).ceil() as usize + 1).min(density.size);
-                        let lo_y = ((local_center.y - radius).floor() as i32).max(0) as usize;
+                            ((grid_center.x + grid_radius).ceil() as usize + 1).min(density.size);
+                        let lo_y = ((grid_center.y - grid_radius).floor() as i32).max(0) as usize;
                         let hi_y =
-                            ((local_center.y + radius).ceil() as usize + 1).min(density.size);
-                        let lo_z = ((local_center.z - radius).floor() as i32).max(0) as usize;
+                            ((grid_center.y + grid_radius).ceil() as usize + 1).min(density.size);
+                        let lo_z = ((grid_center.z - grid_radius).floor() as i32).max(0) as usize;
                         let hi_z =
-                            ((local_center.z + radius).ceil() as usize + 1).min(density.size);
+                            ((grid_center.z + grid_radius).ceil() as usize + 1).min(density.size);
 
                         // First pass: collect voxels to peel
                         let mut to_peel: Vec<(usize, usize, usize)> = Vec::new();
@@ -230,7 +248,7 @@ impl ChunkStore {
                             for y in lo_y..hi_y {
                                 for x in lo_x..hi_x {
                                     let world_pos =
-                                        origin + Vec3::new(x as f32, y as f32, z as f32);
+                                        origin + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
                                     let dist2 = (world_pos - adjusted_center).length_squared();
                                     if dist2 > r2 {
                                         continue;
@@ -254,7 +272,7 @@ impl ChunkStore {
                         // Second pass: apply peeling with SDF gradient
                         for (x, y, z) in to_peel {
                             let world_pos =
-                                origin + Vec3::new(x as f32, y as f32, z as f32);
+                                origin + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
                             let dist = (world_pos - adjusted_center).length();
                             let sdf = dist - radius;
                             let sample = density.get_mut(x, y, z);
@@ -265,12 +283,13 @@ impl ChunkStore {
                         }
 
                         if changed {
-                            let d_min_x = lo_x.saturating_sub(1);
-                            let d_min_y = lo_y.saturating_sub(1);
-                            let d_min_z = lo_z.saturating_sub(1);
-                            let d_max_x = hi_x.min(density.size - 1);
-                            let d_max_y = hi_y.min(density.size - 1);
-                            let d_max_z = hi_z.min(density.size - 1);
+                            let expand = config.mine.dirty_expand as usize;
+                            let d_min_x = lo_x.saturating_sub(expand);
+                            let d_min_y = lo_y.saturating_sub(expand);
+                            let d_min_z = lo_z.saturating_sub(expand);
+                            let d_max_x = (hi_x + expand).min(density.size - 1);
+                            let d_max_y = (hi_y + expand).min(density.size - 1);
+                            let d_max_z = (hi_z + expand).min(density.size - 1);
                             dirty_chunks.push((
                                 (cx, cy, cz),
                                 d_min_x, d_min_y, d_min_z,
@@ -279,6 +298,18 @@ impl ChunkStore {
                         }
                     }
                 }
+            }
+        }
+
+        // Post-mine Laplacian density smoothing
+        for &(key, min_x, min_y, min_z, max_x, max_y, max_z) in &dirty_chunks {
+            if let Some(density) = self.density_fields.get_mut(&key) {
+                smooth_mine_boundary(
+                    density,
+                    min_x, min_y, min_z, max_x, max_y, max_z,
+                    config.mine.smooth_iterations,
+                    config.mine.smooth_strength,
+                );
             }
         }
 
@@ -319,7 +350,7 @@ impl ChunkStore {
 
             let cell_size = density.size - 1;
             let dc_vertices = solve_dc_vertices(hermite, cell_size);
-            let mesh = generate_mesh(hermite, &dc_vertices, cell_size, max_edge_length);
+            let mesh = generate_mesh(hermite, &dc_vertices, cell_size, max_edge_length, config.mine.min_triangle_area);
 
             // Update seam data so seam stitching uses post-mining geometry
             let boundary_edges = region_gen::extract_boundary_edges(hermite, chunk_size);
@@ -332,7 +363,7 @@ impl ChunkStore {
                 },
             );
 
-            let converted = convert_mesh_to_ue(&mesh, world_scale);
+            let converted = convert_mesh_to_ue_scaled(&mesh, config.voxel_scale(), world_scale);
             results.push((key, converted));
         }
 
@@ -477,8 +508,8 @@ impl ChunkStore {
     /// Find the best spring location (wall seep / ceiling drip) near the player.
     /// Scans all loaded density fields for open cavern cells adjacent to a wall.
     /// Returns the world-space (Rust coords) position of the best candidate.
-    pub fn find_spring_location(&self, player_pos: Vec3, chunk_size: usize) -> Option<Vec3> {
-        let cs = chunk_size as f32;
+    pub fn find_spring_location(&self, player_pos: Vec3, chunk_size: usize, effective_bounds: f32) -> Option<Vec3> {
+        let cs = effective_bounds;
         let mut best_score: f32 = -1.0;
         let mut best_pos: Option<Vec3> = None;
 
@@ -572,8 +603,9 @@ impl ChunkStore {
         exclude_center: Vec3,
         exclude_radius: f32,
         chunk_size: usize,
+        effective_bounds: f32,
     ) -> Option<Vec3> {
-        let cs = chunk_size as f32;
+        let cs = effective_bounds;
         let excl_r2 = exclude_radius * exclude_radius;
         let mut best_dist = f32::MAX;
         let mut best_pos: Option<Vec3> = None;
@@ -646,6 +678,93 @@ pub fn extract_solid_mask(density: &DensityField, chunk_size: usize) -> Vec<u64>
     }
 
     mask
+}
+
+/// Laplacian smoothing of density values near the mine boundary.
+/// Only affects voxels near the air/solid interface within the expanded dirty region.
+/// Uses double-buffering to avoid order-dependent results.
+fn smooth_mine_boundary(
+    density: &mut DensityField,
+    min_x: usize, min_y: usize, min_z: usize,
+    max_x: usize, max_y: usize, max_z: usize,
+    iterations: u32,
+    strength: f32,
+) {
+    if iterations == 0 || strength <= 0.0 {
+        return;
+    }
+    let size = density.size;
+
+    for _ in 0..iterations {
+        // Collect smoothed values for surface voxels (double-buffer)
+        let mut updates: Vec<(usize, usize, usize, f32)> = Vec::new();
+
+        for z in min_z..=max_z.min(size - 1) {
+            for y in min_y..=max_y.min(size - 1) {
+                for x in min_x..=max_x.min(size - 1) {
+                    // Only smooth near the surface: solid with air neighbor, or air with solid neighbor
+                    let is_solid = density.get(x, y, z).material.is_solid();
+                    let near_surface = if is_solid {
+                        has_air_neighbor(density, x, y, z)
+                    } else {
+                        has_solid_neighbor(density, x, y, z)
+                    };
+
+                    if !near_surface {
+                        continue;
+                    }
+
+                    // Average of 6 face neighbors (clamped to bounds)
+                    let mut sum = 0.0f32;
+                    let mut count = 0u32;
+                    let neighbors: [(i32, i32, i32); 6] = [
+                        (-1, 0, 0), (1, 0, 0),
+                        (0, -1, 0), (0, 1, 0),
+                        (0, 0, -1), (0, 0, 1),
+                    ];
+                    for (dx, dy, dz) in neighbors {
+                        let nx = x as i32 + dx;
+                        let ny = y as i32 + dy;
+                        let nz = z as i32 + dz;
+                        if nx >= 0 && nx < size as i32 && ny >= 0 && ny < size as i32 && nz >= 0 && nz < size as i32 {
+                            sum += density.get(nx as usize, ny as usize, nz as usize).density;
+                            count += 1;
+                        }
+                    }
+
+                    if count > 0 {
+                        let avg = sum / count as f32;
+                        let old = density.get(x, y, z).density;
+                        let new_val = (1.0 - strength) * old + strength * avg;
+                        updates.push((x, y, z, new_val));
+                    }
+                }
+            }
+        }
+
+        // Apply all updates (only density, not material)
+        for (x, y, z, new_density) in updates {
+            density.get_mut(x, y, z).density = new_density;
+        }
+    }
+}
+
+fn has_solid_neighbor(density: &DensityField, x: usize, y: usize, z: usize) -> bool {
+    let s = density.size;
+    let neighbors = [
+        (x.wrapping_sub(1), y, z),
+        (x + 1, y, z),
+        (x, y.wrapping_sub(1), z),
+        (x, y + 1, z),
+        (x, y, z.wrapping_sub(1)),
+        (x, y, z + 1),
+    ];
+    for (nx, ny, nz) in neighbors {
+        if nx < s && ny < s && nz < s && density.get(nx, ny, nz).material.is_solid() {
+            return true;
+        }
+    }
+    false
 }
 
 fn has_air_neighbor(density: &DensityField, x: usize, y: usize, z: usize) -> bool {

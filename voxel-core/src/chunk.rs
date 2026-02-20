@@ -28,6 +28,15 @@ impl ChunkCoord {
             self.z as f32 * cs,
         )
     }
+
+    /// World-space origin using explicit bounds_size (decoupled from voxel count).
+    pub fn world_origin_bounds(self, bounds_size: f32) -> glam::Vec3 {
+        glam::Vec3::new(
+            self.x as f32 * bounds_size,
+            self.y as f32 * bounds_size,
+            self.z as f32 * bounds_size,
+        )
+    }
 }
 
 /// A chunk containing its octree and metadata

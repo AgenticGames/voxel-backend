@@ -11,7 +11,7 @@ use crate::hermite::{HermiteData, FastHashMap};
 /// position for each cell. Cells without a vertex should have a sentinel or be absent.
 ///
 /// `grid_size`: number of cells along each axis (the density grid is grid_size+1 on each axis)
-pub fn generate_mesh(hermite: &HermiteData, dc_vertices: &[glam::Vec3], grid_size: usize, max_edge_length: f32) -> Mesh {
+pub fn generate_mesh(hermite: &HermiteData, dc_vertices: &[glam::Vec3], grid_size: usize, max_edge_length: f32, min_triangle_area: f32) -> Mesh {
     let mut mesh = Mesh::new();
     let mut vertex_map: FastHashMap<usize, u32> = FastHashMap::default();
 
@@ -89,10 +89,10 @@ pub fn generate_mesh(hermite: &HermiteData, dc_vertices: &[glam::Vec3], grid_siz
                  [quad_verts[3], quad_verts[2], quad_verts[0]])
             };
 
-            if !is_degenerate_tri(&mesh.vertices, tri_a) && !is_stretched_tri(&mesh.vertices, tri_a, max_edge_sq) {
+            if !is_degenerate_tri(&mesh.vertices, tri_a) && !is_stretched_tri(&mesh.vertices, tri_a, max_edge_sq) && !is_thin_tri(&mesh.vertices, tri_a, min_triangle_area) {
                 mesh.triangles.push(Triangle { indices: tri_a });
             }
-            if !is_degenerate_tri(&mesh.vertices, tri_b) && !is_stretched_tri(&mesh.vertices, tri_b, max_edge_sq) {
+            if !is_degenerate_tri(&mesh.vertices, tri_b) && !is_stretched_tri(&mesh.vertices, tri_b, max_edge_sq) && !is_thin_tri(&mesh.vertices, tri_b, min_triangle_area) {
                 mesh.triangles.push(Triangle { indices: tri_b });
             }
         } else if valid_count == 3 {
@@ -116,7 +116,7 @@ pub fn generate_mesh(hermite: &HermiteData, dc_vertices: &[glam::Vec3], grid_siz
                 tri.swap(1, 2);
             }
 
-            if !is_degenerate_tri(&mesh.vertices, tri) && !is_stretched_tri(&mesh.vertices, tri, max_edge_sq) {
+            if !is_degenerate_tri(&mesh.vertices, tri) && !is_stretched_tri(&mesh.vertices, tri, max_edge_sq) && !is_thin_tri(&mesh.vertices, tri, min_triangle_area) {
                 mesh.triangles.push(Triangle { indices: tri });
             }
         }
@@ -196,6 +196,19 @@ fn is_stretched_tri(vertices: &[Vertex], indices: [u32; 3], max_edge_len_sq: f32
         || (v2 - v0).length_squared() > max_edge_len_sq
 }
 
+/// Check if a triangle's area is below the minimum threshold (thin sliver filter).
+/// When min_area <= 0.0, this check is disabled (always returns false).
+fn is_thin_tri(vertices: &[Vertex], indices: [u32; 3], min_area: f32) -> bool {
+    if min_area <= 0.0 {
+        return false;
+    }
+    let v0 = vertices[indices[0] as usize].position;
+    let v1 = vertices[indices[1] as usize].position;
+    let v2 = vertices[indices[2] as usize].position;
+    let area = (v1 - v0).cross(v2 - v0).length() * 0.5;
+    area < min_area
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,7 +219,7 @@ mod tests {
     fn empty_hermite_empty_mesh() {
         let hermite = HermiteData::default();
         let dc_vertices = vec![];
-        let mesh = generate_mesh(&hermite, &dc_vertices, 4, 4.0);
+        let mesh = generate_mesh(&hermite, &dc_vertices, 4, 4.0, 0.0);
         assert!(mesh.is_empty());
     }
 
@@ -240,7 +253,7 @@ mod tests {
             }
         }
 
-        let mesh = generate_mesh(&hermite, &dc_vertices, grid_size, 4.0);
+        let mesh = generate_mesh(&hermite, &dc_vertices, grid_size, 4.0, 0.0);
         assert_eq!(mesh.triangle_count(), 2, "One quad = 2 triangles");
         assert!(mesh.vertex_count() <= 4, "At most 4 vertices for one quad");
     }

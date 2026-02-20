@@ -55,15 +55,15 @@ pub fn generate_region_densities(
     coords: &[(i32, i32, i32)],
     config: &GenerationConfig,
 ) -> HashMap<(i32, i32, i32), DensityField> {
-    let gs = config.chunk_size;
-    let chunk_size_f = gs as f32;
+    let eb = config.effective_bounds();
+    let chunk_size_f = eb;
 
     // Phase 1: Generate base density fields (parallel)
     let mut density_fields: HashMap<(i32, i32, i32), DensityField> = coords
         .par_iter()
         .map(|&(cx, cy, cz)| {
             let coord = ChunkCoord::new(cx, cy, cz);
-            let density = generate_density_field(config, coord.world_origin_sized(gs));
+            let density = generate_density_field(config, coord.world_origin_bounds(eb));
             ((cx, cy, cz), density)
         })
         .collect();
@@ -75,7 +75,7 @@ pub fn generate_region_densities(
             let density = &density_fields[&(cx, cy, cz)];
             let coord = ChunkCoord::new(cx, cy, cz);
             let flat = density.densities();
-            worm::connect::find_cavern_centers(&flat, density.size, coord.world_origin_sized(gs))
+            worm::connect::find_cavern_centers(&flat, density.size, coord.world_origin_bounds(eb))
         })
         .collect();
 
@@ -129,7 +129,7 @@ pub fn generate_region_densities(
                         worm::carve::carve_worm_into_density(
                             density,
                             &segments,
-                            coord.world_origin_sized(gs),
+                            coord.world_origin_bounds(eb),
                             config.worm.falloff_power,
                         );
                     }
@@ -146,7 +146,7 @@ pub fn generate_region_densities(
             crate::formations::place_formations(
                 density,
                 &config.formations,
-                coord.world_origin_sized(gs),
+                coord.world_origin_bounds(eb),
                 config.seed,
                 c_seed,
             );

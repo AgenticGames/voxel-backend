@@ -170,6 +170,13 @@ pub struct FfiEngineConfig {
     pub fluid_lava_spread_rate: f32,
     pub fluid_cavern_source_bias: f64,
     pub fluid_tunnel_bend_threshold: f64,
+    // ── Mine Config (4 fields) ──
+    pub mine_smooth_iterations: u32,
+    pub mine_smooth_strength: f32,
+    pub mine_min_triangle_area: f32,
+    pub mine_dirty_expand: u32,
+    // ── Bounds Size ──
+    pub bounds_size: f32,
 }
 
 #[repr(C)]
