@@ -60,6 +60,11 @@ pub fn generate(coord: ChunkCoord, config: &GenerationConfig) -> Chunk {
         );
     }
 
+    // Step 4b: Place cave formations (stalactites, stalagmites, columns, flowstone)
+    if config.formations.enabled {
+        crate::formations::place_formations(&mut density, &config.formations, world_origin, config.seed, c_seed);
+    }
+
     // Step 5: Extract hermite data from the final density field
     let _hermite = extract_hermite_data(&density);
 

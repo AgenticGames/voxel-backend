@@ -138,6 +138,21 @@ pub fn generate_region_densities(
         }
     }
 
+    // Phase 5: Place cave formations per chunk
+    if config.formations.enabled {
+        for (&(cx, cy, cz), density) in density_fields.iter_mut() {
+            let coord = ChunkCoord::new(cx, cy, cz);
+            let c_seed = crate::seed::chunk_seed(config.seed, coord);
+            crate::formations::place_formations(
+                density,
+                &config.formations,
+                coord.world_origin_sized(gs),
+                config.seed,
+                c_seed,
+            );
+        }
+    }
+
     density_fields
 }
 

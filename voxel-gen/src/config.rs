@@ -10,6 +10,7 @@ pub struct GenerationConfig {
     pub noise: NoiseConfig,
     pub worm: WormConfig,
     pub ore: OreConfig,
+    pub formations: FormationConfig,
     pub octree_max_depth: u32,
     /// Maximum edge length for triangle filtering (removes stretched artifacts).
     pub max_edge_length: f32,
@@ -44,6 +45,7 @@ impl Default for GenerationConfig {
             noise: NoiseConfig::default(),
             worm: WormConfig::default(),
             ore: OreConfig::default(),
+            formations: FormationConfig::default(),
             octree_max_depth: 4,
             max_edge_length: 5.0,
             region_size: 3,
@@ -253,6 +255,80 @@ impl Default for GeodeConfig {
             hollow_factor: -0.20,
             depth_min: -200.0,
             depth_max: 200.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FormationConfig {
+    /// Master switch for cave formations
+    pub enabled: bool,
+    /// Noise frequency for placement field
+    pub placement_frequency: f64,
+    /// Higher = sparser placement
+    pub placement_threshold: f64,
+    /// Per-surface probability for stalactites
+    pub stalactite_chance: f32,
+    /// Per-surface probability for stalagmites
+    pub stalagmite_chance: f32,
+    /// Per-surface probability for flowstone shelves
+    pub flowstone_chance: f32,
+    /// Probability when ceiling+floor align
+    pub column_chance: f32,
+    /// Max gap for column attempt
+    pub column_max_gap: usize,
+    /// Cone length range (min)
+    pub length_min: f32,
+    /// Cone length range (max)
+    pub length_max: f32,
+    /// Cone base radius range (min)
+    pub radius_min: f32,
+    /// Cone base radius range (max)
+    pub radius_max: f32,
+    /// Navigation safety cap on radius
+    pub max_radius: f32,
+    /// Column radius range (min)
+    pub column_radius_min: f32,
+    /// Column radius range (max)
+    pub column_radius_max: f32,
+    /// Flowstone shelf extent (min)
+    pub flowstone_length_min: f32,
+    /// Flowstone shelf extent (max)
+    pub flowstone_length_max: f32,
+    /// Flowstone vertical extent
+    pub flowstone_thickness: f32,
+    /// Minimum air gap for any formation
+    pub min_air_gap: usize,
+    /// Clearance maintained below/above formation tip
+    pub min_clearance: usize,
+    /// Density blending factor
+    pub smoothness: f32,
+}
+
+impl Default for FormationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            placement_frequency: 0.15,
+            placement_threshold: 0.65,
+            stalactite_chance: 0.12,
+            stalagmite_chance: 0.08,
+            flowstone_chance: 0.05,
+            column_chance: 0.15,
+            column_max_gap: 10,
+            length_min: 2.0,
+            length_max: 5.0,
+            radius_min: 0.6,
+            radius_max: 1.2,
+            max_radius: 1.5,
+            column_radius_min: 0.5,
+            column_radius_max: 1.0,
+            flowstone_length_min: 1.5,
+            flowstone_length_max: 3.0,
+            flowstone_thickness: 0.8,
+            min_air_gap: 5,
+            min_clearance: 3,
+            smoothness: 2.0,
         }
     }
 }

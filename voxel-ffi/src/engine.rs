@@ -8,8 +8,9 @@ use voxel_fluid::FluidConfig;
 use voxel_fluid::FluidEvent;
 use voxel_core::stress::StressField;
 use voxel_gen::config::{
-    BandedIronConfig, GenerationConfig, GeodeConfig, HostRockConfig, KimberlitePipeConfig,
-    NoiseConfig, OreConfig, OreVeinParams, StressConfig, SulfideBlobConfig, WormConfig,
+    BandedIronConfig, FormationConfig, GenerationConfig, GeodeConfig, HostRockConfig,
+    KimberlitePipeConfig, NoiseConfig, OreConfig, OreVeinParams, StressConfig, SulfideBlobConfig,
+    WormConfig,
 };
 
 use crate::convert::ue_chunk_to_rust;
@@ -512,6 +513,7 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
                 depth_max: c.geode_depth_max,
             },
         },
+        formations: FormationConfig::default(),
         octree_max_depth: 4,
         max_edge_length: c.max_edge_length,
         region_size: if c.region_size == 0 { 3 } else { c.region_size as i32 },

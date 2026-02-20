@@ -2,6 +2,7 @@ pub mod config;
 pub mod density;
 pub mod worm;
 pub mod blend;
+pub mod formations;
 pub mod hermite_extract;
 pub mod pipeline;
 pub mod chunk_manager;
@@ -60,6 +61,11 @@ pub fn generate_density(coord: ChunkCoord, config: &GenerationConfig) -> Density
             world_origin,
             config.worm.falloff_power,
         );
+    }
+
+    // Step 4: Place cave formations (stalactites, stalagmites, columns, flowstone)
+    if config.formations.enabled {
+        formations::place_formations(&mut density, &config.formations, world_origin, config.seed, c_seed);
     }
 
     density
