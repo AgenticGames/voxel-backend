@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use voxel_core::stress::StressConfig;
 
 /// Top-level sleep configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6,6 +7,7 @@ pub struct SleepConfig {
     pub metamorphism: MetamorphismConfig,
     pub minerals: MineralConfig,
     pub collapse: CollapseConfig,
+    pub stress: StressConfig,
     pub time_budget_ms: u32,
 }
 
@@ -15,6 +17,7 @@ impl Default for SleepConfig {
             metamorphism: MetamorphismConfig::default(),
             minerals: MineralConfig::default(),
             collapse: CollapseConfig::default(),
+            stress: StressConfig::default(),
             time_budget_ms: 8000,
         }
     }

@@ -130,14 +130,13 @@ impl GeneratedRegion {
 
     /// Run a deep sleep cycle on this region.
     /// Returns (sleep_result, updated_mesh_json).
-    pub fn apply_sleep(&mut self) -> (voxel_sleep::SleepResult, JsonMesh) {
-        let sleep_config = voxel_sleep::SleepConfig::default();
+    pub fn apply_sleep(&mut self, sleep_config: &voxel_sleep::SleepConfig) -> (voxel_sleep::SleepResult, JsonMesh) {
 
         // Use center chunk as player position
         let player_chunk = (0, 0, 0);
 
         let result = voxel_sleep::execute_sleep(
-            &sleep_config,
+            sleep_config,
             &mut self.density_fields,
             &mut self.stress_fields,
             &mut self.support_fields,

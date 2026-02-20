@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use voxel_gen::config::GenerationConfig;
+use voxel_sleep::config::SleepConfig;
 
 use crate::region::GeneratedRegion;
 
@@ -15,6 +16,7 @@ const STYLE_CSS: &str = include_str!("static/style.css");
 /// Shared state across requests
 struct AppState {
     region: Option<GeneratedRegion>,
+    sleep_config: SleepConfig,
 }
 
 fn main() {
@@ -57,7 +59,10 @@ fn main() {
         std::process::exit(1);
     });
 
-    let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState { region: None }));
+    let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState {
+        region: None,
+        sleep_config: SleepConfig::default(),
+    }));
 
     println!("Serving at http://localhost:{port}");
     println!("Output directory: {}", output_dir.display());
@@ -315,6 +320,31 @@ fn serve_generate(
     let mut geode_center_threshold: Option<f64> = None;
     let mut geode_shell_thickness: Option<f64> = None;
     let mut geode_hollow_factor: Option<f32> = None;
+    // Formation settings
+    let mut formations_enabled: Option<bool> = None;
+    let mut form_placement_threshold: Option<f64> = None;
+    let mut form_stalactite_chance: Option<f32> = None;
+    let mut form_stalagmite_chance: Option<f32> = None;
+    let mut form_flowstone_chance: Option<f32> = None;
+    let mut form_column_chance: Option<f32> = None;
+    let mut form_length_min: Option<f32> = None;
+    let mut form_length_max: Option<f32> = None;
+    let mut form_max_radius: Option<f32> = None;
+    let mut form_min_air_gap: Option<usize> = None;
+    let mut form_min_clearance: Option<usize> = None;
+    // Stress settings
+    let mut stress_gravity: Option<f32> = None;
+    let mut stress_lateral: Option<f32> = None;
+    let mut stress_vertical: Option<f32> = None;
+    let mut stress_prop_radius: Option<u32> = None;
+    let mut stress_max_collapse: Option<u32> = None;
+    // Sleep collapse settings
+    let mut collapse_wood: Option<f32> = None;
+    let mut collapse_metal: Option<f32> = None;
+    let mut collapse_reinforce: Option<f32> = None;
+    let mut collapse_stress_mult: Option<f32> = None;
+    let mut collapse_max_cascade: Option<u32> = None;
+    let mut collapse_rubble: Option<f32> = None;
 
     for pair in body.split('&') {
         let mut kv = pair.splitn(2, '=');
@@ -367,6 +397,31 @@ fn serve_generate(
             "geode_center_threshold" => { geode_center_threshold = val.parse().ok(); }
             "geode_shell_thickness" => { geode_shell_thickness = val.parse().ok(); }
             "geode_hollow_factor" => { geode_hollow_factor = val.parse().ok(); }
+            // Formation settings
+            "formations_enabled" => { formations_enabled = Some(val == "1" || val == "true"); }
+            "form_placement_threshold" => { form_placement_threshold = val.parse().ok(); }
+            "form_stalactite_chance" => { form_stalactite_chance = val.parse().ok(); }
+            "form_stalagmite_chance" => { form_stalagmite_chance = val.parse().ok(); }
+            "form_flowstone_chance" => { form_flowstone_chance = val.parse().ok(); }
+            "form_column_chance" => { form_column_chance = val.parse().ok(); }
+            "form_length_min" => { form_length_min = val.parse().ok(); }
+            "form_length_max" => { form_length_max = val.parse().ok(); }
+            "form_max_radius" => { form_max_radius = val.parse().ok(); }
+            "form_min_air_gap" => { form_min_air_gap = val.parse().ok(); }
+            "form_min_clearance" => { form_min_clearance = val.parse().ok(); }
+            // Stress settings
+            "stress_gravity" => { stress_gravity = val.parse().ok(); }
+            "stress_lateral" => { stress_lateral = val.parse().ok(); }
+            "stress_vertical" => { stress_vertical = val.parse().ok(); }
+            "stress_prop_radius" => { stress_prop_radius = val.parse().ok(); }
+            "stress_max_collapse" => { stress_max_collapse = val.parse().ok(); }
+            // Sleep collapse settings
+            "collapse_wood" => { collapse_wood = val.parse().ok(); }
+            "collapse_metal" => { collapse_metal = val.parse().ok(); }
+            "collapse_reinforce" => { collapse_reinforce = val.parse().ok(); }
+            "collapse_stress_mult" => { collapse_stress_mult = val.parse().ok(); }
+            "collapse_max_cascade" => { collapse_max_cascade = val.parse().ok(); }
+            "collapse_rubble" => { collapse_rubble = val.parse().ok(); }
             _ => {}
         }
     }
@@ -430,6 +485,34 @@ fn serve_generate(
     if let Some(v) = geode_center_threshold { config.ore.geode.center_threshold = v; }
     if let Some(v) = geode_shell_thickness { config.ore.geode.shell_thickness = v; }
     if let Some(v) = geode_hollow_factor { config.ore.geode.hollow_factor = v; }
+    // Formation settings
+    if let Some(v) = formations_enabled { config.formations.enabled = v; }
+    if let Some(v) = form_placement_threshold { config.formations.placement_threshold = v; }
+    if let Some(v) = form_stalactite_chance { config.formations.stalactite_chance = v; }
+    if let Some(v) = form_stalagmite_chance { config.formations.stalagmite_chance = v; }
+    if let Some(v) = form_flowstone_chance { config.formations.flowstone_chance = v; }
+    if let Some(v) = form_column_chance { config.formations.column_chance = v; }
+    if let Some(v) = form_length_min { config.formations.length_min = v; }
+    if let Some(v) = form_length_max { config.formations.length_max = v; }
+    if let Some(v) = form_max_radius { config.formations.max_radius = v; }
+    if let Some(v) = form_min_air_gap { config.formations.min_air_gap = v; }
+    if let Some(v) = form_min_clearance { config.formations.min_clearance = v; }
+
+    // Build sleep config from UI overrides (stress settings embedded in sleep config)
+    let mut sleep_cfg = SleepConfig::default();
+    // Stress tuning
+    if let Some(v) = stress_gravity { sleep_cfg.stress.gravity_weight = v; }
+    if let Some(v) = stress_lateral { sleep_cfg.stress.lateral_support_factor = v; }
+    if let Some(v) = stress_vertical { sleep_cfg.stress.vertical_support_factor = v; }
+    if let Some(v) = stress_prop_radius { sleep_cfg.stress.propagation_radius = v; }
+    if let Some(v) = stress_max_collapse { sleep_cfg.stress.max_collapse_volume = v; }
+    // Sleep collapse
+    if let Some(v) = collapse_wood { sleep_cfg.collapse.wood_beam_survival = v; }
+    if let Some(v) = collapse_metal { sleep_cfg.collapse.metal_beam_survival = v; }
+    if let Some(v) = collapse_reinforce { sleep_cfg.collapse.reinforcement_survival = v; }
+    if let Some(v) = collapse_stress_mult { sleep_cfg.collapse.stress_multiplier = v; }
+    if let Some(v) = collapse_max_cascade { sleep_cfg.collapse.max_cascade_iterations = v; }
+    if let Some(v) = collapse_rubble { sleep_cfg.collapse.rubble_fill_ratio = v; }
 
     println!("Generating {}x{}x{} region in-process (seed {})...", chunks_x, chunks_y, chunks_z, seed);
     let start = std::time::Instant::now();
@@ -447,10 +530,11 @@ fn serve_generate(
     let tris = mesh_json.indices.len() / 3;
     println!("  Generated in {:.2?}: {} vertices, {} triangles", elapsed, verts, tris);
 
-    // Store region for mining
+    // Store region + sleep config for mining/sleep
     {
         let mut app = state.lock().unwrap();
         app.region = Some(region);
+        app.sleep_config = sleep_cfg;
     }
 
     // Serialize and respond
@@ -542,6 +626,7 @@ fn serve_sleep(
     state: &Arc<Mutex<AppState>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut app = state.lock().unwrap();
+    let sleep_config = app.sleep_config.clone();
     let region = match app.region.as_mut() {
         Some(r) => r,
         None => {
@@ -553,7 +638,7 @@ fn serve_sleep(
     println!("Running deep sleep cycle...");
     let start = std::time::Instant::now();
 
-    let (sleep_result, mesh_json) = region.apply_sleep();
+    let (sleep_result, mesh_json) = region.apply_sleep(&sleep_config);
 
     let elapsed = start.elapsed();
     println!("  Sleep completed in {:.2?}: {} chunks changed, {} metamorphosed, {} minerals grown, {} supports degraded, {} collapses",

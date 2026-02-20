@@ -62,6 +62,17 @@
         "gen-gold-threshold",
         "gen-geode-freq", "gen-geode-center-threshold",
         "gen-geode-shell-thickness", "gen-geode-hollow-factor",
+        // Formation settings
+        "gen-formations-enabled",
+        "gen-form-placement-threshold", "gen-form-stalactite-chance",
+        "gen-form-stalagmite-chance", "gen-form-flowstone-chance", "gen-form-column-chance",
+        "gen-form-length-min", "gen-form-length-max", "gen-form-max-radius",
+        "gen-form-min-air-gap", "gen-form-min-clearance",
+        // Stress & collapse settings
+        "gen-stress-gravity", "gen-stress-lateral", "gen-stress-vertical",
+        "gen-stress-prop-radius", "gen-stress-max-collapse",
+        "gen-collapse-wood", "gen-collapse-metal", "gen-collapse-reinforce",
+        "gen-collapse-stress-mult", "gen-collapse-max-cascade", "gen-collapse-rubble",
     ];
     var activePresetSlot = 0;
 
@@ -1034,6 +1045,31 @@
             appendParam(parts, "geode_center_threshold", "gen-geode-center-threshold");
             appendParam(parts, "geode_shell_thickness", "gen-geode-shell-thickness");
             appendParam(parts, "geode_hollow_factor", "gen-geode-hollow-factor");
+            // Formation settings
+            appendParam(parts, "formations_enabled", "gen-formations-enabled");
+            appendParam(parts, "form_placement_threshold", "gen-form-placement-threshold");
+            appendParam(parts, "form_stalactite_chance", "gen-form-stalactite-chance");
+            appendParam(parts, "form_stalagmite_chance", "gen-form-stalagmite-chance");
+            appendParam(parts, "form_flowstone_chance", "gen-form-flowstone-chance");
+            appendParam(parts, "form_column_chance", "gen-form-column-chance");
+            appendParam(parts, "form_length_min", "gen-form-length-min");
+            appendParam(parts, "form_length_max", "gen-form-length-max");
+            appendParam(parts, "form_max_radius", "gen-form-max-radius");
+            appendParam(parts, "form_min_air_gap", "gen-form-min-air-gap");
+            appendParam(parts, "form_min_clearance", "gen-form-min-clearance");
+            // Stress settings
+            appendParam(parts, "stress_gravity", "gen-stress-gravity");
+            appendParam(parts, "stress_lateral", "gen-stress-lateral");
+            appendParam(parts, "stress_vertical", "gen-stress-vertical");
+            appendParam(parts, "stress_prop_radius", "gen-stress-prop-radius");
+            appendParam(parts, "stress_max_collapse", "gen-stress-max-collapse");
+            // Sleep collapse settings
+            appendParam(parts, "collapse_wood", "gen-collapse-wood");
+            appendParam(parts, "collapse_metal", "gen-collapse-metal");
+            appendParam(parts, "collapse_reinforce", "gen-collapse-reinforce");
+            appendParam(parts, "collapse_stress_mult", "gen-collapse-stress-mult");
+            appendParam(parts, "collapse_max_cascade", "gen-collapse-max-cascade");
+            appendParam(parts, "collapse_rubble", "gen-collapse-rubble");
             var body = parts.join("&");
             var resp = await fetch("/api/generate", {
                 method: "POST",

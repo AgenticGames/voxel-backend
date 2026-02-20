@@ -10,7 +10,7 @@ use crossbeam_channel::Sender;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use voxel_core::density::DensityField;
-use voxel_core::stress::{StressConfig, StressField, SupportField, SupportType};
+use voxel_core::stress::{StressField, SupportField, SupportType};
 
 use crate::collapse::apply_collapse;
 use crate::metamorphism::apply_metamorphism;
@@ -181,10 +181,10 @@ pub fn execute_sleep(
     // --- Phase 2: Structural collapse (critical + important chunks) ---
     send_progress(progress_tx, 2, 0.0, 0, collapse_chunks.len() as u32, None, 0);
 
-    let stress_config = StressConfig::default();
+    let stress_config = &config.stress;
     let collapse_result = apply_collapse(
         &config.collapse,
-        &stress_config,
+        stress_config,
         density_fields,
         stress_fields,
         support_fields,

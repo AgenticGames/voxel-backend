@@ -169,6 +169,48 @@
                         </div>
                     </details>
 
+                    <details class="settings-section">
+                        <summary>Formation Settings</summary>
+                        <div class="settings-grid">
+                            <label title="Master on/off for cave formations (stalactites, stalagmites, columns, flowstone)">Enabled <select id="gen-formations-enabled"><option value="">default (on)</option><option value="1">On</option><option value="0">Off</option></select></label>
+                            <label title="Higher = sparser placement (0-1)">Placement Threshold <input type="number" id="gen-form-placement-threshold" step="0.05" placeholder="0.65"></label>
+                            <label title="Per-ceiling probability for stalactite (0-1)">Stalactite Chance <input type="number" id="gen-form-stalactite-chance" step="0.02" placeholder="0.12"></label>
+                            <label title="Per-floor probability for stalagmite (0-1)">Stalagmite Chance <input type="number" id="gen-form-stalagmite-chance" step="0.02" placeholder="0.08"></label>
+                            <label title="Per-wall probability for flowstone shelf (0-1)">Flowstone Chance <input type="number" id="gen-form-flowstone-chance" step="0.02" placeholder="0.05"></label>
+                            <label title="Probability when ceiling+floor align (0-1)">Column Chance <input type="number" id="gen-form-column-chance" step="0.02" placeholder="0.15"></label>
+                            <label title="Minimum cone length in voxels">Length Min <input type="number" id="gen-form-length-min" step="0.5" min="0.5" placeholder="2.0"></label>
+                            <label title="Maximum cone length in voxels">Length Max <input type="number" id="gen-form-length-max" step="0.5" min="1" placeholder="5.0"></label>
+                            <label title="Maximum base radius (navigation safety cap)">Max Radius <input type="number" id="gen-form-max-radius" step="0.1" min="0.3" placeholder="1.5"></label>
+                            <label title="Minimum air voxels for formation placement">Min Air Gap <input type="number" id="gen-form-min-air-gap" step="1" min="2" placeholder="5"></label>
+                            <label title="Air clearance maintained at formation tip">Min Clearance <input type="number" id="gen-form-min-clearance" step="1" min="1" placeholder="3"></label>
+                        </div>
+                    </details>
+
+                    <details class="settings-section">
+                        <summary>Stress &amp; Collapse</summary>
+                        <div class="ore-subsection">
+                            <span class="ore-label" style="color:#a0a0b8;">Stress Tuning</span> <em class="ore-hint">real-time structural stress</em>
+                            <div class="settings-grid">
+                                <label title="Weight per solid voxel above (column load)">Gravity Weight <input type="number" id="gen-stress-gravity" step="0.05" placeholder="0.15"></label>
+                                <label title="Contribution of side neighbors to support">Lateral Support <input type="number" id="gen-stress-lateral" step="0.05" placeholder="0.3"></label>
+                                <label title="Contribution of voxel directly below">Vertical Support <input type="number" id="gen-stress-vertical" step="0.1" placeholder="1.0"></label>
+                                <label title="BFS radius for stress recalculation">Propagation Radius <input type="number" id="gen-stress-prop-radius" step="1" min="1" placeholder="8"></label>
+                                <label title="Max voxels per single collapse event">Max Collapse Volume <input type="number" id="gen-stress-max-collapse" step="10" min="1" placeholder="200"></label>
+                            </div>
+                        </div>
+                        <div class="ore-subsection">
+                            <span class="ore-label" style="color:#a0a0b8;">Sleep Collapse</span> <em class="ore-hint">geological time degradation</em>
+                            <div class="settings-grid">
+                                <label title="WoodBeam survival probability per sleep cycle (0-1)">Wood Beam Survival <input type="number" id="gen-collapse-wood" step="0.05" placeholder="0.30"></label>
+                                <label title="MetalBeam survival probability per sleep cycle (0-1)">Metal Beam Survival <input type="number" id="gen-collapse-metal" step="0.05" placeholder="0.70"></label>
+                                <label title="Reinforcement survival probability per sleep cycle (0-1)">Reinforcement Survival <input type="number" id="gen-collapse-reinforce" step="0.05" placeholder="0.85"></label>
+                                <label title="Stress multiplier after support degradation">Stress Multiplier <input type="number" id="gen-collapse-stress-mult" step="0.1" placeholder="1.5"></label>
+                                <label title="Max cascade iterations during geological collapse">Max Cascade <input type="number" id="gen-collapse-max-cascade" step="1" min="1" placeholder="8"></label>
+                                <label title="Fraction of collapsed volume placed as rubble">Rubble Fill Ratio <input type="number" id="gen-collapse-rubble" step="0.05" placeholder="0.40"></label>
+                            </div>
+                        </div>
+                    </details>
+
                     <div class="sleep-section">
                         <h3 class="sleep-heading">Deep Sleep</h3>
                         <div class="gen-row">
