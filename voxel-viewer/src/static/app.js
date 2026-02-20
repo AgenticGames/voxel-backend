@@ -80,7 +80,8 @@
         // Stress & collapse settings
         "gen-stress-gravity", "gen-stress-lateral", "gen-stress-vertical",
         "gen-stress-prop-radius", "gen-stress-max-collapse",
-        "gen-collapse-wood", "gen-collapse-metal", "gen-collapse-reinforce",
+        "gen-collapse-slate", "gen-collapse-granite", "gen-collapse-limestone",
+        "gen-collapse-copper", "gen-collapse-iron", "gen-collapse-steel", "gen-collapse-crystal",
         "gen-collapse-stress-mult", "gen-collapse-max-cascade", "gen-collapse-rubble",
     ];
     var activePresetSlot = 0;
@@ -1137,9 +1138,13 @@
             appendParam(parts, "stress_prop_radius", "gen-stress-prop-radius");
             appendParam(parts, "stress_max_collapse", "gen-stress-max-collapse");
             // Sleep collapse settings
-            appendParam(parts, "collapse_wood", "gen-collapse-wood");
-            appendParam(parts, "collapse_metal", "gen-collapse-metal");
-            appendParam(parts, "collapse_reinforce", "gen-collapse-reinforce");
+            appendParam(parts, "collapse_slate", "gen-collapse-slate");
+            appendParam(parts, "collapse_granite", "gen-collapse-granite");
+            appendParam(parts, "collapse_limestone", "gen-collapse-limestone");
+            appendParam(parts, "collapse_copper", "gen-collapse-copper");
+            appendParam(parts, "collapse_iron", "gen-collapse-iron");
+            appendParam(parts, "collapse_steel", "gen-collapse-steel");
+            appendParam(parts, "collapse_crystal", "gen-collapse-crystal");
             appendParam(parts, "collapse_stress_mult", "gen-collapse-stress-mult");
             appendParam(parts, "collapse_max_cascade", "gen-collapse-max-cascade");
             appendParam(parts, "collapse_rubble", "gen-collapse-rubble");

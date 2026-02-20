@@ -67,12 +67,7 @@ pub fn apply_collapse(
                             continue;
                         }
 
-                        let survival_rate = match support {
-                            SupportType::WoodBeam => config.wood_beam_survival,
-                            SupportType::MetalBeam => config.metal_beam_survival,
-                            SupportType::Reinforcement => config.reinforcement_survival,
-                            SupportType::None => unreachable!(),
-                        };
+                        let survival_rate = config.strut_survival[support as u8 as usize];
 
                         // Get stress at this voxel
                         let stress_at_voxel = stress_fields
@@ -264,24 +259,24 @@ mod tests {
         (density_fields, stress_fields, support_fields)
     }
 
-    /// Create a collapse config where wood beams always fail.
-    fn config_wood_always_fails() -> CollapseConfig {
+    /// Create a collapse config where slate struts always fail.
+    fn config_slate_always_fails() -> CollapseConfig {
+        let mut survival = CollapseConfig::default().strut_survival;
+        survival[SupportType::SlateStrut as usize] = 0.0;
         CollapseConfig {
-            wood_beam_survival: 0.0,
-            metal_beam_survival: 0.70,
-            reinforcement_survival: 0.85,
+            strut_survival: survival,
             stress_multiplier: 1.5,
             max_cascade_iterations: 8,
             rubble_fill_ratio: 0.40,
         }
     }
 
-    /// Create a collapse config where reinforcement always survives.
-    fn config_reinforcement_always_survives() -> CollapseConfig {
+    /// Create a collapse config where crystal struts always survive.
+    fn config_crystal_always_survives() -> CollapseConfig {
+        let mut survival = CollapseConfig::default().strut_survival;
+        survival[SupportType::CrystalStrut as usize] = 1.0;
         CollapseConfig {
-            wood_beam_survival: 0.30,
-            metal_beam_survival: 0.70,
-            reinforcement_survival: 1.0,
+            strut_survival: survival,
             stress_multiplier: 1.5,
             max_cascade_iterations: 8,
             rubble_fill_ratio: 0.40,
@@ -289,13 +284,13 @@ mod tests {
     }
 
     #[test]
-    fn test_wood_beam_degrades() {
+    fn test_slate_strut_degrades() {
         let (mut density_fields, mut stress_fields, mut support_fields) = make_solid_world();
 
-        // Place a WoodBeam at (0,0,0) chunk, local (5,5,5)
-        support_fields.get_mut(&(0, 0, 0)).unwrap().set(5, 5, 5, SupportType::WoodBeam);
+        // Place a SlateStrut at (0,0,0) chunk, local (5,5,5)
+        support_fields.get_mut(&(0, 0, 0)).unwrap().set(5, 5, 5, SupportType::SlateStrut);
 
-        let config = config_wood_always_fails();
+        let config = config_slate_always_fails();
         let stress_config = StressConfig::default();
         let chunks = vec![(0, 0, 0)];
         let mut rng = ChaCha8Rng::seed_from_u64(42);
@@ -306,24 +301,24 @@ mod tests {
             &chunks, CHUNK_SIZE, &mut rng,
         );
 
-        // With survival=0.0, the WoodBeam should definitely fail
-        assert!(result.supports_degraded > 0, "WoodBeam with 0% survival should degrade");
+        // With survival=0.0, the SlateStrut should definitely fail
+        assert!(result.supports_degraded > 0, "SlateStrut with 0% survival should degrade");
         // Verify the support is now None
         assert_eq!(
             support_fields.get(&(0, 0, 0)).unwrap().get(5, 5, 5),
             SupportType::None,
-            "Degraded WoodBeam should be None"
+            "Degraded SlateStrut should be None"
         );
     }
 
     #[test]
-    fn test_reinforcement_survives() {
+    fn test_crystal_strut_survives() {
         let (mut density_fields, mut stress_fields, mut support_fields) = make_solid_world();
 
-        // Place Reinforcement at (0,0,0) chunk, local (5,5,5)
-        support_fields.get_mut(&(0, 0, 0)).unwrap().set(5, 5, 5, SupportType::Reinforcement);
+        // Place CrystalStrut at (0,0,0) chunk, local (5,5,5)
+        support_fields.get_mut(&(0, 0, 0)).unwrap().set(5, 5, 5, SupportType::CrystalStrut);
 
-        let config = config_reinforcement_always_survives();
+        let config = config_crystal_always_survives();
         let stress_config = StressConfig::default();
         let chunks = vec![(0, 0, 0)];
         let mut rng = ChaCha8Rng::seed_from_u64(42);
@@ -334,13 +329,12 @@ mod tests {
             &chunks, CHUNK_SIZE, &mut rng,
         );
 
-        // With survival=1.0, reinforcement should never fail
-        // (base_failure = 0.0, actual_failure = 0.0 * (1+stress) = 0.0)
-        assert_eq!(result.supports_degraded, 0, "Reinforcement with 100% survival should not degrade");
+        // With survival=1.0, crystal strut should never fail
+        assert_eq!(result.supports_degraded, 0, "CrystalStrut with 100% survival should not degrade");
         assert_eq!(
             support_fields.get(&(0, 0, 0)).unwrap().get(5, 5, 5),
-            SupportType::Reinforcement,
-            "Reinforcement should still be present"
+            SupportType::CrystalStrut,
+            "CrystalStrut should still be present"
         );
     }
 
@@ -350,9 +344,7 @@ mod tests {
         let stress_config = StressConfig::default();
         let multiplier = 1.5f32;
         let config = CollapseConfig {
-            wood_beam_survival: 1.0,     // No supports degrade
-            metal_beam_survival: 1.0,
-            reinforcement_survival: 1.0,
+            strut_survival: [1.0; 8],    // No supports degrade
             stress_multiplier: multiplier,
             max_cascade_iterations: 0,   // No cascade -- only test amplification
             rubble_fill_ratio: 0.40,
@@ -415,13 +407,13 @@ mod tests {
     fn test_collapse_records_manifest() {
         let (mut density_fields, mut stress_fields, mut support_fields) = make_solid_world();
 
-        // Place several WoodBeams in chunk (0,0,0)
+        // Place several SlateStruts in chunk (0,0,0)
         let sf = support_fields.get_mut(&(0, 0, 0)).unwrap();
-        sf.set(3, 3, 3, SupportType::WoodBeam);
-        sf.set(5, 5, 5, SupportType::WoodBeam);
-        sf.set(7, 7, 7, SupportType::WoodBeam);
+        sf.set(3, 3, 3, SupportType::SlateStrut);
+        sf.set(5, 5, 5, SupportType::SlateStrut);
+        sf.set(7, 7, 7, SupportType::SlateStrut);
 
-        let config = config_wood_always_fails();
+        let config = config_slate_always_fails();
         let stress_config = StressConfig::default();
         let chunks = vec![(0, 0, 0)];
         let mut rng = ChaCha8Rng::seed_from_u64(42);
@@ -432,7 +424,7 @@ mod tests {
             &chunks, CHUNK_SIZE, &mut rng,
         );
 
-        // With wood_beam_survival=0.0, all 3 should fail
+        // With slate_strut_survival=0.0, all 3 should fail
         assert_eq!(result.supports_degraded, 3);
 
         // Verify manifest has support changes recorded
@@ -444,9 +436,9 @@ mod tests {
             "Manifest should record 3 support changes, got {}",
             delta.support_changes.len()
         );
-        // Each should be WoodBeam -> None
+        // Each should be SlateStrut -> None
         for change in &delta.support_changes {
-            assert_eq!(change.old_support, SupportType::WoodBeam as u8);
+            assert_eq!(change.old_support, SupportType::SlateStrut as u8);
             assert_eq!(change.new_support, SupportType::None as u8);
         }
     }
@@ -454,17 +446,17 @@ mod tests {
     #[test]
     fn test_deterministic() {
         // Run collapse twice with the same seed, verify identical results
-        let config = config_wood_always_fails();
+        let config = config_slate_always_fails();
         let stress_config = StressConfig::default();
         let chunks = vec![(0, 0, 0)];
 
         let run = || {
             let (mut density_fields, mut stress_fields, mut support_fields) = make_solid_world();
-            // Place some supports
+            // Place some supports of different types
             let sf = support_fields.get_mut(&(0, 0, 0)).unwrap();
-            sf.set(3, 3, 3, SupportType::WoodBeam);
-            sf.set(5, 5, 5, SupportType::MetalBeam);
-            sf.set(8, 8, 8, SupportType::Reinforcement);
+            sf.set(3, 3, 3, SupportType::SlateStrut);
+            sf.set(5, 5, 5, SupportType::CopperStrut);
+            sf.set(8, 8, 8, SupportType::CrystalStrut);
 
             let mut rng = ChaCha8Rng::seed_from_u64(42);
             let result = apply_collapse(

@@ -106,12 +106,10 @@ impl Default for MineralConfig {
 /// Structural collapse configuration for sleep cycles.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollapseConfig {
-    /// Survival probability per sleep for WoodBeam supports
-    pub wood_beam_survival: f32,
-    /// Survival probability per sleep for MetalBeam supports
-    pub metal_beam_survival: f32,
-    /// Survival probability per sleep for Reinforcement supports
-    pub reinforcement_survival: f32,
+    /// Per-strut-type survival probabilities per sleep cycle (indexed by SupportType as u8, [0] unused).
+    /// [0]=None, [1]=SlateStrut, [2]=GraniteStrut, [3]=LimestoneStrut,
+    /// [4]=CopperStrut, [5]=IronStrut, [6]=SteelStrut, [7]=CrystalStrut
+    pub strut_survival: [f32; 8],
     /// Stress multiplier applied after support degradation (geological pressure)
     pub stress_multiplier: f32,
     /// Max collapse cascade iterations (higher than real-time's 5)
@@ -123,9 +121,16 @@ pub struct CollapseConfig {
 impl Default for CollapseConfig {
     fn default() -> Self {
         Self {
-            wood_beam_survival: 0.30,
-            metal_beam_survival: 0.70,
-            reinforcement_survival: 0.85,
+            strut_survival: [
+                0.0,   // None (unused)
+                0.25,  // SlateStrut (Tier 1 - stone, weakest)
+                0.30,  // GraniteStrut (Tier 1)
+                0.25,  // LimestoneStrut (Tier 1)
+                0.55,  // CopperStrut (Tier 2)
+                0.70,  // IronStrut (Tier 3)
+                0.85,  // SteelStrut (Tier 4)
+                0.95,  // CrystalStrut (Tier 5 - most durable)
+            ],
             stress_multiplier: 1.5,
             max_cascade_iterations: 8,
             rubble_fill_ratio: 0.40,

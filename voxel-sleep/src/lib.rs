@@ -337,11 +337,11 @@ mod tests {
     fn test_sleep_with_supports() {
         let (mut density_fields, mut stress_fields, mut support_fields) = make_test_world(16);
 
-        // Place some wood beam supports
+        // Place some strut supports
         if let Some(sf) = support_fields.get_mut(&(0, 0, 0)) {
-            sf.set(5, 5, 5, SupportType::WoodBeam);
-            sf.set(6, 5, 5, SupportType::WoodBeam);
-            sf.set(7, 5, 5, SupportType::MetalBeam);
+            sf.set(5, 5, 5, SupportType::SlateStrut);
+            sf.set(6, 5, 5, SupportType::SlateStrut);
+            sf.set(7, 5, 5, SupportType::CopperStrut);
         }
 
         let config = SleepConfig::default();

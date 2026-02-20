@@ -467,7 +467,8 @@ pub unsafe extern "C" fn voxel_query_stress_at(
 }
 
 /// Place a support structure at a UE world position.
-/// support_type: 1=WoodBeam, 2=MetalBeam, 3=Reinforcement.
+/// support_type: 1=SlateStrut, 2=GraniteStrut, 3=LimestoneStrut, 4=CopperStrut,
+///               5=IronStrut, 6=SteelStrut, 7=CrystalStrut.
 /// Returns 1 on success (queued), 0 on failure.
 #[no_mangle]
 pub unsafe extern "C" fn voxel_place_support(
@@ -544,6 +545,7 @@ pub unsafe extern "C" fn voxel_set_stress_config(
         warn_dust_threshold: ffi_cfg.warn_dust_threshold,
         warn_creak_threshold: ffi_cfg.warn_creak_threshold,
         warn_shake_threshold: ffi_cfg.warn_shake_threshold,
+        support_hardness: ffi_cfg.support_hardness,
     };
 
     engine.update_stress_config(stress_config);

@@ -233,6 +233,7 @@ pub struct FfiStressConfig {
     pub warn_dust_threshold: f32,
     pub warn_creak_threshold: f32,
     pub warn_shake_threshold: f32,
+    pub support_hardness: [f32; 8],
 }
 
 #[repr(C)]

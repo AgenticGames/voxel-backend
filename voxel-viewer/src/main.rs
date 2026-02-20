@@ -350,10 +350,14 @@ fn serve_generate(
     let mut stress_vertical: Option<f32> = None;
     let mut stress_prop_radius: Option<u32> = None;
     let mut stress_max_collapse: Option<u32> = None;
-    // Sleep collapse settings
-    let mut collapse_wood: Option<f32> = None;
-    let mut collapse_metal: Option<f32> = None;
-    let mut collapse_reinforce: Option<f32> = None;
+    // Sleep collapse settings (strut survival per type)
+    let mut collapse_slate: Option<f32> = None;
+    let mut collapse_granite: Option<f32> = None;
+    let mut collapse_limestone: Option<f32> = None;
+    let mut collapse_copper: Option<f32> = None;
+    let mut collapse_iron: Option<f32> = None;
+    let mut collapse_steel: Option<f32> = None;
+    let mut collapse_crystal: Option<f32> = None;
     let mut collapse_stress_mult: Option<f32> = None;
     let mut collapse_max_cascade: Option<u32> = None;
     let mut collapse_rubble: Option<f32> = None;
@@ -440,9 +444,13 @@ fn serve_generate(
             "stress_prop_radius" => { stress_prop_radius = val.parse().ok(); }
             "stress_max_collapse" => { stress_max_collapse = val.parse().ok(); }
             // Sleep collapse settings
-            "collapse_wood" => { collapse_wood = val.parse().ok(); }
-            "collapse_metal" => { collapse_metal = val.parse().ok(); }
-            "collapse_reinforce" => { collapse_reinforce = val.parse().ok(); }
+            "collapse_slate" => { collapse_slate = val.parse().ok(); }
+            "collapse_granite" => { collapse_granite = val.parse().ok(); }
+            "collapse_limestone" => { collapse_limestone = val.parse().ok(); }
+            "collapse_copper" => { collapse_copper = val.parse().ok(); }
+            "collapse_iron" => { collapse_iron = val.parse().ok(); }
+            "collapse_steel" => { collapse_steel = val.parse().ok(); }
+            "collapse_crystal" => { collapse_crystal = val.parse().ok(); }
             "collapse_stress_mult" => { collapse_stress_mult = val.parse().ok(); }
             "collapse_max_cascade" => { collapse_max_cascade = val.parse().ok(); }
             "collapse_rubble" => { collapse_rubble = val.parse().ok(); }
@@ -543,9 +551,13 @@ fn serve_generate(
     if let Some(v) = stress_prop_radius { sleep_cfg.stress.propagation_radius = v; }
     if let Some(v) = stress_max_collapse { sleep_cfg.stress.max_collapse_volume = v; }
     // Sleep collapse
-    if let Some(v) = collapse_wood { sleep_cfg.collapse.wood_beam_survival = v; }
-    if let Some(v) = collapse_metal { sleep_cfg.collapse.metal_beam_survival = v; }
-    if let Some(v) = collapse_reinforce { sleep_cfg.collapse.reinforcement_survival = v; }
+    if let Some(v) = collapse_slate { sleep_cfg.collapse.strut_survival[1] = v; }
+    if let Some(v) = collapse_granite { sleep_cfg.collapse.strut_survival[2] = v; }
+    if let Some(v) = collapse_limestone { sleep_cfg.collapse.strut_survival[3] = v; }
+    if let Some(v) = collapse_copper { sleep_cfg.collapse.strut_survival[4] = v; }
+    if let Some(v) = collapse_iron { sleep_cfg.collapse.strut_survival[5] = v; }
+    if let Some(v) = collapse_steel { sleep_cfg.collapse.strut_survival[6] = v; }
+    if let Some(v) = collapse_crystal { sleep_cfg.collapse.strut_survival[7] = v; }
     if let Some(v) = collapse_stress_mult { sleep_cfg.collapse.stress_multiplier = v; }
     if let Some(v) = collapse_max_cascade { sleep_cfg.collapse.max_cascade_iterations = v; }
     if let Some(v) = collapse_rubble { sleep_cfg.collapse.rubble_fill_ratio = v; }

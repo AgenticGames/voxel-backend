@@ -42,17 +42,25 @@ impl StressField {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SupportType {
     None = 0,
-    WoodBeam = 1,
-    MetalBeam = 2,
-    Reinforcement = 3,
+    SlateStrut = 1,
+    GraniteStrut = 2,
+    LimestoneStrut = 3,
+    CopperStrut = 4,
+    IronStrut = 5,
+    SteelStrut = 6,
+    CrystalStrut = 7,
 }
 
 impl SupportType {
     pub fn from_u8(v: u8) -> Self {
         match v {
-            1 => SupportType::WoodBeam,
-            2 => SupportType::MetalBeam,
-            3 => SupportType::Reinforcement,
+            1 => SupportType::SlateStrut,
+            2 => SupportType::GraniteStrut,
+            3 => SupportType::LimestoneStrut,
+            4 => SupportType::CopperStrut,
+            5 => SupportType::IronStrut,
+            6 => SupportType::SteelStrut,
+            7 => SupportType::CrystalStrut,
             _ => SupportType::None,
         }
     }
@@ -120,11 +128,15 @@ pub const DEFAULT_MATERIAL_HARDNESS: [f32; 19] = [
 ];
 
 /// Support hardness values (how much stress each support type absorbs).
-pub const SUPPORT_HARDNESS: [f32; 4] = [
+pub const SUPPORT_HARDNESS: [f32; 8] = [
     0.0,   // None
-    0.95,  // WoodBeam
-    1.50,  // MetalBeam
-    1.20,  // Reinforcement
+    0.95,  // SlateStrut (Tier 1)
+    0.95,  // GraniteStrut (Tier 1)
+    0.95,  // LimestoneStrut (Tier 1)
+    1.10,  // CopperStrut (Tier 2)
+    1.30,  // IronStrut (Tier 3)
+    1.50,  // SteelStrut (Tier 4)
+    1.80,  // CrystalStrut (Tier 5)
 ];
 
 // ── StressConfig (moved from voxel-gen) ──
@@ -156,6 +168,8 @@ pub struct StressConfig {
     pub warn_creak_threshold: f32,
     /// Stress threshold for shake warning (90%).
     pub warn_shake_threshold: f32,
+    /// Per-support-type hardness values (indexed by SupportType as u8).
+    pub support_hardness: [f32; 8],
 }
 
 impl Default for StressConfig {
@@ -173,6 +187,7 @@ impl Default for StressConfig {
             warn_dust_threshold: 0.6,
             warn_creak_threshold: 0.8,
             warn_shake_threshold: 0.9,
+            support_hardness: SUPPORT_HARDNESS,
         }
     }
 }
@@ -355,7 +370,7 @@ pub fn calc_voxel_stress(
                 let support = sample_support(support_fields, wx + dx, wy + dy, wz + dz, chunk_size);
                 if support != SupportType::None {
                     let dist = ((dx * dx + dy * dy + dz * dz) as f32).sqrt();
-                    let support_value = SUPPORT_HARDNESS[support as u8 as usize];
+                    let support_value = config.support_hardness[support as u8 as usize];
                     raw_stress -= support_value / dist;
                 }
             }
@@ -708,24 +723,28 @@ mod tests {
         let mut sf = SupportField::new(17);
         assert_eq!(sf.supports.len(), 17 * 17 * 17);
         assert!(!sf.has_support(0, 0, 0));
-        sf.set(3, 3, 3, SupportType::WoodBeam);
+        sf.set(3, 3, 3, SupportType::SlateStrut);
         assert!(sf.has_support(3, 3, 3));
-        assert_eq!(sf.get(3, 3, 3), SupportType::WoodBeam);
+        assert_eq!(sf.get(3, 3, 3), SupportType::SlateStrut);
     }
 
     #[test]
     fn support_type_from_u8() {
         assert_eq!(SupportType::from_u8(0), SupportType::None);
-        assert_eq!(SupportType::from_u8(1), SupportType::WoodBeam);
-        assert_eq!(SupportType::from_u8(2), SupportType::MetalBeam);
-        assert_eq!(SupportType::from_u8(3), SupportType::Reinforcement);
+        assert_eq!(SupportType::from_u8(1), SupportType::SlateStrut);
+        assert_eq!(SupportType::from_u8(2), SupportType::GraniteStrut);
+        assert_eq!(SupportType::from_u8(3), SupportType::LimestoneStrut);
+        assert_eq!(SupportType::from_u8(4), SupportType::CopperStrut);
+        assert_eq!(SupportType::from_u8(5), SupportType::IronStrut);
+        assert_eq!(SupportType::from_u8(6), SupportType::SteelStrut);
+        assert_eq!(SupportType::from_u8(7), SupportType::CrystalStrut);
         assert_eq!(SupportType::from_u8(255), SupportType::None);
     }
 
     #[test]
     fn hardness_tables_correct_length() {
         assert_eq!(DEFAULT_MATERIAL_HARDNESS.len(), 19);
-        assert_eq!(SUPPORT_HARDNESS.len(), 4);
+        assert_eq!(SUPPORT_HARDNESS.len(), 8);
     }
 
     fn make_density_field(size: usize, fill_solid: bool) -> DensityField {
@@ -895,7 +914,7 @@ mod tests {
         }
 
         if let Some(sf) = support_fields_with.get_mut(&(0, 0, 0)) {
-            sf.set(8, 7, 8, SupportType::MetalBeam);
+            sf.set(8, 7, 8, SupportType::SteelStrut);
         }
 
         let stress_without = calc_voxel_stress(

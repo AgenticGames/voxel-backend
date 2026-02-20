@@ -394,8 +394,7 @@ impl ChunkStore {
     }
 
     /// Place a support structure at a world position.
-    /// WoodBeam/MetalBeam: target must be Air.
-    /// Reinforcement: target must be solid.
+    /// All strut types can be placed in air or solid voxels.
     /// Returns (success, collapse_events, dirty_chunks_with_bounds).
     pub fn place_support(
         &mut self,
@@ -413,19 +412,8 @@ impl ChunkStore {
         let lz = world_pos.2.rem_euclid(cs) as usize;
         let key = (cx, cy, cz);
 
-        // Check placement validity
-        let is_solid = self.density_fields
-            .get(&key)
-            .map(|df| df.get(lx, ly, lz).material.is_solid())
-            .unwrap_or(false);
-
-        let valid = match support_type {
-            SupportType::WoodBeam | SupportType::MetalBeam => !is_solid,
-            SupportType::Reinforcement => is_solid,
-            SupportType::None => false,
-        };
-
-        if !valid {
+        // Only SupportType::None is invalid for placement
+        if support_type == SupportType::None {
             return (false, Vec::new(), Vec::new());
         }
 
