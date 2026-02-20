@@ -313,6 +313,34 @@ impl VoxelEngine {
         ))
     }
 
+    /// Find a wall-adjacent air cell near a target, excluding a radius around an exclusion point.
+    /// Takes UE world coords, returns UE world coords via Option.
+    pub fn find_wall_near(
+        &self,
+        ue_x: f32, ue_y: f32, ue_z: f32,
+        exclude_ue_x: f32, exclude_ue_y: f32, exclude_ue_z: f32,
+        exclude_radius: f32,
+        world_scale: f32,
+    ) -> Option<(f32, f32, f32)> {
+        use crate::convert::from_ue_world_pos;
+
+        let chunk_size = self.config.read().map(|c| c.chunk_size).unwrap_or(16);
+        let target = from_ue_world_pos(ue_x, ue_y, ue_z, world_scale);
+        let exclude = from_ue_world_pos(exclude_ue_x, exclude_ue_y, exclude_ue_z, world_scale);
+        // Convert UE-unit radius to voxel-unit radius
+        let voxel_radius = exclude_radius / world_scale;
+
+        let store = self.store.read().ok()?;
+        let best = store.find_wall_location_near(target, exclude, voxel_radius, chunk_size)?;
+
+        // Convert Rust pos back to UE: (x * scale, -z * scale, y * scale)
+        Some((
+            best.x * world_scale,
+            -best.z * world_scale,
+            best.y * world_scale,
+        ))
+    }
+
     /// Query the stress field for a chunk. Returns a cloned StressField if loaded.
     pub fn query_stress(&self, chunk: (i32, i32, i32)) -> Option<StressField> {
         let store = self.store.read().ok()?;

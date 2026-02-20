@@ -562,6 +562,64 @@ impl ChunkStore {
 
         best_pos
     }
+
+    /// Find a wall-adjacent air cell near `target`, excluding cells within
+    /// `exclude_radius` voxels of `exclude_center`. Used to offset the chrysalis
+    /// from the water spring so it's visible.
+    pub fn find_wall_location_near(
+        &self,
+        target: Vec3,
+        exclude_center: Vec3,
+        exclude_radius: f32,
+        chunk_size: usize,
+    ) -> Option<Vec3> {
+        let cs = chunk_size as f32;
+        let excl_r2 = exclude_radius * exclude_radius;
+        let mut best_dist = f32::MAX;
+        let mut best_pos: Option<Vec3> = None;
+
+        for (&(cx, cy, cz), density) in &self.density_fields {
+            let origin = Vec3::new(cx as f32 * cs, cy as f32 * cs, cz as f32 * cs);
+
+            for z in 1..(chunk_size - 1) {
+                for y in 1..(chunk_size - 1) {
+                    for x in 1..(chunk_size - 1) {
+                        let sample = density.get(x, y, z);
+                        if sample.material.is_solid() {
+                            continue;
+                        }
+
+                        let world_pos = origin + Vec3::new(x as f32, y as f32, z as f32);
+
+                        // Exclude zone around the spring
+                        if (world_pos - exclude_center).length_squared() < excl_r2 {
+                            continue;
+                        }
+
+                        // Must have at least one solid face neighbor (wall adjacency)
+                        let has_wall = density.get(x + 1, y, z).material.is_solid()
+                            || density.get(x.wrapping_sub(1), y, z).material.is_solid()
+                            || density.get(x, y + 1, z).material.is_solid()
+                            || density.get(x, y.wrapping_sub(1), z).material.is_solid()
+                            || density.get(x, y, z + 1).material.is_solid()
+                            || density.get(x, y, z.wrapping_sub(1)).material.is_solid();
+
+                        if !has_wall {
+                            continue;
+                        }
+
+                        let dist = (world_pos - target).length_squared();
+                        if dist < best_dist {
+                            best_dist = dist;
+                            best_pos = Some(world_pos);
+                        }
+                    }
+                }
+            }
+        }
+
+        best_pos
+    }
 }
 
 /// Extract a solid mask bitfield from a density field.

@@ -346,6 +346,43 @@ pub unsafe extern "C" fn voxel_find_spring(
     }
 }
 
+/// Find a wall-adjacent air cell near a target, excluding a radius around a point.
+/// Returns 1 if found (out pointers written), 0 if no suitable location.
+/// All coordinates are UE world space.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_find_wall_near(
+    engine: *mut c_void,
+    target_x: f32,
+    target_y: f32,
+    target_z: f32,
+    exclude_x: f32,
+    exclude_y: f32,
+    exclude_z: f32,
+    exclude_radius: f32,
+    world_scale: f32,
+    out_x: *mut f32,
+    out_y: *mut f32,
+    out_z: *mut f32,
+) -> u32 {
+    if engine.is_null() || out_x.is_null() || out_y.is_null() || out_z.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    match engine.find_wall_near(
+        target_x, target_y, target_z,
+        exclude_x, exclude_y, exclude_z,
+        exclude_radius, world_scale,
+    ) {
+        Some((x, y, z)) => {
+            *out_x = x;
+            *out_y = y;
+            *out_z = z;
+            1
+        }
+        None => 0,
+    }
+}
+
 /// Query the stress field for a chunk. Returns heap-allocated stress data.
 /// Caller MUST call `voxel_free_stress_data` on the result.
 /// Chunk coords are UE space.

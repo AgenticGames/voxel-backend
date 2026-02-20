@@ -30,6 +30,30 @@ pub fn tick_fluid(
     dirty
 }
 
+/// Count how many of the 6 face neighbors are solid (or out of bounds).
+fn count_solid_face_neighbors(solid_mask: &[u64], size: usize, x: usize, y: usize, z: usize) -> u8 {
+    let mut count: u8 = 0;
+    let deltas: [(i32, i32, i32); 6] = [
+        (1, 0, 0), (-1, 0, 0),
+        (0, 1, 0), (0, -1, 0),
+        (0, 0, 1), (0, 0, -1),
+    ];
+    for (dx, dy, dz) in deltas {
+        let nx = x as i32 + dx;
+        let ny = y as i32 + dy;
+        let nz = z as i32 + dz;
+        if nx < 0 || nx >= size as i32 || ny < 0 || ny >= size as i32 || nz < 0 || nz >= size as i32 {
+            count += 1; // out of bounds = solid
+        } else {
+            let ni = nz as usize * size * size + ny as usize * size + nx as usize;
+            if (solid_mask[ni / 64] >> (ni % 64)) & 1 == 1 {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
 /// Simulate one tick for a single chunk. Returns true if any cell changed.
 fn tick_chunk(
     chunks: &mut HashMap<(i32, i32, i32), ChunkFluidGrid>,
@@ -75,6 +99,12 @@ fn tick_chunk(
                     continue;
                 }
                 if !is_lava && is_lava_tick {
+                    continue;
+                }
+
+                // Skip flow for sources trapped in solid rock pockets
+                let solid_neighbors = count_solid_face_neighbors(&solid_mask, size, x, y, z);
+                if solid_neighbors >= 5 {
                     continue;
                 }
 
@@ -342,5 +372,41 @@ mod tests {
 
         let solidify = detect_solidification(&chunks);
         assert!(!solidify.is_empty(), "Should detect solidification");
+    }
+
+    #[test]
+    fn contained_source_doesnt_flow() {
+        let mut chunks = HashMap::new();
+        let key = (0, 0, 0);
+        let mut grid = make_chunk(16);
+        // Place water source at (8,8,8)
+        grid.get_mut(8, 8, 8).level = SOURCE_LEVEL;
+        grid.get_mut(8, 8, 8).fluid_type = FluidType::Water;
+        // Surround with solid on all 6 faces
+        grid.set_solid(7, 8, 8, true);
+        grid.set_solid(9, 8, 8, true);
+        grid.set_solid(8, 7, 8, true);
+        grid.set_solid(8, 9, 8, true);
+        grid.set_solid(8, 8, 7, true);
+        grid.set_solid(8, 8, 9, true);
+        chunks.insert(key, grid);
+
+        let config = crate::FluidConfig::default();
+        // Tick several times
+        for _ in 0..10 {
+            tick_fluid(&mut chunks, 16, false, &config);
+        }
+
+        // No fluid should exist outside the source cell
+        let grid = &chunks[&key];
+        for z in 0..16 {
+            for y in 0..16 {
+                for x in 0..16 {
+                    if (x, y, z) == (8, 8, 8) { continue; }
+                    assert!(grid.get(x, y, z).level < 0.001,
+                        "Fluid leaked to ({},{},{}) with level {}", x, y, z, grid.get(x, y, z).level);
+                }
+            }
+        }
     }
 }

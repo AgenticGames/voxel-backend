@@ -30,13 +30,13 @@ pub fn mesh_fluid(grid: &ChunkFluidGrid) -> FluidMeshData {
     // Build a scalar field of fluid levels, sized (size+1)^3 so we have corners
     // for every cell. We use the fluid levels directly; solid cells get 0.
     let field = |x: usize, y: usize, z: usize| -> f32 {
-        if x >= size || y >= size || z >= size {
+        let cx = x.min(size - 1);
+        let cy = y.min(size - 1);
+        let cz = z.min(size - 1);
+        if grid.is_solid(cx, cy, cz) {
             return 0.0;
         }
-        if grid.is_solid(x, y, z) {
-            return 0.0;
-        }
-        grid.get(x, y, z).level
+        grid.get(cx, cy, cz).level
     };
 
     // March through cells (size-1 cubes along each axis)
@@ -120,11 +120,13 @@ pub fn mesh_fluid(grid: &ChunkFluidGrid) -> FluidMeshData {
                         u[0] * v[1] - u[1] * v[0],
                     ];
                     let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-                    if len > 1e-8 {
-                        n[0] /= len;
-                        n[1] /= len;
-                        n[2] /= len;
+                    if len < 1e-4 {
+                        i += 3;
+                        continue;
                     }
+                    n[0] /= len;
+                    n[1] /= len;
+                    n[2] /= len;
 
                     let base = mesh.positions.len() as u32;
                     mesh.positions.push(p0);
@@ -150,7 +152,7 @@ pub fn mesh_fluid(grid: &ChunkFluidGrid) -> FluidMeshData {
 }
 
 /// Iso-level for fluid surface extraction.
-const ISO_LEVEL: f32 = 0.0625;
+const ISO_LEVEL: f32 = 0.15;
 
 /// Determine the dominant fluid type among non-empty neighboring cells.
 fn dominant_fluid_type(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> FluidType {
