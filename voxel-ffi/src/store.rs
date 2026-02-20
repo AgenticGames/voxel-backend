@@ -27,6 +27,8 @@ pub struct ChunkStore {
     pub stress_fields: HashMap<(i32, i32, i32), StressField>,
     /// Per-chunk support structure data.
     pub support_fields: HashMap<(i32, i32, i32), SupportField>,
+    /// Tracks which 2x2 cells have been terraced for building placement.
+    pub terraced_cells: HashSet<(i32, i32, i32)>,
 }
 
 impl ChunkStore {
@@ -38,6 +40,7 @@ impl ChunkStore {
             chunk_seam_data: HashMap::new(),
             stress_fields: HashMap::new(),
             support_fields: HashMap::new(),
+            terraced_cells: HashSet::new(),
         }
     }
 
@@ -651,6 +654,94 @@ impl ChunkStore {
         }
 
         best_pos
+    }
+
+    /// Flatten a 2x2 terrace footprint for building placement.
+    /// Sets the floor layer to solid host_material and clears 2 layers above for clearance.
+    /// Returns the re-meshed dirty chunks (in UE coords).
+    pub fn flatten_terrace(
+        &mut self,
+        base: glam::IVec3,
+        host_material: Material,
+        config: &GenerationConfig,
+        world_scale: f32,
+    ) -> Vec<((i32, i32, i32), ConvertedMesh)> {
+        let cs = config.chunk_size as i32;
+
+        let mut dirty_set: HashSet<(i32, i32, i32)> = HashSet::new();
+
+        for dx in 0..2 {
+            for dz in 0..2 {
+                let wx = base.x + dx;
+                let wy = base.y;
+                let wz = base.z + dz;
+
+                // Process 3 vertical layers: floor (y+0), clearance (y+1, y+2)
+                for dy in 0..3i32 {
+                    let vy = wy + dy;
+                    let cx = wx.div_euclid(cs);
+                    let cy = vy.div_euclid(cs);
+                    let cz = wz.div_euclid(cs);
+                    let lx = wx.rem_euclid(cs) as usize;
+                    let ly = vy.rem_euclid(cs) as usize;
+                    let lz = wz.rem_euclid(cs) as usize;
+                    let key = (cx, cy, cz);
+
+                    if let Some(density) = self.density_fields.get_mut(&key) {
+                        let sample = density.get_mut(lx, ly, lz);
+                        if dy == 0 {
+                            // Floor: make solid with host material
+                            sample.density = 1.0;
+                            sample.material = host_material;
+                        } else {
+                            // Clearance: make air
+                            sample.density = -1.0;
+                            sample.material = Material::Air;
+                        }
+                        dirty_set.insert(key);
+                    }
+                }
+
+                // Track this cell as terraced
+                self.terraced_cells.insert((wx, wy, wz));
+            }
+        }
+
+        // Build dirty chunks with full-chunk bounds for remeshing
+        let chunk_size = config.chunk_size;
+        let dirty_chunks: Vec<_> = dirty_set
+            .into_iter()
+            .map(|key| (key, 0usize, 0usize, 0usize, chunk_size, chunk_size, chunk_size))
+            .collect();
+
+        self.remesh_dirty(&dirty_chunks, config, world_scale)
+    }
+
+    /// Query whether a 2x2 terrace exists at the given base position.
+    /// Returns Some(material) of the floor if all 4 cells are terraced, None otherwise.
+    pub fn query_terrace(&self, base: glam::IVec3) -> Option<Material> {
+        // Check all 4 cells
+        for dx in 0..2 {
+            for dz in 0..2 {
+                if !self.terraced_cells.contains(&(base.x + dx, base.y, base.z + dz)) {
+                    return None;
+                }
+            }
+        }
+
+        // All 4 cells present; read material from the floor voxel
+        let cs = 16i32; // standard chunk size
+        let cx = base.x.div_euclid(cs);
+        let cy = base.y.div_euclid(cs);
+        let cz = base.z.div_euclid(cs);
+        let lx = base.x.rem_euclid(cs) as usize;
+        let ly = base.y.rem_euclid(cs) as usize;
+        let lz = base.z.rem_euclid(cs) as usize;
+        let key = (cx, cy, cz);
+
+        self.density_fields
+            .get(&key)
+            .map(|df| df.get(lx, ly, lz).material)
     }
 }
 

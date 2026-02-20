@@ -396,6 +396,59 @@ impl VoxelEngine {
         }
     }
 
+    /// Request flattening a 2x2 terrace at a UE world position.
+    /// Snaps to 2x2 grid and determines host rock from depth.
+    /// Returns 1 on success, 0 if queue full.
+    pub fn request_flatten(&self, ue_x: f32, ue_y: f32, ue_z: f32, scale: f32) -> u32 {
+        let rust_x = ue_x / scale;
+        let rust_y = ue_z / scale;
+        let rust_z = -ue_y / scale;
+
+        let base_x = (rust_x as i32) & !1;
+        let base_y = rust_y as i32;
+        let base_z = (rust_z as i32) & !1;
+
+        let host_material = {
+            let cfg = self.config.read().unwrap();
+            voxel_gen::density::host_rock_for_depth(rust_y as f64, &cfg.ore.host_rock) as u8
+        };
+
+        match self.mine_tx.try_send(WorkerRequest::Flatten {
+            base_x,
+            base_y,
+            base_z,
+            host_material,
+        }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
+    /// Query whether a 2x2 terrace exists at a UE world position.
+    /// Returns Some(material_id) if terraced, None otherwise.
+    pub fn query_terrace(&self, ue_x: f32, ue_y: f32, ue_z: f32, scale: f32) -> Option<u8> {
+        let rust_x = ue_x / scale;
+        let rust_y = ue_z / scale;
+        let rust_z = -ue_y / scale;
+
+        let base_x = (rust_x as i32) & !1;
+        let base_y = rust_y as i32;
+        let base_z = (rust_z as i32) & !1;
+
+        let store = self.store.read().unwrap();
+        store
+            .query_terrace(glam::IVec3::new(base_x, base_y, base_z))
+            .map(|m| m as u8)
+    }
+
+    /// Query the host rock material at a UE world position based on depth.
+    /// Returns material id as u8.
+    pub fn query_host_rock_at(&self, _ue_x: f32, _ue_y: f32, ue_z: f32, scale: f32) -> u8 {
+        let rust_y = ue_z / scale;
+        let cfg = self.config.read().unwrap();
+        voxel_gen::density::host_rock_for_depth(rust_y as f64, &cfg.ore.host_rock) as u8
+    }
+
     /// Update the stress configuration.
     pub fn update_stress_config(&self, new_config: StressConfig) {
         if let Ok(mut cfg) = self.stress_config.write() {

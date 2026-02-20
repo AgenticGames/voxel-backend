@@ -288,6 +288,12 @@ pub enum WorkerRequest {
     Mine {
         request: FfiMineRequest,
     },
+    Flatten {
+        base_x: i32,
+        base_y: i32,
+        base_z: i32,
+        host_material: u8,
+    },
     Unload {
         chunk: (i32, i32, i32),
     },

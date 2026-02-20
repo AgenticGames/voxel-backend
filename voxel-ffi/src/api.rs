@@ -630,6 +630,67 @@ pub unsafe extern "C" fn voxel_free_sleep_result(result: *mut FfiSleepResult) {
     }
 }
 
+/// Request flattening a 2x2 terrace at a UE world position.
+/// Snaps to grid and uses depth-appropriate host rock.
+/// Returns 1 on success, 0 if queue full.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_request_flatten(
+    engine: *mut c_void,
+    x: f32,
+    y: f32,
+    z: f32,
+    scale: f32,
+) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.request_flatten(x, y, z, scale)
+}
+
+/// Query whether a 2x2 terrace exists at a UE world position.
+/// Returns 1 if found (out_mat written), 0 if not found.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_query_terrace(
+    engine: *mut c_void,
+    x: f32,
+    y: f32,
+    z: f32,
+    scale: f32,
+    out_mat: *mut u8,
+) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    match engine.query_terrace(x, y, z, scale) {
+        Some(mat) => {
+            if !out_mat.is_null() {
+                *out_mat = mat;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+/// Query the host rock material at a UE world position based on depth.
+/// Returns the material id as u8.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_query_host_rock_at(
+    engine: *mut c_void,
+    x: f32,
+    y: f32,
+    z: f32,
+    scale: f32,
+) -> u8 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.query_host_rock_at(x, y, z, scale)
+}
+
 // ── Internal helpers ──
 
 fn convert_mesh_to_ffi_result(

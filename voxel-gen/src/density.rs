@@ -306,6 +306,22 @@ fn assign_material(
     select_host_rock(wx, wy, wz, &ore.host_rock, noise)
 }
 
+/// Simplified host rock selection based purely on depth thresholds (no noise).
+/// Used by the terrace/building system to determine the correct floor material.
+pub fn host_rock_for_depth(y: f64, host: &HostRockConfig) -> Material {
+    if y > host.sandstone_depth {
+        Material::Sandstone
+    } else if y > host.granite_depth {
+        Material::Limestone
+    } else if y > host.basalt_depth {
+        Material::Granite
+    } else if y > host.slate_depth {
+        Material::Slate
+    } else {
+        Material::Marble
+    }
+}
+
 /// Select host rock based on depth with noise-perturbed layer boundaries.
 ///
 /// Layers (top to bottom): Sandstone → Limestone → Granite → Slate → Marble

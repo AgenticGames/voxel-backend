@@ -34,6 +34,30 @@ pub enum Material {
 }
 
 impl Material {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Material::Sandstone,
+            2 => Material::Limestone,
+            3 => Material::Granite,
+            4 => Material::Basalt,
+            5 => Material::Slate,
+            6 => Material::Marble,
+            7 => Material::Iron,
+            8 => Material::Copper,
+            9 => Material::Malachite,
+            10 => Material::Tin,
+            11 => Material::Gold,
+            12 => Material::Diamond,
+            13 => Material::Kimberlite,
+            14 => Material::Sulfide,
+            15 => Material::Quartz,
+            16 => Material::Pyrite,
+            17 => Material::Amethyst,
+            18 => Material::Crystal,
+            _ => Material::Air,
+        }
+    }
+
     pub fn is_solid(self) -> bool {
         self != Material::Air
     }

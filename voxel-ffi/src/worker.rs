@@ -154,6 +154,16 @@ fn handle_request(
             // Try to generate seams for this chunk and its neighbors
             incremental_seam_pass(chunk, &cfg, store, result_tx, world_scale);
         }
+        WorkerRequest::Flatten { base_x, base_y, base_z, host_material } => {
+            let cfg = config.read().unwrap().clone();
+            let mat = voxel_core::material::Material::from_u8(host_material);
+            let mut s = store.write().unwrap();
+            let meshes = s.flatten_terrace(glam::IVec3::new(base_x, base_y, base_z), mat, &cfg, world_scale);
+            drop(s);
+            for (key, mesh) in meshes {
+                let _ = result_tx.send(WorkerResult::ChunkMesh { chunk: key, mesh, generation: 0 });
+            }
+        }
         WorkerRequest::Mine { request } => {
             let cfg = config.read().unwrap().clone();
 
