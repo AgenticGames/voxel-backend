@@ -441,6 +441,29 @@ impl VoxelEngine {
             .map(|m| m as u8)
     }
 
+    /// Query floor support for a 2x2 flatten ghost preview.
+    /// Returns (solid_count, snapped_ue_x, snapped_ue_y, snapped_ue_z).
+    pub fn query_flatten_support(&self, ue_x: f32, ue_y: f32, ue_z: f32, scale: f32) -> (u8, f32, f32, f32) {
+        let rust_x = ue_x / scale;
+        let rust_y = ue_z / scale;
+        let rust_z = -ue_y / scale;
+
+        let base_x = (rust_x as i32) & !1;
+        let base_y = rust_y as i32;
+        let base_z = (rust_z as i32) & !1;
+
+        let cs = { self.config.read().unwrap().chunk_size as i32 };
+        let store = self.store.read().unwrap();
+        let count = store.query_flatten_support(glam::IVec3::new(base_x, base_y, base_z), cs);
+
+        // Convert snapped position back to UE coords
+        let snapped_ue_x = base_x as f32 * scale;
+        let snapped_ue_y = -(base_z as f32) * scale;
+        let snapped_ue_z = base_y as f32 * scale;
+
+        (count, snapped_ue_x, snapped_ue_y, snapped_ue_z)
+    }
+
     /// Query the host rock material at a UE world position based on depth.
     /// Returns material id as u8.
     pub fn query_host_rock_at(&self, _ue_x: f32, _ue_y: f32, ue_z: f32, scale: f32) -> u8 {

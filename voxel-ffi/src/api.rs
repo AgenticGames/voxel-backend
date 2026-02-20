@@ -674,6 +674,30 @@ pub unsafe extern "C" fn voxel_query_terrace(
     }
 }
 
+/// Query floor support for a 2x2 flatten ghost preview.
+/// Returns solid count (0–4). Writes snapped UE position to out pointers.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_query_flatten_support(
+    engine: *mut c_void,
+    x: f32,
+    y: f32,
+    z: f32,
+    scale: f32,
+    out_x: *mut f32,
+    out_y: *mut f32,
+    out_z: *mut f32,
+) -> u8 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let (count, sx, sy, sz) = engine.query_flatten_support(x, y, z, scale);
+    if !out_x.is_null() { *out_x = sx; }
+    if !out_y.is_null() { *out_y = sy; }
+    if !out_z.is_null() { *out_z = sz; }
+    count
+}
+
 /// Query the host rock material at a UE world position based on depth.
 /// Returns the material id as u8.
 #[no_mangle]

@@ -717,6 +717,33 @@ impl ChunkStore {
         self.remesh_dirty(&dirty_chunks, config, world_scale)
     }
 
+    /// Query floor support for a 2x2 flatten preview.
+    /// Checks 4 cells one layer below the terrace floor; density > 0 = solid.
+    /// Returns count of solid cells (0–4).
+    pub fn query_flatten_support(&self, base: glam::IVec3, chunk_size: i32) -> u8 {
+        let mut solid_count = 0u8;
+        let check_y = base.y - 1;
+        for dx in 0..2 {
+            for dz in 0..2 {
+                let wx = base.x + dx;
+                let wz = base.z + dz;
+                let cx = wx.div_euclid(chunk_size);
+                let cy = check_y.div_euclid(chunk_size);
+                let cz = wz.div_euclid(chunk_size);
+                let lx = wx.rem_euclid(chunk_size) as usize;
+                let ly = check_y.rem_euclid(chunk_size) as usize;
+                let lz = wz.rem_euclid(chunk_size) as usize;
+                if let Some(df) = self.density_fields.get(&(cx, cy, cz)) {
+                    if df.get(lx, ly, lz).density > 0.0 {
+                        solid_count += 1;
+                    }
+                }
+                // Missing chunk = no support (stays 0)
+            }
+        }
+        solid_count
+    }
+
     /// Query whether a 2x2 terrace exists at the given base position.
     /// Returns Some(material) of the floor if all 4 cells are terraced, None otherwise.
     pub fn query_terrace(&self, base: glam::IVec3) -> Option<Material> {
