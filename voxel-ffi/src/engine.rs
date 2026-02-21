@@ -14,6 +14,7 @@ use voxel_gen::config::{
 };
 
 use crate::convert::ue_chunk_to_rust;
+use crate::profiler::StreamingProfiler;
 use crate::store::ChunkStore;
 use crate::types::*;
 use crate::worker::worker_loop;
@@ -46,6 +47,9 @@ pub struct VoxelEngine {
 
     // Sleep
     sleep_complete: Arc<Mutex<Option<SleepCompleteData>>>,
+
+    // Profiler
+    profiler: Arc<StreamingProfiler>,
 
     // Worker threads
     workers: Vec<JoinHandle<()>>,
@@ -91,8 +95,10 @@ impl VoxelEngine {
             );
         });
 
+        let profiler = Arc::new(StreamingProfiler::new(num_workers));
+
         let mut workers = Vec::with_capacity(num_workers);
-        for _ in 0..num_workers {
+        for worker_id in 0..num_workers {
             let shutdown = Arc::clone(&shutdown);
             let generate_rx = generate_rx.clone();
             let mine_rx = mine_rx.clone();
@@ -102,6 +108,7 @@ impl VoxelEngine {
             let stress_cfg = Arc::clone(&stress_config);
             let gen_counters = Arc::clone(&generation_counters);
             let fluid_tx = fluid_event_tx.clone();
+            let prof = Arc::clone(&profiler);
 
             let handle = thread::spawn(move || {
                 worker_loop(
@@ -115,6 +122,8 @@ impl VoxelEngine {
                     gen_counters,
                     world_scale,
                     fluid_tx,
+                    prof,
+                    worker_id,
                 );
             });
             workers.push(handle);
@@ -132,6 +141,7 @@ impl VoxelEngine {
             generation_counters,
             shutdown,
             sleep_complete: Arc::new(Mutex::new(None)),
+            profiler,
             workers,
         }
     }
@@ -152,6 +162,7 @@ impl VoxelEngine {
         }) {
             Ok(()) => {
                 counter_ref.store(generation, Ordering::Relaxed);
+                self.profiler.record_request(key);
                 1
             }
             Err(_) => 0,
@@ -608,6 +619,53 @@ impl VoxelEngine {
         if let Ok(mut cfg) = self.config.write() {
             *cfg = new_config;
         }
+    }
+
+    // ── Profiler API ──
+
+    /// Enable or disable the streaming profiler.
+    pub fn profiler_set_enabled(&self, enabled: bool) {
+        self.profiler.set_enabled(enabled);
+    }
+
+    /// Check if profiler is enabled.
+    pub fn profiler_is_enabled(&self) -> bool {
+        self.profiler.is_enabled()
+    }
+
+    /// Begin a new profiling session. Resets metrics, captures config snapshot.
+    pub fn profiler_begin_session(&self) -> u64 {
+        let config_snapshot = if let Ok(cfg) = self.config.read() {
+            format!(
+                "seed={}\nchunk_size={}\nregion_size={}\ncavern_freq={:.4}\ncavern_thresh={:.2}\nworms_per_region={:.1}",
+                cfg.seed, cfg.chunk_size, cfg.region_size,
+                cfg.noise.cavern_frequency, cfg.noise.cavern_threshold,
+                cfg.worm.worms_per_region,
+            )
+        } else {
+            "(config unavailable)".to_string()
+        };
+        self.profiler.begin_session(config_snapshot)
+    }
+
+    /// End the current profiling session.
+    pub fn profiler_end_session(&self) {
+        self.profiler.end_session();
+    }
+
+    /// Generate a plain-text profiling report.
+    pub fn profiler_get_report(&self) -> String {
+        self.profiler.generate_report()
+    }
+
+    /// Generate report as C string for FFI. Caller must free with voxel_profiler_free_report.
+    pub fn profiler_get_report_cstr(&self) -> *mut std::ffi::c_char {
+        self.profiler.generate_report_cstr()
+    }
+
+    /// Get a reference to the profiler (for FFI poll instrumentation).
+    pub fn profiler(&self) -> &Arc<StreamingProfiler> {
+        &self.profiler
     }
 
     /// Gracefully shut down all workers and wait for them to finish.

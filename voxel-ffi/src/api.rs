@@ -1,4 +1,4 @@
-use std::ffi::c_void;
+use std::ffi::{c_char, c_void, CString};
 use std::ptr;
 
 use crate::convert::rust_chunk_to_ue;
@@ -863,6 +863,55 @@ pub unsafe extern "C" fn voxel_query_host_rock_at(
     }
     let engine = &*(engine as *const VoxelEngine);
     engine.query_host_rock_at(x, y, z, scale)
+}
+
+// ── Profiler API ──
+
+/// Enable or disable the streaming profiler.
+/// Returns the previous state (1=was enabled, 0=was disabled).
+#[no_mangle]
+pub unsafe extern "C" fn voxel_profiler_set_enabled(engine: *mut c_void, enabled: u32) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let was_enabled = engine.profiler_is_enabled();
+    engine.profiler_set_enabled(enabled != 0);
+    if was_enabled { 1 } else { 0 }
+}
+
+/// Begin a new profiling session. Resets all metrics and captures config snapshot.
+/// Returns the session id (monotonically increasing).
+#[no_mangle]
+pub unsafe extern "C" fn voxel_profiler_begin_session(engine: *mut c_void) -> u64 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.profiler_begin_session()
+}
+
+/// End the current profiling session and return a plain-text report.
+/// Returns a heap-allocated null-terminated UTF-8 string.
+/// Caller MUST free with `voxel_profiler_free_report`.
+/// Returns null if engine is null.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_profiler_get_report(engine: *mut c_void) -> *mut c_char {
+    if engine.is_null() {
+        return ptr::null_mut();
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.profiler_end_session();
+    engine.profiler_get_report_cstr()
+}
+
+/// Free a report string previously returned by `voxel_profiler_get_report`.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_profiler_free_report(report: *mut c_char) {
+    if report.is_null() {
+        return;
+    }
+    drop(CString::from_raw(report));
 }
 
 // ── Internal helpers ──

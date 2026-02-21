@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
 use dashmap::DashMap;
@@ -15,6 +15,7 @@ use voxel_gen::region_gen::{
 };
 
 use crate::convert::{convert_mesh_to_ue_scaled, from_ue_normal, from_ue_world_pos};
+use crate::profiler::{ChunkTimings, StreamingProfiler};
 use crate::store::{extract_solid_mask, ChunkStore};
 use crate::types::{FfiCollapseEvent, WorkerRequest, WorkerResult};
 
@@ -30,24 +31,32 @@ pub fn worker_loop(
     generation_counters: Arc<DashMap<(i32, i32, i32), AtomicU64>>,
     world_scale: f32,
     fluid_event_tx: Sender<FluidEvent>,
+    profiler: Arc<StreamingProfiler>,
+    worker_id: usize,
 ) {
     while !shutdown.load(Ordering::Relaxed) {
         // Priority 1: mine requests (non-blocking)
         if let Ok(req) = mine_rx.try_recv() {
             handle_request(
-                req, &result_tx, &store, &config, &stress_config, &generation_counters, world_scale, &fluid_event_tx,
+                req, &result_tx, &store, &config, &stress_config, &generation_counters,
+                world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx,
             );
             continue;
         }
 
         // Priority 2: generate requests (blocking with timeout)
+        let idle_start = Instant::now();
         match generate_rx.recv_timeout(Duration::from_millis(50)) {
             Ok(req) => {
+                profiler.record_worker_idle(worker_id, idle_start.elapsed());
                 handle_request(
-                    req, &result_tx, &store, &config, &stress_config, &generation_counters, world_scale, &fluid_event_tx,
+                    req, &result_tx, &store, &config, &stress_config, &generation_counters,
+                    world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx,
                 );
             }
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                profiler.record_worker_idle(worker_id, idle_start.elapsed());
+            }
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         }
     }
@@ -62,13 +71,20 @@ fn handle_request(
     generation_counters: &Arc<DashMap<(i32, i32, i32), AtomicU64>>,
     world_scale: f32,
     fluid_event_tx: &Sender<FluidEvent>,
+    profiler: &Arc<StreamingProfiler>,
+    worker_id: usize,
+    generate_rx: &Receiver<WorkerRequest>,
 ) {
     match req {
         WorkerRequest::PriorityGenerate { chunk, generation } |
         WorkerRequest::Generate { chunk, generation } => {
+            let chunk_start = Instant::now();
+            let profiling = profiler.is_enabled();
+
             // Check if this generation is still current (stale detection)
             if let Some(counter) = generation_counters.get(&chunk) {
                 if counter.load(Ordering::Relaxed) != generation {
+                    profiler.record_stale_skip(worker_id);
                     return; // Stale request, skip
                 }
             }
@@ -76,15 +92,34 @@ fn handle_request(
             let cfg = config.read().unwrap().clone();
             let rk = region_key(chunk.0, chunk.1, chunk.2, cfg.region_size);
 
+            // Timing accumulators
+            let mut t_region_density = Duration::ZERO;
+            let mut t_hermite = Duration::ZERO;
+            let mut t_store_read_wait = Duration::ZERO;
+            let mut t_store_write_wait = Duration::ZERO;
+            let mut t_dc_solve = Duration::ZERO;
+            let mut t_mesh_gen = Duration::ZERO;
+            let mut was_slow_path = false;
+
             // Fast path: region generated AND this chunk has data → mesh under one read lock
             let mesh_result = {
+                let t0 = Instant::now();
                 let s = store.read().unwrap();
+                if profiling { t_store_read_wait += t0.elapsed(); }
+
                 if s.is_region_generated(&rk) && s.has_density(&chunk) {
                     let density = s.density_fields.get(&chunk).unwrap();
                     let hermite = s.hermite_data.get(&chunk).unwrap();
                     let cell_size = density.size - 1;
+
+                    let t1 = Instant::now();
                     let dc_verts = solve_dc_vertices(hermite, cell_size);
+                    if profiling { t_dc_solve += t1.elapsed(); }
+
+                    let t2 = Instant::now();
                     let m = generate_mesh(hermite, &dc_verts, cell_size, cfg.max_edge_length, cfg.mine.min_triangle_area);
+                    if profiling { t_mesh_gen += t2.elapsed(); }
+
                     let b_edges = region_gen::extract_boundary_edges(hermite, cfg.chunk_size);
                     Some((m, dc_verts, b_edges))
                 } else {
@@ -96,28 +131,41 @@ fn handle_request(
                 result
             } else {
                 // Slow path: (re)generate region densities
+                was_slow_path = true;
+
+                let t0 = Instant::now();
                 let coords = region_chunks(rk, cfg.region_size);
                 let (densities, _pools) = generate_region_densities(&coords, &cfg);
+                if profiling { t_region_density += t0.elapsed(); }
 
                 {
+                    let t1 = Instant::now();
                     let mut s = store.write().unwrap();
+                    if profiling { t_store_write_wait += t1.elapsed(); }
+
                     // Guard: another worker may have already done this
                     if !s.is_region_generated(&rk) || !s.has_density(&chunk) {
+                        let t2 = Instant::now();
                         for (key, density) in densities {
                             if !s.has_density(&key) {
                                 let hermite = extract_hermite_data(&density);
                                 s.insert(key, density, hermite);
                             }
                         }
+                        if profiling { t_hermite += t2.elapsed(); }
                         s.mark_region_generated(rk);
                     }
                 }
 
                 // Mesh under fresh read lock
+                let t3 = Instant::now();
                 let s = store.read().unwrap();
+                if profiling { t_store_read_wait += t3.elapsed(); }
+
                 let density = match s.density_fields.get(&chunk) {
                     Some(d) => d,
                     None => {
+                        profiler.record_error();
                         let _ = result_tx.send(WorkerResult::Error { chunk, generation });
                         return;
                     }
@@ -125,13 +173,21 @@ fn handle_request(
                 let hermite = match s.hermite_data.get(&chunk) {
                     Some(h) => h,
                     None => {
+                        profiler.record_error();
                         let _ = result_tx.send(WorkerResult::Error { chunk, generation });
                         return;
                     }
                 };
                 let cell_size = density.size - 1;
+
+                let t4 = Instant::now();
                 let dc_verts = solve_dc_vertices(hermite, cell_size);
+                if profiling { t_dc_solve += t4.elapsed(); }
+
+                let t5 = Instant::now();
                 let m = generate_mesh(hermite, &dc_verts, cell_size, cfg.max_edge_length, cfg.mine.min_triangle_area);
+                if profiling { t_mesh_gen += t5.elapsed(); }
+
                 let b_edges = region_gen::extract_boundary_edges(hermite, cfg.chunk_size);
                 (m, dc_verts, b_edges)
             };
@@ -163,7 +219,25 @@ fn handle_request(
             }
 
             // Convert to UE coordinates and send initial result (no seams yet)
+            let t_coord_start = Instant::now();
             let converted = convert_mesh_to_ue_scaled(&mesh, cfg.voxel_scale(), world_scale);
+            let t_coord_transform = if profiling { t_coord_start.elapsed() } else { Duration::ZERO };
+
+            // Capture mesh complexity before sending
+            let vertex_count = converted.positions.len() as u32;
+            let triangle_count = (converted.indices.len() / 3) as u32;
+            // Count unique material sections
+            let section_count = {
+                let mut mats: Vec<u8> = converted.material_ids.iter().copied().collect();
+                mats.sort_unstable();
+                mats.dedup();
+                mats.len() as u32
+            };
+            let mesh_bytes = (converted.positions.len() * std::mem::size_of::<crate::types::FfiVec3>()
+                + converted.normals.len() * std::mem::size_of::<crate::types::FfiVec3>()
+                + converted.material_ids.len()
+                + converted.indices.len() * std::mem::size_of::<u32>()) as u32;
+
             let _ = result_tx.send(WorkerResult::ChunkMesh {
                 chunk,
                 mesh: converted,
@@ -171,7 +245,35 @@ fn handle_request(
             });
 
             // Try to generate seams for this chunk and its neighbors
+            let t_seam_start = Instant::now();
             incremental_seam_pass(chunk, &cfg, store, result_tx, world_scale);
+            let t_seam_pass = if profiling { t_seam_start.elapsed() } else { Duration::ZERO };
+
+            // Record profiling data
+            if profiling {
+                let gen_queue_len = generate_rx.len() as u32;
+                let result_queue_len = 0u32; // Sender doesn't expose queue length
+
+                let timings = ChunkTimings {
+                    region_density: t_region_density,
+                    hermite: t_hermite,
+                    dc_solve: t_dc_solve,
+                    mesh_gen: t_mesh_gen,
+                    seam_pass: t_seam_pass,
+                    coord_transform: t_coord_transform,
+                    store_read_wait: t_store_read_wait,
+                    store_write_wait: t_store_write_wait,
+                    total: chunk_start.elapsed(),
+                    was_slow_path,
+                    vertex_count,
+                    triangle_count,
+                    section_count,
+                    mesh_bytes,
+                };
+                profiler.record_chunk_with_coord(
+                    worker_id, chunk, timings, gen_queue_len, result_queue_len,
+                );
+            }
         }
         WorkerRequest::Flatten { base_x, base_y, base_z, host_material } => {
             let cfg = config.read().unwrap().clone();
