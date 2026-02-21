@@ -66,7 +66,7 @@ typedef struct {
     double   detail_persistence;
     double   warp_amplitude;
     /* Worm */
-    uint32_t worms_per_region;
+    float    worms_per_region;
     float    worm_radius_min;
     float    worm_radius_max;
     float    worm_step_length;

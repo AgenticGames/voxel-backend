@@ -44,7 +44,7 @@ pub fn run(args: &[String]) {
     let mut detail_octaves: Option<u32> = None;
     let mut detail_persistence: Option<f64> = None;
     let mut warp_amplitude: Option<f64> = None;
-    let mut worms_per_region: Option<u32> = None;
+    let mut worms_per_region: Option<f32> = None;
     let mut worm_radius_min: Option<f32> = None;
     let mut worm_radius_max: Option<f32> = None;
     let mut worm_step_length: Option<f32> = None;
@@ -163,7 +163,7 @@ pub fn run(args: &[String]) {
 
     // ── Phase 3: Plan global worm connections ──
     let global_worm_seed = config.seed.wrapping_add(0xF1F0_CAFE);
-    let total_worms = config.worm.worms_per_region * total_chunks as u32;
+    let total_worms = (config.worm.worms_per_region * total_chunks as f32).ceil() as u32;
     let connections = plan_worm_connections(global_worm_seed, &all_cavern_centers, total_worms);
 
     // ── Phase 4: Generate worm paths and carve into all overlapping chunks ──

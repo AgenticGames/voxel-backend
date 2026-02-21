@@ -284,7 +284,7 @@ fn serve_generate(
     let mut detail_octaves: Option<u32> = None;
     let mut detail_persistence: Option<f64> = None;
     let mut warp_amplitude: Option<f64> = None;
-    let mut worms_per_region: Option<u32> = None;
+    let mut worms_per_region: Option<f32> = None;
     let mut worm_radius_min: Option<f32> = None;
     let mut worm_radius_max: Option<f32> = None;
     let mut worm_step_length: Option<f32> = None;

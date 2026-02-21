@@ -976,7 +976,7 @@ mod tests {
             detail_octaves: 4,
             detail_persistence: 0.5,
             warp_amplitude: 5.0,
-            worms_per_region: 5,
+            worms_per_region: 5.0,
             worm_radius_min: 2.0,
             worm_radius_max: 4.0,
             worm_step_length: 1.0,

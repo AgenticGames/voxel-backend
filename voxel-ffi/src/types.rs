@@ -82,7 +82,7 @@ pub struct FfiEngineConfig {
     pub detail_persistence: f64,
     pub warp_amplitude: f64,
     // Worm
-    pub worms_per_region: u32,
+    pub worms_per_region: f32,
     pub worm_radius_min: f32,
     pub worm_radius_max: f32,
     pub worm_step_length: f32,

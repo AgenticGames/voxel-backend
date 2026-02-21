@@ -83,7 +83,7 @@ pub fn generate_region_densities(
     // Phase 3: Plan global worm connections with deterministic region seed
     let num_chunks = coords.len() as u32;
     let global_worm_seed = region_worm_seed(config.seed, coords);
-    let total_worms = config.worm.worms_per_region * num_chunks;
+    let total_worms = (config.worm.worms_per_region * num_chunks as f32).ceil() as u32;
     let connections =
         worm::connect::plan_worm_connections(global_worm_seed, &all_cavern_centers, total_worms);
 

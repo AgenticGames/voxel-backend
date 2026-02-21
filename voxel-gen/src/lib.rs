@@ -44,7 +44,7 @@ pub fn generate_density(coord: ChunkCoord, config: &GenerationConfig) -> (Densit
     let connections = worm::connect::plan_worm_connections(
         r_seed,
         &cavern_centers,
-        config.worm.worms_per_region,
+        config.worm.worms_per_region.ceil() as u32,
     );
 
     // Step 3: Generate worm paths and carve into density

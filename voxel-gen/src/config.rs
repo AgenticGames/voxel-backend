@@ -73,7 +73,7 @@ pub struct NoiseConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WormConfig {
-    pub worms_per_region: u32,
+    pub worms_per_region: f32,
     pub radius_min: f32,
     pub radius_max: f32,
     pub step_length: f32,
@@ -115,7 +115,7 @@ impl Default for NoiseConfig {
 impl Default for WormConfig {
     fn default() -> Self {
         Self {
-            worms_per_region: 5,
+            worms_per_region: 5.0,
             radius_min: 2.0,
             radius_max: 4.0,
             step_length: 1.0,
