@@ -9,7 +9,7 @@ use voxel_core::stress::{StressField, SupportField, SupportType};
 use voxel_gen::config::{GenerationConfig, StressConfig};
 use voxel_gen::density::DensityField;
 use voxel_gen::hermite_extract::{extract_hermite_data, patch_hermite_data};
-use voxel_gen::region_gen::{self, region_key, region_chunks, ChunkSeamData};
+use voxel_gen::region_gen::{self, region_key, ChunkSeamData};
 
 use crate::convert::convert_mesh_to_ue_scaled;
 use crate::stress::{CollapseEvent, post_change_stress_update};
@@ -86,17 +86,11 @@ impl ChunkStore {
         self.stress_fields.remove(&key);
         self.support_fields.remove(&key);
 
-        // If no chunks from this region still have density data, clear the region flag
-        // so re-entering the area triggers fresh generation instead of hitting the stale cache.
+        // Clear region flag immediately — region is no longer intact.
+        // Next generate will re-run region gen; has_density() guard
+        // prevents overwriting siblings that are still loaded.
         let rk = region_key(key.0, key.1, key.2, self.region_size);
-        if self.generated_regions.contains(&rk) {
-            let still_loaded = region_chunks(rk, self.region_size)
-                .iter()
-                .any(|c| self.density_fields.contains_key(c));
-            if !still_loaded {
-                self.generated_regions.remove(&rk);
-            }
-        }
+        self.generated_regions.remove(&rk);
     }
 
     /// Return mutable references to density, stress, and support fields simultaneously.

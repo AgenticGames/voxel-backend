@@ -76,32 +76,44 @@ fn handle_request(
             let cfg = config.read().unwrap().clone();
             let rk = region_key(chunk.0, chunk.1, chunk.2, cfg.region_size);
 
-            // Check if this chunk's density is already cached (from a region batch)
-            let needs_region = {
+            // Fast path: region generated AND this chunk has data → mesh under one read lock
+            let mesh_result = {
                 let s = store.read().unwrap();
-                !s.is_region_generated(&rk)
+                if s.is_region_generated(&rk) && s.has_density(&chunk) {
+                    let density = s.density_fields.get(&chunk).unwrap();
+                    let hermite = s.hermite_data.get(&chunk).unwrap();
+                    let cell_size = density.size - 1;
+                    let dc_verts = solve_dc_vertices(hermite, cell_size);
+                    let m = generate_mesh(hermite, &dc_verts, cell_size, cfg.max_edge_length, cfg.mine.min_triangle_area);
+                    let b_edges = region_gen::extract_boundary_edges(hermite, cfg.chunk_size);
+                    Some((m, dc_verts, b_edges))
+                } else {
+                    None
+                }
             };
 
-            if needs_region {
-                // Generate ALL densities for this region with global worms
+            let (mesh, dc_vertices, boundary_edges) = if let Some(result) = mesh_result {
+                result
+            } else {
+                // Slow path: (re)generate region densities
                 let coords = region_chunks(rk, cfg.region_size);
                 let (densities, _pools) = generate_region_densities(&coords, &cfg);
 
-                // Store all densities + hermite data
-                let mut s = store.write().unwrap();
-                if !s.is_region_generated(&rk) {
-                    for (key, density) in densities {
-                        if !s.has_density(&key) {
-                            let hermite = extract_hermite_data(&density);
-                            s.insert(key, density, hermite);
+                {
+                    let mut s = store.write().unwrap();
+                    // Guard: another worker may have already done this
+                    if !s.is_region_generated(&rk) || !s.has_density(&chunk) {
+                        for (key, density) in densities {
+                            if !s.has_density(&key) {
+                                let hermite = extract_hermite_data(&density);
+                                s.insert(key, density, hermite);
+                            }
                         }
+                        s.mark_region_generated(rk);
                     }
-                    s.mark_region_generated(rk);
                 }
-            }
 
-            // Mesh the requested chunk from cached density + extract seam data
-            let (mesh, dc_vertices, boundary_edges) = {
+                // Mesh under fresh read lock
                 let s = store.read().unwrap();
                 let density = match s.density_fields.get(&chunk) {
                     Some(d) => d,
