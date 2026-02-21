@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use glam::Vec3;
 use voxel_core::dual_contouring::mesh_gen::generate_mesh;
@@ -14,6 +14,13 @@ use voxel_gen::region_gen::{self, ChunkSeamData};
 use crate::convert::convert_mesh_to_ue_scaled;
 use crate::stress::{CollapseEvent, post_change_stress_update};
 use crate::types::{ConvertedMesh, FfiMinedMaterials};
+
+/// Result from combined cavern location search.
+pub struct CavernLocations {
+    pub spring: Vec3,
+    pub chrysalis: Vec3,
+    pub spawn: Vec3,
+}
 
 /// Per-chunk cached data needed for mining and re-meshing.
 pub struct ChunkStore {
@@ -540,6 +547,14 @@ impl ChunkStore {
                             continue;
                         }
 
+                        // Skip geode interiors
+                        let wx = cx * chunk_size as i32 + x as i32;
+                        let wy = cy * chunk_size as i32 + y as i32;
+                        let wz = cz * chunk_size as i32 + z as i32;
+                        if self.is_geode_interior(wx, wy, wz, chunk_size as i32) {
+                            continue;
+                        }
+
                         // Check face neighbors for wall/ceiling adjacency
                         let solid_above = density.get(x, y + 1, z).material.is_solid();
                         let solid_below = density.get(x, y.wrapping_sub(1), z).material.is_solid();
@@ -696,6 +711,14 @@ impl ChunkStore {
                             continue;
                         }
 
+                        // Skip geode interiors
+                        let wx = cx * cs_i + x as i32;
+                        let wy = cy * cs_i + y as i32;
+                        let wz = cz * cs_i + z as i32;
+                        if self.is_geode_interior(wx, wy, wz, cs_i) {
+                            continue;
+                        }
+
                         let world_pos = origin + Vec3::new(x as f32, y as f32, z as f32);
 
                         // Exclude zone
@@ -709,10 +732,6 @@ impl ChunkStore {
                         }
 
                         // Full clearance check (cross-chunk aware)
-                        let wx = cx * cs_i + x as i32;
-                        let wy = cy * cs_i + y as i32;
-                        let wz = cz * cs_i + z as i32;
-
                         if self.check_clearance(wx, wy, wz, height, radius, cs_i) {
                             best_dist = dist;
                             best_pos = Some(world_pos);
@@ -752,6 +771,14 @@ impl ChunkStore {
                     for x in 2..(chunk_size - 2) {
                         let sample = density.get(x, y, z);
                         if sample.material.is_solid() {
+                            continue;
+                        }
+
+                        // Skip geode interiors
+                        let wx = cx * cs_i + x as i32;
+                        let wy = cy * cs_i + y as i32;
+                        let wz = cz * cs_i + z as i32;
+                        if self.is_geode_interior(wx, wy, wz, cs_i) {
                             continue;
                         }
 
@@ -798,10 +825,6 @@ impl ChunkStore {
                         }
 
                         // Full clearance check
-                        let wx = cx * cs_i + x as i32;
-                        let wy = cy * cs_i + y as i32;
-                        let wz = cz * cs_i + z as i32;
-
                         if self.check_clearance(wx, wy, wz, height, radius, cs_i) {
                             best_dist = dist;
                             best_pos = Some(world_pos);
@@ -838,6 +861,14 @@ impl ChunkStore {
                     for x in 1..(chunk_size - 1) {
                         let sample = density.get(x, y, z);
                         if sample.material.is_solid() {
+                            continue;
+                        }
+
+                        // Skip geode interiors
+                        let wx = cx * chunk_size as i32 + x as i32;
+                        let wy = cy * chunk_size as i32 + y as i32;
+                        let wz = cz * chunk_size as i32 + z as i32;
+                        if self.is_geode_interior(wx, wy, wz, chunk_size as i32) {
                             continue;
                         }
 
@@ -986,6 +1017,307 @@ impl ChunkStore {
         self.density_fields
             .get(&key)
             .map(|df| df.get(lx, ly, lz).material)
+    }
+
+    /// Check if an air cell is inside a geode (crystal/amethyst shell nearby).
+    /// Scans a 5x5x5 cube (radius 2) around the cell for geode shell materials.
+    pub fn is_geode_interior(&self, wx: i32, wy: i32, wz: i32, chunk_size: i32) -> bool {
+        for dz in -2..=2i32 {
+            for dy in -2..=2i32 {
+                for dx in -2..=2i32 {
+                    let vx = wx + dx;
+                    let vy = wy + dy;
+                    let vz = wz + dz;
+                    let cx = vx.div_euclid(chunk_size);
+                    let cy = vy.div_euclid(chunk_size);
+                    let cz = vz.div_euclid(chunk_size);
+                    let lx = vx.rem_euclid(chunk_size) as usize;
+                    let ly = vy.rem_euclid(chunk_size) as usize;
+                    let lz = vz.rem_euclid(chunk_size) as usize;
+                    if let Some(df) = self.density_fields.get(&(cx, cy, cz)) {
+                        if df.get(lx, ly, lz).material.is_geode_shell() {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// BFS flood-fill from a seed cell to find all connected air cells in the same cavern.
+    /// 6-connected, cross-chunk aware. Skips solid voxels, geode interiors, and unloaded chunks.
+    /// Returns None if the fill exceeds max_cells (cavern too large for constraint).
+    pub fn flood_fill_cavern(
+        &self,
+        seed_wx: i32,
+        seed_wy: i32,
+        seed_wz: i32,
+        chunk_size: i32,
+        max_cells: usize,
+    ) -> Option<HashSet<(i32, i32, i32)>> {
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+
+        let seed = (seed_wx, seed_wy, seed_wz);
+        visited.insert(seed);
+        queue.push_back(seed);
+
+        let directions: [(i32, i32, i32); 6] = [
+            (1, 0, 0), (-1, 0, 0),
+            (0, 1, 0), (0, -1, 0),
+            (0, 0, 1), (0, 0, -1),
+        ];
+
+        while let Some((wx, wy, wz)) = queue.pop_front() {
+            if visited.len() > max_cells {
+                return None; // Cavern too large
+            }
+
+            for &(dx, dy, dz) in &directions {
+                let nx = wx + dx;
+                let ny = wy + dy;
+                let nz = wz + dz;
+
+                if visited.contains(&(nx, ny, nz)) {
+                    continue;
+                }
+
+                let cx = nx.div_euclid(chunk_size);
+                let cy = ny.div_euclid(chunk_size);
+                let cz = nz.div_euclid(chunk_size);
+                let lx = nx.rem_euclid(chunk_size) as usize;
+                let ly = ny.rem_euclid(chunk_size) as usize;
+                let lz = nz.rem_euclid(chunk_size) as usize;
+
+                match self.density_fields.get(&(cx, cy, cz)) {
+                    Some(df) => {
+                        if df.get(lx, ly, lz).material.is_solid() {
+                            continue; // Solid wall
+                        }
+                    }
+                    None => continue, // Unloaded chunk
+                }
+
+                // Skip geode interiors
+                if self.is_geode_interior(nx, ny, nz, chunk_size) {
+                    continue;
+                }
+
+                visited.insert((nx, ny, nz));
+                queue.push_back((nx, ny, nz));
+            }
+        }
+
+        Some(visited)
+    }
+
+    /// Same as find_spawn_location but constrained to a pre-computed cavern volume.
+    pub fn find_spawn_in_cavern(
+        &self,
+        cavern: &HashSet<(i32, i32, i32)>,
+        target: Vec3,
+        exclude_center: Vec3,
+        exclude_radius: f32,
+        chunk_size: usize,
+        effective_bounds: f32,
+        height: i32,
+        radius: i32,
+    ) -> Option<Vec3> {
+        let cs = effective_bounds;
+        let excl_r2 = exclude_radius * exclude_radius;
+        let mut best_dist = f32::MAX;
+        let mut best_pos: Option<Vec3> = None;
+        let cs_i = chunk_size as i32;
+
+        for (&(cx, cy, cz), density) in &self.density_fields {
+            let origin = Vec3::new(cx as f32 * cs, cy as f32 * cs, cz as f32 * cs);
+
+            for z in 1..(chunk_size - 1) {
+                for y in 1..(chunk_size - 1) {
+                    for x in 1..(chunk_size - 1) {
+                        let wx = cx * cs_i + x as i32;
+                        let wy = cy * cs_i + y as i32;
+                        let wz = cz * cs_i + z as i32;
+
+                        // Must be in the cavern volume
+                        if !cavern.contains(&(wx, wy, wz)) {
+                            continue;
+                        }
+
+                        let sample = density.get(x, y, z);
+                        if sample.material.is_solid() {
+                            continue;
+                        }
+
+                        let world_pos = origin + Vec3::new(x as f32, y as f32, z as f32);
+
+                        // Exclude zone
+                        if (world_pos - exclude_center).length_squared() < excl_r2 {
+                            continue;
+                        }
+
+                        let dist = (world_pos - target).length_squared();
+                        if dist >= best_dist {
+                            continue;
+                        }
+
+                        if self.check_clearance(wx, wy, wz, height, radius, cs_i) {
+                            best_dist = dist;
+                            best_pos = Some(world_pos);
+                        }
+                    }
+                }
+            }
+        }
+
+        best_pos
+    }
+
+    /// Same as find_chrysalis_location but constrained to a pre-computed cavern volume.
+    pub fn find_chrysalis_in_cavern(
+        &self,
+        cavern: &HashSet<(i32, i32, i32)>,
+        target: Vec3,
+        exclude_center: Vec3,
+        exclude_radius: f32,
+        chunk_size: usize,
+        effective_bounds: f32,
+        height: i32,
+        radius: i32,
+    ) -> Option<Vec3> {
+        let cs = effective_bounds;
+        let excl_r2 = exclude_radius * exclude_radius;
+        let mut best_dist = f32::MAX;
+        let mut best_pos: Option<Vec3> = None;
+        let cs_i = chunk_size as i32;
+
+        for (&(cx, cy, cz), density) in &self.density_fields {
+            let origin = Vec3::new(cx as f32 * cs, cy as f32 * cs, cz as f32 * cs);
+
+            for z in 2..(chunk_size - 2) {
+                for y in 1..(chunk_size - 1) {
+                    for x in 2..(chunk_size - 2) {
+                        let wx = cx * cs_i + x as i32;
+                        let wy = cy * cs_i + y as i32;
+                        let wz = cz * cs_i + z as i32;
+
+                        // Must be in the cavern volume
+                        if !cavern.contains(&(wx, wy, wz)) {
+                            continue;
+                        }
+
+                        let sample = density.get(x, y, z);
+                        if sample.material.is_solid() {
+                            continue;
+                        }
+
+                        let world_pos = origin + Vec3::new(x as f32, y as f32, z as f32);
+
+                        // Exclude zone
+                        if (world_pos - exclude_center).length_squared() < excl_r2 {
+                            continue;
+                        }
+
+                        // No direct face-adjacent solid horizontally (prevents wall clipping)
+                        let adj_solid = density.get(x + 1, y, z).material.is_solid()
+                            || density.get(x.wrapping_sub(1), y, z).material.is_solid()
+                            || density.get(x, y, z + 1).material.is_solid()
+                            || density.get(x, y, z.wrapping_sub(1)).material.is_solid();
+                        if adj_solid {
+                            continue;
+                        }
+
+                        // Must have solid within 3 voxels (nearby but not touching)
+                        let mut near_wall = false;
+                        'outer: for ddx in -3i32..=3 {
+                            for ddz in -3i32..=3 {
+                                if ddx.abs() <= 1 && ddz.abs() <= 1 {
+                                    continue;
+                                }
+                                let nx = (x as i32 + ddx) as usize;
+                                let nz = (z as i32 + ddz) as usize;
+                                if nx < density.size && nz < density.size {
+                                    if density.get(nx, y, nz).material.is_solid() {
+                                        near_wall = true;
+                                        break 'outer;
+                                    }
+                                }
+                            }
+                        }
+                        if !near_wall {
+                            continue;
+                        }
+
+                        let dist = (world_pos - target).length_squared();
+                        if dist >= best_dist {
+                            continue;
+                        }
+
+                        if self.check_clearance(wx, wy, wz, height, radius, cs_i) {
+                            best_dist = dist;
+                            best_pos = Some(world_pos);
+                        }
+                    }
+                }
+            }
+        }
+
+        best_pos
+    }
+
+    /// Combined entry point: find spring, flood-fill cavern, then find chrysalis and spawn
+    /// constrained to the same cavern volume.
+    /// Falls back to independent (geode-filtered) searches if flood fill overflows.
+    pub fn find_cavern_locations(
+        &self,
+        player_pos: Vec3,
+        chunk_size: usize,
+        effective_bounds: f32,
+    ) -> Option<CavernLocations> {
+        // Step 1: Find spring (already geode-filtered)
+        let spring = self.find_spring_location(player_pos, chunk_size, effective_bounds)?;
+
+        let cs_i = chunk_size as i32;
+        let spring_wx = spring.x as i32;
+        let spring_wy = spring.y as i32;
+        let spring_wz = spring.z as i32;
+
+        // Step 2: Flood-fill cavern from spring
+        let cavern_opt = self.flood_fill_cavern(spring_wx, spring_wy, spring_wz, cs_i, 50_000);
+
+        if let Some(ref cavern) = cavern_opt {
+            // Step 3: Find chrysalis in same cavern
+            let chrysalis = self.find_chrysalis_in_cavern(
+                cavern, spring, spring, 30.0,
+                chunk_size, effective_bounds, 4, 2,
+            );
+
+            if let Some(chr) = chrysalis {
+                // Step 4: Find spawn in same cavern (excluding chrysalis)
+                let spawn = self.find_spawn_in_cavern(
+                    cavern, spring, chr, 20.0,
+                    chunk_size, effective_bounds, 13, 3,
+                );
+
+                if let Some(sp) = spawn {
+                    return Some(CavernLocations { spring, chrysalis: chr, spawn: sp });
+                }
+            }
+        }
+
+        // Fallback: independent searches (still geode-filtered)
+        let chrysalis = self.find_chrysalis_location(
+            spring, spring, 30.0,
+            chunk_size, effective_bounds, 4, 2,
+        )?;
+
+        let spawn = self.find_spawn_location(
+            spring, chrysalis, 20.0,
+            chunk_size, effective_bounds, 13, 3,
+        )?;
+
+        Some(CavernLocations { spring, chrysalis, spawn })
     }
 }
 

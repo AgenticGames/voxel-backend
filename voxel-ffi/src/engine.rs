@@ -413,6 +413,45 @@ impl VoxelEngine {
         ))
     }
 
+    /// Find spring, chrysalis, and spawn locations all in the same cavern.
+    /// Takes UE world coords for player position, returns UE world coords for all three.
+    /// Returns None if any of the three couldn't be found.
+    pub fn find_cavern_locations(
+        &self,
+        ue_x: f32, ue_y: f32, ue_z: f32,
+        world_scale: f32,
+    ) -> Option<((f32, f32, f32), (f32, f32, f32), (f32, f32, f32))> {
+        use crate::convert::from_ue_world_pos;
+
+        let cfg = self.config.read().ok()?;
+        let chunk_size = cfg.chunk_size;
+        let eb = cfg.effective_bounds();
+        drop(cfg);
+        let player_pos = from_ue_world_pos(ue_x, ue_y, ue_z, world_scale);
+
+        let store = self.store.read().ok()?;
+        let locations = store.find_cavern_locations(player_pos, chunk_size, eb)?;
+
+        // Convert all three positions from Rust to UE coords: (x * scale, -z * scale, y * scale)
+        let spring_ue = (
+            locations.spring.x * world_scale,
+            -locations.spring.z * world_scale,
+            locations.spring.y * world_scale,
+        );
+        let chrysalis_ue = (
+            locations.chrysalis.x * world_scale,
+            -locations.chrysalis.z * world_scale,
+            locations.chrysalis.y * world_scale,
+        );
+        let spawn_ue = (
+            locations.spawn.x * world_scale,
+            -locations.spawn.z * world_scale,
+            locations.spawn.y * world_scale,
+        );
+
+        Some((spring_ue, chrysalis_ue, spawn_ue))
+    }
+
     /// Queue a priority generate request for a chunk. Sent through the mine channel
     /// for immediate processing. Coords are UE space. Returns 1 on success, 0 if full.
     pub fn request_priority_generate(&self, cx: i32, cy: i32, cz: i32) -> u32 {

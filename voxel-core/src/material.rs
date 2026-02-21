@@ -87,6 +87,10 @@ impl Material {
         )
     }
 
+    pub fn is_geode_shell(self) -> bool {
+        matches!(self, Material::Crystal | Material::Amethyst)
+    }
+
     pub fn display_name(self) -> &'static str {
         match self {
             Material::Air => "Air",
