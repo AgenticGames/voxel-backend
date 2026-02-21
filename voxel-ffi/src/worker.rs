@@ -200,7 +200,7 @@ fn handle_request(
                 (m, dc_verts, b_edges)
             };
 
-            // Cache seam data for this chunk
+            // Cache seam data and base mesh for this chunk
             {
                 let mut s = store.write().unwrap();
                 s.add_seam_data(
@@ -211,6 +211,7 @@ fn handle_request(
                         boundary_edges,
                     },
                 );
+                s.base_meshes.insert(chunk, mesh.clone());
             }
 
             // Extract solid mask and send to fluid thread
@@ -247,16 +248,17 @@ fn handle_request(
                 + converted.material_ids.len()
                 + converted.indices.len() * std::mem::size_of::<u32>()) as u32;
 
+            let t_send_start = Instant::now();
             let _ = result_tx.send(WorkerResult::ChunkMesh {
                 chunk,
                 mesh: converted,
                 generation,
             });
+            let t_send_block = if profiling { t_send_start.elapsed() } else { Duration::ZERO };
 
             // Try to generate seams for this chunk and its neighbors
-            let t_seam_start = Instant::now();
-            incremental_seam_pass(chunk, &cfg, store, result_tx, world_scale);
-            let t_seam_pass = if profiling { t_seam_start.elapsed() } else { Duration::ZERO };
+            let seam_timings = incremental_seam_pass(chunk, &cfg, store, result_tx, world_scale);
+            let t_seam_pass = if profiling { seam_timings.total } else { Duration::ZERO };
 
             // Record profiling data
             if profiling {
@@ -278,6 +280,13 @@ fn handle_request(
                     triangle_count,
                     section_count,
                     mesh_bytes,
+                    seam_quad_gen: seam_timings.quad_gen,
+                    seam_mesh_retrieve: seam_timings.mesh_retrieve,
+                    seam_convert: seam_timings.convert,
+                    seam_candidates_tried: seam_timings.candidates_tried,
+                    seam_candidates_sent: seam_timings.candidates_sent,
+                    send_block: t_send_block,
+                    coarse_skip: vertex_count == 0 && triangle_count == 0,
                 };
                 profiler.record_chunk_with_coord(
                     worker_id, chunk, timings, gen_queue_len, result_queue_len,
@@ -378,7 +387,7 @@ fn handle_request(
 
             // Regenerate seams for dirty chunks and their neighbors
             for key in dirty_keys {
-                incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
+                let _ = incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
             }
         }
         WorkerRequest::Unload { chunk } => {
@@ -531,15 +540,25 @@ fn handle_request(
 
             // Regenerate seams for dirty chunks
             for &key in &sleep_result.dirty_chunks {
-                incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
+                let _ = incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
             }
         }
     }
 }
 
+/// Timing breakdown from the seam pass.
+struct SeamPassTimings {
+    pub total: Duration,
+    pub quad_gen: Duration,
+    pub mesh_retrieve: Duration,
+    pub convert: Duration,
+    pub candidates_tried: u32,
+    pub candidates_sent: u32,
+}
+
 /// After meshing chunk C, attempt seam generation for C and its 6 face-adjacent
-/// neighbors. Any chunk that produces non-empty seam quads gets re-meshed
-/// (from cached hermite) with seams appended and re-sent.
+/// neighbors. Any chunk that produces non-empty seam quads gets combined with
+/// the cached base mesh and re-sent.
 ///
 /// generate_chunk_seam_quads gracefully handles missing neighbors — it simply
 /// skips quads where neighbor data isn't available yet. So calling it repeatedly
@@ -550,8 +569,14 @@ fn incremental_seam_pass(
     store: &Arc<RwLock<ChunkStore>>,
     result_tx: &Sender<WorkerResult>,
     world_scale: f32,
-) {
-    // Collect this chunk + its 6 face-adjacent neighbors to try seam generation
+) -> SeamPassTimings {
+    let pass_start = Instant::now();
+    let mut t_quad_gen = Duration::ZERO;
+    let mut t_mesh_retrieve = Duration::ZERO;
+    let mut t_convert = Duration::ZERO;
+    let mut candidates_tried: u32 = 0;
+    let mut candidates_sent: u32 = 0;
+
     let candidates = [
         chunk,
         (chunk.0 - 1, chunk.1, chunk.2),
@@ -563,44 +588,54 @@ fn incremental_seam_pass(
     ];
 
     for &target in &candidates {
-        // Generate seam quads for this target chunk using all available neighbor data
+        let t0 = Instant::now();
         let seam_mesh = {
             let s = store.read().unwrap();
-            // Skip if this chunk doesn't have seam data (hasn't been meshed yet)
             if !s.chunk_seam_data.contains_key(&target) {
                 continue;
             }
             region_gen::generate_chunk_seam_quads(target, &s.chunk_seam_data, cfg.chunk_size)
         };
+        t_quad_gen += t0.elapsed();
+        candidates_tried += 1;
 
         if seam_mesh.triangles.is_empty() {
             continue;
         }
 
-        // Re-mesh the chunk from cached hermite data, append seam quads
+        // Clone cached base mesh + append seam quads (instead of re-solving DC)
+        let t1 = Instant::now();
         let combined = {
             let s = store.read().unwrap();
-            let density = match s.density_fields.get(&target) {
-                Some(d) => d,
-                None => continue,
+            let base = match s.base_meshes.get(&target) {
+                Some(m) => m.clone(),
+                None => continue, // No cached mesh yet, skip
             };
-            let hermite = match s.hermite_data.get(&target) {
-                Some(h) => h,
-                None => continue,
-            };
-            let cell_size = density.size - 1;
-            let dc_vertices = solve_dc_vertices(hermite, cell_size);
-            let mut mesh = generate_mesh(hermite, &dc_vertices, cell_size, cfg.max_edge_length, cfg.mine.min_triangle_area);
+            let mut mesh = base;
             mesh.append(seam_mesh);
             mesh
         };
+        t_mesh_retrieve += t1.elapsed();
 
+        let t2 = Instant::now();
         let mut converted = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
         crate::convert::bucket_mesh_by_material(&mut converted);
+        t_convert += t2.elapsed();
+
         let _ = result_tx.send(WorkerResult::ChunkMesh {
             chunk: target,
             mesh: converted,
-            generation: 0, // Seam update
+            generation: 0,
         });
+        candidates_sent += 1;
+    }
+
+    SeamPassTimings {
+        total: pass_start.elapsed(),
+        quad_gen: t_quad_gen,
+        mesh_retrieve: t_mesh_retrieve,
+        convert: t_convert,
+        candidates_tried,
+        candidates_sent,
     }
 }

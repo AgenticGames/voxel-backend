@@ -5,6 +5,7 @@ use voxel_core::dual_contouring::mesh_gen::generate_mesh;
 use voxel_core::dual_contouring::solve::solve_dc_vertices;
 use voxel_core::hermite::HermiteData;
 use voxel_core::material::Material;
+use voxel_core::mesh::Mesh;
 use voxel_core::stress::{StressField, SupportField, SupportType};
 use voxel_gen::config::{GenerationConfig, StressConfig};
 use voxel_gen::density::DensityField;
@@ -30,6 +31,8 @@ pub struct ChunkStore {
     generated_regions: HashSet<(i32, i32, i32)>,
     /// Per-chunk seam data (DC vertices + boundary edges) for seam stitching.
     pub chunk_seam_data: HashMap<(i32, i32, i32), ChunkSeamData>,
+    /// Cached base meshes (pre-seam) for fast seam pass reuse.
+    pub base_meshes: HashMap<(i32, i32, i32), Mesh>,
     /// Per-chunk stress data for the collapse system.
     pub stress_fields: HashMap<(i32, i32, i32), StressField>,
     /// Per-chunk support structure data.
@@ -47,6 +50,7 @@ impl ChunkStore {
             hermite_data: HashMap::new(),
             generated_regions: HashSet::new(),
             chunk_seam_data: HashMap::new(),
+            base_meshes: HashMap::new(),
             stress_fields: HashMap::new(),
             support_fields: HashMap::new(),
             terraced_cells: HashSet::new(),
@@ -83,6 +87,7 @@ impl ChunkStore {
         self.density_fields.remove(&key);
         self.hermite_data.remove(&key);
         self.chunk_seam_data.remove(&key);
+        self.base_meshes.remove(&key);
         self.stress_fields.remove(&key);
         self.support_fields.remove(&key);
 
@@ -370,6 +375,9 @@ impl ChunkStore {
             let cell_size = density.size - 1;
             let dc_vertices = solve_dc_vertices(hermite, cell_size);
             let mesh = generate_mesh(hermite, &dc_vertices, cell_size, max_edge_length, config.mine.min_triangle_area);
+
+            // Cache the base mesh for fast seam pass reuse
+            self.base_meshes.insert(key, mesh.clone());
 
             // Update seam data so seam stitching uses post-mining geometry
             let boundary_edges = region_gen::extract_boundary_edges(hermite, chunk_size);

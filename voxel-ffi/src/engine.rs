@@ -68,7 +68,7 @@ impl VoxelEngine {
 
         let (generate_tx, generate_rx) = bounded::<WorkerRequest>(256);
         let (mine_tx, mine_rx) = bounded::<WorkerRequest>(16);
-        let (result_tx, result_rx) = bounded::<WorkerResult>(256);
+        let (result_tx, result_rx) = bounded::<WorkerResult>(2048);
 
         // Fluid event channel
         let (fluid_event_tx, fluid_event_rx) = bounded::<FluidEvent>(512);

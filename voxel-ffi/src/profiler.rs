@@ -61,6 +61,16 @@ pub struct ChunkTimings {
     pub triangle_count: u32,
     pub section_count: u32,
     pub mesh_bytes: u32,
+    // Seam sub-phase timings
+    pub seam_quad_gen: Duration,
+    pub seam_mesh_retrieve: Duration,
+    pub seam_convert: Duration,
+    pub seam_candidates_tried: u32,
+    pub seam_candidates_sent: u32,
+    // Send block time
+    pub send_block: Duration,
+    // Coarse pre-pass
+    pub coarse_skip: bool,
 }
 
 /// Per-worker utilization stats.
@@ -70,6 +80,8 @@ pub struct WorkerStats {
     pub total_idle_time: Duration,
     pub chunks_processed: u64,
     pub stale_skipped: u64,
+    pub total_seam_time: Duration,
+    pub total_send_block_time: Duration,
 }
 
 impl WorkerStats {
@@ -79,6 +91,8 @@ impl WorkerStats {
             total_idle_time: Duration::ZERO,
             chunks_processed: 0,
             stale_skipped: 0,
+            total_seam_time: Duration::ZERO,
+            total_send_block_time: Duration::ZERO,
         }
     }
 }
@@ -120,6 +134,14 @@ pub struct SessionMetrics {
     // Chunk details for breakdown
     pub chunk_details: Vec<ChunkDetail>,
 
+    // Seam sub-phase stats
+    pub seam_quad_gen: PhaseStats,
+    pub seam_mesh_retrieve: PhaseStats,
+    pub seam_convert: PhaseStats,
+    pub send_block: PhaseStats,
+    pub coarse_skip_count: u64,
+    pub coarse_full_gen_count: u64,
+
     // Path counts
     pub slow_path_count: u64,
     pub fast_path_count: u64,
@@ -160,6 +182,12 @@ impl SessionMetrics {
             store_read_wait: PhaseStats::new(),
             store_write_wait: PhaseStats::new(),
             total_chunk: PhaseStats::new(),
+            seam_quad_gen: PhaseStats::new(),
+            seam_mesh_retrieve: PhaseStats::new(),
+            seam_convert: PhaseStats::new(),
+            send_block: PhaseStats::new(),
+            coarse_skip_count: 0,
+            coarse_full_gen_count: 0,
             gen_queue_depths: Vec::new(),
             result_queue_depths: Vec::new(),
             worker_stats: (0..num_workers).map(|_| WorkerStats::new()).collect(),
@@ -191,6 +219,12 @@ impl SessionMetrics {
         self.store_read_wait = PhaseStats::new();
         self.store_write_wait = PhaseStats::new();
         self.total_chunk = PhaseStats::new();
+        self.seam_quad_gen = PhaseStats::new();
+        self.seam_mesh_retrieve = PhaseStats::new();
+        self.seam_convert = PhaseStats::new();
+        self.send_block = PhaseStats::new();
+        self.coarse_skip_count = 0;
+        self.coarse_full_gen_count = 0;
         self.gen_queue_depths.clear();
         self.result_queue_depths.clear();
         self.worker_stats = (0..num_workers).map(|_| WorkerStats::new()).collect();
@@ -292,6 +326,17 @@ impl StreamingProfiler {
         m.store_write_wait.record(timings.store_write_wait);
         m.total_chunk.record(timings.total);
 
+        // Seam sub-phase stats
+        m.seam_quad_gen.record(timings.seam_quad_gen);
+        m.seam_mesh_retrieve.record(timings.seam_mesh_retrieve);
+        m.seam_convert.record(timings.seam_convert);
+        m.send_block.record(timings.send_block);
+        if timings.coarse_skip {
+            m.coarse_skip_count += 1;
+        } else {
+            m.coarse_full_gen_count += 1;
+        }
+
         // Queue depth samples
         m.gen_queue_depths.push(gen_queue_len);
         m.result_queue_depths.push(result_queue_len);
@@ -300,6 +345,8 @@ impl StreamingProfiler {
         if let Some(ws) = m.worker_stats.get_mut(worker_id) {
             ws.total_work_time += timings.total;
             ws.chunks_processed += 1;
+            ws.total_seam_time += timings.seam_pass;
+            ws.total_send_block_time += timings.send_block;
         }
 
         // Path tracking
@@ -351,6 +398,17 @@ impl StreamingProfiler {
         m.store_write_wait.record(timings.store_write_wait);
         m.total_chunk.record(timings.total);
 
+        // Seam sub-phase stats
+        m.seam_quad_gen.record(timings.seam_quad_gen);
+        m.seam_mesh_retrieve.record(timings.seam_mesh_retrieve);
+        m.seam_convert.record(timings.seam_convert);
+        m.send_block.record(timings.send_block);
+        if timings.coarse_skip {
+            m.coarse_skip_count += 1;
+        } else {
+            m.coarse_full_gen_count += 1;
+        }
+
         // Queue depth samples
         m.gen_queue_depths.push(gen_queue_len);
         m.result_queue_depths.push(result_queue_len);
@@ -359,6 +417,8 @@ impl StreamingProfiler {
         if let Some(ws) = m.worker_stats.get_mut(worker_id) {
             ws.total_work_time += timings.total;
             ws.chunks_processed += 1;
+            ws.total_seam_time += timings.seam_pass;
+            ws.total_send_block_time += timings.send_block;
         }
 
         // Path tracking
@@ -492,6 +552,57 @@ impl StreamingProfiler {
         }
         let _ = writeln!(out);
 
+        // ── 3b. Seam Pass Breakdown ──
+        let _ = writeln!(out, "── Seam Pass Breakdown (ms) ────────────────────────────────");
+        let _ = writeln!(out, "  {:<20} {:>8} {:>8} {:>8} {:>10}", "Phase", "Min", "Avg", "Max", "Total");
+        let _ = writeln!(out, "  {:-<20} {:->8} {:->8} {:->8} {:->10}", "", "", "", "", "");
+        let seam_phases: &[(&str, &PhaseStats)] = &[
+            ("quad_gen",      &m.seam_quad_gen),
+            ("mesh_retrieve", &m.seam_mesh_retrieve),
+            ("convert",       &m.seam_convert),
+        ];
+        for (name, ps) in seam_phases {
+            if ps.count == 0 {
+                let _ = writeln!(out, "  {:<20} {:>8} {:>8} {:>8} {:>10}", name, "-", "-", "-", "-");
+            } else {
+                let _ = writeln!(
+                    out,
+                    "  {:<20} {:>8.2} {:>8.2} {:>8.2} {:>10.1}",
+                    name,
+                    dur_ms(ps.min),
+                    dur_ms(ps.avg()),
+                    dur_ms(ps.max),
+                    dur_ms(ps.total),
+                );
+            }
+        }
+        let total_tried: u64 = m.seam_quad_gen.count;
+        let total_sent: u64 = m.seam_convert.count;
+        let hit_rate = if total_tried > 0 { (total_sent as f64 / total_tried as f64) * 100.0 } else { 0.0 };
+        let _ = writeln!(out, "  Candidates:   tried={}  sent={}  (hit rate: {:.1}%)", total_tried, total_sent, hit_rate);
+        let _ = writeln!(out);
+
+        // ── 3c. Send Block ──
+        let _ = writeln!(out, "── Send Block (ms) ─────────────────────────────────────────");
+        if m.send_block.count == 0 {
+            let _ = writeln!(out, "  (no data)");
+        } else {
+            let _ = writeln!(out, "  Min:    {:.2}  Avg:  {:.2}  Max:  {:.2}  Total: {:.1}",
+                dur_ms(m.send_block.min),
+                dur_ms(m.send_block.avg()),
+                dur_ms(m.send_block.max),
+                dur_ms(m.send_block.total));
+        }
+        let _ = writeln!(out);
+
+        // ── 3d. Coarse Pre-Pass ──
+        let _ = writeln!(out, "── Coarse Pre-Pass ─────────────────────────────────────────");
+        let coarse_total = m.coarse_skip_count + m.coarse_full_gen_count;
+        let skip_rate = if coarse_total > 0 { (m.coarse_skip_count as f64 / coarse_total as f64) * 100.0 } else { 0.0 };
+        let _ = writeln!(out, "  Skipped:  {}  Full gen: {}  (skip rate: {:.1}%)",
+            m.coarse_skip_count, m.coarse_full_gen_count, skip_rate);
+        let _ = writeln!(out);
+
         // ── 4. Lock Contention Stats ──
         let _ = writeln!(out, "── Lock Contention (ms) ────────────────────────────────────");
         let _ = writeln!(out, "  Store read wait:   avg={:.2}  max={:.2}  total={:.1}",
@@ -518,9 +629,9 @@ impl StreamingProfiler {
 
         // ── 6. Worker Utilization Table ──
         let _ = writeln!(out, "── Worker Utilization ──────────────────────────────────────");
-        let _ = writeln!(out, "  {:<8} {:>8} {:>10} {:>10} {:>8} {:>8}",
-            "Worker", "Chunks", "Work(ms)", "Idle(ms)", "Stale", "Util%");
-        let _ = writeln!(out, "  {:-<8} {:->8} {:->10} {:->10} {:->8} {:->8}", "", "", "", "", "", "");
+        let _ = writeln!(out, "  {:<8} {:>8} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8}",
+            "Worker", "Chunks", "Work(ms)", "Idle(ms)", "Seam(ms)", "Send(ms)", "Stale", "Util%");
+        let _ = writeln!(out, "  {:-<8} {:->8} {:->10} {:->10} {:->10} {:->10} {:->8} {:->8}", "", "", "", "", "", "", "", "");
         for (i, ws) in m.worker_stats.iter().enumerate() {
             let total_time = ws.total_work_time + ws.total_idle_time;
             let util_pct = if total_time.as_nanos() > 0 {
@@ -532,11 +643,13 @@ impl StreamingProfiler {
             };
             let _ = writeln!(
                 out,
-                "  {:<8} {:>8} {:>10.1} {:>10.1} {:>8} {:>7.1}",
+                "  {:<8} {:>8} {:>10.1} {:>10.1} {:>10.1} {:>10.1} {:>8} {:>7.1}",
                 i,
                 ws.chunks_processed,
                 dur_ms(ws.total_work_time),
                 dur_ms(ws.total_idle_time),
+                dur_ms(ws.total_seam_time),
+                dur_ms(ws.total_send_block_time),
                 ws.stale_skipped,
                 util_pct,
             );
@@ -708,6 +821,13 @@ mod tests {
             triangle_count: 800,
             section_count: 3,
             mesh_bytes: 48000,
+            seam_quad_gen: Duration::ZERO,
+            seam_mesh_retrieve: Duration::ZERO,
+            seam_convert: Duration::ZERO,
+            seam_candidates_tried: 0,
+            seam_candidates_sent: 0,
+            send_block: Duration::ZERO,
+            coarse_skip: false,
         };
 
         p.record_chunk_with_coord(0, (0, 0, 0), timings, 5, 2);
@@ -768,6 +888,13 @@ mod tests {
             triangle_count: 50,
             section_count: 1,
             mesh_bytes: 3000,
+            seam_quad_gen: Duration::ZERO,
+            seam_mesh_retrieve: Duration::ZERO,
+            seam_convert: Duration::ZERO,
+            seam_candidates_tried: 0,
+            seam_candidates_sent: 0,
+            send_block: Duration::ZERO,
+            coarse_skip: false,
         };
 
         p.record_chunk(0, timings, 0, 0);
@@ -803,6 +930,13 @@ mod tests {
             triangle_count: 300,
             section_count: 2,
             mesh_bytes: 15000,
+            seam_quad_gen: Duration::ZERO,
+            seam_mesh_retrieve: Duration::ZERO,
+            seam_convert: Duration::ZERO,
+            seam_candidates_tried: 0,
+            seam_candidates_sent: 0,
+            send_block: Duration::ZERO,
+            coarse_skip: false,
         };
 
         p.record_chunk_with_coord(0, (0, 0, 0), timings, 0, 0);

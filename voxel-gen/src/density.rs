@@ -55,7 +55,22 @@ impl MaterialNoiseSources {
 /// None otherwise (caller must do full generation).
 pub fn try_coarse_solid_check(config: &GenerationConfig, world_origin: glam::Vec3) -> Option<DensityField> {
     let size = config.chunk_size + 1;
+    let vs = config.voxel_scale() as f64;
     let global_seed = config.seed;
+
+    // Depth bypass: if the chunk's highest point is deep underground,
+    // it's guaranteed solid — skip noise evaluation entirely.
+    let chunk_top_y = world_origin.y as f64 + (size as f64 * vs);
+    if chunk_top_y < -200.0 {
+        let center_y = world_origin.y as f64 + (size as f64 * vs * 0.5);
+        let host_material = host_rock_for_depth(center_y, &config.ore.host_rock);
+        let mut field = DensityField::new(size);
+        for sample in &mut field.samples {
+            sample.density = 1.0;
+            sample.material = host_material;
+        }
+        return Some(field);
+    }
 
     // Cavern noise (same as full generation)
     let cavern_base = Simplex3D::new(global_seed);
@@ -68,7 +83,6 @@ pub fn try_coarse_solid_check(config: &GenerationConfig, world_origin: glam::Vec
 
     let freq = config.noise.cavern_frequency;
     let threshold = config.noise.cavern_threshold;
-    let vs = config.voxel_scale() as f64;
 
     // Sample coarse 4x4x4 grid (stride of ~4 through chunk)
     let stride = (size / 4).max(1);
@@ -100,7 +114,7 @@ pub fn try_coarse_solid_check(config: &GenerationConfig, world_origin: glam::Vec
                 let cavern_val = cavern_raw * 0.5 + 0.5;
 
                 // If this sample would be air (cavern), chunk is NOT fully solid
-                if cavern_val > threshold - 0.05 {
+                if cavern_val > threshold - 0.08 {
                     // Near threshold or above = might have air, not safe to skip
                     return None;
                 }
