@@ -138,21 +138,29 @@ fn handle_request(
                 let (densities, _pools) = generate_region_densities(&coords, &cfg);
                 if profiling { t_region_density += t0.elapsed(); }
 
+                    // Pre-extract hermite data BEFORE acquiring write lock (expensive part)
+                let t2 = Instant::now();
+                let keyed_data: Vec<_> = densities
+                    .into_iter()
+                    .map(|(key, density)| {
+                        let hermite = extract_hermite_data(&density);
+                        (key, density, hermite)
+                    })
+                    .collect();
+                if profiling { t_hermite += t2.elapsed(); }
+
+                // Write lock held only for fast inserts
                 {
                     let t1 = Instant::now();
                     let mut s = store.write().unwrap();
                     if profiling { t_store_write_wait += t1.elapsed(); }
 
-                    // Guard: another worker may have already done this
                     if !s.is_region_generated(&rk) || !s.has_density(&chunk) {
-                        let t2 = Instant::now();
-                        for (key, density) in densities {
+                        for (key, density, hermite) in keyed_data {
                             if !s.has_density(&key) {
-                                let hermite = extract_hermite_data(&density);
                                 s.insert(key, density, hermite);
                             }
                         }
-                        if profiling { t_hermite += t2.elapsed(); }
                         s.mark_region_generated(rk);
                     }
                 }
@@ -220,7 +228,8 @@ fn handle_request(
 
             // Convert to UE coordinates and send initial result (no seams yet)
             let t_coord_start = Instant::now();
-            let converted = convert_mesh_to_ue_scaled(&mesh, cfg.voxel_scale(), world_scale);
+            let mut converted = convert_mesh_to_ue_scaled(&mesh, cfg.voxel_scale(), world_scale);
+            crate::convert::bucket_mesh_by_material(&mut converted);
             let t_coord_transform = if profiling { t_coord_start.elapsed() } else { Duration::ZERO };
 
             // Capture mesh complexity before sending
@@ -586,7 +595,8 @@ fn incremental_seam_pass(
             mesh
         };
 
-        let converted = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
+        let mut converted = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
+        crate::convert::bucket_mesh_by_material(&mut converted);
         let _ = result_tx.send(WorkerResult::ChunkMesh {
             chunk: target,
             mesh: converted,

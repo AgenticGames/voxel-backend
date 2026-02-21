@@ -247,6 +247,13 @@ pub unsafe extern "C" fn voxel_free_result(result: *mut FfiResult) {
             mesh.index_count as usize,
         ));
     }
+    if mesh.submesh_count > 0 && !mesh.submeshes.is_null() {
+        drop(Vec::from_raw_parts(
+            mesh.submeshes,
+            mesh.submesh_count as usize,
+            mesh.submesh_count as usize,
+        ));
+    }
 
     // Free fluid mesh data if present
     let fluid = &result.fluid_mesh;
@@ -940,23 +947,25 @@ fn convert_mesh_to_ffi_result(
 fn converted_mesh_to_ffi(mesh: ConvertedMesh) -> FfiMeshData {
     let vertex_count = mesh.positions.len() as u32;
     let index_count = mesh.indices.len() as u32;
+    let submesh_count = mesh.submeshes.len() as u32;
 
-    // Convert Vecs to raw pointers. Ownership transferred to FFI side.
     let mut positions = mesh.positions.into_boxed_slice();
     let mut normals = mesh.normals.into_boxed_slice();
     let mut material_ids = mesh.material_ids.into_boxed_slice();
     let mut indices = mesh.indices.into_boxed_slice();
+    let mut submeshes = mesh.submeshes.into_boxed_slice();
 
     let positions_ptr = positions.as_mut_ptr();
     let normals_ptr = normals.as_mut_ptr();
     let material_ids_ptr = material_ids.as_mut_ptr();
     let indices_ptr = indices.as_mut_ptr();
+    let submeshes_ptr = submeshes.as_mut_ptr();
 
-    // Leak the boxes so they aren't freed here. voxel_free_result handles cleanup.
     std::mem::forget(positions);
     std::mem::forget(normals);
     std::mem::forget(material_ids);
     std::mem::forget(indices);
+    std::mem::forget(submeshes);
 
     FfiMeshData {
         positions: positions_ptr,
@@ -965,6 +974,8 @@ fn converted_mesh_to_ffi(mesh: ConvertedMesh) -> FfiMeshData {
         vertex_count,
         indices: indices_ptr,
         index_count,
+        submeshes: submeshes_ptr,
+        submesh_count,
     }
 }
 
@@ -976,6 +987,8 @@ fn empty_mesh_data() -> FfiMeshData {
         vertex_count: 0,
         indices: ptr::null_mut(),
         index_count: 0,
+        submeshes: ptr::null_mut(),
+        submesh_count: 0,
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::types::{ConvertedMesh, FfiVec3};
+use crate::types::{ConvertedMesh, FfiSubmesh, FfiVec3};
 use voxel_core::mesh::Mesh;
 
 /// Convert a Rust-space mesh (Y-up, right-hand) to UE space (Z-up, left-hand).
@@ -76,6 +76,7 @@ pub fn convert_mesh_to_ue_scaled(mesh: &Mesh, voxel_scale: f32, world_scale: f32
         normals,
         material_ids,
         indices,
+        submeshes: Vec::new(),
     }
 }
 
@@ -100,6 +101,71 @@ pub fn ue_chunk_to_rust(cx: i32, cy: i32, cz: i32) -> (i32, i32, i32) {
 /// Rust (x, y, z) -> UE (x, -z, y)
 pub fn rust_chunk_to_ue(cx: i32, cy: i32, cz: i32) -> (i32, i32, i32) {
     (cx, -cz, cy)
+}
+
+/// Rearrange a ConvertedMesh so vertices and indices are grouped by material.
+/// Populates the submeshes field with offset/count for each material section.
+pub fn bucket_mesh_by_material(mesh: &mut ConvertedMesh) {
+    if mesh.indices.is_empty() {
+        return;
+    }
+
+    // Group triangles by material of their first vertex
+    let mut buckets: std::collections::BTreeMap<u8, Vec<u32>> = std::collections::BTreeMap::new();
+    let tri_count = mesh.indices.len() / 3;
+    for tri in 0..tri_count {
+        let first_vert = mesh.indices[tri * 3] as usize;
+        let mat_id = mesh.material_ids[first_vert];
+        buckets.entry(mat_id).or_default().push(tri as u32);
+    }
+
+    let mut new_positions = Vec::with_capacity(mesh.positions.len());
+    let mut new_normals = Vec::with_capacity(mesh.normals.len());
+    let mut new_material_ids = Vec::with_capacity(mesh.material_ids.len());
+    let mut new_indices = Vec::with_capacity(mesh.indices.len());
+    let mut submeshes = Vec::with_capacity(buckets.len());
+
+    for (mat_id, triangles) in &buckets {
+        let vertex_offset = new_positions.len() as u32;
+        let index_offset = new_indices.len() as u32;
+
+        // Remap vertices for this material section
+        let mut remap: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+
+        for &tri_idx in triangles {
+            for corner in 0..3 {
+                let orig_idx = mesh.indices[tri_idx as usize * 3 + corner];
+                let new_idx = if let Some(&mapped) = remap.get(&orig_idx) {
+                    mapped
+                } else {
+                    let idx = new_positions.len() as u32;
+                    remap.insert(orig_idx, idx);
+                    new_positions.push(mesh.positions[orig_idx as usize]);
+                    new_normals.push(mesh.normals[orig_idx as usize]);
+                    new_material_ids.push(mesh.material_ids[orig_idx as usize]);
+                    idx
+                };
+                new_indices.push(new_idx);
+            }
+        }
+
+        let vertex_count = new_positions.len() as u32 - vertex_offset;
+        let index_count = new_indices.len() as u32 - index_offset;
+
+        submeshes.push(FfiSubmesh {
+            material_id: *mat_id,
+            vertex_offset,
+            vertex_count,
+            index_offset,
+            index_count,
+        });
+    }
+
+    mesh.positions = new_positions;
+    mesh.normals = new_normals;
+    mesh.material_ids = new_material_ids;
+    mesh.indices = new_indices;
+    mesh.submeshes = submeshes;
 }
 
 #[cfg(test)]

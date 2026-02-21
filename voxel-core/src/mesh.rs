@@ -66,6 +66,36 @@ impl Mesh {
         }
     }
 
+    /// Split mesh into per-material submeshes.
+    pub fn split_by_material(&self) -> Vec<(u8, Mesh)> {
+        use std::collections::BTreeMap;
+        let mut buckets: BTreeMap<u8, Vec<usize>> = BTreeMap::new();
+        for (i, tri) in self.triangles.iter().enumerate() {
+            let mat = self.vertices[tri.indices[0] as usize].material as u8;
+            buckets.entry(mat).or_default().push(i);
+        }
+
+        buckets.into_iter().map(|(mat, tri_indices)| {
+            let mut remap = std::collections::HashMap::new();
+            let mut verts = Vec::new();
+            let mut tris = Vec::new();
+            for tri_idx in tri_indices {
+                let orig_tri = &self.triangles[tri_idx];
+                let mut new_indices = [0u32; 3];
+                for (c, &orig_idx) in orig_tri.indices.iter().enumerate() {
+                    let new_idx = *remap.entry(orig_idx).or_insert_with(|| {
+                        let idx = verts.len() as u32;
+                        verts.push(self.vertices[orig_idx as usize]);
+                        idx
+                    });
+                    new_indices[c] = new_idx;
+                }
+                tris.push(Triangle { indices: new_indices });
+            }
+            (mat, Mesh { vertices: verts, triangles: tris })
+        }).collect()
+    }
+
     /// Check for degenerate triangles (zero area)
     pub fn has_degenerate_triangles(&self) -> bool {
         for tri in &self.triangles {

@@ -16,6 +16,16 @@ pub struct FfiChunkCoord {
     pub z: i32,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiSubmesh {
+    pub material_id: u8,
+    pub vertex_offset: u32,
+    pub vertex_count: u32,
+    pub index_offset: u32,
+    pub index_count: u32,
+}
+
 /// SoA layout for UE ProceduralMeshComponent.
 /// Pointers are owned by the Rust side and freed via `voxel_free_result`.
 #[repr(C)]
@@ -26,6 +36,8 @@ pub struct FfiMeshData {
     pub vertex_count: u32,
     pub indices: *mut u32,
     pub index_count: u32,
+    pub submeshes: *mut FfiSubmesh,
+    pub submesh_count: u32,
 }
 
 #[repr(C)]
@@ -270,6 +282,7 @@ pub struct ConvertedMesh {
     pub normals: Vec<FfiVec3>,
     pub material_ids: Vec<u8>,
     pub indices: Vec<u32>,
+    pub submeshes: Vec<FfiSubmesh>,
 }
 
 /// Converted fluid mesh data in UE coordinate space.

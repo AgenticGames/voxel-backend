@@ -382,7 +382,8 @@ impl ChunkStore {
                 },
             );
 
-            let converted = convert_mesh_to_ue_scaled(&mesh, config.voxel_scale(), world_scale);
+            let mut converted = convert_mesh_to_ue_scaled(&mesh, config.voxel_scale(), world_scale);
+            crate::convert::bucket_mesh_by_material(&mut converted);
             results.push((key, converted));
         }
 

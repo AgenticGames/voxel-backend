@@ -60,11 +60,16 @@ pub fn generate_region_densities(
     let chunk_size_f = eb;
 
     // Phase 1: Generate base density fields (parallel)
+    // Try coarse solid check first — skip full generation for fully-solid chunks
     let mut density_fields: HashMap<(i32, i32, i32), DensityField> = coords
         .par_iter()
         .map(|&(cx, cy, cz)| {
             let coord = ChunkCoord::new(cx, cy, cz);
-            let density = generate_density_field(config, coord.world_origin_bounds(eb));
+            let origin = coord.world_origin_bounds(eb);
+            let density = match crate::density::try_coarse_solid_check(config, origin) {
+                Some(solid_field) => solid_field,
+                None => generate_density_field(config, origin),
+            };
             ((cx, cy, cz), density)
         })
         .collect();

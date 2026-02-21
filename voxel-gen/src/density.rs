@@ -50,6 +50,78 @@ impl MaterialNoiseSources {
     }
 }
 
+/// Quick check if a chunk is likely fully solid by sampling a coarse 4x4x4 grid.
+/// Returns Some(DensityField) filled uniformly with host rock if ALL 64 samples are solid,
+/// None otherwise (caller must do full generation).
+pub fn try_coarse_solid_check(config: &GenerationConfig, world_origin: glam::Vec3) -> Option<DensityField> {
+    let size = config.chunk_size + 1;
+    let global_seed = config.seed;
+
+    // Cavern noise (same as full generation)
+    let cavern_base = Simplex3D::new(global_seed);
+    let cavern_noise = Fbm::new(cavern_base, 3, 2.0, 0.5);
+
+    let warp_x_noise = Simplex3D::new(global_seed.wrapping_add(2));
+    let warp_y_noise = Simplex3D::new(global_seed.wrapping_add(3));
+    let warp_z_noise = Simplex3D::new(global_seed.wrapping_add(4));
+    let warp_amplitude = config.noise.warp_amplitude;
+
+    let freq = config.noise.cavern_frequency;
+    let threshold = config.noise.cavern_threshold;
+    let vs = config.voxel_scale() as f64;
+
+    // Sample coarse 4x4x4 grid (stride of ~4 through chunk)
+    let stride = (size / 4).max(1);
+
+    for sz in 0..4 {
+        for sy in 0..4 {
+            for sx in 0..4 {
+                let x = (sx * stride).min(size - 1);
+                let y = (sy * stride).min(size - 1);
+                let z = (sz * stride).min(size - 1);
+
+                let wx = world_origin.x as f64 + x as f64 * vs;
+                let wy = world_origin.y as f64 + y as f64 * vs;
+                let wz = world_origin.z as f64 + z as f64 * vs;
+
+                let sample_x = wx * freq;
+                let sample_y = wy * freq;
+                let sample_z = wz * freq;
+
+                // Domain warp
+                let dx = warp_x_noise.sample(sample_x * 0.5, sample_y * 0.5, sample_z * 0.5)
+                    * warp_amplitude * freq;
+                let dy = warp_y_noise.sample(sample_x * 0.5, sample_y * 0.5, sample_z * 0.5)
+                    * warp_amplitude * freq;
+                let dz = warp_z_noise.sample(sample_x * 0.5, sample_y * 0.5, sample_z * 0.5)
+                    * warp_amplitude * freq;
+
+                let cavern_raw = cavern_noise.sample(sample_x + dx, sample_y + dy, sample_z + dz);
+                let cavern_val = cavern_raw * 0.5 + 0.5;
+
+                // If this sample would be air (cavern), chunk is NOT fully solid
+                if cavern_val > threshold - 0.05 {
+                    // Near threshold or above = might have air, not safe to skip
+                    return None;
+                }
+            }
+        }
+    }
+
+    // ALL 64 samples are well below threshold -> chunk is fully solid
+    // Fill with uniform density and depth-appropriate host rock
+    let center_y = world_origin.y as f64 + (size as f64 * vs * 0.5);
+    let host_material = host_rock_for_depth(center_y, &config.ore.host_rock);
+
+    let mut field = DensityField::new(size);
+    for sample in &mut field.samples {
+        sample.density = 1.0;
+        sample.material = host_material;
+    }
+
+    Some(field)
+}
+
 /// Generate density field from noise composition.
 ///
 /// Uses:
