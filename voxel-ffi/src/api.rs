@@ -136,6 +136,18 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                 };
                 Box::into_raw(Box::new(result))
             }
+            WorkerResult::Error { chunk, generation } => {
+                let ue = rust_chunk_to_ue(chunk.0, chunk.1, chunk.2);
+                let result = FfiResult {
+                    result_type: FfiResultType::Error,
+                    chunk: FfiChunkCoord { x: ue.0, y: ue.1, z: ue.2 },
+                    mesh: empty_mesh_data(),
+                    mined: FfiMinedMaterials { counts: [0; 19] },
+                    generation,
+                    fluid_mesh: empty_fluid_mesh_data(),
+                };
+                Box::into_raw(Box::new(result))
+            }
             WorkerResult::SolidifyRequest { .. } => {
                 // SolidifyRequest is handled engine-internally; skip for now
                 ptr::null_mut()

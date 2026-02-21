@@ -69,7 +69,8 @@ impl VoxelEngine {
         // Fluid event channel
         let (fluid_event_tx, fluid_event_rx) = bounded::<FluidEvent>(512);
 
-        let store = Arc::new(RwLock::new(ChunkStore::new()));
+        let region_size = config.region_size;
+        let store = Arc::new(RwLock::new(ChunkStore::new(region_size)));
         let config = Arc::new(RwLock::new(config));
         let stress_config = Arc::new(RwLock::new(StressConfig::default()));
         let generation_counters: Arc<DashMap<(i32, i32, i32), AtomicU64>> =
@@ -139,22 +140,20 @@ impl VoxelEngine {
     /// Returns 1 on success, 0 if queue full.
     pub fn request_generate(&self, cx: i32, cy: i32, cz: i32) -> u32 {
         let key = ue_chunk_to_rust(cx, cy, cz);
-        let generation = self
+        let counter_ref = self
             .generation_counters
             .entry(key)
-            .or_insert_with(|| AtomicU64::new(0))
-            .fetch_add(1, Ordering::Relaxed)
-            + 1;
-        // Store the new generation value
-        if let Some(counter) = self.generation_counters.get(&key) {
-            counter.store(generation, Ordering::Relaxed);
-        }
+            .or_insert_with(|| AtomicU64::new(0));
+        let generation = counter_ref.load(Ordering::Relaxed) + 1;
 
         match self.generate_tx.try_send(WorkerRequest::Generate {
             chunk: key,
             generation,
         }) {
-            Ok(()) => 1,
+            Ok(()) => {
+                counter_ref.store(generation, Ordering::Relaxed);
+                1
+            }
             Err(_) => 0,
         }
     }
@@ -456,21 +455,20 @@ impl VoxelEngine {
     /// for immediate processing. Coords are UE space. Returns 1 on success, 0 if full.
     pub fn request_priority_generate(&self, cx: i32, cy: i32, cz: i32) -> u32 {
         let key = ue_chunk_to_rust(cx, cy, cz);
-        let generation = self
+        let counter_ref = self
             .generation_counters
             .entry(key)
-            .or_insert_with(|| AtomicU64::new(0))
-            .fetch_add(1, Ordering::Relaxed)
-            + 1;
-        if let Some(counter) = self.generation_counters.get(&key) {
-            counter.store(generation, Ordering::Relaxed);
-        }
+            .or_insert_with(|| AtomicU64::new(0));
+        let generation = counter_ref.load(Ordering::Relaxed) + 1;
 
         match self.mine_tx.try_send(WorkerRequest::PriorityGenerate {
             chunk: key,
             generation,
         }) {
-            Ok(()) => 1,
+            Ok(()) => {
+                counter_ref.store(generation, Ordering::Relaxed);
+                1
+            }
             Err(_) => 0,
         }
     }

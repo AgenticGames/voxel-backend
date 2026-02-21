@@ -105,11 +105,17 @@ fn handle_request(
                 let s = store.read().unwrap();
                 let density = match s.density_fields.get(&chunk) {
                     Some(d) => d,
-                    None => return,
+                    None => {
+                        let _ = result_tx.send(WorkerResult::Error { chunk, generation });
+                        return;
+                    }
                 };
                 let hermite = match s.hermite_data.get(&chunk) {
                     Some(h) => h,
-                    None => return,
+                    None => {
+                        let _ = result_tx.send(WorkerResult::Error { chunk, generation });
+                        return;
+                    }
                 };
                 let cell_size = density.size - 1;
                 let dc_verts = solve_dc_vertices(hermite, cell_size);

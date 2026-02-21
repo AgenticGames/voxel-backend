@@ -326,6 +326,10 @@ pub enum WorkerResult {
         mesh: ConvertedMesh,
         generation: u64,
     },
+    Error {
+        chunk: (i32, i32, i32),
+        generation: u64,
+    },
     MinedMaterials {
         mined: FfiMinedMaterials,
     },
