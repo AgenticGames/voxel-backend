@@ -286,6 +286,10 @@ pub enum WorkerRequest {
         chunk: (i32, i32, i32),
         generation: u64,
     },
+    PriorityGenerate {
+        chunk: (i32, i32, i32),
+        generation: u64,
+    },
     Mine {
         request: FfiMineRequest,
     },

@@ -350,6 +350,92 @@ impl VoxelEngine {
         ))
     }
 
+    /// Find a validated spawn location for the player capsule.
+    /// Takes UE world coords, returns UE world coords via Option.
+    /// `height` and `radius` are in voxel units.
+    pub fn find_spawn_location(
+        &self,
+        ue_x: f32, ue_y: f32, ue_z: f32,
+        exclude_ue_x: f32, exclude_ue_y: f32, exclude_ue_z: f32,
+        exclude_radius: f32,
+        world_scale: f32,
+        height: i32,
+        radius: i32,
+    ) -> Option<(f32, f32, f32)> {
+        use crate::convert::from_ue_world_pos;
+
+        let cfg = self.config.read().ok()?;
+        let chunk_size = cfg.chunk_size;
+        let eb = cfg.effective_bounds();
+        drop(cfg);
+        let target = from_ue_world_pos(ue_x, ue_y, ue_z, world_scale);
+        let exclude = from_ue_world_pos(exclude_ue_x, exclude_ue_y, exclude_ue_z, world_scale);
+        let voxel_radius = exclude_radius / world_scale;
+
+        let store = self.store.read().ok()?;
+        let best = store.find_spawn_location(target, exclude, voxel_radius, chunk_size, eb, height, radius)?;
+
+        Some((
+            best.x * world_scale,
+            -best.z * world_scale,
+            best.y * world_scale,
+        ))
+    }
+
+    /// Find a validated spawn location for the chrysalis.
+    /// Takes UE world coords, returns UE world coords via Option.
+    pub fn find_chrysalis_location(
+        &self,
+        ue_x: f32, ue_y: f32, ue_z: f32,
+        exclude_ue_x: f32, exclude_ue_y: f32, exclude_ue_z: f32,
+        exclude_radius: f32,
+        world_scale: f32,
+        height: i32,
+        radius: i32,
+    ) -> Option<(f32, f32, f32)> {
+        use crate::convert::from_ue_world_pos;
+
+        let cfg = self.config.read().ok()?;
+        let chunk_size = cfg.chunk_size;
+        let eb = cfg.effective_bounds();
+        drop(cfg);
+        let target = from_ue_world_pos(ue_x, ue_y, ue_z, world_scale);
+        let exclude = from_ue_world_pos(exclude_ue_x, exclude_ue_y, exclude_ue_z, world_scale);
+        let voxel_radius = exclude_radius / world_scale;
+
+        let store = self.store.read().ok()?;
+        let best = store.find_chrysalis_location(target, exclude, voxel_radius, chunk_size, eb, height, radius)?;
+
+        Some((
+            best.x * world_scale,
+            -best.z * world_scale,
+            best.y * world_scale,
+        ))
+    }
+
+    /// Queue a priority generate request for a chunk. Sent through the mine channel
+    /// for immediate processing. Coords are UE space. Returns 1 on success, 0 if full.
+    pub fn request_priority_generate(&self, cx: i32, cy: i32, cz: i32) -> u32 {
+        let key = ue_chunk_to_rust(cx, cy, cz);
+        let generation = self
+            .generation_counters
+            .entry(key)
+            .or_insert_with(|| AtomicU64::new(0))
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
+        if let Some(counter) = self.generation_counters.get(&key) {
+            counter.store(generation, Ordering::Relaxed);
+        }
+
+        match self.mine_tx.try_send(WorkerRequest::PriorityGenerate {
+            chunk: key,
+            generation,
+        }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
     /// Query the stress field for a chunk. Returns a cloned StressField if loaded.
     pub fn query_stress(&self, chunk: (i32, i32, i32)) -> Option<StressField> {
         let store = self.store.read().ok()?;

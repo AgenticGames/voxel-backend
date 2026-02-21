@@ -567,14 +567,243 @@ impl ChunkStore {
 
                         let air_below_bonus = if air_below { 1.5_f32 } else { 1.0 };
 
+                        // Vertical clearance bonus: count air voxels above
+                        let mut air_above: u32 = 0;
+                        for dy in 1..=15u32 {
+                            let ny = y + dy as usize;
+                            if ny >= density.size {
+                                break;
+                            }
+                            if !density.get(x, ny, z).material.is_solid() {
+                                air_above += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        let clearance_bonus = if air_above >= 10 {
+                            2.0_f32
+                        } else if air_above >= 5 {
+                            1.5
+                        } else {
+                            0.5
+                        };
+
                         let world_pos = origin + Vec3::new(x as f32, y as f32, z as f32);
                         let distance = (world_pos - player_pos).length();
 
-                        let score = (air_count as f32) * wall_bonus * air_below_bonus
+                        let score = (air_count as f32) * wall_bonus * air_below_bonus * clearance_bonus
                             / (1.0 + distance);
 
                         if score > best_score {
                             best_score = score;
+                            best_pos = Some(world_pos);
+                        }
+                    }
+                }
+            }
+        }
+
+        best_pos
+    }
+
+    /// Check whether a bounding box of air voxels exists at a world position,
+    /// with a solid floor below. Handles cross-chunk boundaries via div_euclid/rem_euclid.
+    /// Returns false if any required chunk is not loaded (conservative).
+    pub fn check_clearance(
+        &self,
+        wx: i32,
+        wy: i32,
+        wz: i32,
+        height: i32,
+        radius: i32,
+        chunk_size: i32,
+    ) -> bool {
+        // Floor check: voxel at (wx, wy-1, wz) must be solid
+        {
+            let cx = wx.div_euclid(chunk_size);
+            let cy = (wy - 1).div_euclid(chunk_size);
+            let cz = wz.div_euclid(chunk_size);
+            let lx = wx.rem_euclid(chunk_size) as usize;
+            let ly = (wy - 1).rem_euclid(chunk_size) as usize;
+            let lz = wz.rem_euclid(chunk_size) as usize;
+            match self.density_fields.get(&(cx, cy, cz)) {
+                Some(df) => {
+                    if !df.get(lx, ly, lz).material.is_solid() {
+                        return false;
+                    }
+                }
+                None => return false,
+            }
+        }
+
+        // Air column: all voxels in [wy..wy+height] x [wx-radius..wx+radius] x [wz-radius..wz+radius]
+        for dy in 0..height {
+            for dx in -radius..=radius {
+                for dz in -radius..=radius {
+                    let vx = wx + dx;
+                    let vy = wy + dy;
+                    let vz = wz + dz;
+                    let cx = vx.div_euclid(chunk_size);
+                    let cy = vy.div_euclid(chunk_size);
+                    let cz = vz.div_euclid(chunk_size);
+                    let lx = vx.rem_euclid(chunk_size) as usize;
+                    let ly = vy.rem_euclid(chunk_size) as usize;
+                    let lz = vz.rem_euclid(chunk_size) as usize;
+                    match self.density_fields.get(&(cx, cy, cz)) {
+                        Some(df) => {
+                            if df.get(lx, ly, lz).material.is_solid() {
+                                return false;
+                            }
+                        }
+                        None => return false,
+                    }
+                }
+            }
+        }
+
+        true
+    }
+
+    /// Find a validated spawn location for the player capsule.
+    /// Scans all loaded density fields for air cells with sufficient clearance
+    /// (height=13 voxels, radius=3 voxels) and a solid floor.
+    /// Returns the closest valid location to `target`, excluding cells within
+    /// `exclude_radius` voxels of `exclude_center`.
+    pub fn find_spawn_location(
+        &self,
+        target: Vec3,
+        exclude_center: Vec3,
+        exclude_radius: f32,
+        chunk_size: usize,
+        effective_bounds: f32,
+        height: i32,
+        radius: i32,
+    ) -> Option<Vec3> {
+        let cs = effective_bounds;
+        let excl_r2 = exclude_radius * exclude_radius;
+        let mut best_dist = f32::MAX;
+        let mut best_pos: Option<Vec3> = None;
+        let cs_i = chunk_size as i32;
+
+        for (&(cx, cy, cz), density) in &self.density_fields {
+            let origin = Vec3::new(cx as f32 * cs, cy as f32 * cs, cz as f32 * cs);
+
+            for z in 1..(chunk_size - 1) {
+                for y in 1..(chunk_size - 1) {
+                    for x in 1..(chunk_size - 1) {
+                        let sample = density.get(x, y, z);
+                        if sample.material.is_solid() {
+                            continue;
+                        }
+
+                        let world_pos = origin + Vec3::new(x as f32, y as f32, z as f32);
+
+                        // Exclude zone
+                        if (world_pos - exclude_center).length_squared() < excl_r2 {
+                            continue;
+                        }
+
+                        let dist = (world_pos - target).length_squared();
+                        if dist >= best_dist {
+                            continue;
+                        }
+
+                        // Full clearance check (cross-chunk aware)
+                        let wx = cx * cs_i + x as i32;
+                        let wy = cy * cs_i + y as i32;
+                        let wz = cz * cs_i + z as i32;
+
+                        if self.check_clearance(wx, wy, wz, height, radius, cs_i) {
+                            best_dist = dist;
+                            best_pos = Some(world_pos);
+                        }
+                    }
+                }
+            }
+        }
+
+        best_pos
+    }
+
+    /// Find a validated spawn location for the chrysalis (quest giver).
+    /// Needs smaller clearance (height=4, radius=2) and prefers being near
+    /// but not directly adjacent to walls (prevents wall clipping).
+    pub fn find_chrysalis_location(
+        &self,
+        target: Vec3,
+        exclude_center: Vec3,
+        exclude_radius: f32,
+        chunk_size: usize,
+        effective_bounds: f32,
+        height: i32,
+        radius: i32,
+    ) -> Option<Vec3> {
+        let cs = effective_bounds;
+        let excl_r2 = exclude_radius * exclude_radius;
+        let mut best_dist = f32::MAX;
+        let mut best_pos: Option<Vec3> = None;
+        let cs_i = chunk_size as i32;
+
+        for (&(cx, cy, cz), density) in &self.density_fields {
+            let origin = Vec3::new(cx as f32 * cs, cy as f32 * cs, cz as f32 * cs);
+
+            for z in 2..(chunk_size - 2) {
+                for y in 1..(chunk_size - 1) {
+                    for x in 2..(chunk_size - 2) {
+                        let sample = density.get(x, y, z);
+                        if sample.material.is_solid() {
+                            continue;
+                        }
+
+                        let world_pos = origin + Vec3::new(x as f32, y as f32, z as f32);
+
+                        // Exclude zone
+                        if (world_pos - exclude_center).length_squared() < excl_r2 {
+                            continue;
+                        }
+
+                        // No direct face-adjacent solid horizontally (prevents wall clipping)
+                        let adj_solid = density.get(x + 1, y, z).material.is_solid()
+                            || density.get(x.wrapping_sub(1), y, z).material.is_solid()
+                            || density.get(x, y, z + 1).material.is_solid()
+                            || density.get(x, y, z.wrapping_sub(1)).material.is_solid();
+                        if adj_solid {
+                            continue;
+                        }
+
+                        // Must have solid within 3 voxels (nearby but not touching)
+                        let mut near_wall = false;
+                        'outer: for ddx in -3i32..=3 {
+                            for ddz in -3i32..=3 {
+                                if ddx.abs() <= 1 && ddz.abs() <= 1 {
+                                    continue; // skip already-checked adjacent cells
+                                }
+                                let nx = (x as i32 + ddx) as usize;
+                                let nz = (z as i32 + ddz) as usize;
+                                if nx < density.size && nz < density.size {
+                                    if density.get(nx, y, nz).material.is_solid() {
+                                        near_wall = true;
+                                        break 'outer;
+                                    }
+                                }
+                            }
+                        }
+                        if !near_wall {
+                            continue;
+                        }
+
+                        let dist = (world_pos - target).length_squared();
+                        if dist >= best_dist {
+                            continue;
+                        }
+
+                        // Full clearance check
+                        let wx = cx * cs_i + x as i32;
+                        let wy = cy * cs_i + y as i32;
+                        let wz = cz * cs_i + z as i32;
+
+                        if self.check_clearance(wx, wy, wz, height, radius, cs_i) {
+                            best_dist = dist;
                             best_pos = Some(world_pos);
                         }
                     }

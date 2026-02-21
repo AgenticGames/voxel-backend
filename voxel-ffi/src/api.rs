@@ -455,7 +455,7 @@ pub unsafe extern "C" fn voxel_query_stress_at(
 
     // Get world scale and chunk size from the engine config
     let chunk_size = 16usize; // Standard chunk size
-    let world_scale = 100.0f32; // Standard world scale
+    let world_scale = 15.0f32; // Standard world scale
 
     let rust_pos = from_ue_world_pos(world_x, world_y, world_z, world_scale);
     engine.query_stress_at(
@@ -484,7 +484,7 @@ pub unsafe extern "C" fn voxel_place_support(
         return 0;
     }
     let engine = &*(engine as *const VoxelEngine);
-    let world_scale = 100.0f32;
+    let world_scale = 15.0f32;
     let rust_pos = from_ue_world_pos(world_x, world_y, world_z, world_scale);
     engine.request_place_support(
         rust_pos.x as i32,
@@ -509,7 +509,7 @@ pub unsafe extern "C" fn voxel_remove_support(
         return 0;
     }
     let engine = &*(engine as *const VoxelEngine);
-    let world_scale = 100.0f32;
+    let world_scale = 15.0f32;
     let rust_pos = from_ue_world_pos(world_x, world_y, world_z, world_scale);
     engine.request_remove_support(
         rust_pos.x as i32,
@@ -700,6 +700,96 @@ pub unsafe extern "C" fn voxel_query_flatten_support(
     count
 }
 
+/// Find a capsule-validated spawn location for the player.
+/// Returns 1 if found (out pointers written), 0 if no suitable location.
+/// All coordinates are UE world space. Clearance: height=13, radius=3 voxels.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_find_spawn_location(
+    engine: *mut c_void,
+    target_x: f32,
+    target_y: f32,
+    target_z: f32,
+    exclude_x: f32,
+    exclude_y: f32,
+    exclude_z: f32,
+    exclude_radius: f32,
+    world_scale: f32,
+    out_x: *mut f32,
+    out_y: *mut f32,
+    out_z: *mut f32,
+) -> u32 {
+    if engine.is_null() || out_x.is_null() || out_y.is_null() || out_z.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    // Player capsule: 13 voxels tall, 3 voxels radius
+    match engine.find_spawn_location(
+        target_x, target_y, target_z,
+        exclude_x, exclude_y, exclude_z,
+        exclude_radius, world_scale, 13, 3,
+    ) {
+        Some((x, y, z)) => {
+            *out_x = x;
+            *out_y = y;
+            *out_z = z;
+            1
+        }
+        None => 0,
+    }
+}
+
+/// Find a validated spawn location for the chrysalis (quest giver).
+/// Returns 1 if found (out pointers written), 0 if no suitable location.
+/// Clearance: height=4, radius=2 voxels. Prefers near walls but not clipping.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_find_chrysalis_location(
+    engine: *mut c_void,
+    target_x: f32,
+    target_y: f32,
+    target_z: f32,
+    exclude_x: f32,
+    exclude_y: f32,
+    exclude_z: f32,
+    exclude_radius: f32,
+    world_scale: f32,
+    out_x: *mut f32,
+    out_y: *mut f32,
+    out_z: *mut f32,
+) -> u32 {
+    if engine.is_null() || out_x.is_null() || out_y.is_null() || out_z.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    // Chrysalis: 4 voxels tall, 2 voxels radius
+    match engine.find_chrysalis_location(
+        target_x, target_y, target_z,
+        exclude_x, exclude_y, exclude_z,
+        exclude_radius, world_scale, 4, 2,
+    ) {
+        Some((x, y, z)) => {
+            *out_x = x;
+            *out_y = y;
+            *out_z = z;
+            1
+        }
+        None => 0,
+    }
+}
+
+/// Request priority generation for a single chunk (sent via mine channel for
+/// immediate processing). Coords are UE space. Returns 1 on success, 0 if full.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_request_priority_generate(
+    engine: *mut c_void,
+    chunk: FfiChunkCoord,
+) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.request_priority_generate(chunk.x, chunk.y, chunk.z)
+}
+
 /// Query the host rock material at a UE world position based on depth.
 /// Returns the material id as u8.
 #[no_mangle]
@@ -833,10 +923,10 @@ mod tests {
             seed: 42,
             chunk_size: 16,
             worker_threads: 2,
-            world_scale: 100.0,
+            world_scale: 15.0,
             max_edge_length: 5.0,
             cavern_frequency: 0.05,
-            cavern_threshold: 0.55,
+            cavern_threshold: 0.80,
             detail_octaves: 4,
             detail_persistence: 0.5,
             warp_amplitude: 5.0,

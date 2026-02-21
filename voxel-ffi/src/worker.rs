@@ -64,6 +64,7 @@ fn handle_request(
     fluid_event_tx: &Sender<FluidEvent>,
 ) {
     match req {
+        WorkerRequest::PriorityGenerate { chunk, generation } |
         WorkerRequest::Generate { chunk, generation } => {
             // Check if this generation is still current (stale detection)
             if let Some(counter) = generation_counters.get(&chunk) {

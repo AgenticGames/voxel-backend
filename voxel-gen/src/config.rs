@@ -104,7 +104,7 @@ impl Default for NoiseConfig {
     fn default() -> Self {
         Self {
             cavern_frequency: 0.05,
-            cavern_threshold: 0.55,
+            cavern_threshold: 0.80,
             detail_octaves: 4,
             detail_persistence: 0.5,
             warp_amplitude: 5.0,
