@@ -84,12 +84,14 @@ pub fn try_coarse_solid_check(config: &GenerationConfig, world_origin: glam::Vec
     let freq = config.noise.cavern_frequency;
     let threshold = config.noise.cavern_threshold;
 
-    // Sample coarse 4x4x4 grid (stride of ~4 through chunk)
-    let stride = (size / 4).max(1);
+    // Sample coarse 8x8x8 grid (stride of ~2.6 through chunk)
+    // 512 samples catches narrower cave features than the old 4x4x4 (64 samples)
+    let coarse_res = 8;
+    let stride = (size / coarse_res).max(1);
 
-    for sz in 0..4 {
-        for sy in 0..4 {
-            for sx in 0..4 {
+    for sz in 0..coarse_res {
+        for sy in 0..coarse_res {
+            for sx in 0..coarse_res {
                 let x = (sx * stride).min(size - 1);
                 let y = (sy * stride).min(size - 1);
                 let z = (sz * stride).min(size - 1);

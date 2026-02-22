@@ -629,7 +629,7 @@ fn incremental_seam_pass(
         crate::convert::bucket_mesh_by_material(&mut converted);
         t_convert += t2.elapsed();
 
-        let _ = result_tx.try_send(WorkerResult::ChunkMesh {
+        let _ = result_tx.send(WorkerResult::ChunkMesh {
             chunk: target,
             mesh: converted,
             generation: 0,
