@@ -118,14 +118,10 @@ fn handle_request(
                     if profiling { t_dc_solve += t1.elapsed(); }
 
                     let t2 = Instant::now();
-                    let mut m = generate_mesh(hermite, &dc_verts, cell_size, cfg.max_edge_length, cfg.mine.min_triangle_area);
+                    let m = generate_mesh(hermite, &dc_verts, cell_size, cfg.max_edge_length, cfg.mine.min_triangle_area);
                     if profiling { t_mesh_gen += t2.elapsed(); }
 
-                    let t_smooth_start = Instant::now();
-                    m.smooth(cfg.mesh_smooth_iterations, cfg.mesh_smooth_strength, cfg.mesh_boundary_smooth);
-                    if cfg.mesh_recalc_normals > 0 { m.recalculate_normals(); }
-                    if profiling { t_mesh_smooth = t_smooth_start.elapsed(); }
-
+                    // NO smooth here — smoothing happens after base_meshes caching
                     let b_edges = region_gen::extract_boundary_edges(hermite, cfg.chunk_size);
                     Some((m, dc_verts, b_edges))
                 } else {
@@ -199,14 +195,10 @@ fn handle_request(
                 if profiling { t_dc_solve += t4.elapsed(); }
 
                 let t5 = Instant::now();
-                let mut m = generate_mesh(hermite, &dc_verts, cell_size, cfg.max_edge_length, cfg.mine.min_triangle_area);
+                let m = generate_mesh(hermite, &dc_verts, cell_size, cfg.max_edge_length, cfg.mine.min_triangle_area);
                 if profiling { t_mesh_gen += t5.elapsed(); }
 
-                let t_smooth_start2 = Instant::now();
-                m.smooth(cfg.mesh_smooth_iterations, cfg.mesh_smooth_strength, cfg.mesh_boundary_smooth);
-                if cfg.mesh_recalc_normals > 0 { m.recalculate_normals(); }
-                if profiling { t_mesh_smooth = t_smooth_start2.elapsed(); }
-
+                // NO smooth here — smoothing happens after base_meshes caching
                 let b_edges = region_gen::extract_boundary_edges(hermite, cfg.chunk_size);
                 (m, dc_verts, b_edges)
             };
@@ -224,6 +216,14 @@ fn handle_request(
                 );
                 s.base_meshes.insert(chunk, mesh.clone());
             }
+
+            // Smooth a clone for the initial UE send (base mesh stays unsmoothed for seam alignment)
+            let t_smooth_start = Instant::now();
+            let mut smoothed = mesh.clone();
+            smoothed.smooth(cfg.mesh_smooth_iterations, cfg.mesh_smooth_strength, cfg.mesh_boundary_smooth);
+            if cfg.mesh_recalc_normals > 0 { smoothed.recalculate_normals(); }
+            t_mesh_smooth = if profiling { t_smooth_start.elapsed() } else { Duration::ZERO };
+            let mesh = smoothed;
 
             // Extract solid mask and send to fluid thread
             {
@@ -658,6 +658,9 @@ fn incremental_seam_pass(
             };
             let mut mesh = base;
             mesh.append(seam_mesh);
+            // Smooth combined mesh so seam quads blend with base geometry
+            mesh.smooth(cfg.mesh_smooth_iterations, cfg.mesh_smooth_strength, cfg.mesh_boundary_smooth);
+            if cfg.mesh_recalc_normals > 0 { mesh.recalculate_normals(); }
             t_mesh_retrieve += tm.elapsed();
 
             to_send.push((target, mesh));
