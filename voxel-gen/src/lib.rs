@@ -80,5 +80,8 @@ pub fn generate_density(coord: ChunkCoord, config: &GenerationConfig) -> (Densit
         formations::place_formations(&mut density, &config.formations, world_origin, config.seed, c_seed);
     }
 
+    // Step 5: Compute cached metadata (geode flag, air count) for search optimization
+    density.compute_metadata();
+
     (density, pool_descriptors)
 }

@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use glam::Vec3;
+use rayon::prelude::*;
 use voxel_core::dual_contouring::mesh_gen::generate_mesh;
 use voxel_core::dual_contouring::solve::solve_dc_vertices;
 use voxel_core::hermite::HermiteData;
@@ -524,119 +525,126 @@ impl ChunkStore {
     /// Find the best spring location (wall seep / ceiling drip) near the player.
     /// Scans all loaded density fields for open cavern cells adjacent to a wall.
     /// Returns the world-space (Rust coords) position of the best candidate.
+    /// Parallelized with rayon; skips solid chunks and guards geode checks with metadata.
     pub fn find_spring_location(&self, player_pos: Vec3, chunk_size: usize, effective_bounds: f32) -> Option<Vec3> {
         let cs = effective_bounds;
-        let mut best_score: f32 = -1.0;
-        let mut best_pos: Option<Vec3> = None;
+        let cs_i = chunk_size as i32;
 
-        for (&(cx, cy, cz), density) in &self.density_fields {
-            let origin = Vec3::new(cx as f32 * cs, cy as f32 * cs, cz as f32 * cs);
+        let chunks: Vec<_> = self.density_fields.iter().collect();
 
-            // Skip border cells (1..chunk_size-1) to avoid neighbor OOB on the +1 grid
-            for z in 1..(chunk_size - 1) {
-                for y in 1..(chunk_size - 1) {
-                    for x in 1..(chunk_size - 1) {
-                        let sample = density.get(x, y, z);
-                        // Must be air
-                        if sample.material.is_solid() {
-                            continue;
-                        }
+        chunks.par_iter()
+            .filter_map(|(&(cx, cy, cz), density)| {
+                // Skip all-solid chunks (no air cells to search)
+                if density.air_cell_count == 0 {
+                    return None;
+                }
 
-                        // Count air neighbors in 3x3x3 Moore neighborhood
-                        let mut air_count: u32 = 0;
-                        for dz in -1i32..=1 {
-                            for dy in -1i32..=1 {
-                                for dx in -1i32..=1 {
-                                    if dx == 0 && dy == 0 && dz == 0 {
-                                        continue;
-                                    }
-                                    let nx = (x as i32 + dx) as usize;
-                                    let ny = (y as i32 + dy) as usize;
-                                    let nz = (z as i32 + dz) as usize;
-                                    if !density.get(nx, ny, nz).material.is_solid() {
-                                        air_count += 1;
+                let origin = Vec3::new(cx as f32 * cs, cy as f32 * cs, cz as f32 * cs);
+                let chunk_has_geode = density.has_geode_material;
+                let mut best_score: f32 = -1.0;
+                let mut best_pos: Option<Vec3> = None;
+
+                for z in 1..(chunk_size - 1) {
+                    for y in 1..(chunk_size - 1) {
+                        for x in 1..(chunk_size - 1) {
+                            let sample = density.get(x, y, z);
+                            if sample.material.is_solid() {
+                                continue;
+                            }
+
+                            let mut air_count: u32 = 0;
+                            for dz in -1i32..=1 {
+                                for dy in -1i32..=1 {
+                                    for dx in -1i32..=1 {
+                                        if dx == 0 && dy == 0 && dz == 0 {
+                                            continue;
+                                        }
+                                        let nx = (x as i32 + dx) as usize;
+                                        let ny = (y as i32 + dy) as usize;
+                                        let nz = (z as i32 + dz) as usize;
+                                        if !density.get(nx, ny, nz).material.is_solid() {
+                                            air_count += 1;
+                                        }
                                     }
                                 }
                             }
-                        }
 
-                        // Cavern test: need >= 15 air neighbors out of 26
-                        if air_count < 15 {
-                            continue;
-                        }
-
-                        // Skip geode interiors
-                        let wx = cx * chunk_size as i32 + x as i32;
-                        let wy = cy * chunk_size as i32 + y as i32;
-                        let wz = cz * chunk_size as i32 + z as i32;
-                        if self.is_geode_interior(wx, wy, wz, chunk_size as i32) {
-                            continue;
-                        }
-
-                        // Check face neighbors for wall/ceiling adjacency
-                        let solid_above = density.get(x, y + 1, z).material.is_solid();
-                        let solid_below = density.get(x, y.wrapping_sub(1), z).material.is_solid();
-                        let solid_xp = density.get(x + 1, y, z).material.is_solid();
-                        let solid_xn = density.get(x.wrapping_sub(1), y, z).material.is_solid();
-                        let solid_zp = density.get(x, y, z + 1).material.is_solid();
-                        let solid_zn = density.get(x, y, z.wrapping_sub(1)).material.is_solid();
-
-                        let has_solid_side = solid_xp || solid_xn || solid_zp || solid_zn;
-                        let air_below = !solid_below;
-
-                        // Must have at least one solid face neighbor
-                        if !solid_above && !has_solid_side {
-                            continue;
-                        }
-
-                        // Scoring
-                        let wall_bonus = if has_solid_side && !solid_above {
-                            2.0_f32 // wall seep (preferred)
-                        } else if solid_above {
-                            1.5 // ceiling drip
-                        } else {
-                            1.0
-                        };
-
-                        let air_below_bonus = if air_below { 1.5_f32 } else { 1.0 };
-
-                        // Vertical clearance bonus: count air voxels above
-                        let mut air_above: u32 = 0;
-                        for dy in 1..=15u32 {
-                            let ny = y + dy as usize;
-                            if ny >= density.size {
-                                break;
+                            if air_count < 15 {
+                                continue;
                             }
-                            if !density.get(x, ny, z).material.is_solid() {
-                                air_above += 1;
+
+                            // Guard geode check behind chunk-level metadata
+                            if chunk_has_geode {
+                                let wx = cx * cs_i + x as i32;
+                                let wy = cy * cs_i + y as i32;
+                                let wz = cz * cs_i + z as i32;
+                                if self.is_geode_interior(wx, wy, wz, cs_i) {
+                                    continue;
+                                }
+                            }
+
+                            let solid_above = density.get(x, y + 1, z).material.is_solid();
+                            let solid_below = density.get(x, y.wrapping_sub(1), z).material.is_solid();
+                            let solid_xp = density.get(x + 1, y, z).material.is_solid();
+                            let solid_xn = density.get(x.wrapping_sub(1), y, z).material.is_solid();
+                            let solid_zp = density.get(x, y, z + 1).material.is_solid();
+                            let solid_zn = density.get(x, y, z.wrapping_sub(1)).material.is_solid();
+
+                            let has_solid_side = solid_xp || solid_xn || solid_zp || solid_zn;
+                            let air_below = !solid_below;
+
+                            if !solid_above && !has_solid_side {
+                                continue;
+                            }
+
+                            let wall_bonus = if has_solid_side && !solid_above {
+                                2.0_f32
+                            } else if solid_above {
+                                1.5
                             } else {
-                                break;
+                                1.0
+                            };
+
+                            let air_below_bonus = if air_below { 1.5_f32 } else { 1.0 };
+
+                            let mut air_above: u32 = 0;
+                            for dy in 1..=15u32 {
+                                let ny = y + dy as usize;
+                                if ny >= density.size {
+                                    break;
+                                }
+                                if !density.get(x, ny, z).material.is_solid() {
+                                    air_above += 1;
+                                } else {
+                                    break;
+                                }
                             }
-                        }
-                        let clearance_bonus = if air_above >= 10 {
-                            2.0_f32
-                        } else if air_above >= 5 {
-                            1.5
-                        } else {
-                            0.5
-                        };
+                            let clearance_bonus = if air_above >= 10 {
+                                2.0_f32
+                            } else if air_above >= 5 {
+                                1.5
+                            } else {
+                                0.5
+                            };
 
-                        let world_pos = origin + Vec3::new(x as f32, y as f32, z as f32);
-                        let distance = (world_pos - player_pos).length();
+                            let world_pos = origin + Vec3::new(x as f32, y as f32, z as f32);
+                            let distance = (world_pos - player_pos).length();
 
-                        let score = (air_count as f32) * wall_bonus * air_below_bonus * clearance_bonus
-                            / (1.0 + distance);
+                            let score = (air_count as f32) * wall_bonus * air_below_bonus * clearance_bonus
+                                / (1.0 + distance);
 
-                        if score > best_score {
-                            best_score = score;
-                            best_pos = Some(world_pos);
+                            if score > best_score {
+                                best_score = score;
+                                best_pos = Some(world_pos);
+                            }
                         }
                     }
                 }
-            }
-        }
 
-        best_pos
+                best_pos.map(|pos| (best_score, pos))
+            })
+            .reduce_with(|a, b| if a.0 > b.0 { a } else { b })
+            .map(|(_, pos)| pos)
     }
 
     /// Check whether a bounding box of air voxels exists at a world position,
@@ -698,10 +706,7 @@ impl ChunkStore {
     }
 
     /// Find a validated spawn location for the player capsule.
-    /// Scans all loaded density fields for air cells with sufficient clearance
-    /// (height=13 voxels, radius=3 voxels) and a solid floor.
-    /// Returns the closest valid location to `target`, excluding cells within
-    /// `exclude_radius` voxels of `exclude_center`.
+    /// Parallelized with rayon; skips solid chunks and guards geode checks with metadata.
     pub fn find_spawn_location(
         &self,
         target: Vec3,
@@ -714,57 +719,68 @@ impl ChunkStore {
     ) -> Option<Vec3> {
         let cs = effective_bounds;
         let excl_r2 = exclude_radius * exclude_radius;
-        let mut best_dist = f32::MAX;
-        let mut best_pos: Option<Vec3> = None;
         let cs_i = chunk_size as i32;
 
-        for (&(cx, cy, cz), density) in &self.density_fields {
-            let origin = Vec3::new(cx as f32 * cs, cy as f32 * cs, cz as f32 * cs);
+        let chunks: Vec<_> = self.density_fields.iter().collect();
 
-            for z in 1..(chunk_size - 1) {
-                for y in 1..(chunk_size - 1) {
-                    for x in 1..(chunk_size - 1) {
-                        let sample = density.get(x, y, z);
-                        if sample.material.is_solid() {
-                            continue;
-                        }
+        chunks.par_iter()
+            .filter_map(|(&(cx, cy, cz), density)| {
+                if density.air_cell_count == 0 {
+                    return None;
+                }
 
-                        // Skip geode interiors
-                        let wx = cx * cs_i + x as i32;
-                        let wy = cy * cs_i + y as i32;
-                        let wz = cz * cs_i + z as i32;
-                        if self.is_geode_interior(wx, wy, wz, cs_i) {
-                            continue;
-                        }
+                let origin = Vec3::new(cx as f32 * cs, cy as f32 * cs, cz as f32 * cs);
+                let chunk_has_geode = density.has_geode_material;
+                let mut best_dist = f32::MAX;
+                let mut best_pos: Option<Vec3> = None;
 
-                        let world_pos = origin + Vec3::new(x as f32, y as f32, z as f32);
+                for z in 1..(chunk_size - 1) {
+                    for y in 1..(chunk_size - 1) {
+                        for x in 1..(chunk_size - 1) {
+                            let sample = density.get(x, y, z);
+                            if sample.material.is_solid() {
+                                continue;
+                            }
 
-                        // Exclude zone
-                        if (world_pos - exclude_center).length_squared() < excl_r2 {
-                            continue;
-                        }
+                            if chunk_has_geode {
+                                let wx = cx * cs_i + x as i32;
+                                let wy = cy * cs_i + y as i32;
+                                let wz = cz * cs_i + z as i32;
+                                if self.is_geode_interior(wx, wy, wz, cs_i) {
+                                    continue;
+                                }
+                            }
 
-                        let dist = (world_pos - target).length_squared();
-                        if dist >= best_dist {
-                            continue;
-                        }
+                            let world_pos = origin + Vec3::new(x as f32, y as f32, z as f32);
 
-                        // Full clearance check (cross-chunk aware)
-                        if self.check_clearance(wx, wy, wz, height, radius, cs_i) {
-                            best_dist = dist;
-                            best_pos = Some(world_pos);
+                            if (world_pos - exclude_center).length_squared() < excl_r2 {
+                                continue;
+                            }
+
+                            let dist = (world_pos - target).length_squared();
+                            if dist >= best_dist {
+                                continue;
+                            }
+
+                            let wx = cx * cs_i + x as i32;
+                            let wy = cy * cs_i + y as i32;
+                            let wz = cz * cs_i + z as i32;
+                            if self.check_clearance(wx, wy, wz, height, radius, cs_i) {
+                                best_dist = dist;
+                                best_pos = Some(world_pos);
+                            }
                         }
                     }
                 }
-            }
-        }
 
-        best_pos
+                best_pos.map(|pos| (best_dist, pos))
+            })
+            .reduce_with(|a, b| if a.0 < b.0 { a } else { b })
+            .map(|(_, pos)| pos)
     }
 
     /// Find a validated spawn location for the chrysalis (quest giver).
-    /// Needs smaller clearance (height=4, radius=2) and prefers being near
-    /// but not directly adjacent to walls (prevents wall clipping).
+    /// Parallelized with rayon; skips solid chunks and guards geode checks with metadata.
     pub fn find_chrysalis_location(
         &self,
         target: Vec3,
@@ -777,87 +793,96 @@ impl ChunkStore {
     ) -> Option<Vec3> {
         let cs = effective_bounds;
         let excl_r2 = exclude_radius * exclude_radius;
-        let mut best_dist = f32::MAX;
-        let mut best_pos: Option<Vec3> = None;
         let cs_i = chunk_size as i32;
 
-        for (&(cx, cy, cz), density) in &self.density_fields {
-            let origin = Vec3::new(cx as f32 * cs, cy as f32 * cs, cz as f32 * cs);
+        let chunks: Vec<_> = self.density_fields.iter().collect();
 
-            for z in 2..(chunk_size - 2) {
-                for y in 1..(chunk_size - 1) {
-                    for x in 2..(chunk_size - 2) {
-                        let sample = density.get(x, y, z);
-                        if sample.material.is_solid() {
-                            continue;
-                        }
+        chunks.par_iter()
+            .filter_map(|(&(cx, cy, cz), density)| {
+                if density.air_cell_count == 0 {
+                    return None;
+                }
 
-                        // Skip geode interiors
-                        let wx = cx * cs_i + x as i32;
-                        let wy = cy * cs_i + y as i32;
-                        let wz = cz * cs_i + z as i32;
-                        if self.is_geode_interior(wx, wy, wz, cs_i) {
-                            continue;
-                        }
+                let origin = Vec3::new(cx as f32 * cs, cy as f32 * cs, cz as f32 * cs);
+                let chunk_has_geode = density.has_geode_material;
+                let mut best_dist = f32::MAX;
+                let mut best_pos: Option<Vec3> = None;
 
-                        let world_pos = origin + Vec3::new(x as f32, y as f32, z as f32);
+                for z in 2..(chunk_size - 2) {
+                    for y in 1..(chunk_size - 1) {
+                        for x in 2..(chunk_size - 2) {
+                            let sample = density.get(x, y, z);
+                            if sample.material.is_solid() {
+                                continue;
+                            }
 
-                        // Exclude zone
-                        if (world_pos - exclude_center).length_squared() < excl_r2 {
-                            continue;
-                        }
-
-                        // No direct face-adjacent solid horizontally (prevents wall clipping)
-                        let adj_solid = density.get(x + 1, y, z).material.is_solid()
-                            || density.get(x.wrapping_sub(1), y, z).material.is_solid()
-                            || density.get(x, y, z + 1).material.is_solid()
-                            || density.get(x, y, z.wrapping_sub(1)).material.is_solid();
-                        if adj_solid {
-                            continue;
-                        }
-
-                        // Must have solid within 3 voxels (nearby but not touching)
-                        let mut near_wall = false;
-                        'outer: for ddx in -3i32..=3 {
-                            for ddz in -3i32..=3 {
-                                if ddx.abs() <= 1 && ddz.abs() <= 1 {
-                                    continue; // skip already-checked adjacent cells
+                            if chunk_has_geode {
+                                let wx = cx * cs_i + x as i32;
+                                let wy = cy * cs_i + y as i32;
+                                let wz = cz * cs_i + z as i32;
+                                if self.is_geode_interior(wx, wy, wz, cs_i) {
+                                    continue;
                                 }
-                                let nx = (x as i32 + ddx) as usize;
-                                let nz = (z as i32 + ddz) as usize;
-                                if nx < density.size && nz < density.size {
-                                    if density.get(nx, y, nz).material.is_solid() {
-                                        near_wall = true;
-                                        break 'outer;
+                            }
+
+                            let world_pos = origin + Vec3::new(x as f32, y as f32, z as f32);
+
+                            if (world_pos - exclude_center).length_squared() < excl_r2 {
+                                continue;
+                            }
+
+                            let adj_solid = density.get(x + 1, y, z).material.is_solid()
+                                || density.get(x.wrapping_sub(1), y, z).material.is_solid()
+                                || density.get(x, y, z + 1).material.is_solid()
+                                || density.get(x, y, z.wrapping_sub(1)).material.is_solid();
+                            if adj_solid {
+                                continue;
+                            }
+
+                            let mut near_wall = false;
+                            'outer: for ddx in -3i32..=3 {
+                                for ddz in -3i32..=3 {
+                                    if ddx.abs() <= 1 && ddz.abs() <= 1 {
+                                        continue;
+                                    }
+                                    let nx = (x as i32 + ddx) as usize;
+                                    let nz = (z as i32 + ddz) as usize;
+                                    if nx < density.size && nz < density.size {
+                                        if density.get(nx, y, nz).material.is_solid() {
+                                            near_wall = true;
+                                            break 'outer;
+                                        }
                                     }
                                 }
                             }
-                        }
-                        if !near_wall {
-                            continue;
-                        }
+                            if !near_wall {
+                                continue;
+                            }
 
-                        let dist = (world_pos - target).length_squared();
-                        if dist >= best_dist {
-                            continue;
-                        }
+                            let dist = (world_pos - target).length_squared();
+                            if dist >= best_dist {
+                                continue;
+                            }
 
-                        // Full clearance check
-                        if self.check_clearance(wx, wy, wz, height, radius, cs_i) {
-                            best_dist = dist;
-                            best_pos = Some(world_pos);
+                            let wx = cx * cs_i + x as i32;
+                            let wy = cy * cs_i + y as i32;
+                            let wz = cz * cs_i + z as i32;
+                            if self.check_clearance(wx, wy, wz, height, radius, cs_i) {
+                                best_dist = dist;
+                                best_pos = Some(world_pos);
+                            }
                         }
                     }
                 }
-            }
-        }
 
-        best_pos
+                best_pos.map(|pos| (best_dist, pos))
+            })
+            .reduce_with(|a, b| if a.0 < b.0 { a } else { b })
+            .map(|(_, pos)| pos)
     }
 
-    /// Find a wall-adjacent air cell near `target`, excluding cells within
-    /// `exclude_radius` voxels of `exclude_center`. Used to offset the chrysalis
-    /// from the water spring so it's visible.
+    /// Find a wall-adjacent air cell near `target`.
+    /// Parallelized with rayon; skips solid chunks and guards geode checks with metadata.
     pub fn find_wall_location_near(
         &self,
         target: Vec3,
@@ -868,58 +893,68 @@ impl ChunkStore {
     ) -> Option<Vec3> {
         let cs = effective_bounds;
         let excl_r2 = exclude_radius * exclude_radius;
-        let mut best_dist = f32::MAX;
-        let mut best_pos: Option<Vec3> = None;
+        let cs_i = chunk_size as i32;
 
-        for (&(cx, cy, cz), density) in &self.density_fields {
-            let origin = Vec3::new(cx as f32 * cs, cy as f32 * cs, cz as f32 * cs);
+        let chunks: Vec<_> = self.density_fields.iter().collect();
 
-            for z in 1..(chunk_size - 1) {
-                for y in 1..(chunk_size - 1) {
-                    for x in 1..(chunk_size - 1) {
-                        let sample = density.get(x, y, z);
-                        if sample.material.is_solid() {
-                            continue;
-                        }
+        chunks.par_iter()
+            .filter_map(|(&(cx, cy, cz), density)| {
+                if density.air_cell_count == 0 {
+                    return None;
+                }
 
-                        // Skip geode interiors
-                        let wx = cx * chunk_size as i32 + x as i32;
-                        let wy = cy * chunk_size as i32 + y as i32;
-                        let wz = cz * chunk_size as i32 + z as i32;
-                        if self.is_geode_interior(wx, wy, wz, chunk_size as i32) {
-                            continue;
-                        }
+                let origin = Vec3::new(cx as f32 * cs, cy as f32 * cs, cz as f32 * cs);
+                let chunk_has_geode = density.has_geode_material;
+                let mut best_dist = f32::MAX;
+                let mut best_pos: Option<Vec3> = None;
 
-                        let world_pos = origin + Vec3::new(x as f32, y as f32, z as f32);
+                for z in 1..(chunk_size - 1) {
+                    for y in 1..(chunk_size - 1) {
+                        for x in 1..(chunk_size - 1) {
+                            let sample = density.get(x, y, z);
+                            if sample.material.is_solid() {
+                                continue;
+                            }
 
-                        // Exclude zone around the spring
-                        if (world_pos - exclude_center).length_squared() < excl_r2 {
-                            continue;
-                        }
+                            if chunk_has_geode {
+                                let wx = cx * cs_i + x as i32;
+                                let wy = cy * cs_i + y as i32;
+                                let wz = cz * cs_i + z as i32;
+                                if self.is_geode_interior(wx, wy, wz, cs_i) {
+                                    continue;
+                                }
+                            }
 
-                        // Must have at least one solid face neighbor (wall adjacency)
-                        let has_wall = density.get(x + 1, y, z).material.is_solid()
-                            || density.get(x.wrapping_sub(1), y, z).material.is_solid()
-                            || density.get(x, y + 1, z).material.is_solid()
-                            || density.get(x, y.wrapping_sub(1), z).material.is_solid()
-                            || density.get(x, y, z + 1).material.is_solid()
-                            || density.get(x, y, z.wrapping_sub(1)).material.is_solid();
+                            let world_pos = origin + Vec3::new(x as f32, y as f32, z as f32);
 
-                        if !has_wall {
-                            continue;
-                        }
+                            if (world_pos - exclude_center).length_squared() < excl_r2 {
+                                continue;
+                            }
 
-                        let dist = (world_pos - target).length_squared();
-                        if dist < best_dist {
-                            best_dist = dist;
-                            best_pos = Some(world_pos);
+                            let has_wall = density.get(x + 1, y, z).material.is_solid()
+                                || density.get(x.wrapping_sub(1), y, z).material.is_solid()
+                                || density.get(x, y + 1, z).material.is_solid()
+                                || density.get(x, y.wrapping_sub(1), z).material.is_solid()
+                                || density.get(x, y, z + 1).material.is_solid()
+                                || density.get(x, y, z.wrapping_sub(1)).material.is_solid();
+
+                            if !has_wall {
+                                continue;
+                            }
+
+                            let dist = (world_pos - target).length_squared();
+                            if dist < best_dist {
+                                best_dist = dist;
+                                best_pos = Some(world_pos);
+                            }
                         }
                     }
                 }
-            }
-        }
 
-        best_pos
+                best_pos.map(|pos| (best_dist, pos))
+            })
+            .reduce_with(|a, b| if a.0 < b.0 { a } else { b })
+            .map(|(_, pos)| pos)
     }
 
     /// Flatten a 2x2 terrace footprint for building placement.
@@ -1066,6 +1101,7 @@ impl ChunkStore {
     /// BFS flood-fill from a seed cell to find all connected air cells in the same cavern.
     /// 6-connected, cross-chunk aware. Skips solid voxels, geode interiors, and unloaded chunks.
     /// Returns None if the fill exceeds max_cells (cavern too large for constraint).
+    /// Uses per-chunk Vec<bool> bitset for O(1) visited checks instead of HashSet hashing.
     pub fn flood_fill_cavern(
         &self,
         seed_wx: i32,
@@ -1074,12 +1110,38 @@ impl ChunkStore {
         chunk_size: i32,
         max_cells: usize,
     ) -> Option<HashSet<(i32, i32, i32)>> {
-        let mut visited = HashSet::new();
+        let cs = chunk_size as usize;
+        let cells_per_chunk = cs * cs * cs;
+        let mut visited_chunks: HashMap<(i32, i32, i32), Vec<bool>> = HashMap::new();
+        let mut total_visited: usize = 0;
         let mut queue = VecDeque::new();
 
-        let seed = (seed_wx, seed_wy, seed_wz);
-        visited.insert(seed);
-        queue.push_back(seed);
+        // Helper: check and mark visited in bitset
+        let is_visited = |chunks: &HashMap<(i32, i32, i32), Vec<bool>>, ck: (i32, i32, i32), lx: usize, ly: usize, lz: usize| -> bool {
+            if let Some(bits) = chunks.get(&ck) {
+                bits[lz * cs * cs + ly * cs + lx]
+            } else {
+                false
+            }
+        };
+
+        let mark_visited = |chunks: &mut HashMap<(i32, i32, i32), Vec<bool>>, ck: (i32, i32, i32), lx: usize, ly: usize, lz: usize| {
+            let bits = chunks.entry(ck).or_insert_with(|| vec![false; cells_per_chunk]);
+            bits[lz * cs * cs + ly * cs + lx] = true;
+        };
+
+        // Seed
+        {
+            let cx = seed_wx.div_euclid(chunk_size);
+            let cy = seed_wy.div_euclid(chunk_size);
+            let cz = seed_wz.div_euclid(chunk_size);
+            let lx = seed_wx.rem_euclid(chunk_size) as usize;
+            let ly = seed_wy.rem_euclid(chunk_size) as usize;
+            let lz = seed_wz.rem_euclid(chunk_size) as usize;
+            mark_visited(&mut visited_chunks, (cx, cy, cz), lx, ly, lz);
+            total_visited += 1;
+        }
+        queue.push_back((seed_wx, seed_wy, seed_wz));
 
         let directions: [(i32, i32, i32); 6] = [
             (1, 0, 0), (-1, 0, 0),
@@ -1088,8 +1150,8 @@ impl ChunkStore {
         ];
 
         while let Some((wx, wy, wz)) = queue.pop_front() {
-            if visited.len() > max_cells {
-                return None; // Cavern too large
+            if total_visited > max_cells {
+                return None;
             }
 
             for &(dx, dy, dz) in &directions {
@@ -1097,40 +1159,59 @@ impl ChunkStore {
                 let ny = wy + dy;
                 let nz = wz + dz;
 
-                if visited.contains(&(nx, ny, nz)) {
-                    continue;
-                }
-
                 let cx = nx.div_euclid(chunk_size);
                 let cy = ny.div_euclid(chunk_size);
                 let cz = nz.div_euclid(chunk_size);
                 let lx = nx.rem_euclid(chunk_size) as usize;
                 let ly = ny.rem_euclid(chunk_size) as usize;
                 let lz = nz.rem_euclid(chunk_size) as usize;
+                let ck = (cx, cy, cz);
 
-                match self.density_fields.get(&(cx, cy, cz)) {
-                    Some(df) => {
-                        if df.get(lx, ly, lz).material.is_solid() {
-                            continue; // Solid wall
-                        }
-                    }
-                    None => continue, // Unloaded chunk
-                }
-
-                // Skip geode interiors
-                if self.is_geode_interior(nx, ny, nz, chunk_size) {
+                if is_visited(&visited_chunks, ck, lx, ly, lz) {
                     continue;
                 }
 
-                visited.insert((nx, ny, nz));
+                match self.density_fields.get(&ck) {
+                    Some(df) => {
+                        if df.get(lx, ly, lz).material.is_solid() {
+                            continue;
+                        }
+                        // Guard geode check behind chunk-level metadata
+                        if df.has_geode_material && self.is_geode_interior(nx, ny, nz, chunk_size) {
+                            continue;
+                        }
+                    }
+                    None => continue,
+                }
+
+                mark_visited(&mut visited_chunks, ck, lx, ly, lz);
+                total_visited += 1;
                 queue.push_back((nx, ny, nz));
             }
         }
 
-        Some(visited)
+        // Convert bitset back to HashSet for downstream compatibility
+        let mut result = HashSet::with_capacity(total_visited);
+        for (&(cx, cy, cz), bits) in &visited_chunks {
+            for z in 0..cs {
+                for y in 0..cs {
+                    for x in 0..cs {
+                        if bits[z * cs * cs + y * cs + x] {
+                            let wx = cx * chunk_size + x as i32;
+                            let wy = cy * chunk_size + y as i32;
+                            let wz = cz * chunk_size + z as i32;
+                            result.insert((wx, wy, wz));
+                        }
+                    }
+                }
+            }
+        }
+
+        Some(result)
     }
 
     /// Same as find_spawn_location but constrained to a pre-computed cavern volume.
+    /// Parallelized with rayon; skips solid chunks.
     pub fn find_spawn_in_cavern(
         &self,
         cavern: &HashSet<(i32, i32, i32)>,
@@ -1144,55 +1225,63 @@ impl ChunkStore {
     ) -> Option<Vec3> {
         let cs = effective_bounds;
         let excl_r2 = exclude_radius * exclude_radius;
-        let mut best_dist = f32::MAX;
-        let mut best_pos: Option<Vec3> = None;
         let cs_i = chunk_size as i32;
 
-        for (&(cx, cy, cz), density) in &self.density_fields {
-            let origin = Vec3::new(cx as f32 * cs, cy as f32 * cs, cz as f32 * cs);
+        let chunks: Vec<_> = self.density_fields.iter().collect();
 
-            for z in 1..(chunk_size - 1) {
-                for y in 1..(chunk_size - 1) {
-                    for x in 1..(chunk_size - 1) {
-                        let wx = cx * cs_i + x as i32;
-                        let wy = cy * cs_i + y as i32;
-                        let wz = cz * cs_i + z as i32;
+        chunks.par_iter()
+            .filter_map(|(&(cx, cy, cz), density)| {
+                if density.air_cell_count == 0 {
+                    return None;
+                }
 
-                        // Must be in the cavern volume
-                        if !cavern.contains(&(wx, wy, wz)) {
-                            continue;
-                        }
+                let origin = Vec3::new(cx as f32 * cs, cy as f32 * cs, cz as f32 * cs);
+                let mut best_dist = f32::MAX;
+                let mut best_pos: Option<Vec3> = None;
 
-                        let sample = density.get(x, y, z);
-                        if sample.material.is_solid() {
-                            continue;
-                        }
+                for z in 1..(chunk_size - 1) {
+                    for y in 1..(chunk_size - 1) {
+                        for x in 1..(chunk_size - 1) {
+                            let wx = cx * cs_i + x as i32;
+                            let wy = cy * cs_i + y as i32;
+                            let wz = cz * cs_i + z as i32;
 
-                        let world_pos = origin + Vec3::new(x as f32, y as f32, z as f32);
+                            if !cavern.contains(&(wx, wy, wz)) {
+                                continue;
+                            }
 
-                        // Exclude zone
-                        if (world_pos - exclude_center).length_squared() < excl_r2 {
-                            continue;
-                        }
+                            let sample = density.get(x, y, z);
+                            if sample.material.is_solid() {
+                                continue;
+                            }
 
-                        let dist = (world_pos - target).length_squared();
-                        if dist >= best_dist {
-                            continue;
-                        }
+                            let world_pos = origin + Vec3::new(x as f32, y as f32, z as f32);
 
-                        if self.check_clearance(wx, wy, wz, height, radius, cs_i) {
-                            best_dist = dist;
-                            best_pos = Some(world_pos);
+                            if (world_pos - exclude_center).length_squared() < excl_r2 {
+                                continue;
+                            }
+
+                            let dist = (world_pos - target).length_squared();
+                            if dist >= best_dist {
+                                continue;
+                            }
+
+                            if self.check_clearance(wx, wy, wz, height, radius, cs_i) {
+                                best_dist = dist;
+                                best_pos = Some(world_pos);
+                            }
                         }
                     }
                 }
-            }
-        }
 
-        best_pos
+                best_pos.map(|pos| (best_dist, pos))
+            })
+            .reduce_with(|a, b| if a.0 < b.0 { a } else { b })
+            .map(|(_, pos)| pos)
     }
 
     /// Same as find_chrysalis_location but constrained to a pre-computed cavern volume.
+    /// Parallelized with rayon; skips solid chunks.
     pub fn find_chrysalis_in_cavern(
         &self,
         cavern: &HashSet<(i32, i32, i32)>,
@@ -1206,82 +1295,87 @@ impl ChunkStore {
     ) -> Option<Vec3> {
         let cs = effective_bounds;
         let excl_r2 = exclude_radius * exclude_radius;
-        let mut best_dist = f32::MAX;
-        let mut best_pos: Option<Vec3> = None;
         let cs_i = chunk_size as i32;
 
-        for (&(cx, cy, cz), density) in &self.density_fields {
-            let origin = Vec3::new(cx as f32 * cs, cy as f32 * cs, cz as f32 * cs);
+        let chunks: Vec<_> = self.density_fields.iter().collect();
 
-            for z in 2..(chunk_size - 2) {
-                for y in 1..(chunk_size - 1) {
-                    for x in 2..(chunk_size - 2) {
-                        let wx = cx * cs_i + x as i32;
-                        let wy = cy * cs_i + y as i32;
-                        let wz = cz * cs_i + z as i32;
+        chunks.par_iter()
+            .filter_map(|(&(cx, cy, cz), density)| {
+                if density.air_cell_count == 0 {
+                    return None;
+                }
 
-                        // Must be in the cavern volume
-                        if !cavern.contains(&(wx, wy, wz)) {
-                            continue;
-                        }
+                let origin = Vec3::new(cx as f32 * cs, cy as f32 * cs, cz as f32 * cs);
+                let mut best_dist = f32::MAX;
+                let mut best_pos: Option<Vec3> = None;
 
-                        let sample = density.get(x, y, z);
-                        if sample.material.is_solid() {
-                            continue;
-                        }
+                for z in 2..(chunk_size - 2) {
+                    for y in 1..(chunk_size - 1) {
+                        for x in 2..(chunk_size - 2) {
+                            let wx = cx * cs_i + x as i32;
+                            let wy = cy * cs_i + y as i32;
+                            let wz = cz * cs_i + z as i32;
 
-                        let world_pos = origin + Vec3::new(x as f32, y as f32, z as f32);
+                            if !cavern.contains(&(wx, wy, wz)) {
+                                continue;
+                            }
 
-                        // Exclude zone
-                        if (world_pos - exclude_center).length_squared() < excl_r2 {
-                            continue;
-                        }
+                            let sample = density.get(x, y, z);
+                            if sample.material.is_solid() {
+                                continue;
+                            }
 
-                        // No direct face-adjacent solid horizontally (prevents wall clipping)
-                        let adj_solid = density.get(x + 1, y, z).material.is_solid()
-                            || density.get(x.wrapping_sub(1), y, z).material.is_solid()
-                            || density.get(x, y, z + 1).material.is_solid()
-                            || density.get(x, y, z.wrapping_sub(1)).material.is_solid();
-                        if adj_solid {
-                            continue;
-                        }
+                            let world_pos = origin + Vec3::new(x as f32, y as f32, z as f32);
 
-                        // Must have solid within 3 voxels (nearby but not touching)
-                        let mut near_wall = false;
-                        'outer: for ddx in -3i32..=3 {
-                            for ddz in -3i32..=3 {
-                                if ddx.abs() <= 1 && ddz.abs() <= 1 {
-                                    continue;
-                                }
-                                let nx = (x as i32 + ddx) as usize;
-                                let nz = (z as i32 + ddz) as usize;
-                                if nx < density.size && nz < density.size {
-                                    if density.get(nx, y, nz).material.is_solid() {
-                                        near_wall = true;
-                                        break 'outer;
+                            if (world_pos - exclude_center).length_squared() < excl_r2 {
+                                continue;
+                            }
+
+                            let adj_solid = density.get(x + 1, y, z).material.is_solid()
+                                || density.get(x.wrapping_sub(1), y, z).material.is_solid()
+                                || density.get(x, y, z + 1).material.is_solid()
+                                || density.get(x, y, z.wrapping_sub(1)).material.is_solid();
+                            if adj_solid {
+                                continue;
+                            }
+
+                            let mut near_wall = false;
+                            'outer: for ddx in -3i32..=3 {
+                                for ddz in -3i32..=3 {
+                                    if ddx.abs() <= 1 && ddz.abs() <= 1 {
+                                        continue;
+                                    }
+                                    let nx = (x as i32 + ddx) as usize;
+                                    let nz = (z as i32 + ddz) as usize;
+                                    if nx < density.size && nz < density.size {
+                                        if density.get(nx, y, nz).material.is_solid() {
+                                            near_wall = true;
+                                            break 'outer;
+                                        }
                                     }
                                 }
                             }
-                        }
-                        if !near_wall {
-                            continue;
-                        }
+                            if !near_wall {
+                                continue;
+                            }
 
-                        let dist = (world_pos - target).length_squared();
-                        if dist >= best_dist {
-                            continue;
-                        }
+                            let dist = (world_pos - target).length_squared();
+                            if dist >= best_dist {
+                                continue;
+                            }
 
-                        if self.check_clearance(wx, wy, wz, height, radius, cs_i) {
-                            best_dist = dist;
-                            best_pos = Some(world_pos);
+                            if self.check_clearance(wx, wy, wz, height, radius, cs_i) {
+                                best_dist = dist;
+                                best_pos = Some(world_pos);
+                            }
                         }
                     }
                 }
-            }
-        }
 
-        best_pos
+                best_pos.map(|pos| (best_dist, pos))
+            })
+            .reduce_with(|a, b| if a.0 < b.0 { a } else { b })
+            .map(|(_, pos)| pos)
     }
 
     /// Combined entry point: find spring, flood-fill cavern, then find chrysalis and spawn

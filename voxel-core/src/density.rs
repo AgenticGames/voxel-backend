@@ -6,6 +6,12 @@ use crate::octree::node::VoxelSample;
 pub struct DensityField {
     pub samples: Vec<VoxelSample>,
     pub size: usize, // chunk_size + 1
+    /// True if ANY cell contains Crystal or Amethyst (geode shell materials).
+    /// Computed by `compute_metadata()` after generation completes.
+    pub has_geode_material: bool,
+    /// Count of non-solid (air) cells in the inner chunk grid (0..chunk_size)^3.
+    /// Computed by `compute_metadata()` after generation completes.
+    pub air_cell_count: u32,
 }
 
 impl DensityField {
@@ -13,6 +19,8 @@ impl DensityField {
         Self {
             samples: vec![VoxelSample::default(); size * size * size],
             size,
+            has_geode_material: false,
+            air_cell_count: 0,
         }
     }
 
@@ -35,6 +43,30 @@ impl DensityField {
     /// Get flat density array (for octree builder compatibility)
     pub fn densities(&self) -> Vec<f32> {
         self.samples.iter().map(|s| s.density).collect()
+    }
+
+    /// Compute cached metadata (has_geode_material, air_cell_count).
+    /// Must be called after all density modifications (noise, worms, pools, formations).
+    /// Scans the inner chunk grid (0..chunk_size)^3 in a single pass.
+    pub fn compute_metadata(&mut self) {
+        let chunk_size = self.size - 1; // inner grid = size - 1
+        let mut has_geode = false;
+        let mut air_count = 0u32;
+        for z in 0..chunk_size {
+            for y in 0..chunk_size {
+                for x in 0..chunk_size {
+                    let sample = self.get(x, y, z);
+                    if sample.material.is_geode_shell() {
+                        has_geode = true;
+                    }
+                    if !sample.material.is_solid() {
+                        air_count += 1;
+                    }
+                }
+            }
+        }
+        self.has_geode_material = has_geode;
+        self.air_cell_count = air_count;
     }
 
     /// Force boundary faces to solid, sealing the chunk on specified faces.
@@ -98,6 +130,40 @@ mod tests {
                 assert_eq!(field.get(2, y, z).density, -1.0);
             }
         }
+    }
+
+    #[test]
+    fn test_compute_metadata() {
+        // size=5 means chunk_size=4, inner grid = 4^3 = 64 cells
+        // Default VoxelSample is solid (density=1.0, material=Limestone)
+        let mut field = DensityField::new(5);
+        field.compute_metadata();
+        assert_eq!(field.air_cell_count, 0); // all solid
+        assert!(!field.has_geode_material);
+
+        // Set one cell to Crystal (geode shell)
+        field.get_mut(1, 1, 1).material = Material::Crystal;
+        // Set one cell to air
+        field.get_mut(2, 2, 2).density = -1.0;
+        field.get_mut(2, 2, 2).material = Material::Air;
+
+        field.compute_metadata();
+        assert_eq!(field.air_cell_count, 1);
+        assert!(field.has_geode_material);
+
+        // Make all inner cells air
+        for z in 0..4 {
+            for y in 0..4 {
+                for x in 0..4 {
+                    let sample = field.get_mut(x, y, z);
+                    sample.density = -1.0;
+                    sample.material = Material::Air;
+                }
+            }
+        }
+        field.compute_metadata();
+        assert_eq!(field.air_cell_count, 64);
+        assert!(!field.has_geode_material);
     }
 
     #[test]

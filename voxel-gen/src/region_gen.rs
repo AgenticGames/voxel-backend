@@ -180,6 +180,11 @@ pub fn generate_region_densities(
         }
     }
 
+    // Phase 7: Compute cached metadata for all density fields (search optimization)
+    for density in density_fields.values_mut() {
+        density.compute_metadata();
+    }
+
     (density_fields, all_pool_descriptors)
 }
 
