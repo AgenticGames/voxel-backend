@@ -291,7 +291,7 @@ impl Mesh {
 
             let grad = density.gradient_at(p.x, p.y, p.z);
             if grad.length_squared() < 1e-10 { continue; }
-            let grad_normal = grad.normalize();
+            let grad_normal = (-grad).normalize(); // negate: gradient points toward solid, normal points away
 
             let blend = 1.0 - (dist / blend_width);
             let blended = v.normal * (1.0 - blend) + grad_normal * blend;
