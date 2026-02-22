@@ -587,42 +587,49 @@ fn incremental_seam_pass(
         (chunk.0, chunk.1, chunk.2 + 1),
     ];
 
-    for &target in &candidates {
+    // Batch: acquire ONE read lock, generate all seam quads + clone base meshes
+    let mut to_send: Vec<((i32, i32, i32), voxel_core::mesh::Mesh)> = Vec::new();
+    {
         let t0 = Instant::now();
-        let seam_mesh = {
-            let s = store.read().unwrap();
+        let s = store.read().unwrap();
+        let lock_wait = t0.elapsed();
+        t_mesh_retrieve += lock_wait; // attribute lock wait to mesh_retrieve
+
+        for &target in &candidates {
             if !s.chunk_seam_data.contains_key(&target) {
                 continue;
             }
-            region_gen::generate_chunk_seam_quads(target, &s.chunk_seam_data, cfg.chunk_size)
-        };
-        t_quad_gen += t0.elapsed();
-        candidates_tried += 1;
 
-        if seam_mesh.triangles.is_empty() {
-            continue;
-        }
+            let tq = Instant::now();
+            let seam_mesh = region_gen::generate_chunk_seam_quads(target, &s.chunk_seam_data, cfg.chunk_size);
+            t_quad_gen += tq.elapsed();
+            candidates_tried += 1;
 
-        // Clone cached base mesh + append seam quads (instead of re-solving DC)
-        let t1 = Instant::now();
-        let combined = {
-            let s = store.read().unwrap();
+            if seam_mesh.triangles.is_empty() {
+                continue;
+            }
+
+            let tm = Instant::now();
             let base = match s.base_meshes.get(&target) {
                 Some(m) => m.clone(),
-                None => continue, // No cached mesh yet, skip
+                None => continue,
             };
             let mut mesh = base;
             mesh.append(seam_mesh);
-            mesh
-        };
-        t_mesh_retrieve += t1.elapsed();
+            t_mesh_retrieve += tm.elapsed();
 
+            to_send.push((target, mesh));
+        }
+    } // read lock released
+
+    // Convert and send outside the lock (non-blocking sends)
+    for (target, combined) in to_send {
         let t2 = Instant::now();
         let mut converted = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
         crate::convert::bucket_mesh_by_material(&mut converted);
         t_convert += t2.elapsed();
 
-        let _ = result_tx.send(WorkerResult::ChunkMesh {
+        let _ = result_tx.try_send(WorkerResult::ChunkMesh {
             chunk: target,
             mesh: converted,
             generation: 0,

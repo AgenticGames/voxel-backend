@@ -114,7 +114,7 @@ pub fn try_coarse_solid_check(config: &GenerationConfig, world_origin: glam::Vec
                 let cavern_val = cavern_raw * 0.5 + 0.5;
 
                 // If this sample would be air (cavern), chunk is NOT fully solid
-                if cavern_val > threshold - 0.08 {
+                if cavern_val > threshold - 0.05 {
                     // Near threshold or above = might have air, not safe to skip
                     return None;
                 }
