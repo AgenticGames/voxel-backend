@@ -98,7 +98,9 @@ impl Mesh {
 
     /// Laplacian smoothing: iteratively blend vertices toward neighbor average.
     /// Material-boundary vertices use reduced strength to preserve ore outlines.
-    pub fn smooth(&mut self, iterations: u32, strength: f32, boundary_smooth: f32) {
+    /// When `chunk_cell_size` is set, vertices in boundary cells (any coord < 1.0
+    /// or > cell_size - 1) are pinned so they match seam quad positions exactly.
+    pub fn smooth(&mut self, iterations: u32, strength: f32, boundary_smooth: f32, chunk_cell_size: Option<usize>) {
         if iterations == 0 || self.vertices.is_empty() { return; }
 
         let vert_count = self.vertices.len();
@@ -132,10 +134,24 @@ impl Mesh {
             is_boundary[vi] = vert_materials[vi].len() > 1;
         }
 
+        // Identify chunk-edge vertices to pin (skip during smoothing)
+        let is_chunk_edge: Vec<bool> = if let Some(cell_size) = chunk_cell_size {
+            let lo = 1.0_f32;
+            let hi = (cell_size - 1) as f32;
+            self.vertices.iter().map(|v| {
+                let p = v.position;
+                p.x < lo || p.y < lo || p.z < lo || p.x > hi || p.y > hi || p.z > hi
+            }).collect()
+        } else {
+            vec![false; vert_count]
+        };
+
         // Iterative smoothing
         for _ in 0..iterations {
             let old_positions: Vec<Vec3> = self.vertices.iter().map(|v| v.position).collect();
             for vi in 0..vert_count {
+                if is_chunk_edge[vi] { continue; }
+
                 let neighbors = &adjacency[vi];
                 if neighbors.is_empty() { continue; }
 
@@ -279,7 +295,7 @@ mod tests {
     fn smooth_zero_iterations_noop() {
         let mut mesh = make_tri_mesh();
         let orig: Vec<Vec3> = mesh.vertices.iter().map(|v| v.position).collect();
-        mesh.smooth(0, 0.5, 0.3);
+        mesh.smooth(0, 0.5, 0.3, None);
         for (i, v) in mesh.vertices.iter().enumerate() {
             assert_eq!(v.position, orig[i]);
         }
@@ -301,7 +317,7 @@ mod tests {
             ],
         };
         let orig_pos = mesh.vertices[2].position;
-        mesh.smooth(1, 0.5, 0.3);
+        mesh.smooth(1, 0.5, 0.3, None);
         // Vertex 2 should have moved toward its neighbors
         assert_ne!(mesh.vertices[2].position, orig_pos);
     }
