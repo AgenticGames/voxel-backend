@@ -123,6 +123,75 @@ pub fn generate_mesh(hermite: &HermiteData, dc_vertices: &[glam::Vec3], grid_siz
         // else: 2 or fewer valid vertices, skip entirely
     }
 
+    // Fallback: if full filter chain removed ALL triangles but vertices exist,
+    // retry with degenerate-only filter to rescue some geometry
+    if mesh.triangles.is_empty() && !vertex_map.is_empty() {
+        for (edge_key, intersection) in hermite.edges.iter() {
+            let x = edge_key.x() as usize;
+            let y = edge_key.y() as usize;
+            let z = edge_key.z() as usize;
+            let axis = edge_key.axis() as usize;
+
+            let cell_indices = match axis {
+                0 => get_quad_cells_x(x, y, z, grid_size),
+                1 => get_quad_cells_y(x, y, z, grid_size),
+                2 => get_quad_cells_z(x, y, z, grid_size),
+                _ => continue,
+            };
+            let cell_indices = match cell_indices {
+                Some(c) => c,
+                None => continue,
+            };
+
+            let mut quad_verts = [0u32; 4];
+            let mut valid_count = 0u32;
+            for (i, &cell_idx) in cell_indices.iter().enumerate() {
+                if let Some(&vi) = vertex_map.get(&cell_idx) {
+                    quad_verts[i] = vi;
+                    valid_count += 1;
+                }
+            }
+
+            if valid_count == 4 {
+                let normal_dot = intersection.normal.dot(axis_direction(axis));
+                let (tri_a, tri_b) = if normal_dot > 0.0 {
+                    ([quad_verts[0], quad_verts[1], quad_verts[2]],
+                     [quad_verts[0], quad_verts[2], quad_verts[3]])
+                } else {
+                    ([quad_verts[2], quad_verts[1], quad_verts[0]],
+                     [quad_verts[3], quad_verts[2], quad_verts[0]])
+                };
+                if !is_degenerate_tri(&mesh.vertices, tri_a) {
+                    mesh.triangles.push(Triangle { indices: tri_a });
+                }
+                if !is_degenerate_tri(&mesh.vertices, tri_b) {
+                    mesh.triangles.push(Triangle { indices: tri_b });
+                }
+            } else if valid_count == 3 {
+                let mut tri = [0u32; 3];
+                let mut j = 0;
+                for i in 0..4 {
+                    if vertex_map.contains_key(&cell_indices[i]) {
+                        tri[j] = quad_verts[i];
+                        j += 1;
+                    }
+                }
+                if j == 3 {
+                    let v0 = mesh.vertices[tri[0] as usize].position;
+                    let v1 = mesh.vertices[tri[1] as usize].position;
+                    let v2 = mesh.vertices[tri[2] as usize].position;
+                    let face_normal = (v1 - v0).cross(v2 - v0);
+                    if face_normal.dot(intersection.normal) < 0.0 {
+                        tri.swap(1, 2);
+                    }
+                    if !is_degenerate_tri(&mesh.vertices, tri) {
+                        mesh.triangles.push(Triangle { indices: tri });
+                    }
+                }
+            }
+        }
+    }
+
     mesh
 }
 

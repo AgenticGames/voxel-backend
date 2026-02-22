@@ -53,6 +53,9 @@ pub struct VoxelEngine {
 
     // Worker threads
     workers: Vec<JoinHandle<()>>,
+
+    // Scale
+    world_scale: f32,
 }
 
 impl VoxelEngine {
@@ -143,6 +146,7 @@ impl VoxelEngine {
             sleep_complete: Arc::new(Mutex::new(None)),
             profiler,
             workers,
+            world_scale,
         }
     }
 
@@ -637,10 +641,15 @@ impl VoxelEngine {
     pub fn profiler_begin_session(&self) -> u64 {
         let config_snapshot = if let Ok(cfg) = self.config.read() {
             format!(
-                "seed={}\nchunk_size={}\nregion_size={}\ncavern_freq={:.4}\ncavern_thresh={:.2}\nworms_per_region={:.1}",
-                cfg.seed, cfg.chunk_size, cfg.region_size,
+                "seed={}\nchunk_size={}\nworkers={}\nworld_scale={:.1}\nmax_edge_length={:.1}\nregion_size={}\n\
+                 cavern_freq={:.4}\ncavern_thresh={:.2}\ndetail_octaves={}\ndetail_persistence={:.2}\nwarp_amplitude={:.1}\n\
+                 worms_per_region={:.1}\nworm_radius_min={:.1}\nworm_radius_max={:.1}\nworm_step_length={:.1}\nworm_max_steps={}\nworm_falloff_power={:.1}",
+                cfg.seed, cfg.chunk_size,
+                self.workers.len(), self.world_scale, cfg.max_edge_length, cfg.region_size,
                 cfg.noise.cavern_frequency, cfg.noise.cavern_threshold,
-                cfg.worm.worms_per_region,
+                cfg.noise.detail_octaves, cfg.noise.detail_persistence, cfg.noise.warp_amplitude,
+                cfg.worm.worms_per_region, cfg.worm.radius_min, cfg.worm.radius_max,
+                cfg.worm.step_length, cfg.worm.max_steps, cfg.worm.falloff_power,
             )
         } else {
             "(config unavailable)".to_string()

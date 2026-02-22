@@ -233,6 +233,11 @@ fn handle_request(
             crate::convert::bucket_mesh_by_material(&mut converted);
             let t_coord_transform = if profiling { t_coord_start.elapsed() } else { Duration::ZERO };
 
+            if !converted.positions.is_empty() && converted.indices.is_empty() {
+                eprintln!("[WARN] Chunk {:?}: {} vertices but 0 indices (all triangles filtered)",
+                    chunk, converted.positions.len());
+            }
+
             // Capture mesh complexity before sending
             let vertex_count = converted.positions.len() as u32;
             let triangle_count = (converted.indices.len() / 3) as u32;
@@ -628,6 +633,10 @@ fn incremental_seam_pass(
         let mut converted = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
         crate::convert::bucket_mesh_by_material(&mut converted);
         t_convert += t2.elapsed();
+
+        if converted.indices.is_empty() {
+            continue;  // Don't overwrite base mesh with empty seam update
+        }
 
         let _ = result_tx.send(WorkerResult::ChunkMesh {
             chunk: target,
