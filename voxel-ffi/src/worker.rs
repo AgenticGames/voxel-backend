@@ -227,6 +227,10 @@ fn handle_request(
                 }
             }
 
+            // Gate 1: replace mesh with hardcoded test cube
+            #[cfg(feature = "diag-gate-1")]
+            let mesh = crate::convert::diagnostic_test_cube();
+
             // Convert to UE coordinates and send initial result (no seams yet)
             let t_coord_start = Instant::now();
             let mut converted = convert_mesh_to_ue_scaled(&mesh, cfg.voxel_scale(), world_scale);
@@ -253,6 +257,13 @@ fn handle_request(
                 + converted.material_ids.len()
                 + converted.indices.len() * std::mem::size_of::<u32>()) as u32;
 
+            // Capture per-submesh details for profiler before sending (converted is moved)
+            let submesh_details: Vec<(u8, u32, u32)> = if profiling {
+                converted.submeshes.iter().map(|s| (s.material_id, s.vertex_count, s.index_count)).collect()
+            } else {
+                Vec::new()
+            };
+
             let t_send_start = Instant::now();
             let _ = result_tx.send(WorkerResult::ChunkMesh {
                 chunk,
@@ -262,6 +273,17 @@ fn handle_request(
             let t_send_block = if profiling { t_send_start.elapsed() } else { Duration::ZERO };
 
             // Try to generate seams for this chunk and its neighbors
+            // Gate 3: skip seam pass entirely
+            #[cfg(feature = "diag-gate-3")]
+            let seam_timings = SeamPassTimings {
+                total: Duration::ZERO,
+                quad_gen: Duration::ZERO,
+                mesh_retrieve: Duration::ZERO,
+                convert: Duration::ZERO,
+                candidates_tried: 0,
+                candidates_sent: 0,
+            };
+            #[cfg(not(feature = "diag-gate-3"))]
             let seam_timings = incremental_seam_pass(chunk, &cfg, store, result_tx, world_scale);
             let t_seam_pass = if profiling { seam_timings.total } else { Duration::ZERO };
 
@@ -296,6 +318,9 @@ fn handle_request(
                 profiler.record_chunk_with_coord(
                     worker_id, chunk, timings, gen_queue_len, result_queue_len,
                 );
+                if !submesh_details.is_empty() {
+                    profiler.attach_submesh_info(submesh_details);
+                }
             }
         }
         WorkerRequest::Flatten { base_x, base_y, base_z, host_material } => {

@@ -63,6 +63,10 @@ impl VoxelEngine {
         let config = ffi_config_to_generation(ffi_config);
         let fluid_config = ffi_config_to_fluid(ffi_config);
         let world_scale = ffi_config.world_scale;
+        // Gate 4: force single worker thread to test for concurrency races
+        #[cfg(feature = "diag-gate-4")]
+        let num_workers = 1;
+        #[cfg(not(feature = "diag-gate-4"))]
         let num_workers = if ffi_config.worker_threads == 0 {
             num_cpus()
         } else {

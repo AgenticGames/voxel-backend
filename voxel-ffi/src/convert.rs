@@ -168,6 +168,55 @@ pub fn bucket_mesh_by_material(mesh: &mut ConvertedMesh) {
     mesh.submeshes = submeshes;
 }
 
+/// Gate 1 diagnostic: hardcoded 8-vertex cube (12 triangles, single material).
+/// Every chunk becomes an identical cube, testing whether the bug is in mesh
+/// generation vs transport/rendering.
+#[cfg(feature = "diag-gate-1")]
+pub fn diagnostic_test_cube() -> Mesh {
+    use voxel_core::material::Material;
+    use voxel_core::mesh::{Triangle, Vertex};
+
+    // Unit cube from (1,1,1) to (2,2,2) — safely inside a chunk cell
+    let corners = [
+        glam::Vec3::new(1.0, 1.0, 1.0), // 0: ---
+        glam::Vec3::new(2.0, 1.0, 1.0), // 1: +--
+        glam::Vec3::new(2.0, 2.0, 1.0), // 2: ++-
+        glam::Vec3::new(1.0, 2.0, 1.0), // 3: -+-
+        glam::Vec3::new(1.0, 1.0, 2.0), // 4: --+
+        glam::Vec3::new(2.0, 1.0, 2.0), // 5: +-+
+        glam::Vec3::new(2.0, 2.0, 2.0), // 6: +++
+        glam::Vec3::new(1.0, 2.0, 2.0), // 7: -++
+    ];
+
+    // 6 faces, each with an outward normal
+    let faces: [([usize; 4], glam::Vec3); 6] = [
+        ([0, 3, 2, 1], glam::Vec3::NEG_Z), // front  (z-)
+        ([4, 5, 6, 7], glam::Vec3::Z),      // back   (z+)
+        ([0, 4, 7, 3], glam::Vec3::NEG_X),  // left   (x-)
+        ([1, 2, 6, 5], glam::Vec3::X),      // right  (x+)
+        ([0, 1, 5, 4], glam::Vec3::NEG_Y),  // bottom (y-)
+        ([3, 7, 6, 2], glam::Vec3::Y),      // top    (y+)
+    ];
+
+    let mut vertices = Vec::with_capacity(24);
+    let mut triangles = Vec::with_capacity(12);
+
+    for (quad, normal) in &faces {
+        let base = vertices.len() as u32;
+        for &ci in quad {
+            vertices.push(Vertex {
+                position: corners[ci],
+                normal: *normal,
+                material: Material::Limestone,
+            });
+        }
+        triangles.push(Triangle { indices: [base, base + 1, base + 2] });
+        triangles.push(Triangle { indices: [base, base + 2, base + 3] });
+    }
+
+    Mesh { vertices, triangles }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

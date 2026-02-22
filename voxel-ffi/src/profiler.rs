@@ -97,14 +97,19 @@ impl WorkerStats {
     }
 }
 
-/// Per-chunk detail for the "top N slowest" report.
+/// Per-chunk detail for the "top N slowest" report and per-chunk dump.
 #[derive(Debug, Clone)]
 pub struct ChunkDetail {
     pub coord: (i32, i32, i32),
     pub was_slow_path: bool,
+    pub coarse_skip: bool,
     pub total: Duration,
     pub vertex_count: u32,
     pub triangle_count: u32,
+    pub section_count: u32,
+    pub mesh_bytes: u32,
+    /// Per-submesh breakdown: (material_id, vertex_count, index_count)
+    pub submesh_info: Vec<(u8, u32, u32)>,
 }
 
 /// Aggregated session metrics. Protected by Mutex inside StreamingProfiler.
@@ -366,9 +371,13 @@ impl StreamingProfiler {
         m.chunk_details.push(ChunkDetail {
             coord: (0, 0, 0), // Will be set by caller or via record_chunk_with_coord
             was_slow_path: timings.was_slow_path,
+            coarse_skip: timings.coarse_skip,
             total: timings.total,
             vertex_count: timings.vertex_count,
             triangle_count: timings.triangle_count,
+            section_count: timings.section_count,
+            mesh_bytes: timings.mesh_bytes,
+            submesh_info: Vec::new(),
         });
     }
 
@@ -444,10 +453,25 @@ impl StreamingProfiler {
         m.chunk_details.push(ChunkDetail {
             coord: chunk,
             was_slow_path: timings.was_slow_path,
+            coarse_skip: timings.coarse_skip,
             total: timings.total,
             vertex_count: timings.vertex_count,
             triangle_count: timings.triangle_count,
+            section_count: timings.section_count,
+            mesh_bytes: timings.mesh_bytes,
+            submesh_info: Vec::new(),
         });
+    }
+
+    /// Attach submesh info to the most recently recorded chunk detail.
+    pub fn attach_submesh_info(&self, info: Vec<(u8, u32, u32)>) {
+        if !self.is_enabled() {
+            return;
+        }
+        let mut m = self.metrics.lock().unwrap();
+        if let Some(last) = m.chunk_details.last_mut() {
+            last.submesh_info = info;
+        }
     }
 
     /// Record worker idle time (time spent waiting for work).
@@ -693,6 +717,42 @@ impl StreamingProfiler {
                     cd.vertex_count,
                     cd.triangle_count,
                 );
+            }
+        }
+        let _ = writeln!(out);
+
+        // ── 8b. Per-Chunk Detail (non-empty only, UE coords) ──
+        let _ = writeln!(out, "── Per-Chunk Detail (non-empty, UE coords) ─────────────────");
+        let _ = writeln!(out, "  UE Coord = Rust (x, -z, y).  Submeshes: mat:V/I");
+        {
+            let mut non_empty: Vec<_> = m.chunk_details.iter()
+                .filter(|cd| cd.vertex_count > 0)
+                .collect();
+            non_empty.sort_by_key(|cd| (cd.coord.0, cd.coord.1, cd.coord.2));
+
+            if non_empty.is_empty() {
+                let _ = writeln!(out, "  (no non-empty chunks)");
+            } else {
+                let _ = writeln!(out, "  {:<16} {:>6} {:>6} {:>4} {:>7} {:>5} {}",
+                    "UE Coord", "Verts", "Tris", "Secs", "Bytes", "Path", "Submeshes");
+                let _ = writeln!(out, "  {:-<16} {:->6} {:->6} {:->4} {:->7} {:->5} {:->30}",
+                    "", "", "", "", "", "", "");
+                for cd in &non_empty {
+                    // Convert Rust coords to UE: (x, -z, y)
+                    let ue = (cd.coord.0, -cd.coord.2, cd.coord.1);
+                    let path = if cd.was_slow_path { "slow" } else { "fast" };
+                    let mut subs = String::new();
+                    for (i, &(mat, vc, ic)) in cd.submesh_info.iter().enumerate() {
+                        if i > 0 { subs.push_str(", "); }
+                        let _ = write!(subs, "{}:{}/{}", mat, vc, ic);
+                    }
+                    if subs.is_empty() { subs.push_str("-"); }
+                    let _ = writeln!(out, "  ({:>4},{:>4},{:>4}) {:>6} {:>6} {:>4} {:>7} {:>5} [{}]",
+                        ue.0, ue.1, ue.2,
+                        cd.vertex_count, cd.triangle_count, cd.section_count,
+                        cd.mesh_bytes, path, subs);
+                }
+                let _ = writeln!(out, "  Total non-empty: {}", non_empty.len());
             }
         }
         let _ = writeln!(out);

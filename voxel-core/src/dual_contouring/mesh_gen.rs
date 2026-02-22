@@ -89,10 +89,20 @@ pub fn generate_mesh(hermite: &HermiteData, dc_vertices: &[glam::Vec3], grid_siz
                  [quad_verts[3], quad_verts[2], quad_verts[0]])
             };
 
-            if !is_degenerate_tri(&mesh.vertices, tri_a) && !is_stretched_tri(&mesh.vertices, tri_a, max_edge_sq) && !is_thin_tri(&mesh.vertices, tri_a, min_triangle_area) {
+            // Gate 2: skip stretched and thin filters, keep only degenerate check
+            #[cfg(feature = "diag-gate-2")]
+            let pass_a = !is_degenerate_tri(&mesh.vertices, tri_a);
+            #[cfg(not(feature = "diag-gate-2"))]
+            let pass_a = !is_degenerate_tri(&mesh.vertices, tri_a) && !is_stretched_tri(&mesh.vertices, tri_a, max_edge_sq) && !is_thin_tri(&mesh.vertices, tri_a, min_triangle_area);
+            if pass_a {
                 mesh.triangles.push(Triangle { indices: tri_a });
             }
-            if !is_degenerate_tri(&mesh.vertices, tri_b) && !is_stretched_tri(&mesh.vertices, tri_b, max_edge_sq) && !is_thin_tri(&mesh.vertices, tri_b, min_triangle_area) {
+
+            #[cfg(feature = "diag-gate-2")]
+            let pass_b = !is_degenerate_tri(&mesh.vertices, tri_b);
+            #[cfg(not(feature = "diag-gate-2"))]
+            let pass_b = !is_degenerate_tri(&mesh.vertices, tri_b) && !is_stretched_tri(&mesh.vertices, tri_b, max_edge_sq) && !is_thin_tri(&mesh.vertices, tri_b, min_triangle_area);
+            if pass_b {
                 mesh.triangles.push(Triangle { indices: tri_b });
             }
         } else if valid_count == 3 {
@@ -116,7 +126,12 @@ pub fn generate_mesh(hermite: &HermiteData, dc_vertices: &[glam::Vec3], grid_siz
                 tri.swap(1, 2);
             }
 
-            if !is_degenerate_tri(&mesh.vertices, tri) && !is_stretched_tri(&mesh.vertices, tri, max_edge_sq) && !is_thin_tri(&mesh.vertices, tri, min_triangle_area) {
+            // Gate 2: skip stretched and thin filters, keep only degenerate check
+            #[cfg(feature = "diag-gate-2")]
+            let pass_tri = !is_degenerate_tri(&mesh.vertices, tri);
+            #[cfg(not(feature = "diag-gate-2"))]
+            let pass_tri = !is_degenerate_tri(&mesh.vertices, tri) && !is_stretched_tri(&mesh.vertices, tri, max_edge_sq) && !is_thin_tri(&mesh.vertices, tri, min_triangle_area);
+            if pass_tri {
                 mesh.triangles.push(Triangle { indices: tri });
             }
         }
