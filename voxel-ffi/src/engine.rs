@@ -647,13 +647,19 @@ impl VoxelEngine {
             format!(
                 "seed={}\nchunk_size={}\nworkers={}\nworld_scale={:.1}\nmax_edge_length={:.1}\nregion_size={}\n\
                  cavern_freq={:.4}\ncavern_thresh={:.2}\ndetail_octaves={}\ndetail_persistence={:.2}\nwarp_amplitude={:.1}\n\
-                 worms_per_region={:.1}\nworm_radius_min={:.1}\nworm_radius_max={:.1}\nworm_step_length={:.1}\nworm_max_steps={}\nworm_falloff_power={:.1}",
+                 worms_per_region={:.1}\nworm_radius_min={:.1}\nworm_radius_max={:.1}\nworm_step_length={:.1}\nworm_max_steps={}\nworm_falloff_power={:.1}\n\
+                 ore_domain_warp_strength={:.2}\nore_warp_frequency={:.4}\nore_edge_falloff={:.4}\nore_detail_weight={:.2}\n\
+                 mesh_smooth_iterations={}\nmesh_smooth_strength={:.2}\nmesh_boundary_smooth={:.2}\nmesh_recalc_normals={}",
                 cfg.seed, cfg.chunk_size,
                 self.workers.len(), self.world_scale, cfg.max_edge_length, cfg.region_size,
                 cfg.noise.cavern_frequency, cfg.noise.cavern_threshold,
                 cfg.noise.detail_octaves, cfg.noise.detail_persistence, cfg.noise.warp_amplitude,
                 cfg.worm.worms_per_region, cfg.worm.radius_min, cfg.worm.radius_max,
                 cfg.worm.step_length, cfg.worm.max_steps, cfg.worm.falloff_power,
+                cfg.ore.ore_domain_warp_strength, cfg.ore.ore_warp_frequency,
+                cfg.ore.ore_edge_falloff, cfg.ore.ore_detail_weight,
+                cfg.mesh_smooth_iterations, cfg.mesh_smooth_strength,
+                cfg.mesh_boundary_smooth, cfg.mesh_recalc_normals,
             )
         } else {
             "(config unavailable)".to_string()
@@ -790,6 +796,10 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
                 depth_min: c.geode_depth_min,
                 depth_max: c.geode_depth_max,
             },
+            ore_domain_warp_strength: c.ore_domain_warp_strength,
+            ore_warp_frequency: if c.ore_warp_frequency > 0.0 { c.ore_warp_frequency } else { 0.02 },
+            ore_edge_falloff: c.ore_edge_falloff,
+            ore_detail_weight: c.ore_detail_weight,
         },
         formations: FormationConfig::default(),
         pools: PoolConfig::default(),
@@ -807,6 +817,10 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
         max_edge_length: c.max_edge_length,
         region_size: if c.region_size == 0 { 3 } else { c.region_size as i32 },
         bounds_size: c.bounds_size,
+        mesh_smooth_iterations: c.mesh_smooth_iterations,
+        mesh_smooth_strength: if c.mesh_smooth_strength > 0.0 { c.mesh_smooth_strength } else { 0.3 },
+        mesh_boundary_smooth: if c.mesh_boundary_smooth > 0.0 { c.mesh_boundary_smooth } else { 0.3 },
+        mesh_recalc_normals: c.mesh_recalc_normals,
     }
 }
 

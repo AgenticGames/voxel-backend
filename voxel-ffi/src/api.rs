@@ -1143,6 +1143,16 @@ mod tests {
             mine_dirty_expand: 2,
             // Bounds
             bounds_size: 0.0,
+            // Ore Visual Quality
+            ore_domain_warp_strength: 0.0,
+            ore_warp_frequency: 0.02,
+            ore_edge_falloff: 0.0,
+            ore_detail_weight: 0.0,
+            // Mesh Smoothing
+            mesh_smooth_iterations: 0,
+            mesh_smooth_strength: 0.3,
+            mesh_boundary_smooth: 0.3,
+            mesh_recalc_normals: 1,
         }
     }
 

@@ -22,6 +22,9 @@ struct MaterialNoiseSources {
     basalt_noise: Simplex3D,
     geode_noise: Simplex3D,
     boundary_noise: Simplex3D,
+    warp_x: Simplex3D,
+    warp_y: Simplex3D,
+    warp_z: Simplex3D,
 }
 
 impl MaterialNoiseSources {
@@ -46,6 +49,9 @@ impl MaterialNoiseSources {
             basalt_noise: Simplex3D::new(seed.wrapping_add(110)),
             geode_noise: Simplex3D::new(seed.wrapping_add(111)),
             boundary_noise: Simplex3D::new(seed.wrapping_add(112)),
+            warp_x: Simplex3D::new(seed.wrapping_add(200)),
+            warp_y: Simplex3D::new(seed.wrapping_add(201)),
+            warp_z: Simplex3D::new(seed.wrapping_add(202)),
         }
     }
 }
@@ -283,6 +289,26 @@ pub fn generate_density_field(config: &GenerationConfig, world_origin: glam::Vec
 /// 6. Pyrite — halo indicator near copper/gold
 /// 7. Banded iron — horizontal sine-wave layers
 /// 8. Host rock — depth-layered with noise-perturbed boundaries
+/// Check an ore threshold with optional dithered edge falloff.
+/// Returns true if the sample should be considered "inside" the ore.
+#[inline]
+fn ore_threshold_check(noise_val: f64, threshold: f64, falloff: f64, wx: f64, wy: f64, wz: f64) -> bool {
+    if falloff > 0.0 {
+        let half = falloff * 0.5;
+        if noise_val > threshold + half {
+            return true;
+        }
+        if noise_val > threshold - half {
+            let t = (noise_val - (threshold - half)) / falloff;
+            let hash = ((wx * 73.7 + wy * 37.3 + wz * 91.1) * 1000.0).fract().abs();
+            return hash < t;
+        }
+        false
+    } else {
+        noise_val > threshold
+    }
+}
+
 fn assign_material(
     wx: f64,
     wy: f64,
@@ -290,20 +316,34 @@ fn assign_material(
     ore: &OreConfig,
     noise: &MaterialNoiseSources,
 ) -> Material {
+    // ── Domain warping for ore shapes ──
+    let warp_strength = ore.ore_domain_warp_strength;
+    let warp_freq = ore.ore_warp_frequency;
+    let (wwx, wwy, wwz) = if warp_strength > 0.0 {
+        let dx = noise.warp_x.sample(wx * warp_freq, wy * warp_freq, wz * warp_freq) * warp_strength;
+        let dy = noise.warp_y.sample(wx * warp_freq, wy * warp_freq, wz * warp_freq) * warp_strength;
+        let dz = noise.warp_z.sample(wx * warp_freq, wy * warp_freq, wz * warp_freq) * warp_strength;
+        (wx + dx, wy + dy, wz + dz)
+    } else {
+        (wx, wy, wz)
+    };
+
+    let falloff = ore.ore_edge_falloff;
+
     // ── 1. Kimberlite pipe (vertical cylinder via 2D noise) ──
     // Sampled with y=0 to create vertical pipe structures.
     // Very high threshold = rare, narrow columns.
     let kimb = &ore.kimberlite;
     if wy >= kimb.depth_min && wy <= kimb.depth_max {
         let pf = kimb.pipe_frequency_2d;
-        let pipe_val = noise.pipe_noise.sample(wx * pf, 0.0, wz * pf);
+        let pipe_val = noise.pipe_noise.sample(wwx * pf, 0.0, wwz * pf);
         let pipe_norm = pipe_val * 0.5 + 0.5;
-        if pipe_norm > kimb.pipe_threshold {
+        if ore_threshold_check(pipe_norm, kimb.pipe_threshold, falloff, wx, wy, wz) {
             // Inside kimberlite pipe — check for diamond
             let df = kimb.diamond_frequency;
-            let diamond_val = noise.diamond_noise.sample(wx * df, wy * df, wz * df);
+            let diamond_val = noise.diamond_noise.sample(wwx * df, wwy * df, wwz * df);
             let diamond_norm = diamond_val * 0.5 + 0.5;
-            if diamond_norm > kimb.diamond_threshold {
+            if ore_threshold_check(diamond_norm, kimb.diamond_threshold, falloff, wx, wy, wz) {
                 return Material::Diamond;
             }
             return Material::Kimberlite;
@@ -314,13 +354,13 @@ fn assign_material(
     // RidgedMulti produces sharp ridge-like patterns perfect for vein structures.
     if wy >= ore.quartz.depth_min && wy <= ore.quartz.depth_max {
         let rf = ore.quartz.frequency;
-        let reef_val = noise.reef_noise.sample(wx * rf, wy * rf, wz * rf);
+        let reef_val = noise.reef_noise.sample(wwx * rf, wwy * rf, wwz * rf);
         let reef_norm = reef_val * 0.5 + 0.5;
-        if reef_norm > ore.quartz.threshold {
+        if ore_threshold_check(reef_norm, ore.quartz.threshold, falloff, wx, wy, wz) {
             // Inside quartz reef — gold at higher threshold
             if wy >= ore.gold.depth_min
                 && wy <= ore.gold.depth_max
-                && reef_norm > ore.gold.threshold
+                && ore_threshold_check(reef_norm, ore.gold.threshold, falloff, wx, wy, wz)
             {
                 return Material::Gold;
             }
@@ -333,10 +373,10 @@ fn assign_material(
     let sulf = &ore.sulfide;
     if wy >= sulf.depth_min && wy <= sulf.depth_max {
         let sf = sulf.frequency;
-        let sulfide_val = noise.sulfide_noise.sample(wx * sf, wy * sf, wz * sf);
+        let sulfide_val = noise.sulfide_noise.sample(wwx * sf, wwy * sf, wwz * sf);
         let sulfide_norm = sulfide_val * 0.5 + 0.5;
-        if sulfide_norm > sulf.threshold {
-            if sulfide_norm > sulf.tin_threshold {
+        if ore_threshold_check(sulfide_norm, sulf.threshold, falloff, wx, wy, wz) {
+            if ore_threshold_check(sulfide_norm, sulf.tin_threshold, falloff, wx, wy, wz) {
                 return Material::Tin;
             }
             return Material::Sulfide;
@@ -347,9 +387,9 @@ fn assign_material(
     // RidgedMulti with 5 octaves creates natural branching tendril shapes.
     if wy >= ore.copper.depth_min && wy <= ore.copper.depth_max {
         let cf = ore.copper.frequency;
-        let copper_val = noise.copper_ridged.sample(wx * cf, wy * cf, wz * cf);
+        let copper_val = noise.copper_ridged.sample(wwx * cf, wwy * cf, wwz * cf);
         let copper_norm = copper_val * 0.5 + 0.5;
-        if copper_norm > ore.copper.threshold {
+        if ore_threshold_check(copper_norm, ore.copper.threshold, falloff, wx, wy, wz) {
             return Material::Copper;
         }
     }
@@ -357,9 +397,9 @@ fn assign_material(
     // ── 5. Malachite zones (deep, green copper indicator) ──
     if wy >= ore.malachite.depth_min && wy <= ore.malachite.depth_max {
         let mf = ore.malachite.frequency;
-        let mal_val = noise.malachite_noise.sample(wx * mf, wy * mf, wz * mf);
+        let mal_val = noise.malachite_noise.sample(wwx * mf, wwy * mf, wwz * mf);
         let mal_norm = mal_val * 0.5 + 0.5;
-        if mal_norm > ore.malachite.threshold {
+        if ore_threshold_check(mal_norm, ore.malachite.threshold, falloff, wx, wy, wz) {
             return Material::Malachite;
         }
     }
@@ -369,28 +409,31 @@ fn assign_material(
     // creates a natural "halo" around ore-bearing regions.
     if wy >= ore.pyrite.depth_min && wy <= ore.pyrite.depth_max {
         let pf = ore.pyrite.frequency;
-        let pyrite_val = noise.pyrite_noise.sample(wx * pf, wy * pf, wz * pf);
+        let pyrite_val = noise.pyrite_noise.sample(wwx * pf, wwy * pf, wwz * pf);
         let pyrite_norm = pyrite_val * 0.5 + 0.5;
-        if pyrite_norm > ore.pyrite.threshold {
+        if ore_threshold_check(pyrite_norm, ore.pyrite.threshold, falloff, wx, wy, wz) {
             return Material::Pyrite;
         }
     }
 
     // ── 7. Banded iron formation (horizontal sine-wave layers) ──
     // sin(wy * freq) creates horizontal bands; noise wobbles the edges.
+    // Iron uses original wy for band frequency (geological strata are horizontal)
+    // but warped coordinates for the noise perturbation.
     let iron = &ore.iron;
     if wy >= iron.depth_min && wy <= iron.depth_max {
         let band = (wy * iron.band_frequency).sin();
         let nf = iron.noise_frequency;
         let perturbation =
-            noise.iron_noise.sample(wx * nf, wy * nf, wz * nf) * iron.noise_perturbation;
+            noise.iron_noise.sample(wwx * nf, wwy * nf, wwz * nf) * iron.noise_perturbation;
         let iron_val = (band + perturbation) * 0.5 + 0.5;
-        if iron_val > iron.threshold {
+        if ore_threshold_check(iron_val, iron.threshold, falloff, wx, wy, wz) {
             return Material::Iron;
         }
     }
 
     // ── 8. Host rock fallback (depth-layered with noise-perturbed boundaries) ──
+    // Host rock uses original coordinates (not warped)
     select_host_rock(wx, wy, wz, &ore.host_rock, noise)
 }
 

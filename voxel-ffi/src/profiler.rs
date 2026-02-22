@@ -50,6 +50,7 @@ pub struct ChunkTimings {
     pub hermite: Duration,
     pub dc_solve: Duration,
     pub mesh_gen: Duration,
+    pub mesh_smooth: Duration,
     pub seam_pass: Duration,
     pub coord_transform: Duration,
     pub store_read_wait: Duration,
@@ -123,6 +124,7 @@ pub struct SessionMetrics {
     pub hermite: PhaseStats,
     pub dc_solve: PhaseStats,
     pub mesh_gen: PhaseStats,
+    pub mesh_smooth: PhaseStats,
     pub seam_pass: PhaseStats,
     pub coord_transform: PhaseStats,
     pub store_read_wait: PhaseStats,
@@ -182,6 +184,7 @@ impl SessionMetrics {
             hermite: PhaseStats::new(),
             dc_solve: PhaseStats::new(),
             mesh_gen: PhaseStats::new(),
+            mesh_smooth: PhaseStats::new(),
             seam_pass: PhaseStats::new(),
             coord_transform: PhaseStats::new(),
             store_read_wait: PhaseStats::new(),
@@ -219,6 +222,7 @@ impl SessionMetrics {
         self.hermite = PhaseStats::new();
         self.dc_solve = PhaseStats::new();
         self.mesh_gen = PhaseStats::new();
+        self.mesh_smooth = PhaseStats::new();
         self.seam_pass = PhaseStats::new();
         self.coord_transform = PhaseStats::new();
         self.store_read_wait = PhaseStats::new();
@@ -325,6 +329,7 @@ impl StreamingProfiler {
         m.hermite.record(timings.hermite);
         m.dc_solve.record(timings.dc_solve);
         m.mesh_gen.record(timings.mesh_gen);
+        m.mesh_smooth.record(timings.mesh_smooth);
         m.seam_pass.record(timings.seam_pass);
         m.coord_transform.record(timings.coord_transform);
         m.store_read_wait.record(timings.store_read_wait);
@@ -401,6 +406,7 @@ impl StreamingProfiler {
         m.hermite.record(timings.hermite);
         m.dc_solve.record(timings.dc_solve);
         m.mesh_gen.record(timings.mesh_gen);
+        m.mesh_smooth.record(timings.mesh_smooth);
         m.seam_pass.record(timings.seam_pass);
         m.coord_transform.record(timings.coord_transform);
         m.store_read_wait.record(timings.store_read_wait);
@@ -553,6 +559,7 @@ impl StreamingProfiler {
             ("hermite",         &m.hermite),
             ("dc_solve",        &m.dc_solve),
             ("mesh_gen",        &m.mesh_gen),
+            ("mesh_smooth",    &m.mesh_smooth),
             ("seam_pass",       &m.seam_pass),
             ("coord_transform", &m.coord_transform),
             ("store_read_wait", &m.store_read_wait),
@@ -871,6 +878,7 @@ mod tests {
             hermite: Duration::from_millis(5),
             dc_solve: Duration::from_millis(8),
             mesh_gen: Duration::from_millis(12),
+            mesh_smooth: Duration::ZERO,
             seam_pass: Duration::from_millis(3),
             coord_transform: Duration::from_millis(1),
             store_read_wait: Duration::from_millis(2),
@@ -938,6 +946,7 @@ mod tests {
             hermite: Duration::from_millis(5),
             dc_solve: Duration::from_millis(8),
             mesh_gen: Duration::from_millis(12),
+            mesh_smooth: Duration::ZERO,
             seam_pass: Duration::from_millis(3),
             coord_transform: Duration::from_millis(1),
             store_read_wait: Duration::from_millis(2),
@@ -980,6 +989,7 @@ mod tests {
             hermite: Duration::from_millis(2),
             dc_solve: Duration::from_millis(3),
             mesh_gen: Duration::from_millis(4),
+            mesh_smooth: Duration::ZERO,
             seam_pass: Duration::from_millis(1),
             coord_transform: Duration::from_millis(1),
             store_read_wait: Duration::from_millis(1),

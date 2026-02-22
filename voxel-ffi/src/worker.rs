@@ -99,6 +99,7 @@ fn handle_request(
             let mut t_store_write_wait = Duration::ZERO;
             let mut t_dc_solve = Duration::ZERO;
             let mut t_mesh_gen = Duration::ZERO;
+            let mut t_mesh_smooth = Duration::ZERO;
             let mut was_slow_path = false;
 
             // Fast path: region generated AND this chunk has data → mesh under one read lock
@@ -117,8 +118,13 @@ fn handle_request(
                     if profiling { t_dc_solve += t1.elapsed(); }
 
                     let t2 = Instant::now();
-                    let m = generate_mesh(hermite, &dc_verts, cell_size, cfg.max_edge_length, cfg.mine.min_triangle_area);
+                    let mut m = generate_mesh(hermite, &dc_verts, cell_size, cfg.max_edge_length, cfg.mine.min_triangle_area);
                     if profiling { t_mesh_gen += t2.elapsed(); }
+
+                    let t_smooth_start = Instant::now();
+                    m.smooth(cfg.mesh_smooth_iterations, cfg.mesh_smooth_strength, cfg.mesh_boundary_smooth);
+                    if cfg.mesh_recalc_normals > 0 { m.recalculate_normals(); }
+                    if profiling { t_mesh_smooth = t_smooth_start.elapsed(); }
 
                     let b_edges = region_gen::extract_boundary_edges(hermite, cfg.chunk_size);
                     Some((m, dc_verts, b_edges))
@@ -193,8 +199,13 @@ fn handle_request(
                 if profiling { t_dc_solve += t4.elapsed(); }
 
                 let t5 = Instant::now();
-                let m = generate_mesh(hermite, &dc_verts, cell_size, cfg.max_edge_length, cfg.mine.min_triangle_area);
+                let mut m = generate_mesh(hermite, &dc_verts, cell_size, cfg.max_edge_length, cfg.mine.min_triangle_area);
                 if profiling { t_mesh_gen += t5.elapsed(); }
+
+                let t_smooth_start2 = Instant::now();
+                m.smooth(cfg.mesh_smooth_iterations, cfg.mesh_smooth_strength, cfg.mesh_boundary_smooth);
+                if cfg.mesh_recalc_normals > 0 { m.recalculate_normals(); }
+                if profiling { t_mesh_smooth = t_smooth_start2.elapsed(); }
 
                 let b_edges = region_gen::extract_boundary_edges(hermite, cfg.chunk_size);
                 (m, dc_verts, b_edges)
@@ -297,6 +308,7 @@ fn handle_request(
                     hermite: t_hermite,
                     dc_solve: t_dc_solve,
                     mesh_gen: t_mesh_gen,
+                    mesh_smooth: t_mesh_smooth,
                     seam_pass: t_seam_pass,
                     coord_transform: t_coord_transform,
                     store_read_wait: t_store_read_wait,

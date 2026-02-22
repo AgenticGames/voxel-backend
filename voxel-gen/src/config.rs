@@ -43,6 +43,14 @@ pub struct GenerationConfig {
     pub region_size: i32,
     /// World-space extent per chunk. 0.0 means use chunk_size (backward compatible).
     pub bounds_size: f32,
+    /// Laplacian smooth passes. 0=off, 1-3=smoother
+    pub mesh_smooth_iterations: u32,
+    /// Per-pass blend factor 0.0-1.0
+    pub mesh_smooth_strength: f32,
+    /// Smooth factor at material boundaries. Lower=preserve edges
+    pub mesh_boundary_smooth: f32,
+    /// Recalculate area-weighted normals. 0=off, 1=on
+    pub mesh_recalc_normals: u32,
 }
 
 impl GenerationConfig {
@@ -96,6 +104,10 @@ impl Default for GenerationConfig {
             max_edge_length: 5.0,
             region_size: 3,
             bounds_size: 0.0,
+            mesh_smooth_iterations: 0,
+            mesh_smooth_strength: 0.3,
+            mesh_boundary_smooth: 0.3,
+            mesh_recalc_normals: 1,
         }
     }
 }
@@ -237,6 +249,14 @@ pub struct OreConfig {
     pub geode: GeodeConfig,
     /// Host rock depth layering
     pub host_rock: HostRockConfig,
+    /// Domain warp amplitude for ore shapes. 0=off, 2-5=organic
+    pub ore_domain_warp_strength: f64,
+    /// Frequency of ore warp noise. Higher=tighter warping
+    pub ore_warp_frequency: f64,
+    /// Transition zone at ore boundaries. 0=hard, 0.03-0.08=soft
+    pub ore_edge_falloff: f64,
+    /// Multi-freq detail blend. 0=off, 0.15-0.3=natural
+    pub ore_detail_weight: f64,
 }
 
 impl Default for HostRockConfig {
@@ -462,6 +482,10 @@ impl Default for OreConfig {
             sulfide: SulfideBlobConfig::default(),
             geode: GeodeConfig::default(),
             host_rock: HostRockConfig::default(),
+            ore_domain_warp_strength: 0.0,
+            ore_warp_frequency: 0.02,
+            ore_edge_falloff: 0.0,
+            ore_detail_weight: 0.0,
         }
     }
 }

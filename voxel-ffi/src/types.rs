@@ -189,6 +189,16 @@ pub struct FfiEngineConfig {
     pub mine_dirty_expand: u32,
     // ── Bounds Size ──
     pub bounds_size: f32,
+    // ── Ore Visual Quality (4 fields) ──
+    pub ore_domain_warp_strength: f64,
+    pub ore_warp_frequency: f64,
+    pub ore_edge_falloff: f64,
+    pub ore_detail_weight: f64,
+    // ── Mesh Smoothing (4 fields) ──
+    pub mesh_smooth_iterations: u32,
+    pub mesh_smooth_strength: f32,
+    pub mesh_boundary_smooth: f32,
+    pub mesh_recalc_normals: u32,
 }
 
 #[repr(C)]
