@@ -658,6 +658,7 @@ fn incremental_seam_pass(
             };
             let mut mesh = base;
             mesh.append(seam_mesh);
+            mesh.weld_vertices(1e-4);
             if cfg.mesh_recalc_normals > 0 { mesh.recalculate_normals(); }
             t_mesh_retrieve += tm.elapsed();
 
