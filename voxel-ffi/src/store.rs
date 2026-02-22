@@ -375,7 +375,9 @@ impl ChunkStore {
 
             let cell_size = density.size - 1;
             let dc_vertices = solve_dc_vertices(hermite, cell_size);
-            let mesh = generate_mesh(hermite, &dc_vertices, cell_size, max_edge_length, config.mine.min_triangle_area);
+            let mut mesh = generate_mesh(hermite, &dc_vertices, cell_size, max_edge_length, config.mine.min_triangle_area);
+            mesh.smooth(config.mesh_smooth_iterations, config.mesh_smooth_strength, config.mesh_boundary_smooth, Some(cell_size));
+            if config.mesh_recalc_normals > 0 { mesh.recalculate_normals(); }
 
             // Cache the base mesh for fast seam pass reuse
             self.base_meshes.insert(key, mesh.clone());
