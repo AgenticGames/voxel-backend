@@ -124,7 +124,6 @@ fn handle_request(
                     let t_s = Instant::now();
                     m.smooth(cfg.mesh_smooth_iterations, cfg.mesh_smooth_strength, cfg.mesh_boundary_smooth, Some(cell_size));
                     if cfg.mesh_recalc_normals > 0 { m.recalculate_normals(); }
-                    m.override_boundary_normals(density, cell_size);
                     if profiling { t_mesh_smooth += t_s.elapsed(); }
 
                     let b_edges = region_gen::extract_boundary_edges(hermite, cfg.chunk_size);
@@ -206,7 +205,6 @@ fn handle_request(
                 let t_s = Instant::now();
                 m.smooth(cfg.mesh_smooth_iterations, cfg.mesh_smooth_strength, cfg.mesh_boundary_smooth, Some(cell_size));
                 if cfg.mesh_recalc_normals > 0 { m.recalculate_normals(); }
-                m.override_boundary_normals(density, cell_size);
                 if profiling { t_mesh_smooth += t_s.elapsed(); }
 
                 let b_edges = region_gen::extract_boundary_edges(hermite, cfg.chunk_size);
@@ -662,10 +660,6 @@ fn incremental_seam_pass(
             mesh.append(seam_mesh);
             mesh.weld_vertices(1e-4);
             if cfg.mesh_recalc_normals > 0 { mesh.recalculate_normals(); }
-            if let Some(density) = s.density_fields.get(&target) {
-                let cell_size = density.size - 1;
-                mesh.override_boundary_normals(density, cell_size);
-            }
             t_mesh_retrieve += tm.elapsed();
 
             to_send.push((target, mesh));
