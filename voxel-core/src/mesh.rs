@@ -1,4 +1,5 @@
 use glam::Vec3;
+use crate::density::DensityField;
 use crate::material::Material;
 
 #[derive(Debug, Clone, Copy)]
@@ -270,6 +271,37 @@ impl Mesh {
         }
     }
 
+    /// Override normals near chunk boundaries with density-field-gradient normals.
+    /// The density field is continuous across chunk boundaries (world-coordinate noise),
+    /// so its gradient gives the true isosurface normal — identical regardless of which
+    /// chunk computes it. This eliminates cross-chunk normal mismatch and hides the
+    /// geometric crease from boundary vertex pinning during smoothing.
+    /// Blends from 100% gradient at boundary to 0% at `blend_width` cells inward.
+    pub fn override_boundary_normals(&mut self, density: &DensityField, chunk_cell_size: usize) {
+        let cell_f = chunk_cell_size as f32;
+        let blend_width = 2.0_f32;
+
+        for v in &mut self.vertices {
+            let p = v.position;
+            let dist = p.x.min(cell_f - p.x)
+                .min(p.y.min(cell_f - p.y))
+                .min(p.z.min(cell_f - p.z))
+                .max(0.0);
+            if dist >= blend_width { continue; }
+
+            let grad = density.gradient_at(p.x, p.y, p.z);
+            if grad.length_squared() < 1e-10 { continue; }
+            let grad_normal = grad.normalize();
+
+            let blend = 1.0 - (dist / blend_width);
+            let blended = v.normal * (1.0 - blend) + grad_normal * blend;
+            let len = blended.length();
+            if len > 1e-10 {
+                v.normal = blended / len;
+            }
+        }
+    }
+
     /// Check for degenerate triangles (zero area)
     pub fn has_degenerate_triangles(&self) -> bool {
         for tri in &self.triangles {
@@ -496,5 +528,59 @@ mod tests {
                     "Shared vertex normal should blend both triangles, got {:?}", v.normal);
             }
         }
+    }
+
+    #[test]
+    fn override_boundary_normals_modifies_edge_verts() {
+        use crate::density::DensityField;
+        // Create a density field with a linear X ramp
+        let mut field = DensityField::new(17); // chunk_size=16
+        for z in 0..17 {
+            for y in 0..17 {
+                for x in 0..17 {
+                    field.get_mut(x, y, z).density = x as f32 / 16.0;
+                }
+            }
+        }
+
+        // Vertex at boundary (x=0) with arbitrary normal
+        let mut mesh = Mesh {
+            vertices: vec![
+                Vertex { position: Vec3::new(0.0, 8.0, 8.0), normal: Vec3::Y, material: Material::Limestone },
+            ],
+            triangles: vec![],
+        };
+
+        let original_normal = mesh.vertices[0].normal;
+        mesh.override_boundary_normals(&field, 16);
+        // Normal should have changed (blended toward gradient)
+        assert_ne!(mesh.vertices[0].normal, original_normal,
+            "Boundary vertex normal should be overridden");
+    }
+
+    #[test]
+    fn override_boundary_normals_preserves_interior() {
+        use crate::density::DensityField;
+        let mut field = DensityField::new(17);
+        for z in 0..17 {
+            for y in 0..17 {
+                for x in 0..17 {
+                    field.get_mut(x, y, z).density = x as f32 / 16.0;
+                }
+            }
+        }
+
+        // Vertex well inside the chunk (dist > blend_width=2.0)
+        let mut mesh = Mesh {
+            vertices: vec![
+                Vertex { position: Vec3::new(8.0, 8.0, 8.0), normal: Vec3::Y, material: Material::Limestone },
+            ],
+            triangles: vec![],
+        };
+
+        let original_normal = mesh.vertices[0].normal;
+        mesh.override_boundary_normals(&field, 16);
+        assert_eq!(mesh.vertices[0].normal, original_normal,
+            "Interior vertex normal should be unchanged");
     }
 }
