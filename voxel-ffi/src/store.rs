@@ -12,6 +12,7 @@ use voxel_gen::config::{GenerationConfig, StressConfig};
 use voxel_gen::density::DensityField;
 use voxel_gen::hermite_extract::{extract_hermite_data, patch_hermite_data};
 use voxel_gen::region_gen::{self, region_key, ChunkSeamData};
+use voxel_gen::worm::path::WormSegment;
 
 use crate::convert::convert_mesh_to_ue_scaled;
 use crate::stress::{CollapseEvent, post_change_stress_update};
@@ -40,6 +41,8 @@ pub struct ChunkStore {
     pub support_fields: HashMap<(i32, i32, i32), SupportField>,
     /// Tracks which 2x2 cells have been terraced for building placement.
     pub terraced_cells: HashSet<(i32, i32, i32)>,
+    /// Worm paths per region key, for cross-region worm sharing.
+    pub region_worm_paths: HashMap<(i32, i32, i32), Vec<Vec<WormSegment>>>,
     /// Region size for computing region keys (needed by unload).
     region_size: i32,
 }
@@ -55,6 +58,7 @@ impl ChunkStore {
             stress_fields: HashMap::new(),
             support_fields: HashMap::new(),
             terraced_cells: HashSet::new(),
+            region_worm_paths: HashMap::new(),
             region_size,
         }
     }
@@ -69,6 +73,16 @@ impl ChunkStore {
 
     pub fn mark_region_generated(&mut self, region_key: (i32, i32, i32)) {
         self.generated_regions.insert(region_key);
+    }
+
+    /// Store worm paths for a region key (used for cross-region sharing).
+    pub fn store_region_worms(&mut self, region_key: (i32, i32, i32), paths: Vec<Vec<WormSegment>>) {
+        self.region_worm_paths.insert(region_key, paths);
+    }
+
+    /// Get all stored region worm paths for forward sharing.
+    pub fn get_all_region_worm_paths(&self) -> &HashMap<(i32, i32, i32), Vec<Vec<WormSegment>>> {
+        &self.region_worm_paths
     }
 
     pub fn chunks_loaded(&self) -> usize {
@@ -97,6 +111,25 @@ impl ChunkStore {
         // prevents overwriting siblings that are still loaded.
         let rk = region_key(key.0, key.1, key.2, self.region_size);
         self.generated_regions.remove(&rk);
+
+        // Clean up worm paths if no other chunks in this region remain loaded
+        let region_base_x = rk.0 * self.region_size;
+        let region_base_y = rk.1 * self.region_size;
+        let region_base_z = rk.2 * self.region_size;
+        let any_remaining = (0..self.region_size).any(|dz| {
+            (0..self.region_size).any(|dy| {
+                (0..self.region_size).any(|dx| {
+                    self.density_fields.contains_key(&(
+                        region_base_x + dx,
+                        region_base_y + dy,
+                        region_base_z + dz,
+                    ))
+                })
+            })
+        });
+        if !any_remaining {
+            self.region_worm_paths.remove(&rk);
+        }
     }
 
     /// Return mutable references to density, stress, and support fields simultaneously.

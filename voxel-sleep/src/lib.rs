@@ -271,7 +271,7 @@ mod tests {
             seed: 42,
             ..Default::default()
         };
-        let (density_fields, _pools) = voxel_gen::region_gen::generate_region_densities(&coords, &config);
+        let (density_fields, _pools, _worms) = voxel_gen::region_gen::generate_region_densities(&coords, &config);
         let mut stress_fields = HashMap::new();
         let mut support_fields = HashMap::new();
         for &key in density_fields.keys() {

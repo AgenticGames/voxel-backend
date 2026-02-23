@@ -141,10 +141,33 @@ fn handle_request(
 
                 let t0 = Instant::now();
                 let coords = region_chunks(rk, cfg.region_size);
-                let (densities, _pools) = generate_region_densities(&coords, &cfg);
+                let (mut densities, _pools, worm_paths) = generate_region_densities(&coords, &cfg);
                 if profiling { t_region_density += t0.elapsed(); }
 
-                    // Pre-extract hermite data BEFORE acquiring write lock (expensive part)
+                // Forward sharing: apply worm paths from already-generated regions
+                // into our new density fields (before hermite extraction)
+                {
+                    let s = store.read().unwrap();
+                    let stored = s.get_all_region_worm_paths();
+                    let mut external: Vec<&[voxel_gen::worm::path::WormSegment]> = Vec::new();
+                    for (rk_other, paths) in stored {
+                        if *rk_other == rk { continue; }
+                        for path in paths {
+                            external.push(path);
+                        }
+                    }
+                    if !external.is_empty() {
+                        let as_vecs: Vec<Vec<voxel_gen::worm::path::WormSegment>> =
+                            external.into_iter().map(|s| s.to_vec()).collect();
+                        region_gen::apply_external_worm_paths(&mut densities, &as_vecs, &cfg);
+                        // Recompute metadata after carving external worms
+                        for density in densities.values_mut() {
+                            density.compute_metadata();
+                        }
+                    }
+                }
+
+                // Pre-extract hermite data BEFORE acquiring write lock (expensive part)
                 let t2 = Instant::now();
                 let keyed_data: Vec<_> = densities
                     .into_iter()
@@ -155,7 +178,7 @@ fn handle_request(
                     .collect();
                 if profiling { t_hermite += t2.elapsed(); }
 
-                // Write lock held only for fast inserts
+                // Write lock held only for fast inserts + worm path storage
                 {
                     let t1 = Instant::now();
                     let mut s = store.write().unwrap();
@@ -168,6 +191,100 @@ fn handle_request(
                             }
                         }
                         s.mark_region_generated(rk);
+                    }
+                    s.store_region_worms(rk, worm_paths.clone());
+                }
+
+                // Backward sharing: carve new worms into already-loaded chunks
+                // from other regions, then re-extract hermite and re-mesh
+                if !worm_paths.is_empty() {
+                    let eb = cfg.effective_bounds();
+                    let mut backward_dirty: Vec<(i32, i32, i32)> = Vec::new();
+                    {
+                        let mut s = store.write().unwrap();
+                        for path in &worm_paths {
+                            if path.is_empty() { continue; }
+                            let (path_min, path_max) = region_gen::worm_path_aabb(path);
+                            let min_cx = (path_min.x / eb).floor() as i32;
+                            let max_cx = (path_max.x / eb).floor() as i32;
+                            let min_cy = (path_min.y / eb).floor() as i32;
+                            let max_cy = (path_max.y / eb).floor() as i32;
+                            let min_cz = (path_min.z / eb).floor() as i32;
+                            let max_cz = (path_max.z / eb).floor() as i32;
+
+                            for cz in min_cz..=max_cz {
+                                for cy in min_cy..=max_cy {
+                                    for cx in min_cx..=max_cx {
+                                        let key = (cx, cy, cz);
+                                        if coords.contains(&key) { continue; }
+                                        if let Some(density) = s.density_fields.get_mut(&key) {
+                                            let coord = voxel_core::chunk::ChunkCoord::new(cx, cy, cz);
+                                            voxel_gen::worm::carve::carve_worm_into_density(
+                                                density,
+                                                path,
+                                                coord.world_origin_bounds(eb),
+                                                cfg.worm.falloff_power,
+                                            );
+                                            density.compute_metadata();
+                                            let hermite = extract_hermite_data(density);
+                                            s.hermite_data.insert(key, hermite);
+                                            if !backward_dirty.contains(&key) {
+                                                backward_dirty.push(key);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Re-mesh backward-dirty chunks and send updated meshes
+                    for &bk in &backward_dirty {
+                        // Read lock: extract mesh data
+                        let mesh_data = {
+                            let s = store.read().unwrap();
+                            let density = match s.density_fields.get(&bk) {
+                                Some(d) => d,
+                                None => continue,
+                            };
+                            let hermite = match s.hermite_data.get(&bk) {
+                                Some(h) => h,
+                                None => continue,
+                            };
+                            let cell_size = density.size - 1;
+                            let dc_verts = solve_dc_vertices(hermite, cell_size);
+                            let mut m = generate_mesh(hermite, &dc_verts, cell_size, cfg.max_edge_length, cfg.mine.min_triangle_area);
+                            m.smooth(cfg.mesh_smooth_iterations, cfg.mesh_smooth_strength, cfg.mesh_boundary_smooth, Some(cell_size));
+                            if cfg.mesh_recalc_normals > 0 { m.recalculate_normals(); }
+                            let b_edges = region_gen::extract_boundary_edges(hermite, cfg.chunk_size);
+                            (m, dc_verts, b_edges)
+                        };
+
+                        let (m, dc_verts, b_edges) = mesh_data;
+
+                        // Write lock: cache seam data and base mesh
+                        {
+                            let mut sw = store.write().unwrap();
+                            sw.add_seam_data(
+                                bk,
+                                ChunkSeamData {
+                                    dc_vertices: dc_verts,
+                                    world_origin: glam::Vec3::ZERO,
+                                    boundary_edges: b_edges,
+                                },
+                            );
+                            sw.base_meshes.insert(bk, m.clone());
+                        }
+
+                        let mut converted = convert_mesh_to_ue_scaled(&m, cfg.voxel_scale(), world_scale);
+                        crate::convert::bucket_mesh_by_material(&mut converted);
+                        if !converted.indices.is_empty() {
+                            let _ = result_tx.send(WorkerResult::ChunkMesh {
+                                chunk: bk,
+                                mesh: converted,
+                                generation: 0,
+                            });
+                        }
                     }
                 }
 

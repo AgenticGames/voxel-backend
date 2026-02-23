@@ -15,6 +15,7 @@ use crate::config::GenerationConfig;
 use crate::density::{DensityField, generate_density_field};
 use crate::pools::PoolDescriptor;
 use crate::worm;
+use crate::worm::path::WormSegment;
 
 /// Compute the deterministic region key for a chunk coordinate.
 pub fn region_key(cx: i32, cy: i32, cz: i32, region_size: i32) -> (i32, i32, i32) {
@@ -55,7 +56,7 @@ pub fn region_chunks(region: (i32, i32, i32), region_size: i32) -> Vec<(i32, i32
 pub fn generate_region_densities(
     coords: &[(i32, i32, i32)],
     config: &GenerationConfig,
-) -> (HashMap<(i32, i32, i32), DensityField>, Vec<PoolDescriptor>) {
+) -> (HashMap<(i32, i32, i32), DensityField>, Vec<PoolDescriptor>, Vec<Vec<WormSegment>>) {
     let eb = config.effective_bounds();
     let chunk_size_f = eb;
 
@@ -93,6 +94,7 @@ pub fn generate_region_densities(
         worm::connect::plan_worm_connections(global_worm_seed, &all_cavern_centers, total_worms);
 
     // Phase 4: Generate worm paths and carve across all chunks they touch
+    let mut all_worm_paths: Vec<Vec<WormSegment>> = Vec::new();
     for (i, (worm_start, _end)) in connections.iter().enumerate() {
         let worm_seed = global_worm_seed
             .wrapping_add(0x1000)
@@ -110,15 +112,7 @@ pub fn generate_region_densities(
         }
 
         // Find bounding box of worm path to limit chunk iteration
-        let max_r = segments.iter().map(|s| s.radius).fold(0.0f32, f32::max);
-        let mut path_min = segments[0].position;
-        let mut path_max = segments[0].position;
-        for seg in &segments {
-            path_min = path_min.min(seg.position);
-            path_max = path_max.max(seg.position);
-        }
-        path_min -= Vec3::splat(max_r);
-        path_max += Vec3::splat(max_r);
+        let (path_min, path_max) = worm_path_aabb(&segments);
 
         let min_cx = (path_min.x / chunk_size_f).floor() as i32;
         let max_cx = (path_max.x / chunk_size_f).floor() as i32;
@@ -142,6 +136,8 @@ pub fn generate_region_densities(
                 }
             }
         }
+
+        all_worm_paths.push(segments);
     }
 
     // Phase 5: Place cave pools per chunk (sort keys for determinism)
@@ -185,7 +181,7 @@ pub fn generate_region_densities(
         density.compute_metadata();
     }
 
-    (density_fields, all_pool_descriptors)
+    (density_fields, all_pool_descriptors, all_worm_paths)
 }
 
 /// Compute a deterministic worm seed for a set of coordinates.
@@ -202,6 +198,61 @@ fn region_worm_seed(base_seed: u64, coords: &[(i32, i32, i32)]) -> u64 {
         .wrapping_add((min_x as u64).wrapping_mul(0x9E3779B97F4A7C15))
         ^ (min_y as u64).wrapping_mul(0x517CC1B727220A95)
         ^ (min_z as u64).wrapping_mul(0x6C62272E07BB0142)
+}
+
+/// Compute the axis-aligned bounding box of a worm path, expanded by the max segment radius.
+pub fn worm_path_aabb(segments: &[WormSegment]) -> (Vec3, Vec3) {
+    let max_r = segments.iter().map(|s| s.radius).fold(0.0f32, f32::max);
+    let mut path_min = segments[0].position;
+    let mut path_max = segments[0].position;
+    for seg in segments {
+        path_min = path_min.min(seg.position);
+        path_max = path_max.max(seg.position);
+    }
+    path_min -= Vec3::splat(max_r);
+    path_max += Vec3::splat(max_r);
+    (path_min, path_max)
+}
+
+/// Apply worm paths from external regions into density fields.
+///
+/// For each worm path, computes AABB, finds overlapping chunks in `density_fields`,
+/// and carves worm segments into them. Used for cross-region worm sharing.
+pub fn apply_external_worm_paths(
+    density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
+    worm_paths: &[Vec<WormSegment>],
+    config: &GenerationConfig,
+) {
+    let eb = config.effective_bounds();
+    for path in worm_paths {
+        if path.is_empty() {
+            continue;
+        }
+        let (path_min, path_max) = worm_path_aabb(path);
+
+        let min_cx = (path_min.x / eb).floor() as i32;
+        let max_cx = (path_max.x / eb).floor() as i32;
+        let min_cy = (path_min.y / eb).floor() as i32;
+        let max_cy = (path_max.y / eb).floor() as i32;
+        let min_cz = (path_min.z / eb).floor() as i32;
+        let max_cz = (path_max.z / eb).floor() as i32;
+
+        for cz in min_cz..=max_cz {
+            for cy in min_cy..=max_cy {
+                for cx in min_cx..=max_cx {
+                    if let Some(density) = density_fields.get_mut(&(cx, cy, cz)) {
+                        let coord = ChunkCoord::new(cx, cy, cz);
+                        worm::carve::carve_worm_into_density(
+                            density,
+                            path,
+                            coord.world_origin_bounds(eb),
+                            config.worm.falloff_power,
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ── Seam stitching ──────────────────────────────────────────────────────────
@@ -524,7 +575,7 @@ mod tests {
             ..GenerationConfig::default()
         };
         let coords = region_chunks((0, 0, 0), 2);
-        let (densities, _pools) = generate_region_densities(&coords, &config);
+        let (densities, _pools, _worms) = generate_region_densities(&coords, &config);
         assert_eq!(densities.len(), 8);
         for &c in &coords {
             assert!(densities.contains_key(&c));
