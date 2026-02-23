@@ -230,6 +230,13 @@ fn handle_request(
                                         if coords.contains(&key) { continue; }
                                         if let Some(density) = s.density_fields.get_mut(&key) {
                                             let coord = voxel_core::chunk::ChunkCoord::new(cx, cy, cz);
+                                            if !voxel_gen::worm::carve::worm_overlaps_chunk(
+                                                path,
+                                                coord.world_origin_bounds(eb),
+                                                density.size,
+                                            ) {
+                                                continue;
+                                            }
                                             voxel_gen::worm::carve::carve_worm_into_density(
                                                 density,
                                                 path,
@@ -251,60 +258,7 @@ fn handle_request(
                     if profiling { t_worm_backward_carve = t_bwd_carve.elapsed(); }
                     backward_dirty_count = backward_dirty.len() as u32;
 
-                    // Re-mesh backward-dirty chunks and send updated meshes
                     let t_bwd_remesh = Instant::now();
-                    for &bk in &backward_dirty {
-                        // Read lock: extract mesh data
-                        let mesh_data = {
-                            let s = store.read().unwrap();
-                            let density = match s.density_fields.get(&bk) {
-                                Some(d) => d,
-                                None => continue,
-                            };
-                            let hermite = match s.hermite_data.get(&bk) {
-                                Some(h) => h,
-                                None => continue,
-                            };
-                            let cell_size = density.size - 1;
-                            let dc_verts = solve_dc_vertices(hermite, cell_size);
-                            let mut m = generate_mesh(hermite, &dc_verts, cell_size, cfg.max_edge_length, cfg.mine.min_triangle_area);
-                            m.smooth(cfg.mesh_smooth_iterations, cfg.mesh_smooth_strength, cfg.mesh_boundary_smooth, Some(cell_size));
-                            if cfg.mesh_recalc_normals > 0 { m.recalculate_normals(); }
-                            let b_edges = region_gen::extract_boundary_edges(hermite, cfg.chunk_size);
-                            (m, dc_verts, b_edges)
-                        };
-
-                        let (m, dc_verts, b_edges) = mesh_data;
-
-                        // Write lock: cache seam data and base mesh
-                        {
-                            let mut sw = store.write().unwrap();
-                            sw.add_seam_data(
-                                bk,
-                                ChunkSeamData {
-                                    dc_vertices: dc_verts,
-                                    world_origin: glam::Vec3::ZERO,
-                                    boundary_edges: b_edges,
-                                },
-                            );
-                            sw.base_meshes.insert(bk, m.clone());
-                        }
-
-                        let mut converted = convert_mesh_to_ue_scaled(&m, cfg.voxel_scale(), world_scale);
-                        crate::convert::bucket_mesh_by_material(&mut converted);
-                        if !converted.indices.is_empty() {
-                            let _ = result_tx.send(WorkerResult::ChunkMesh {
-                                chunk: bk,
-                                mesh: converted,
-                                generation: 0,
-                            });
-                        }
-                    }
-
-                    // Regenerate seams for backward-dirty chunks and their neighbors
-                    for &bk in &backward_dirty {
-                        let _ = incremental_seam_pass(bk, &cfg, store, result_tx, world_scale);
-                    }
                     if profiling { t_worm_backward_remesh = t_bwd_remesh.elapsed(); }
                 }
 

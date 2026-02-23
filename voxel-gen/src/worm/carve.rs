@@ -55,6 +55,32 @@ pub fn carve_worm_into_density(
     }
 }
 
+/// Check if any worm segment actually overlaps a chunk's density grid.
+/// Uses point-to-AABB distance test for fast rejection of chunks
+/// that fall within the conservative worm AABB but no segment touches.
+pub fn worm_overlaps_chunk(
+    segments: &[WormSegment],
+    world_origin: glam::Vec3,
+    grid_size: usize,
+) -> bool {
+    let size_f = grid_size as f32;
+    for segment in segments {
+        let local = segment.position - world_origin;
+        let r = segment.radius;
+        // Nearest point on [0, size) cube to segment center
+        let nx = local.x.clamp(0.0, size_f);
+        let ny = local.y.clamp(0.0, size_f);
+        let nz = local.z.clamp(0.0, size_f);
+        let dx = local.x - nx;
+        let dy = local.y - ny;
+        let dz = local.z - nz;
+        if dx * dx + dy * dy + dz * dz <= r * r {
+            return true;
+        }
+    }
+    false
+}
+
 /// Smoothstep interpolation for falloff
 #[inline]
 fn smoothstep(t: f32) -> f32 {
@@ -129,5 +155,43 @@ mod tests {
         for sample in &field.samples {
             assert_eq!(sample.density, 1.0);
         }
+    }
+
+    #[test]
+    fn test_worm_overlaps_chunk_inside() {
+        let segments = vec![WormSegment {
+            position: glam::Vec3::new(8.0, 8.0, 8.0),
+            radius: 3.0,
+        }];
+        assert!(worm_overlaps_chunk(&segments, glam::Vec3::ZERO, 17));
+    }
+
+    #[test]
+    fn test_worm_overlaps_chunk_far_outside() {
+        let segments = vec![WormSegment {
+            position: glam::Vec3::new(100.0, 100.0, 100.0),
+            radius: 3.0,
+        }];
+        assert!(!worm_overlaps_chunk(&segments, glam::Vec3::ZERO, 17));
+    }
+
+    #[test]
+    fn test_worm_overlaps_chunk_edge_touch() {
+        // Segment center at (-2, 8, 8), radius 3 — just touches the x=0 face
+        let segments = vec![WormSegment {
+            position: glam::Vec3::new(-2.0, 8.0, 8.0),
+            radius: 3.0,
+        }];
+        assert!(worm_overlaps_chunk(&segments, glam::Vec3::ZERO, 17));
+    }
+
+    #[test]
+    fn test_worm_overlaps_chunk_just_outside() {
+        // Segment center at (-4, 8, 8), radius 3 — doesn't reach x=0 face
+        let segments = vec![WormSegment {
+            position: glam::Vec3::new(-4.0, 8.0, 8.0),
+            radius: 3.0,
+        }];
+        assert!(!worm_overlaps_chunk(&segments, glam::Vec3::ZERO, 17));
     }
 }
