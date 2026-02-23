@@ -166,12 +166,6 @@ pub fn generate_region_densities(
     timings.worm_carving = t3.elapsed();
     timings.worm_count = all_worm_paths.len() as u32;
 
-    // Phase 4.5: Smooth density at worm-carved boundaries
-    // Eliminates near-zero density dead zones that cause missing quads in hermite extraction
-    for density in density_fields.values_mut() {
-        density.smooth_surface(1, 0.3);
-    }
-
     // Phase 5: Place cave pools per chunk (sort keys for determinism)
     let t4 = Instant::now();
     let mut all_pool_descriptors = Vec::new();
