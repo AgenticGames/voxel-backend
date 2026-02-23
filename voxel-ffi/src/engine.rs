@@ -7,6 +7,7 @@ use dashmap::DashMap;
 use voxel_fluid::FluidConfig;
 use voxel_fluid::FluidEvent;
 use voxel_core::stress::StressField;
+use voxel_core::world_scan::ScanConfig;
 use voxel_gen::config::{
     BandedIronConfig, FormationConfig, GenerationConfig, GeodeConfig, HostRockConfig,
     KimberlitePipeConfig, MineConfig, NoiseConfig, OreConfig, OreVeinParams, PoolConfig,
@@ -279,6 +280,15 @@ impl VoxelEngine {
     /// Returns 1 on success, 0 if queue full.
     pub fn request_world_scan(&self) -> u32 {
         match self.mine_tx.try_send(WorkerRequest::WorldScan) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
+    /// Request a world scan with custom configuration. Sent through the mine
+    /// channel for immediate processing. Returns 1 on success, 0 if queue full.
+    pub fn request_world_scan_with_config(&self, config: ScanConfig) -> u32 {
+        match self.mine_tx.try_send(WorkerRequest::WorldScanWithConfig { config }) {
             Ok(()) => 1,
             Err(_) => 0,
         }
@@ -869,6 +879,32 @@ fn ffi_config_to_fluid(c: &FfiEngineConfig) -> FluidConfig {
         lava_spread_rate: if c.fluid_lava_spread_rate > 0.0 { c.fluid_lava_spread_rate } else { 0.125 },
         cavern_source_bias: c.fluid_cavern_source_bias,
         tunnel_bend_threshold: c.fluid_tunnel_bend_threshold,
+    }
+}
+
+/// Convert FFI scan config to internal ScanConfig.
+pub fn ffi_scan_config_to_scan_config(c: &FfiScanConfig) -> ScanConfig {
+    ScanConfig {
+        enable_density_seam: c.enable_density_seam != 0,
+        enable_mesh_topology: c.enable_mesh_topology != 0,
+        enable_seam_completeness: c.enable_seam_completeness != 0,
+        enable_navigability: c.enable_navigability != 0,
+        enable_worm_truncation: c.enable_worm_truncation != 0,
+        enable_thin_walls: c.enable_thin_walls != 0,
+        enable_winding_consistency: c.enable_winding_consistency != 0,
+        enable_degenerate_triangles: c.enable_degenerate_triangles != 0,
+        enable_worm_carve_verify: c.enable_worm_carve_verify != 0,
+        enable_self_intersection: c.enable_self_intersection != 0,
+        enable_seam_mesh_quality: c.enable_seam_mesh_quality != 0,
+        density_subsample_count: c.density_subsample_count,
+        raymarch_rays_per_chunk: c.raymarch_rays_per_chunk,
+        raymarch_step_size: c.raymarch_step_size,
+        max_vertex_zero_crossing_dist: c.max_vertex_zero_crossing_dist,
+        min_passage_width: c.min_passage_width,
+        min_triangle_area: c.min_triangle_area,
+        max_edge_length: c.max_edge_length,
+        thin_wall_max_thickness: c.thin_wall_max_thickness,
+        self_intersection_tri_limit: c.self_intersection_tri_limit,
     }
 }
 

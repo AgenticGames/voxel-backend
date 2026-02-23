@@ -3,19 +3,21 @@ use std::time::Instant;
 
 use voxel_core::dual_contouring::mesh_gen::generate_mesh;
 use voxel_core::dual_contouring::solve::solve_dc_vertices;
+use voxel_core::hermite::HermiteData;
 use voxel_core::mesh::Mesh;
-use voxel_core::world_scan::{self, ScanSeamData, ScanWormSegment};
-use voxel_gen::config::GenerationConfig;
+use voxel_core::world_scan::{self, ScanConfig, ScanSeamData, ScanWormSegment};
+use voxel_gen::config::{GenerationConfig, WormConfig};
 use voxel_gen::hermite_extract::extract_hermite_data;
 use voxel_gen::region_gen;
 
 /// Run the scan command.
 ///
-/// Usage: voxel-cli scan [--seed N] [--chunks N] [--output PATH]
+/// Usage: voxel-cli scan [--seed N] [--chunks N] [--output PATH] [--no-PASS] [--self-intersection] [--rays N] [--subsamples N]
 pub fn run(args: &[String]) {
     let mut seed = 42u64;
-    let mut chunks_per_axis = 3i32;
+    let mut chunks_per_axis = 7i32; // load_radius=3 → -3..+3 = 7 per axis
     let mut output = "scan_report.json".to_string();
+    let mut scan_config = ScanConfig::default();
 
     let mut i = 0;
     while i < args.len() {
@@ -32,16 +34,46 @@ pub fn run(args: &[String]) {
                 i += 1;
                 if i < args.len() { output = args[i].clone(); }
             }
+            // Disable flags
+            "--no-density-seam" => { scan_config.enable_density_seam = false; }
+            "--no-mesh-topology" => { scan_config.enable_mesh_topology = false; }
+            "--no-seam-completeness" => { scan_config.enable_seam_completeness = false; }
+            "--no-navigability" => { scan_config.enable_navigability = false; }
+            "--no-worm-truncation" => { scan_config.enable_worm_truncation = false; }
+            "--no-thin-walls" => { scan_config.enable_thin_walls = false; }
+            "--no-winding" => { scan_config.enable_winding_consistency = false; }
+            "--no-degenerate-tri" => { scan_config.enable_degenerate_triangles = false; }
+            "--no-worm-carve" => { scan_config.enable_worm_carve_verify = false; }
+            "--self-intersection" => { scan_config.enable_self_intersection = true; }
+            "--no-seam-quality" => { scan_config.enable_seam_mesh_quality = false; }
+            // Accuracy params
+            "--rays" => {
+                i += 1;
+                if i < args.len() { scan_config.raymarch_rays_per_chunk = args[i].parse().unwrap_or(0); }
+            }
+            "--subsamples" => {
+                i += 1;
+                if i < args.len() { scan_config.density_subsample_count = args[i].parse().unwrap_or(0); }
+            }
             _ => { eprintln!("Unknown option: {}", args[i]); }
         }
         i += 1;
     }
 
-    // Cap at 5 for sanity
-    chunks_per_axis = chunks_per_axis.min(5).max(1);
+    // Cap at 9 for sanity (load_radius=4 → 9x9x9 = 729 chunks max)
+    chunks_per_axis = chunks_per_axis.min(9).max(1);
 
     let config = GenerationConfig {
         seed,
+        chunk_size: 24,
+        region_size: 3,
+        worm: WormConfig {
+            radius_min: 6.0,
+            radius_max: 8.0,
+            step_length: 0.8,
+            max_steps: 800,
+            ..Default::default()
+        },
         ..Default::default()
     };
     let chunk_size = config.chunk_size;
@@ -78,10 +110,11 @@ pub fn run(args: &[String]) {
     let gen_elapsed = gen_start.elapsed();
     println!("  Region generated in {:.2?} ({} chunks)", gen_elapsed, coords.len());
 
-    // Phase 2: Mesh all chunks + extract seam data
+    // Phase 2: Mesh all chunks + extract seam data + collect hermite data
     let mesh_start = Instant::now();
     let mut base_meshes: HashMap<(i32, i32, i32), Mesh> = HashMap::new();
     let mut seam_data: HashMap<(i32, i32, i32), ScanSeamData> = HashMap::new();
+    let mut hermite_map: HashMap<(i32, i32, i32), HermiteData> = HashMap::new();
 
     for &coord in &coords {
         let density = match density_fields.get(&coord) {
@@ -99,6 +132,7 @@ pub fn run(args: &[String]) {
 
         base_meshes.insert(coord, mesh);
         seam_data.insert(coord, ScanSeamData { boundary_edges });
+        hermite_map.insert(coord, hermite);
     }
 
     let mesh_elapsed = mesh_start.elapsed();
@@ -119,12 +153,14 @@ pub fn run(args: &[String]) {
 
     // Phase 4: Run world scan
     let scan_start = Instant::now();
-    let mut result = world_scan::scan_world(
+    let mut result = world_scan::scan_world_with_config(
         &density_fields,
         &base_meshes,
+        Some(&hermite_map),
         &seam_data,
         &scan_worm_paths,
         chunk_size,
+        &scan_config,
     );
     result.seed = Some(seed);
     let scan_elapsed = scan_start.elapsed();

@@ -2,7 +2,7 @@ use std::ffi::{c_char, c_void, CString};
 use std::ptr;
 
 use crate::convert::rust_chunk_to_ue;
-use crate::engine::VoxelEngine;
+use crate::engine::{ffi_scan_config_to_scan_config, VoxelEngine};
 use crate::types::*;
 
 /// Create a new voxel engine instance. Returns opaque pointer.
@@ -641,6 +641,22 @@ pub unsafe extern "C" fn voxel_request_world_scan(engine: *mut c_void) -> u32 {
     }
     let engine = &*(engine as *const VoxelEngine);
     engine.request_world_scan()
+}
+
+/// Request a world scan with custom configuration.
+/// Returns 1 on success, 0 if queue full.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_request_world_scan_with_config(
+    engine: *mut c_void,
+    config: *const FfiScanConfig,
+) -> u32 {
+    if engine.is_null() || config.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let ffi_config = &*config;
+    let scan_config = ffi_scan_config_to_scan_config(ffi_config);
+    engine.request_world_scan_with_config(scan_config)
 }
 
 /// Poll for a completed world scan result.
