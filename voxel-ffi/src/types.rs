@@ -340,6 +340,7 @@ pub enum WorkerRequest {
         player_chunk: (i32, i32, i32),
         sleep_count: u32,
     },
+    WorldScan,
 }
 
 /// Results sent back from worker threads.
@@ -378,4 +379,19 @@ pub enum WorkerResult {
         supports_degraded: u32,
         collapses_triggered: u32,
     },
+    ScanComplete {
+        json_report: String,
+    },
+}
+
+/// FFI result for world scan. JSON report is passed as a heap-allocated string.
+#[repr(C)]
+pub struct FfiWorldScanResult {
+    pub success: u32,
+    pub json_report: *mut std::ffi::c_char,
+    pub json_length: u32,
+    pub chunks_scanned: u32,
+    pub total_issues: u32,
+    pub total_errors: u32,
+    pub total_warnings: u32,
 }

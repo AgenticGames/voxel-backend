@@ -48,6 +48,9 @@ pub struct VoxelEngine {
     // Sleep
     sleep_complete: Arc<Mutex<Option<SleepCompleteData>>>,
 
+    // World Scan
+    scan_complete: Arc<Mutex<Option<String>>>,
+
     // Profiler
     profiler: Arc<StreamingProfiler>,
 
@@ -148,6 +151,7 @@ impl VoxelEngine {
             generation_counters,
             shutdown,
             sleep_complete: Arc::new(Mutex::new(None)),
+            scan_complete: Arc::new(Mutex::new(None)),
             profiler,
             workers,
             world_scale,
@@ -240,6 +244,13 @@ impl VoxelEngine {
                 // Don't expose to the FfiResult pipeline; UE polls via voxel_poll_sleep_result
                 None
             }
+            Ok(WorkerResult::ScanComplete { json_report }) => {
+                if let Ok(mut sc) = self.scan_complete.lock() {
+                    *sc = Some(json_report);
+                }
+                // Don't expose to the FfiResult pipeline; UE polls via voxel_poll_scan_result
+                None
+            }
             Ok(other) => Some(other),
             Err(_) => None,
         }
@@ -261,6 +272,21 @@ impl VoxelEngine {
     /// Poll for a completed sleep result. Returns None if no sleep has completed yet.
     pub fn poll_sleep_complete(&self) -> Option<SleepCompleteData> {
         let mut sc = self.sleep_complete.lock().ok()?;
+        sc.take()
+    }
+
+    /// Request a world scan. Sent through the mine channel for immediate processing.
+    /// Returns 1 on success, 0 if queue full.
+    pub fn request_world_scan(&self) -> u32 {
+        match self.mine_tx.try_send(WorkerRequest::WorldScan) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
+    /// Poll for a completed scan result. Returns the JSON report string if ready.
+    pub fn poll_scan_complete(&self) -> Option<String> {
+        let mut sc = self.scan_complete.lock().ok()?;
         sc.take()
     }
 

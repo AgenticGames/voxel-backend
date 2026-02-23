@@ -688,6 +688,41 @@ fn handle_request(
                 let _ = incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
             }
         }
+        WorkerRequest::WorldScan => {
+            let cfg = config.read().unwrap().clone();
+            let s = store.read().unwrap();
+
+            // Convert store data to scan-compatible types
+            let scan_seam_data: std::collections::HashMap<(i32,i32,i32), voxel_core::world_scan::ScanSeamData> =
+                s.chunk_seam_data.iter().map(|(&k, v)| {
+                    (k, voxel_core::world_scan::ScanSeamData {
+                        boundary_edges: v.boundary_edges.clone(),
+                    })
+                }).collect();
+
+            let scan_worm_paths: Vec<Vec<voxel_core::world_scan::ScanWormSegment>> =
+                s.region_worm_paths.values().flat_map(|paths| {
+                    paths.iter().map(|path| {
+                        path.iter().map(|seg| voxel_core::world_scan::ScanWormSegment {
+                            position: [seg.position.x, seg.position.y, seg.position.z],
+                            radius: seg.radius,
+                        }).collect::<Vec<_>>()
+                    })
+                }).collect();
+
+            let result = voxel_core::world_scan::scan_world(
+                &s.density_fields,
+                &s.base_meshes,
+                &scan_seam_data,
+                &scan_worm_paths,
+                cfg.chunk_size,
+            );
+
+            let json = result.to_json_string();
+            drop(s);
+
+            let _ = result_tx.send(WorkerResult::ScanComplete { json_report: json });
+        }
     }
 }
 

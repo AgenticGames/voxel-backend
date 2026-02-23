@@ -203,6 +203,11 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                 // If it somehow reaches here, ignore it.
                 ptr::null_mut()
             }
+            WorkerResult::ScanComplete { .. } => {
+                // This should have been intercepted by engine.poll_result().
+                // If it somehow reaches here, ignore it.
+                ptr::null_mut()
+            }
         },
     }
 }
@@ -624,6 +629,88 @@ pub unsafe extern "C" fn voxel_poll_sleep_result(engine: *mut c_void) -> FfiSlee
             collapse_event_count: 0,
         },
         None => empty,
+    }
+}
+
+/// Request a world scan. The scan runs on a worker thread and the result is
+/// polled via `voxel_poll_scan_result`. Returns 1 on success, 0 if queue full.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_request_world_scan(engine: *mut c_void) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.request_world_scan()
+}
+
+/// Poll for a completed world scan result.
+/// Returns success=0 if not ready, success=1 with heap-allocated JSON string if ready.
+/// Caller MUST call `voxel_free_scan_result` on a successful result.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_poll_scan_result(engine: *mut c_void) -> FfiWorldScanResult {
+    let empty = FfiWorldScanResult {
+        success: 0,
+        json_report: ptr::null_mut(),
+        json_length: 0,
+        chunks_scanned: 0,
+        total_issues: 0,
+        total_errors: 0,
+        total_warnings: 0,
+    };
+    if engine.is_null() {
+        return empty;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    match engine.poll_scan_complete() {
+        Some(json) => {
+            // Parse summary stats from the JSON for convenience
+            let (chunks_scanned, total_issues, total_errors, total_warnings) =
+                parse_scan_summary(&json);
+            let json_len = json.len() as u32;
+            match CString::new(json) {
+                Ok(cstr) => {
+                    let ptr = cstr.into_raw();
+                    FfiWorldScanResult {
+                        success: 1,
+                        json_report: ptr,
+                        json_length: json_len,
+                        chunks_scanned,
+                        total_issues,
+                        total_errors,
+                        total_warnings,
+                    }
+                }
+                Err(_) => empty,
+            }
+        }
+        None => empty,
+    }
+}
+
+/// Free a scan result's JSON string. Safe to call with null pointer.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_free_scan_result(result: *mut FfiWorldScanResult) {
+    if result.is_null() {
+        return;
+    }
+    let r = &*result;
+    if !r.json_report.is_null() {
+        drop(CString::from_raw(r.json_report));
+    }
+}
+
+/// Parse summary stats from a scan JSON report string.
+fn parse_scan_summary(json: &str) -> (u32, u32, u32, u32) {
+    // Quick parse using serde_json::Value to extract summary fields
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(json) {
+        let chunks = val.get("chunks_scanned").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let issues = val.get("issues").and_then(|v| v.as_array()).map(|a| a.len() as u32).unwrap_or(0);
+        let summary = val.get("summary");
+        let errors = summary.and_then(|s| s.get("total_errors")).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let warnings = summary.and_then(|s| s.get("total_warnings")).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        (chunks, issues, errors, warnings)
+    } else {
+        (0, 0, 0, 0)
     }
 }
 

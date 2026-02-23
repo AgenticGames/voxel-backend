@@ -7,6 +7,7 @@ pub mod mesh;
 pub mod export;
 pub mod density;
 pub mod stress;
+pub mod world_scan;
 
 #[cfg(feature = "ffi")]
 pub mod ffi;
