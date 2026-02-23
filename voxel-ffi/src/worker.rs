@@ -286,6 +286,11 @@ fn handle_request(
                             });
                         }
                     }
+
+                    // Regenerate seams for backward-dirty chunks and their neighbors
+                    for &bk in &backward_dirty {
+                        let _ = incremental_seam_pass(bk, &cfg, store, result_tx, world_scale);
+                    }
                 }
 
                 // Mesh under fresh read lock
