@@ -11,7 +11,7 @@ use voxel_fluid::FluidEvent;
 use voxel_gen::config::{GenerationConfig, StressConfig};
 use voxel_gen::hermite_extract::extract_hermite_data;
 use voxel_gen::region_gen::{
-    self, generate_region_densities, region_chunks, region_key, ChunkSeamData,
+    self, generate_region_densities, region_chunks, region_key, ChunkSeamData, RegionTimings,
 };
 
 use crate::convert::{convert_mesh_to_ue_scaled, from_ue_normal, from_ue_world_pos};
@@ -101,6 +101,11 @@ fn handle_request(
             let mut t_mesh_gen = Duration::ZERO;
             let mut t_mesh_smooth = Duration::ZERO;
             let mut was_slow_path = false;
+            let mut region_timings = RegionTimings::default();
+            let mut t_worm_forward_sharing = Duration::ZERO;
+            let mut t_worm_backward_carve = Duration::ZERO;
+            let mut t_worm_backward_remesh = Duration::ZERO;
+            let mut backward_dirty_count: u32 = 0;
 
             // Fast path: region generated AND this chunk has data → mesh under one read lock
             let mesh_result = {
@@ -141,11 +146,15 @@ fn handle_request(
 
                 let t0 = Instant::now();
                 let coords = region_chunks(rk, cfg.region_size);
-                let (mut densities, _pools, worm_paths) = generate_region_densities(&coords, &cfg);
-                if profiling { t_region_density += t0.elapsed(); }
+                let (mut densities, _pools, worm_paths, rt) = generate_region_densities(&coords, &cfg);
+                if profiling {
+                    t_region_density += t0.elapsed();
+                    region_timings = rt;
+                }
 
                 // Forward sharing: apply worm paths from already-generated regions
                 // into our new density fields (before hermite extraction)
+                let t_fwd = Instant::now();
                 {
                     let s = store.read().unwrap();
                     let stored = s.get_all_region_worm_paths();
@@ -166,6 +175,7 @@ fn handle_request(
                         }
                     }
                 }
+                if profiling { t_worm_forward_sharing = t_fwd.elapsed(); }
 
                 // Pre-extract hermite data BEFORE acquiring write lock (expensive part)
                 let t2 = Instant::now();
@@ -200,6 +210,7 @@ fn handle_request(
                 if !worm_paths.is_empty() {
                     let eb = cfg.effective_bounds();
                     let mut backward_dirty: Vec<(i32, i32, i32)> = Vec::new();
+                    let t_bwd_carve = Instant::now();
                     {
                         let mut s = store.write().unwrap();
                         for path in &worm_paths {
@@ -237,8 +248,11 @@ fn handle_request(
                             }
                         }
                     }
+                    if profiling { t_worm_backward_carve = t_bwd_carve.elapsed(); }
+                    backward_dirty_count = backward_dirty.len() as u32;
 
                     // Re-mesh backward-dirty chunks and send updated meshes
+                    let t_bwd_remesh = Instant::now();
                     for &bk in &backward_dirty {
                         // Read lock: extract mesh data
                         let mesh_data = {
@@ -291,6 +305,7 @@ fn handle_request(
                     for &bk in &backward_dirty {
                         let _ = incremental_seam_pass(bk, &cfg, store, result_tx, world_scale);
                     }
+                    if profiling { t_worm_backward_remesh = t_bwd_remesh.elapsed(); }
                 }
 
                 // Mesh under fresh read lock
@@ -448,6 +463,18 @@ fn handle_request(
                     seam_candidates_sent: seam_timings.candidates_sent,
                     send_block: t_send_block,
                     coarse_skip: vertex_count == 0 && triangle_count == 0,
+                    worm_base_density: region_timings.base_density,
+                    worm_cavern_centers: region_timings.cavern_centers,
+                    worm_planning: region_timings.worm_planning,
+                    worm_carving: region_timings.worm_carving,
+                    worm_pools: region_timings.pools,
+                    worm_formations: region_timings.formations,
+                    worm_forward_sharing: t_worm_forward_sharing,
+                    worm_backward_carve: t_worm_backward_carve,
+                    worm_backward_remesh: t_worm_backward_remesh,
+                    worm_count: region_timings.worm_count,
+                    worm_segment_count: region_timings.worm_segment_count,
+                    backward_dirty_count,
                 };
                 profiler.record_chunk_with_coord(
                     worker_id, chunk, timings, gen_queue_len, result_queue_len,

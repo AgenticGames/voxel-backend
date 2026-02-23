@@ -72,6 +72,19 @@ pub struct ChunkTimings {
     pub send_block: Duration,
     // Coarse pre-pass
     pub coarse_skip: bool,
+    // Worm sub-phase timings (slow path only)
+    pub worm_base_density: Duration,
+    pub worm_cavern_centers: Duration,
+    pub worm_planning: Duration,
+    pub worm_carving: Duration,
+    pub worm_pools: Duration,
+    pub worm_formations: Duration,
+    pub worm_forward_sharing: Duration,
+    pub worm_backward_carve: Duration,
+    pub worm_backward_remesh: Duration,
+    pub worm_count: u32,
+    pub worm_segment_count: u32,
+    pub backward_dirty_count: u32,
 }
 
 /// Per-worker utilization stats.
@@ -149,6 +162,20 @@ pub struct SessionMetrics {
     pub coarse_skip_count: u64,
     pub coarse_full_gen_count: u64,
 
+    // Worm sub-phase stats (slow path only)
+    pub worm_base_density: PhaseStats,
+    pub worm_cavern_centers: PhaseStats,
+    pub worm_planning: PhaseStats,
+    pub worm_carving: PhaseStats,
+    pub worm_pools: PhaseStats,
+    pub worm_formations: PhaseStats,
+    pub worm_forward_sharing: PhaseStats,
+    pub worm_backward_carve: PhaseStats,
+    pub worm_backward_remesh: PhaseStats,
+    pub worm_counts: Vec<u32>,
+    pub worm_segment_counts: Vec<u32>,
+    pub backward_dirty_counts: Vec<u32>,
+
     // Path counts
     pub slow_path_count: u64,
     pub fast_path_count: u64,
@@ -196,6 +223,18 @@ impl SessionMetrics {
             send_block: PhaseStats::new(),
             coarse_skip_count: 0,
             coarse_full_gen_count: 0,
+            worm_base_density: PhaseStats::new(),
+            worm_cavern_centers: PhaseStats::new(),
+            worm_planning: PhaseStats::new(),
+            worm_carving: PhaseStats::new(),
+            worm_pools: PhaseStats::new(),
+            worm_formations: PhaseStats::new(),
+            worm_forward_sharing: PhaseStats::new(),
+            worm_backward_carve: PhaseStats::new(),
+            worm_backward_remesh: PhaseStats::new(),
+            worm_counts: Vec::new(),
+            worm_segment_counts: Vec::new(),
+            backward_dirty_counts: Vec::new(),
             gen_queue_depths: Vec::new(),
             result_queue_depths: Vec::new(),
             worker_stats: (0..num_workers).map(|_| WorkerStats::new()).collect(),
@@ -234,6 +273,18 @@ impl SessionMetrics {
         self.send_block = PhaseStats::new();
         self.coarse_skip_count = 0;
         self.coarse_full_gen_count = 0;
+        self.worm_base_density = PhaseStats::new();
+        self.worm_cavern_centers = PhaseStats::new();
+        self.worm_planning = PhaseStats::new();
+        self.worm_carving = PhaseStats::new();
+        self.worm_pools = PhaseStats::new();
+        self.worm_formations = PhaseStats::new();
+        self.worm_forward_sharing = PhaseStats::new();
+        self.worm_backward_carve = PhaseStats::new();
+        self.worm_backward_remesh = PhaseStats::new();
+        self.worm_counts.clear();
+        self.worm_segment_counts.clear();
+        self.backward_dirty_counts.clear();
         self.gen_queue_depths.clear();
         self.result_queue_depths.clear();
         self.worker_stats = (0..num_workers).map(|_| WorkerStats::new()).collect();
@@ -347,6 +398,22 @@ impl StreamingProfiler {
             m.coarse_full_gen_count += 1;
         }
 
+        // Worm sub-phase stats (only meaningful for slow path)
+        if timings.was_slow_path {
+            m.worm_base_density.record(timings.worm_base_density);
+            m.worm_cavern_centers.record(timings.worm_cavern_centers);
+            m.worm_planning.record(timings.worm_planning);
+            m.worm_carving.record(timings.worm_carving);
+            m.worm_pools.record(timings.worm_pools);
+            m.worm_formations.record(timings.worm_formations);
+            m.worm_forward_sharing.record(timings.worm_forward_sharing);
+            m.worm_backward_carve.record(timings.worm_backward_carve);
+            m.worm_backward_remesh.record(timings.worm_backward_remesh);
+            m.worm_counts.push(timings.worm_count);
+            m.worm_segment_counts.push(timings.worm_segment_count);
+            m.backward_dirty_counts.push(timings.backward_dirty_count);
+        }
+
         // Queue depth samples
         m.gen_queue_depths.push(gen_queue_len);
         m.result_queue_depths.push(result_queue_len);
@@ -422,6 +489,22 @@ impl StreamingProfiler {
             m.coarse_skip_count += 1;
         } else {
             m.coarse_full_gen_count += 1;
+        }
+
+        // Worm sub-phase stats (only meaningful for slow path)
+        if timings.was_slow_path {
+            m.worm_base_density.record(timings.worm_base_density);
+            m.worm_cavern_centers.record(timings.worm_cavern_centers);
+            m.worm_planning.record(timings.worm_planning);
+            m.worm_carving.record(timings.worm_carving);
+            m.worm_pools.record(timings.worm_pools);
+            m.worm_formations.record(timings.worm_formations);
+            m.worm_forward_sharing.record(timings.worm_forward_sharing);
+            m.worm_backward_carve.record(timings.worm_backward_carve);
+            m.worm_backward_remesh.record(timings.worm_backward_remesh);
+            m.worm_counts.push(timings.worm_count);
+            m.worm_segment_counts.push(timings.worm_segment_count);
+            m.backward_dirty_counts.push(timings.backward_dirty_count);
         }
 
         // Queue depth samples
@@ -611,6 +694,46 @@ impl StreamingProfiler {
         let total_sent: u64 = m.seam_convert.count;
         let hit_rate = if total_tried > 0 { (total_sent as f64 / total_tried as f64) * 100.0 } else { 0.0 };
         let _ = writeln!(out, "  Candidates:   tried={}  sent={}  (hit rate: {:.1}%)", total_tried, total_sent, hit_rate);
+        let _ = writeln!(out);
+
+        // ── 3b2. Worm Generation Breakdown ──
+        let _ = writeln!(out, "── Worm Generation Breakdown (ms, slow-path only) ─────────");
+        let _ = writeln!(out, "  {:<20} {:>8} {:>8} {:>8} {:>10}", "Phase", "Min", "Avg", "Max", "Total");
+        let _ = writeln!(out, "  {:-<20} {:->8} {:->8} {:->8} {:->10}", "", "", "", "", "");
+        let worm_phases: &[(&str, &PhaseStats)] = &[
+            ("base_density",      &m.worm_base_density),
+            ("cavern_centers",    &m.worm_cavern_centers),
+            ("worm_planning",     &m.worm_planning),
+            ("worm_carving",      &m.worm_carving),
+            ("pools",             &m.worm_pools),
+            ("formations",        &m.worm_formations),
+            ("forward_sharing",   &m.worm_forward_sharing),
+            ("backward_carve",    &m.worm_backward_carve),
+            ("backward_remesh",   &m.worm_backward_remesh),
+        ];
+        for (name, ps) in worm_phases {
+            if ps.count == 0 {
+                let _ = writeln!(out, "  {:<20} {:>8} {:>8} {:>8} {:>10}", name, "-", "-", "-", "-");
+            } else {
+                let _ = writeln!(
+                    out,
+                    "  {:<20} {:>8.2} {:>8.2} {:>8.2} {:>10.1}",
+                    name,
+                    dur_ms(ps.min),
+                    dur_ms(ps.avg()),
+                    dur_ms(ps.max),
+                    dur_ms(ps.total),
+                );
+            }
+        }
+        if !m.worm_counts.is_empty() {
+            let (wmin, wavg, wmax) = vec_stats(&m.worm_counts);
+            let (smin, savg, smax) = vec_stats(&m.worm_segment_counts);
+            let (dmin, davg, dmax) = vec_stats(&m.backward_dirty_counts);
+            let _ = writeln!(out, "  Worms: min={}  avg={:.0}  max={}    Segments: min={}  avg={:.0}  max={}",
+                wmin, wavg, wmax, smin, savg, smax);
+            let _ = writeln!(out, "  Backward-dirty: min={}  avg={:.1}  max={}", dmin, davg, dmax);
+        }
         let _ = writeln!(out);
 
         // ── 3c. Send Block ──
@@ -896,6 +1019,18 @@ mod tests {
             seam_candidates_sent: 0,
             send_block: Duration::ZERO,
             coarse_skip: false,
+            worm_base_density: Duration::ZERO,
+            worm_cavern_centers: Duration::ZERO,
+            worm_planning: Duration::ZERO,
+            worm_carving: Duration::ZERO,
+            worm_pools: Duration::ZERO,
+            worm_formations: Duration::ZERO,
+            worm_forward_sharing: Duration::ZERO,
+            worm_backward_carve: Duration::ZERO,
+            worm_backward_remesh: Duration::ZERO,
+            worm_count: 0,
+            worm_segment_count: 0,
+            backward_dirty_count: 0,
         };
 
         p.record_chunk_with_coord(0, (0, 0, 0), timings, 5, 2);
@@ -964,6 +1099,18 @@ mod tests {
             seam_candidates_sent: 0,
             send_block: Duration::ZERO,
             coarse_skip: false,
+            worm_base_density: Duration::ZERO,
+            worm_cavern_centers: Duration::ZERO,
+            worm_planning: Duration::ZERO,
+            worm_carving: Duration::ZERO,
+            worm_pools: Duration::ZERO,
+            worm_formations: Duration::ZERO,
+            worm_forward_sharing: Duration::ZERO,
+            worm_backward_carve: Duration::ZERO,
+            worm_backward_remesh: Duration::ZERO,
+            worm_count: 0,
+            worm_segment_count: 0,
+            backward_dirty_count: 0,
         };
 
         p.record_chunk(0, timings, 0, 0);
@@ -1007,6 +1154,18 @@ mod tests {
             seam_candidates_sent: 0,
             send_block: Duration::ZERO,
             coarse_skip: false,
+            worm_base_density: Duration::ZERO,
+            worm_cavern_centers: Duration::ZERO,
+            worm_planning: Duration::ZERO,
+            worm_carving: Duration::ZERO,
+            worm_pools: Duration::ZERO,
+            worm_formations: Duration::ZERO,
+            worm_forward_sharing: Duration::ZERO,
+            worm_backward_carve: Duration::ZERO,
+            worm_backward_remesh: Duration::ZERO,
+            worm_count: 0,
+            worm_segment_count: 0,
+            backward_dirty_count: 0,
         };
 
         p.record_chunk_with_coord(0, (0, 0, 0), timings, 0, 0);

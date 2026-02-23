@@ -4,6 +4,7 @@
 //! A "region" is a deterministic group of chunks that share global worm connections.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use glam::Vec3;
 use rayon::prelude::*;
@@ -16,6 +17,20 @@ use crate::density::{DensityField, generate_density_field};
 use crate::pools::PoolDescriptor;
 use crate::worm;
 use crate::worm::path::WormSegment;
+
+/// Timing breakdown of region generation phases.
+#[derive(Debug, Clone, Default)]
+pub struct RegionTimings {
+    pub base_density: Duration,
+    pub cavern_centers: Duration,
+    pub worm_planning: Duration,
+    pub worm_carving: Duration,
+    pub pools: Duration,
+    pub formations: Duration,
+    pub metadata: Duration,
+    pub worm_count: u32,
+    pub worm_segment_count: u32,
+}
 
 /// Compute the deterministic region key for a chunk coordinate.
 pub fn region_key(cx: i32, cy: i32, cz: i32, region_size: i32) -> (i32, i32, i32) {
@@ -56,12 +71,14 @@ pub fn region_chunks(region: (i32, i32, i32), region_size: i32) -> Vec<(i32, i32
 pub fn generate_region_densities(
     coords: &[(i32, i32, i32)],
     config: &GenerationConfig,
-) -> (HashMap<(i32, i32, i32), DensityField>, Vec<PoolDescriptor>, Vec<Vec<WormSegment>>) {
+) -> (HashMap<(i32, i32, i32), DensityField>, Vec<PoolDescriptor>, Vec<Vec<WormSegment>>, RegionTimings) {
     let eb = config.effective_bounds();
     let chunk_size_f = eb;
+    let mut timings = RegionTimings::default();
 
     // Phase 1: Generate base density fields (parallel)
     // Try coarse solid check first — skip full generation for fully-solid chunks
+    let t0 = Instant::now();
     let mut density_fields: HashMap<(i32, i32, i32), DensityField> = coords
         .par_iter()
         .map(|&(cx, cy, cz)| {
@@ -74,8 +91,10 @@ pub fn generate_region_densities(
             ((cx, cy, cz), density)
         })
         .collect();
+    timings.base_density = t0.elapsed();
 
     // Phase 2: Collect cavern centers from ALL chunks
+    let t1 = Instant::now();
     let all_cavern_centers: Vec<Vec3> = coords
         .par_iter()
         .flat_map(|&(cx, cy, cz)| {
@@ -85,15 +104,19 @@ pub fn generate_region_densities(
             worm::connect::find_cavern_centers(&flat, density.size, coord.world_origin_bounds(eb))
         })
         .collect();
+    timings.cavern_centers = t1.elapsed();
 
     // Phase 3: Plan global worm connections with deterministic region seed
+    let t2 = Instant::now();
     let num_chunks = coords.len() as u32;
     let global_worm_seed = region_worm_seed(config.seed, coords);
     let total_worms = (config.worm.worms_per_region * num_chunks as f32).ceil() as u32;
     let connections =
         worm::connect::plan_worm_connections(global_worm_seed, &all_cavern_centers, total_worms);
+    timings.worm_planning = t2.elapsed();
 
     // Phase 4: Generate worm paths and carve across all chunks they touch
+    let t3 = Instant::now();
     let mut all_worm_paths: Vec<Vec<WormSegment>> = Vec::new();
     for (i, (worm_start, _end)) in connections.iter().enumerate() {
         let worm_seed = global_worm_seed
@@ -137,10 +160,14 @@ pub fn generate_region_densities(
             }
         }
 
+        timings.worm_segment_count += segments.len() as u32;
         all_worm_paths.push(segments);
     }
+    timings.worm_carving = t3.elapsed();
+    timings.worm_count = all_worm_paths.len() as u32;
 
     // Phase 5: Place cave pools per chunk (sort keys for determinism)
+    let t4 = Instant::now();
     let mut all_pool_descriptors = Vec::new();
     if config.pools.enabled {
         let mut sorted_keys: Vec<_> = density_fields.keys().copied().collect();
@@ -160,8 +187,10 @@ pub fn generate_region_densities(
             }
         }
     }
+    timings.pools = t4.elapsed();
 
     // Phase 6: Place cave formations per chunk
+    let t5 = Instant::now();
     if config.formations.enabled {
         for (&(cx, cy, cz), density) in density_fields.iter_mut() {
             let coord = ChunkCoord::new(cx, cy, cz);
@@ -175,13 +204,16 @@ pub fn generate_region_densities(
             );
         }
     }
+    timings.formations = t5.elapsed();
 
     // Phase 7: Compute cached metadata for all density fields (search optimization)
+    let t6 = Instant::now();
     for density in density_fields.values_mut() {
         density.compute_metadata();
     }
+    timings.metadata = t6.elapsed();
 
-    (density_fields, all_pool_descriptors, all_worm_paths)
+    (density_fields, all_pool_descriptors, all_worm_paths, timings)
 }
 
 /// Compute a deterministic worm seed for a set of coordinates.
@@ -575,7 +607,7 @@ mod tests {
             ..GenerationConfig::default()
         };
         let coords = region_chunks((0, 0, 0), 2);
-        let (densities, _pools, _worms) = generate_region_densities(&coords, &config);
+        let (densities, _pools, _worms, _timings) = generate_region_densities(&coords, &config);
         assert_eq!(densities.len(), 8);
         for &c in &coords {
             assert!(densities.contains_key(&c));
