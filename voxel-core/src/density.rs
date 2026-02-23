@@ -1,4 +1,3 @@
-use glam::Vec3;
 use crate::material::Material;
 use crate::octree::node::VoxelSample;
 
@@ -68,48 +67,6 @@ impl DensityField {
         }
         self.has_geode_material = has_geode;
         self.air_cell_count = air_count;
-    }
-
-    /// Compute density gradient at a grid position using central differences.
-    /// Returns un-normalized gradient vector (caller normalizes if needed).
-    /// Used for overriding boundary normals with isosurface-consistent normals.
-    pub fn gradient_at(&self, fx: f32, fy: f32, fz: f32) -> Vec3 {
-        let s = self.size;
-        let ix = (fx.round().max(0.0) as usize).min(s - 1);
-        let iy = (fy.round().max(0.0) as usize).min(s - 1);
-        let iz = (fz.round().max(0.0) as usize).min(s - 1);
-
-        let dx = if ix > 0 && ix + 1 < s {
-            self.get(ix + 1, iy, iz).density - self.get(ix - 1, iy, iz).density
-        } else if ix + 1 < s {
-            self.get(ix + 1, iy, iz).density - self.get(ix, iy, iz).density
-        } else if ix > 0 {
-            self.get(ix, iy, iz).density - self.get(ix - 1, iy, iz).density
-        } else {
-            0.0
-        };
-
-        let dy = if iy > 0 && iy + 1 < s {
-            self.get(ix, iy + 1, iz).density - self.get(ix, iy - 1, iz).density
-        } else if iy + 1 < s {
-            self.get(ix, iy + 1, iz).density - self.get(ix, iy, iz).density
-        } else if iy > 0 {
-            self.get(ix, iy, iz).density - self.get(ix, iy - 1, iz).density
-        } else {
-            0.0
-        };
-
-        let dz = if iz > 0 && iz + 1 < s {
-            self.get(ix, iy, iz + 1).density - self.get(ix, iy, iz - 1).density
-        } else if iz + 1 < s {
-            self.get(ix, iy, iz + 1).density - self.get(ix, iy, iz).density
-        } else if iz > 0 {
-            self.get(ix, iy, iz).density - self.get(ix, iy, iz - 1).density
-        } else {
-            0.0
-        };
-
-        Vec3::new(dx, dy, dz)
     }
 
     /// Force boundary faces to solid, sealing the chunk on specified faces.
@@ -234,34 +191,5 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn gradient_at_uniform_field() {
-        // Uniform density → zero gradient everywhere
-        let mut field = DensityField::new(5);
-        for s in &mut field.samples {
-            s.density = 0.5;
-        }
-        let g = field.gradient_at(2.0, 2.0, 2.0);
-        assert!(g.length() < 1e-6, "Uniform field should have zero gradient, got {:?}", g);
-    }
-
-    #[test]
-    fn gradient_at_linear_ramp() {
-        // Linear ramp in X: density = x / 4.0
-        let mut field = DensityField::new(5);
-        for z in 0..5 {
-            for y in 0..5 {
-                for x in 0..5 {
-                    field.get_mut(x, y, z).density = x as f32 / 4.0;
-                }
-            }
-        }
-        let g = field.gradient_at(2.0, 2.0, 2.0);
-        // Central diff: (3/4 - 1/4) = 0.5 in X, 0 in Y and Z
-        assert!(g.x > 0.0, "X gradient should be positive, got {}", g.x);
-        assert!(g.y.abs() < 1e-6, "Y gradient should be ~0, got {}", g.y);
-        assert!(g.z.abs() < 1e-6, "Z gradient should be ~0, got {}", g.z);
     }
 }
