@@ -259,6 +259,44 @@ fn handle_request(
                     backward_dirty_count = backward_dirty.len() as u32;
 
                     let t_bwd_remesh = Instant::now();
+                    if !backward_dirty.is_empty() {
+                        // Lightweight seam-data refresh: update DC vertices + boundary
+                        // edges + base mesh so neighboring seam passes read correct
+                        // post-carve geometry.  Skip expensive convert/send/seam-pass
+                        // (deferred to next request).
+                        let mut seam_updates = Vec::new();
+                        {
+                            let s = store.read().unwrap();
+                            for &key in &backward_dirty {
+                                let density = match s.density_fields.get(&key) {
+                                    Some(d) => d,
+                                    None => continue,
+                                };
+                                let hermite = match s.hermite_data.get(&key) {
+                                    Some(h) => h,
+                                    None => continue,
+                                };
+                                let cell_size = density.size - 1;
+                                let dc_verts = solve_dc_vertices(hermite, cell_size);
+                                let mut m = generate_mesh(hermite, &dc_verts, cell_size, cfg.max_edge_length, cfg.mine.min_triangle_area);
+                                m.smooth(cfg.mesh_smooth_iterations, cfg.mesh_smooth_strength, cfg.mesh_boundary_smooth, Some(cell_size));
+                                if cfg.mesh_recalc_normals > 0 { m.recalculate_normals(); }
+                                let b_edges = region_gen::extract_boundary_edges(hermite, cfg.chunk_size);
+                                seam_updates.push((key, dc_verts, b_edges, m));
+                            }
+                        }
+                        {
+                            let mut s = store.write().unwrap();
+                            for (key, dc_verts, b_edges, m) in seam_updates {
+                                s.add_seam_data(key, ChunkSeamData {
+                                    dc_vertices: dc_verts,
+                                    world_origin: glam::Vec3::ZERO,
+                                    boundary_edges: b_edges,
+                                });
+                                s.base_meshes.insert(key, m);
+                            }
+                        }
+                    }
                     if profiling { t_worm_backward_remesh = t_bwd_remesh.elapsed(); }
                 }
 
