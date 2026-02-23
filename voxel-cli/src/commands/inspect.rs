@@ -72,7 +72,7 @@ pub fn run(args: &[String]) {
     // Solve DC vertices and generate mesh
     let cell_size = density.size - 1;
     let dc_vertices = solve_dc_vertices(&hermite, cell_size);
-    let mesh = generate_mesh(&hermite, &dc_vertices, cell_size, config.max_edge_length, 0.0);
+    let mesh = generate_mesh(&hermite, &dc_vertices, cell_size);
     let mesh_time = start.elapsed() - density_time - hermite_time;
 
     let total_time = start.elapsed();

@@ -5,7 +5,6 @@ edition = "2021"
 
 [features]
 ffi = []
-diag-gate-2 = []
 
 [dependencies]
 glam.workspace = true

@@ -79,7 +79,7 @@ impl GeneratedRegion {
                 let hermite = extract_hermite_data(density);
                 let cell_size = density.size - 1;
                 let dc_vertices = solve_dc_vertices(&hermite, cell_size);
-                let mut mesh = generate_mesh(&hermite, &dc_vertices, cell_size, config.max_edge_length, 0.0);
+                let mut mesh = generate_mesh(&hermite, &dc_vertices, cell_size);
 
                 let boundary_edges = region_gen::extract_boundary_edges(&hermite, gs);
 
@@ -340,7 +340,7 @@ impl GeneratedRegion {
             let hermite = extract_hermite_data(density);
             let cell_size = density.size - 1;
             let dc_vertices = solve_dc_vertices(&hermite, cell_size);
-            let mut mesh = generate_mesh(&hermite, &dc_vertices, cell_size, self.config.max_edge_length, 0.0);
+            let mut mesh = generate_mesh(&hermite, &dc_vertices, cell_size);
 
             let boundary_edges = region_gen::extract_boundary_edges(&hermite, gs);
 
@@ -370,7 +370,6 @@ impl GeneratedRegion {
         }
 
         let gs = self.config.chunk_size;
-        let max_edge_length = self.config.max_edge_length;
 
         // Extract data for dirty chunks so we can process in parallel
         let mut work: Vec<(
@@ -411,7 +410,7 @@ impl GeneratedRegion {
 
                 let cell_size = density.size - 1;
                 let dc_vertices = solve_dc_vertices(&hermite, cell_size);
-                let mut mesh = generate_mesh(&hermite, &dc_vertices, cell_size, max_edge_length, 0.0);
+                let mut mesh = generate_mesh(&hermite, &dc_vertices, cell_size);
 
                 let boundary_edges = region_gen::extract_boundary_edges(&hermite, gs);
 

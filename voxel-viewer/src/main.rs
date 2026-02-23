@@ -291,7 +291,6 @@ fn serve_generate(
     let mut worm_max_steps: Option<u32> = None;
     let mut worm_falloff_power: Option<f32> = None;
     let mut chunk_size: Option<usize> = None;
-    let mut max_edge_length: Option<f32> = None;
     let mut sandstone_depth: Option<f64> = None;
     let mut granite_depth: Option<f64> = None;
     let mut basalt_depth: Option<f64> = None;
@@ -384,7 +383,7 @@ fn serve_generate(
             "worm_max_steps" => { worm_max_steps = val.parse().ok(); }
             "worm_falloff_power" => { worm_falloff_power = val.parse().ok(); }
             "chunk_size" => { chunk_size = val.parse().ok(); }
-            "max_edge_length" => { max_edge_length = val.parse().ok(); }
+            "max_edge_length" => { /* removed: filter no longer used */ }
             "sandstone_depth" => { sandstone_depth = val.parse().ok(); }
             "granite_depth" => { granite_depth = val.parse().ok(); }
             "basalt_depth" => { basalt_depth = val.parse().ok(); }
@@ -467,7 +466,7 @@ fn serve_generate(
         ..Default::default()
     };
     if let Some(v) = chunk_size { config.chunk_size = v.clamp(4, 64); }
-    if let Some(v) = max_edge_length { config.max_edge_length = v.max(0.5); }
+    // max_edge_length removed: triangle filter no longer used
     if let Some(v) = cavern_freq { config.noise.cavern_frequency = v; }
     if let Some(v) = cavern_threshold { config.noise.cavern_threshold = v; }
     if let Some(v) = detail_octaves { config.noise.detail_octaves = v; }

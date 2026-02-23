@@ -8,7 +8,6 @@ crate-type = ["cdylib"]
 
 [features]
 diag-gate-1 = []
-diag-gate-2 = ["voxel-core/diag-gate-2"]
 diag-gate-3 = []
 diag-gate-4 = []
 

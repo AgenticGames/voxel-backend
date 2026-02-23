@@ -645,13 +645,13 @@ impl VoxelEngine {
     pub fn profiler_begin_session(&self) -> u64 {
         let config_snapshot = if let Ok(cfg) = self.config.read() {
             format!(
-                "seed={}\nchunk_size={}\nworkers={}\nworld_scale={:.1}\nmax_edge_length={:.1}\nregion_size={}\n\
+                "seed={}\nchunk_size={}\nworkers={}\nworld_scale={:.1}\nregion_size={}\n\
                  cavern_freq={:.4}\ncavern_thresh={:.2}\ndetail_octaves={}\ndetail_persistence={:.2}\nwarp_amplitude={:.1}\n\
                  worms_per_region={:.1}\nworm_radius_min={:.1}\nworm_radius_max={:.1}\nworm_step_length={:.1}\nworm_max_steps={}\nworm_falloff_power={:.1}\n\
                  ore_domain_warp_strength={:.2}\nore_warp_frequency={:.4}\nore_edge_falloff={:.4}\nore_detail_weight={:.2}\n\
                  mesh_smooth_iterations={}\nmesh_smooth_strength={:.2}\nmesh_boundary_smooth={:.2}\nmesh_recalc_normals={}",
                 cfg.seed, cfg.chunk_size,
-                self.workers.len(), self.world_scale, cfg.max_edge_length, cfg.region_size,
+                self.workers.len(), self.world_scale, cfg.region_size,
                 cfg.noise.cavern_frequency, cfg.noise.cavern_threshold,
                 cfg.noise.detail_octaves, cfg.noise.detail_persistence, cfg.noise.warp_amplitude,
                 cfg.worm.worms_per_region, cfg.worm.radius_min, cfg.worm.radius_max,
@@ -810,11 +810,9 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
                 c.mine_smooth_iterations
             },
             smooth_strength: if c.mine_smooth_strength > 0.0 { c.mine_smooth_strength } else { 0.3 },
-            min_triangle_area: if c.mine_min_triangle_area > 0.0 { c.mine_min_triangle_area } else { 0.01 },
             dirty_expand: if c.mine_dirty_expand > 0 { c.mine_dirty_expand } else { 2 },
         },
         octree_max_depth: 4,
-        max_edge_length: c.max_edge_length,
         region_size: if c.region_size == 0 { 3 } else { c.region_size as i32 },
         bounds_size: c.bounds_size,
         mesh_smooth_iterations: c.mesh_smooth_iterations,

@@ -247,7 +247,7 @@ pub fn run(args: &[String]) {
                 let dc_vertices = solve_dc_vertices(&hermite, cell_size);
 
                 // Generate mesh via dual contouring
-                let mut mesh = generate_mesh(&hermite, &dc_vertices, cell_size, config.max_edge_length, 0.0);
+                let mut mesh = generate_mesh(&hermite, &dc_vertices, cell_size);
 
                 // Validate before transforming (validation thresholds are in grid space)
                 let valid = validate_mesh(&mesh);

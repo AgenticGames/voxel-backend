@@ -9,8 +9,6 @@ pub struct MineConfig {
     pub smooth_iterations: u32,
     /// Per-pass blend factor 0.0-1.0 (default: 0.3)
     pub smooth_strength: f32,
-    /// Reject triangles below this area (default: 0.01)
-    pub min_triangle_area: f32,
     /// Extra voxels to expand dirty region (default: 2)
     pub dirty_expand: u32,
 }
@@ -20,7 +18,6 @@ impl Default for MineConfig {
         Self {
             smooth_iterations: 2,
             smooth_strength: 0.3,
-            min_triangle_area: 0.01,
             dirty_expand: 2,
         }
     }
@@ -37,8 +34,6 @@ pub struct GenerationConfig {
     pub pools: PoolConfig,
     pub mine: MineConfig,
     pub octree_max_depth: u32,
-    /// Maximum edge length for triangle filtering (removes stretched artifacts).
-    pub max_edge_length: f32,
     /// Region size in chunks per axis for global worm planning (default 3).
     pub region_size: i32,
     /// World-space extent per chunk. 0.0 means use chunk_size (backward compatible).
@@ -101,7 +96,6 @@ impl Default for GenerationConfig {
             pools: PoolConfig::default(),
             mine: MineConfig::default(),
             octree_max_depth: 4,
-            max_edge_length: 5.0,
             region_size: 3,
             bounds_size: 0.0,
             mesh_smooth_iterations: 0,
