@@ -169,8 +169,9 @@ fn handle_request(
                         let as_vecs: Vec<Vec<voxel_gen::worm::path::WormSegment>> =
                             external.into_iter().map(|s| s.to_vec()).collect();
                         region_gen::apply_external_worm_paths(&mut densities, &as_vecs, &cfg);
-                        // Recompute metadata after carving external worms
+                        // Smooth + recompute metadata after carving external worms
                         for density in densities.values_mut() {
+                            density.smooth_surface(1, 0.3);
                             density.compute_metadata();
                         }
                     }
@@ -243,6 +244,7 @@ fn handle_request(
                                                 coord.world_origin_bounds(eb),
                                                 cfg.worm.falloff_power,
                                             );
+                                            density.smooth_surface(1, 0.3);
                                             density.compute_metadata();
                                             let hermite = extract_hermite_data(density);
                                             s.hermite_data.insert(key, hermite);
@@ -259,6 +261,51 @@ fn handle_request(
                     backward_dirty_count = backward_dirty.len() as u32;
 
                     let t_bwd_remesh = Instant::now();
+                    if !backward_dirty.is_empty() {
+                        let mut seam_updates = Vec::new();
+                        {
+                            let s = store.read().unwrap();
+                            for &key in &backward_dirty {
+                                let density = match s.density_fields.get(&key) {
+                                    Some(d) => d,
+                                    None => continue,
+                                };
+                                let hermite = match s.hermite_data.get(&key) {
+                                    Some(h) => h,
+                                    None => continue,
+                                };
+                                let cell_size = density.size - 1;
+                                let dc_verts = solve_dc_vertices(hermite, cell_size);
+                                let mut m = generate_mesh(hermite, &dc_verts, cell_size);
+                                m.smooth(cfg.mesh_smooth_iterations, cfg.mesh_smooth_strength, cfg.mesh_boundary_smooth, Some(cell_size));
+                                if cfg.mesh_recalc_normals > 0 { m.recalculate_normals(); }
+                                let b_edges = region_gen::extract_boundary_edges(hermite, cfg.chunk_size);
+                                seam_updates.push((key, dc_verts, b_edges, m));
+                            }
+                        }
+                        {
+                            let mut s = store.write().unwrap();
+                            for (key, dc_verts, b_edges, m) in seam_updates {
+                                s.add_seam_data(key, ChunkSeamData {
+                                    dc_vertices: dc_verts,
+                                    world_origin: glam::Vec3::ZERO,
+                                    boundary_edges: b_edges,
+                                });
+                                s.base_meshes.insert(key, m.clone());
+
+                                // Send re-meshed chunk to UE so worm carving is visible
+                                let mut converted = convert_mesh_to_ue_scaled(&m, cfg.voxel_scale(), world_scale);
+                                crate::convert::bucket_mesh_by_material(&mut converted);
+                                if !converted.indices.is_empty() {
+                                    let _ = result_tx.send(WorkerResult::ChunkMesh {
+                                        chunk: key,
+                                        mesh: converted,
+                                        generation: 0,
+                                    });
+                                }
+                            }
+                        }
+                    }
                     if profiling { t_worm_backward_remesh = t_bwd_remesh.elapsed(); }
                 }
 

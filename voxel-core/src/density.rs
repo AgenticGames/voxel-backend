@@ -69,6 +69,101 @@ impl DensityField {
         self.air_cell_count = air_count;
     }
 
+    /// Laplacian smooth of density values near the air/solid interface.
+    /// Only affects surface voxels (solid with air neighbor or vice versa).
+    /// Uses double-buffering to avoid order-dependent results.
+    pub fn smooth_surface(&mut self, iterations: u32, strength: f32) {
+        if iterations == 0 || strength <= 0.0 {
+            return;
+        }
+        let size = self.size;
+        let neighbors: [(i32, i32, i32); 6] = [
+            (-1, 0, 0), (1, 0, 0),
+            (0, -1, 0), (0, 1, 0),
+            (0, 0, -1), (0, 0, 1),
+        ];
+
+        for _ in 0..iterations {
+            let mut updates: Vec<(usize, usize, usize, f32)> = Vec::new();
+
+            for z in 0..size {
+                for y in 0..size {
+                    for x in 0..size {
+                        let is_solid = self.get(x, y, z).material.is_solid();
+                        let near_surface = if is_solid {
+                            self.has_air_neighbor(x, y, z)
+                        } else {
+                            self.has_solid_neighbor(x, y, z)
+                        };
+
+                        if !near_surface {
+                            continue;
+                        }
+
+                        let mut sum = 0.0f32;
+                        let mut count = 0u32;
+                        for (dx, dy, dz) in neighbors {
+                            let nx = x as i32 + dx;
+                            let ny = y as i32 + dy;
+                            let nz = z as i32 + dz;
+                            if nx >= 0 && nx < size as i32 && ny >= 0 && ny < size as i32 && nz >= 0 && nz < size as i32 {
+                                sum += self.get(nx as usize, ny as usize, nz as usize).density;
+                                count += 1;
+                            }
+                        }
+
+                        if count > 0 {
+                            let avg = sum / count as f32;
+                            let old = self.get(x, y, z).density;
+                            let new_val = (1.0 - strength) * old + strength * avg;
+                            updates.push((x, y, z, new_val));
+                        }
+                    }
+                }
+            }
+
+            for (x, y, z, new_density) in updates {
+                self.get_mut(x, y, z).density = new_density;
+            }
+        }
+    }
+
+    fn has_air_neighbor(&self, x: usize, y: usize, z: usize) -> bool {
+        let s = self.size;
+        let neighbors = [
+            (x.wrapping_sub(1), y, z),
+            (x + 1, y, z),
+            (x, y.wrapping_sub(1), z),
+            (x, y + 1, z),
+            (x, y, z.wrapping_sub(1)),
+            (x, y, z + 1),
+        ];
+        for (nx, ny, nz) in neighbors {
+            if nx < s && ny < s && nz < s && !self.get(nx, ny, nz).material.is_solid() {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn has_solid_neighbor(&self, x: usize, y: usize, z: usize) -> bool {
+        let s = self.size;
+        let neighbors = [
+            (x.wrapping_sub(1), y, z),
+            (x + 1, y, z),
+            (x, y.wrapping_sub(1), z),
+            (x, y + 1, z),
+            (x, y, z.wrapping_sub(1)),
+            (x, y, z + 1),
+        ];
+        for (nx, ny, nz) in neighbors {
+            if nx < s && ny < s && nz < s && self.get(nx, ny, nz).material.is_solid() {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Force boundary faces to solid, sealing the chunk on specified faces.
     ///
     /// Used with closed-boundary generation to make outer region faces watertight.
