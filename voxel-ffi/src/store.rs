@@ -7,6 +7,7 @@ use voxel_core::dual_contouring::solve::solve_dc_vertices;
 use voxel_core::hermite::HermiteData;
 use voxel_core::material::Material;
 use voxel_core::mesh::Mesh;
+use voxel_core::octree::node::VoxelSample;
 use voxel_core::stress::{StressField, SupportField, SupportType};
 use voxel_gen::config::{GenerationConfig, StressConfig};
 use voxel_gen::density::DensityField;
@@ -251,6 +252,12 @@ impl ChunkStore {
             }
         }
 
+        // Sync boundary density between dirty chunks and face neighbors
+        let extra_dirty = sync_boundary_density(
+            &mut self.density_fields, &dirty_chunks, config.chunk_size,
+        );
+        dirty_chunks.extend(extra_dirty);
+
         let meshes = self.remesh_dirty(&dirty_chunks, config, world_scale);
         (meshes, FfiMinedMaterials { counts: mined_counts })
     }
@@ -370,6 +377,12 @@ impl ChunkStore {
                 );
             }
         }
+
+        // Sync boundary density between dirty chunks and face neighbors
+        let extra_dirty = sync_boundary_density(
+            &mut self.density_fields, &dirty_chunks, config.chunk_size,
+        );
+        dirty_chunks.extend(extra_dirty);
 
         let meshes = self.remesh_dirty(&dirty_chunks, config, world_scale);
         (meshes, FfiMinedMaterials { counts: mined_counts })
@@ -1493,6 +1506,109 @@ pub fn extract_solid_mask(density: &DensityField, chunk_size: usize) -> Vec<u64>
     mask
 }
 
+/// Average two voxel samples at the same world position for boundary sync.
+/// Density is averaged; material = Air if either side was mined to Air.
+fn average_boundary_voxel(a: &VoxelSample, b: &VoxelSample) -> (f32, Material) {
+    let avg_density = (a.density + b.density) * 0.5;
+    let material = if !a.material.is_solid() || !b.material.is_solid() {
+        Material::Air
+    } else {
+        a.material
+    };
+    (avg_density, material)
+}
+
+/// Post-smoothing boundary density sync: average overlap voxels between
+/// dirty chunks and their face neighbors so hermite edges match at seams.
+///
+/// Returns extra neighbor chunks that need remeshing but weren't already dirty.
+fn sync_boundary_density(
+    density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
+    dirty_chunks: &[((i32, i32, i32), usize, usize, usize, usize, usize, usize)],
+    chunk_size: usize,
+) -> Vec<((i32, i32, i32), usize, usize, usize, usize, usize, usize)> {
+    let cs = chunk_size; // density grid is cs+1 in each dimension
+    let dirty_keys: HashSet<(i32, i32, i32)> = dirty_chunks.iter().map(|d| d.0).collect();
+
+    // Faces to check: (axis condition on dirty bounds, neighbor offset, local coord on A, local coord on B)
+    // For each face we collect updates as: (chunk_key, x, y, z, density, material)
+    let mut updates: Vec<((i32, i32, i32), usize, usize, usize, f32, Material)> = Vec::new();
+    let mut extra_neighbors: HashSet<(i32, i32, i32)> = HashSet::new();
+
+    for &(key, min_x, min_y, min_z, max_x, max_y, max_z) in dirty_chunks {
+        let (cx, cy, cz) = key;
+
+        let faces: [(bool, (i32, i32, i32), usize, usize); 6] = [
+            // (dirty touches this face?, neighbor key, coord in A, coord in B)
+            (max_x >= cs, (cx + 1, cy, cz), cs, 0),     // +X
+            (min_x == 0, (cx - 1, cy, cz), 0, cs),      // -X
+            (max_y >= cs, (cx, cy + 1, cz), cs, 0),      // +Y
+            (min_y == 0, (cx, cy - 1, cz), 0, cs),       // -Y
+            (max_z >= cs, (cx, cy, cz + 1), cs, 0),      // +Z
+            (min_z == 0, (cx, cy, cz - 1), 0, cs),       // -Z
+        ];
+
+        for (face_idx, &(touches, neighbor, coord_a, coord_b)) in faces.iter().enumerate() {
+            if !touches {
+                continue;
+            }
+            // Skip if neighbor not loaded
+            if !density_fields.contains_key(&neighbor) {
+                continue;
+            }
+
+            let axis = face_idx / 2; // 0=X, 1=Y, 2=Z
+
+            // Iterate over the face plane (the two non-axis dimensions, 0..=cs)
+            for u in 0..=cs {
+                for v in 0..=cs {
+                    let (ax, ay, az) = match axis {
+                        0 => (coord_a, u, v),
+                        1 => (u, coord_a, v),
+                        _ => (u, v, coord_a),
+                    };
+                    let (bx, by, bz) = match axis {
+                        0 => (coord_b, u, v),
+                        1 => (u, coord_b, v),
+                        _ => (u, v, coord_b),
+                    };
+
+                    let sample_a = density_fields[&key].get(ax, ay, az);
+                    let sample_b = density_fields[&neighbor].get(bx, by, bz);
+
+                    let (avg_d, avg_m) = average_boundary_voxel(sample_a, sample_b);
+
+                    updates.push((key, ax, ay, az, avg_d, avg_m));
+                    updates.push((neighbor, bx, by, bz, avg_d, avg_m));
+
+                    if !dirty_keys.contains(&neighbor) {
+                        extra_neighbors.insert(neighbor);
+                    }
+                }
+            }
+        }
+    }
+
+    // Pass 2: apply all updates
+    for (chunk_key, x, y, z, density, material) in updates {
+        if let Some(field) = density_fields.get_mut(&chunk_key) {
+            let sample = field.get_mut(x, y, z);
+            sample.density = density;
+            sample.material = material;
+        }
+    }
+
+    // Build extra dirty entries for neighbors that weren't already dirty.
+    let mut extra_dirty: Vec<((i32, i32, i32), usize, usize, usize, usize, usize, usize)> =
+        Vec::new();
+    for neighbor in extra_neighbors {
+        // Full chunk bounds (conservative — only boundary face was modified but remesh needs context)
+        extra_dirty.push((neighbor, 0, 0, 0, cs, cs, cs));
+    }
+
+    extra_dirty
+}
+
 /// Laplacian smoothing of density values near the mine boundary.
 /// Only affects voxels near the air/solid interface within the expanded dirty region.
 /// Uses double-buffering to avoid order-dependent results.
@@ -1596,4 +1712,160 @@ fn has_air_neighbor(density: &DensityField, x: usize, y: usize, z: usize) -> boo
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: create a solid density field of given grid size (chunk_size+1).
+    fn make_solid_field(size: usize) -> DensityField {
+        let mut field = DensityField::new(size);
+        for s in &mut field.samples {
+            s.density = 1.0;
+            s.material = Material::Limestone;
+        }
+        field
+    }
+
+    /// Mine asymmetric patterns in two adjacent chunks and smooth independently,
+    /// then verify sync_boundary_density makes the overlap match.
+    #[test]
+    fn test_boundary_density_sync_after_mine() {
+        let chunk_size = 4usize;
+        let size = chunk_size + 1; // grid size = 5
+
+        // Two adjacent chunks along X: A=(0,0,0), B=(1,0,0)
+        let mut fields: HashMap<(i32, i32, i32), DensityField> = HashMap::new();
+        fields.insert((0, 0, 0), make_solid_field(size));
+        fields.insert((1, 0, 0), make_solid_field(size));
+
+        // Asymmetric mining: carve a wide tunnel in A but narrow in B.
+        // This creates different neighbor patterns so smoothing diverges at overlap.
+        // Chunk A: carve x=2..4, y=0..4, z=1..3  (wide, reaching overlap at x=4)
+        for z in 1..=3 {
+            for y in 0..size {
+                for x in 2..size {
+                    let s = fields.get_mut(&(0, 0, 0)).unwrap().get_mut(x, y, z);
+                    s.density = -1.0;
+                    s.material = Material::Air;
+                }
+            }
+        }
+        // Chunk B: carve only x=0, y=2..2, z=2..2  (narrow, overlap at x=0)
+        {
+            let s = fields.get_mut(&(1, 0, 0)).unwrap().get_mut(0, 2, 2);
+            s.density = -1.0;
+            s.material = Material::Air;
+        }
+
+        // Smooth each chunk independently (simulating post-mine smoothing)
+        smooth_mine_boundary(
+            fields.get_mut(&(0, 0, 0)).unwrap(),
+            1, 0, 0, chunk_size, chunk_size, chunk_size,
+            3, 0.5,
+        );
+        smooth_mine_boundary(
+            fields.get_mut(&(1, 0, 0)).unwrap(),
+            0, 0, 0, 1, chunk_size, chunk_size,
+            3, 0.5,
+        );
+
+        // Before sync: overlap voxels should differ due to asymmetric carving
+        let mut any_differ = false;
+        for y in 0..size {
+            for z in 0..size {
+                let a = fields[&(0, 0, 0)].get(chunk_size, y, z).density;
+                let b = fields[&(1, 0, 0)].get(0, y, z).density;
+                if (a - b).abs() > 1e-6 {
+                    any_differ = true;
+                }
+            }
+        }
+        assert!(any_differ, "smoothing should have desynchronized at least some overlap voxels");
+
+        // Run boundary sync
+        let dirty_chunks = vec![
+            ((0, 0, 0), 1usize, 0usize, 0usize, chunk_size, chunk_size, chunk_size),
+            ((1, 0, 0), 0usize, 0usize, 0usize, 1usize, chunk_size, chunk_size),
+        ];
+        let extra = sync_boundary_density(&mut fields, &dirty_chunks, chunk_size);
+
+        // Both chunks were already dirty, so no extra neighbors expected
+        assert!(extra.is_empty(), "both chunks already dirty, no extras expected");
+
+        // After sync: overlap voxels must match exactly
+        for y in 0..size {
+            for z in 0..size {
+                let a = fields[&(0, 0, 0)].get(chunk_size, y, z);
+                let b = fields[&(1, 0, 0)].get(0, y, z);
+                assert!(
+                    (a.density - b.density).abs() < 1e-6,
+                    "density mismatch at overlap y={y} z={z}: A={} B={}",
+                    a.density, b.density
+                );
+                assert_eq!(
+                    a.material, b.material,
+                    "material mismatch at overlap y={y} z={z}"
+                );
+            }
+        }
+    }
+
+    /// Mine one chunk with dirty_expand reaching the boundary; verify
+    /// the neighbor gets added to extra_dirty and overlaps match after sync.
+    #[test]
+    fn test_boundary_sync_single_chunk_dirty_expand() {
+        let chunk_size = 4usize;
+        let size = chunk_size + 1;
+
+        let mut fields: HashMap<(i32, i32, i32), DensityField> = HashMap::new();
+        fields.insert((0, 0, 0), make_solid_field(size));
+        fields.insert((1, 0, 0), make_solid_field(size));
+
+        // Mine near the +X face of chunk A only (x=3,4)
+        for y in 1..=3 {
+            for z in 1..=3 {
+                for x in 3..=4 {
+                    let s = fields.get_mut(&(0, 0, 0)).unwrap().get_mut(x, y, z);
+                    s.density = -1.0;
+                    s.material = Material::Air;
+                }
+            }
+        }
+
+        // Smooth only chunk A
+        smooth_mine_boundary(
+            fields.get_mut(&(0, 0, 0)).unwrap(),
+            2, 0, 0, 4, 4, 4,
+            2, 0.5,
+        );
+
+        // Only chunk A is dirty, with max_x reaching chunk_size (the overlap face)
+        let dirty_chunks = vec![
+            ((0, 0, 0), 2usize, 0usize, 0usize, chunk_size, chunk_size, chunk_size),
+        ];
+        let extra = sync_boundary_density(&mut fields, &dirty_chunks, chunk_size);
+
+        // Neighbor (1,0,0) should be added as extra dirty
+        assert_eq!(extra.len(), 1, "neighbor should be added as extra dirty");
+        assert_eq!(extra[0].0, (1, 0, 0));
+
+        // After sync: overlap voxels must match
+        for y in 0..size {
+            for z in 0..size {
+                let a = fields[&(0, 0, 0)].get(chunk_size, y, z);
+                let b = fields[&(1, 0, 0)].get(0, y, z);
+                assert!(
+                    (a.density - b.density).abs() < 1e-6,
+                    "density mismatch at overlap y={y} z={z}: A={} B={}",
+                    a.density, b.density
+                );
+                assert_eq!(
+                    a.material, b.material,
+                    "material mismatch at overlap y={y} z={z}"
+                );
+            }
+        }
+    }
 }
