@@ -11,7 +11,7 @@ use voxel_core::octree::node::VoxelSample;
 use voxel_core::stress::{StressField, SupportField, SupportType};
 use voxel_gen::config::{GenerationConfig, StressConfig};
 use voxel_gen::density::DensityField;
-use voxel_gen::hermite_extract::{extract_hermite_data, patch_hermite_data};
+use voxel_gen::hermite_extract::extract_hermite_data;
 use voxel_gen::region_gen::{self, region_key, ChunkSeamData};
 use voxel_gen::worm::path::WormSegment;
 
@@ -388,7 +388,7 @@ impl ChunkStore {
         (meshes, FfiMinedMaterials { counts: mined_counts })
     }
 
-    /// Re-mesh dirty chunks using incremental hermite patching.
+    /// Re-mesh dirty chunks using full hermite re-extraction.
     /// Returns converted meshes in UE coordinate space.
     /// Also updates seam data so seam stitching reflects post-mining geometry.
     pub fn remesh_dirty(
@@ -400,23 +400,16 @@ impl ChunkStore {
         let chunk_size = config.chunk_size;
         let mut results = Vec::with_capacity(dirty_chunks.len());
 
-        for &(key, min_x, min_y, min_z, max_x, max_y, max_z) in dirty_chunks {
+        for &(key, _min_x, _min_y, _min_z, _max_x, _max_y, _max_z) in dirty_chunks {
             let density = match self.density_fields.get(&key) {
                 Some(d) => d,
                 None => continue,
             };
 
-            let hermite = match self.hermite_data.get_mut(&key) {
-                Some(h) => {
-                    patch_hermite_data(h, density, min_x, min_y, min_z, max_x, max_y, max_z);
-                    h
-                }
-                None => {
-                    let h = extract_hermite_data(density);
-                    self.hermite_data.insert(key, h);
-                    self.hermite_data.get(&key).unwrap()
-                }
-            };
+            // Full re-extraction ensures no stale edges from smoothing boundary effects.
+            let h = extract_hermite_data(density);
+            self.hermite_data.insert(key, h);
+            let hermite = self.hermite_data.get(&key).unwrap();
 
             let cell_size = density.size - 1;
             let dc_vertices = solve_dc_vertices(hermite, cell_size);
@@ -1865,6 +1858,91 @@ mod tests {
                     a.material, b.material,
                     "material mismatch at overlap y={y} z={z}"
                 );
+            }
+        }
+    }
+
+    /// Full hermite re-extraction after mining produces a valid mesh with no NaN vertices,
+    /// and edges in unmodified regions match the original extraction.
+    #[test]
+    fn test_full_reextract_matches_initial() {
+        use voxel_gen::hermite_extract::extract_hermite_data;
+
+        let chunk_size = 4usize;
+        let size = chunk_size + 1;
+
+        // Create a density field with a surface: solid below y=2, air above
+        let mut field = DensityField::new(size);
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..size {
+                    let s = field.get_mut(x, y, z);
+                    if y <= 2 {
+                        s.density = 1.0;
+                        s.material = Material::Limestone;
+                    } else {
+                        s.density = -1.0;
+                        s.material = Material::Air;
+                    }
+                }
+            }
+        }
+
+        // Initial full extraction → mesh A
+        let hermite_a = extract_hermite_data(&field);
+        let cell_size = size - 1;
+        let dc_a = voxel_core::dual_contouring::solve::solve_dc_vertices(&hermite_a, cell_size);
+        let mesh_a = voxel_core::dual_contouring::mesh_gen::generate_mesh(&hermite_a, &dc_a, cell_size);
+
+        // Verify mesh A is valid
+        assert!(!mesh_a.vertices.is_empty(), "initial mesh should have vertices");
+        for v in &mesh_a.vertices {
+            assert!(!v.position[0].is_nan() && !v.position[1].is_nan() && !v.position[2].is_nan(),
+                "initial mesh has NaN vertex");
+        }
+
+        // Mine a sphere: carve out y=1..2, x=1..3, z=1..3
+        for z in 1..=3 {
+            for y in 1..=2 {
+                for x in 1..=3 {
+                    let s = field.get_mut(x, y, z);
+                    s.density = -1.0;
+                    s.material = Material::Air;
+                }
+            }
+        }
+
+        // Smooth the mined region
+        smooth_mine_boundary(&mut field, 1, 1, 1, 3, 2, 3, 2, 0.5);
+
+        // Full re-extraction after mining → mesh B
+        let hermite_b = extract_hermite_data(&field);
+        let dc_b = voxel_core::dual_contouring::solve::solve_dc_vertices(&hermite_b, cell_size);
+        let mesh_b = voxel_core::dual_contouring::mesh_gen::generate_mesh(&hermite_b, &dc_b, cell_size);
+
+        // Verify mesh B has no NaN vertices
+        for v in &mesh_b.vertices {
+            assert!(!v.position[0].is_nan() && !v.position[1].is_nan() && !v.position[2].is_nan(),
+                "post-mine mesh has NaN vertex");
+        }
+
+        // Verify mesh B still has geometry (mining carved some but not all)
+        assert!(!mesh_b.vertices.is_empty(), "post-mine mesh should have vertices");
+
+        // Verify edges outside the mined region are consistent:
+        // Edges at z=0 (untouched) should match between A and B
+        for (key, edge_b) in &hermite_b.edges {
+            let z = key.z();
+            let y = key.y();
+            if z == 0 && y <= 2 {
+                // This edge is in the z=0 slice, below the surface — density unchanged
+                if let Some(edge_a) = hermite_a.edges.get(&key) {
+                    assert!(
+                        (edge_b.t - edge_a.t).abs() < 1e-5,
+                        "edge at ({},{},{}) axis {} has t={} but original had t={}",
+                        key.x(), key.y(), key.z(), key.axis(), edge_b.t, edge_a.t
+                    );
+                }
             }
         }
     }
