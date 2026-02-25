@@ -19,6 +19,9 @@ use crate::convert::convert_mesh_to_ue_scaled;
 use crate::stress::{CollapseEvent, post_change_stress_update};
 use crate::types::{ConvertedMesh, FfiMinedMaterials};
 
+/// Side length of the flatten-terrace footprint in voxels.
+pub const TERRACE_SIZE: i32 = 10;
+
 /// Result from combined cavern location search.
 pub struct CavernLocations {
     pub spring: Vec3,
@@ -997,7 +1000,7 @@ impl ChunkStore {
             .map(|(_, pos)| pos)
     }
 
-    /// Flatten a 2x2 terrace footprint for building placement.
+    /// Flatten a 10x10 terrace footprint for building placement.
     /// Sets the floor layer to solid host_material and clears 2 layers above for clearance.
     /// Returns the re-meshed dirty chunks (in UE coords).
     pub fn flatten_terrace(
@@ -1011,8 +1014,8 @@ impl ChunkStore {
 
         let mut dirty_set: HashSet<(i32, i32, i32)> = HashSet::new();
 
-        for dx in 0..2 {
-            for dz in 0..2 {
+        for dx in 0..TERRACE_SIZE {
+            for dz in 0..TERRACE_SIZE {
                 let wx = base.x + dx;
                 let wy = base.y;
                 let wz = base.z + dz;
@@ -1058,14 +1061,14 @@ impl ChunkStore {
         self.remesh_dirty(&dirty_chunks, config, world_scale)
     }
 
-    /// Query floor support for a 2x2 flatten preview.
-    /// Checks 4 cells one layer below the terrace floor; density > 0 = solid.
-    /// Returns count of solid cells (0–4).
+    /// Query floor support for a 10x10 flatten preview.
+    /// Checks cells one layer below the terrace floor; density > 0 = solid.
+    /// Returns count of solid cells (0–100).
     pub fn query_flatten_support(&self, base: glam::IVec3, chunk_size: i32) -> u8 {
         let mut solid_count = 0u8;
         let check_y = base.y - 1;
-        for dx in 0..2 {
-            for dz in 0..2 {
+        for dx in 0..TERRACE_SIZE {
+            for dz in 0..TERRACE_SIZE {
                 let wx = base.x + dx;
                 let wz = base.z + dz;
                 let cx = wx.div_euclid(chunk_size);

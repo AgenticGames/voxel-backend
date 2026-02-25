@@ -16,7 +16,7 @@ use voxel_gen::config::{
 
 use crate::convert::ue_chunk_to_rust;
 use crate::profiler::StreamingProfiler;
-use crate::store::ChunkStore;
+use crate::store::{ChunkStore, TERRACE_SIZE};
 use crate::types::*;
 use crate::worker::worker_loop;
 
@@ -574,17 +574,17 @@ impl VoxelEngine {
         }
     }
 
-    /// Request flattening a 2x2 terrace at a UE world position.
-    /// Snaps to 2x2 grid and determines host rock from depth.
+    /// Request flattening a 10x10 terrace at a UE world position.
+    /// Snaps to 10-aligned grid and determines host rock from depth.
     /// Returns 1 on success, 0 if queue full.
     pub fn request_flatten(&self, ue_x: f32, ue_y: f32, ue_z: f32, scale: f32) -> u32 {
         let rust_x = ue_x / scale;
         let rust_y = ue_z / scale;
         let rust_z = -ue_y / scale;
 
-        let base_x = (rust_x as i32) & !1;
+        let base_x = (rust_x as i32).div_euclid(TERRACE_SIZE) * TERRACE_SIZE;
         let base_y = rust_y as i32;
-        let base_z = (rust_z as i32) & !1;
+        let base_z = (rust_z as i32).div_euclid(TERRACE_SIZE) * TERRACE_SIZE;
 
         let host_material = {
             let cfg = self.config.read().unwrap();
@@ -619,16 +619,16 @@ impl VoxelEngine {
             .map(|m| m as u8)
     }
 
-    /// Query floor support for a 2x2 flatten ghost preview.
+    /// Query floor support for a 10x10 flatten ghost preview.
     /// Returns (solid_count, snapped_ue_x, snapped_ue_y, snapped_ue_z).
     pub fn query_flatten_support(&self, ue_x: f32, ue_y: f32, ue_z: f32, scale: f32) -> (u8, f32, f32, f32) {
         let rust_x = ue_x / scale;
         let rust_y = ue_z / scale;
         let rust_z = -ue_y / scale;
 
-        let base_x = (rust_x as i32) & !1;
+        let base_x = (rust_x as i32).div_euclid(TERRACE_SIZE) * TERRACE_SIZE;
         let base_y = rust_y as i32;
-        let base_z = (rust_z as i32) & !1;
+        let base_z = (rust_z as i32).div_euclid(TERRACE_SIZE) * TERRACE_SIZE;
 
         let cs = { self.config.read().unwrap().chunk_size as i32 };
         let store = self.store.read().unwrap();
