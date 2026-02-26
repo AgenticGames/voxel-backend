@@ -19,8 +19,6 @@ use crate::convert::convert_mesh_to_ue_scaled;
 use crate::stress::{CollapseEvent, post_change_stress_update};
 use crate::types::{ConvertedMesh, FfiMinedMaterials};
 
-/// Side length of the flatten-terrace footprint in voxels.
-pub const TERRACE_SIZE: i32 = 11;
 
 /// Result from combined cavern location search.
 pub struct CavernLocations {
@@ -1011,11 +1009,12 @@ impl ChunkStore {
         world_scale: f32,
     ) -> Vec<((i32, i32, i32), ConvertedMesh)> {
         let cs = config.chunk_size as i32;
+        let terrace_size = (150.0f32 / world_scale).round().max(2.0) as i32;
 
         let mut dirty_set: HashSet<(i32, i32, i32)> = HashSet::new();
 
-        for dx in 0..TERRACE_SIZE {
-            for dz in 0..TERRACE_SIZE {
+        for dx in 0..terrace_size {
+            for dz in 0..terrace_size {
                 let wx = base.x + dx;
                 let wy = base.y;
                 let wz = base.z + dz;
@@ -1067,14 +1066,14 @@ impl ChunkStore {
         self.remesh_dirty(&dirty_chunks, config, world_scale)
     }
 
-    /// Query floor support for an 11x11 flatten preview.
+    /// Query floor support for a flatten preview.
     /// Checks cells one layer below the terrace floor; density > 0 = solid.
-    /// Returns count of solid cells (0–121).
-    pub fn query_flatten_support(&self, base: glam::IVec3, chunk_size: i32) -> u8 {
+    /// Returns count of solid cells (0..terrace_size²).
+    pub fn query_flatten_support(&self, base: glam::IVec3, chunk_size: i32, terrace_size: i32) -> u8 {
         let mut solid_count = 0u8;
         let check_y = base.y - 1;
-        for dx in 0..TERRACE_SIZE {
-            for dz in 0..TERRACE_SIZE {
+        for dx in 0..terrace_size {
+            for dz in 0..terrace_size {
                 let wx = base.x + dx;
                 let wz = base.z + dz;
                 let cx = wx.div_euclid(chunk_size);
@@ -1094,11 +1093,11 @@ impl ChunkStore {
         solid_count
     }
 
-    /// Query whether an 11x11 terrace exists at the given base position.
+    /// Query whether a terrace exists at the given base position.
     /// Returns Some(material) of the floor if all cells are terraced, None otherwise.
-    pub fn query_terrace(&self, base: glam::IVec3) -> Option<Material> {
-        for dx in 0..TERRACE_SIZE {
-            for dz in 0..TERRACE_SIZE {
+    pub fn query_terrace(&self, base: glam::IVec3, terrace_size: i32) -> Option<Material> {
+        for dx in 0..terrace_size {
+            for dz in 0..terrace_size {
                 if !self.terraced_cells.contains(&(base.x + dx, base.y, base.z + dz)) {
                     return None;
                 }

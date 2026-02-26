@@ -16,12 +16,14 @@ use voxel_gen::config::{
 
 use crate::convert::ue_chunk_to_rust;
 use crate::profiler::StreamingProfiler;
-use crate::store::{ChunkStore, TERRACE_SIZE};
+use crate::store::ChunkStore;
 use crate::types::*;
 use crate::worker::worker_loop;
 
-/// Vertical snap grid for flatten operations (in voxels).
-const TERRACE_Y_SNAP: i32 = TERRACE_SIZE;
+/// Compute terrace size in voxels from world scale, targeting ~150 UU snap steps.
+fn terrace_size_for_scale(scale: f32) -> i32 {
+    (150.0f32 / scale).round().max(2.0) as i32
+}
 
 /// Data returned when a sleep cycle completes.
 pub struct SleepCompleteData {
@@ -577,17 +579,18 @@ impl VoxelEngine {
         }
     }
 
-    /// Request flattening an 11x11 terrace at a UE world position.
-    /// Snaps to 11-aligned grid on all axes and determines host rock from depth.
+    /// Request flattening a terrace at a UE world position.
+    /// Snaps to a terrace_size-aligned grid on all axes and determines host rock from depth.
     /// Returns 1 on success, 0 if queue full.
     pub fn request_flatten(&self, ue_x: f32, ue_y: f32, ue_z: f32, scale: f32) -> u32 {
         let rust_x = ue_x / scale;
         let rust_y = ue_z / scale;
         let rust_z = -ue_y / scale;
 
-        let base_x = (rust_x as i32).div_euclid(TERRACE_SIZE) * TERRACE_SIZE;
-        let base_y = (rust_y as i32).div_euclid(TERRACE_Y_SNAP) * TERRACE_Y_SNAP;
-        let base_z = (rust_z as i32).div_euclid(TERRACE_SIZE) * TERRACE_SIZE;
+        let ts = terrace_size_for_scale(scale);
+        let base_x = (rust_x as i32).div_euclid(ts) * ts;
+        let base_y = (rust_y as i32).div_euclid(ts) * ts;
+        let base_z = (rust_z as i32).div_euclid(ts) * ts;
 
         let host_material = {
             let cfg = self.config.read().unwrap();
@@ -605,37 +608,39 @@ impl VoxelEngine {
         }
     }
 
-    /// Query whether an 11x11 terrace exists at a UE world position.
+    /// Query whether a terrace exists at a UE world position.
     /// Returns Some(material_id) if terraced, None otherwise.
     pub fn query_terrace(&self, ue_x: f32, ue_y: f32, ue_z: f32, scale: f32) -> Option<u8> {
         let rust_x = ue_x / scale;
         let rust_y = ue_z / scale;
         let rust_z = -ue_y / scale;
 
-        let base_x = (rust_x as i32).div_euclid(TERRACE_SIZE) * TERRACE_SIZE;
-        let base_y = (rust_y as i32).div_euclid(TERRACE_Y_SNAP) * TERRACE_Y_SNAP;
-        let base_z = (rust_z as i32).div_euclid(TERRACE_SIZE) * TERRACE_SIZE;
+        let ts = terrace_size_for_scale(scale);
+        let base_x = (rust_x as i32).div_euclid(ts) * ts;
+        let base_y = (rust_y as i32).div_euclid(ts) * ts;
+        let base_z = (rust_z as i32).div_euclid(ts) * ts;
 
         let store = self.store.read().unwrap();
         store
-            .query_terrace(glam::IVec3::new(base_x, base_y, base_z))
+            .query_terrace(glam::IVec3::new(base_x, base_y, base_z), ts)
             .map(|m| m as u8)
     }
 
-    /// Query floor support for an 11x11 flatten ghost preview.
+    /// Query floor support for a flatten ghost preview.
     /// Returns (solid_count, snapped_ue_x, snapped_ue_y, snapped_ue_z).
     pub fn query_flatten_support(&self, ue_x: f32, ue_y: f32, ue_z: f32, scale: f32) -> (u8, f32, f32, f32) {
         let rust_x = ue_x / scale;
         let rust_y = ue_z / scale;
         let rust_z = -ue_y / scale;
 
-        let base_x = (rust_x as i32).div_euclid(TERRACE_SIZE) * TERRACE_SIZE;
-        let base_y = (rust_y as i32).div_euclid(TERRACE_Y_SNAP) * TERRACE_Y_SNAP;
-        let base_z = (rust_z as i32).div_euclid(TERRACE_SIZE) * TERRACE_SIZE;
+        let ts = terrace_size_for_scale(scale);
+        let base_x = (rust_x as i32).div_euclid(ts) * ts;
+        let base_y = (rust_y as i32).div_euclid(ts) * ts;
+        let base_z = (rust_z as i32).div_euclid(ts) * ts;
 
         let cs = { self.config.read().unwrap().chunk_size as i32 };
         let store = self.store.read().unwrap();
-        let count = store.query_flatten_support(glam::IVec3::new(base_x, base_y, base_z), cs);
+        let count = store.query_flatten_support(glam::IVec3::new(base_x, base_y, base_z), cs, ts);
 
         // Convert snapped position back to UE coords
         let snapped_ue_x = base_x as f32 * scale;
