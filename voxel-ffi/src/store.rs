@@ -20,7 +20,7 @@ use crate::stress::{CollapseEvent, post_change_stress_update};
 use crate::types::{ConvertedMesh, FfiMinedMaterials};
 
 /// Side length of the flatten-terrace footprint in voxels.
-pub const TERRACE_SIZE: i32 = 10;
+pub const TERRACE_SIZE: i32 = 11;
 
 /// Result from combined cavern location search.
 pub struct CavernLocations {
@@ -43,7 +43,7 @@ pub struct ChunkStore {
     pub stress_fields: HashMap<(i32, i32, i32), StressField>,
     /// Per-chunk support structure data.
     pub support_fields: HashMap<(i32, i32, i32), SupportField>,
-    /// Tracks which 2x2 cells have been terraced for building placement.
+    /// Tracks which cells have been terraced for building placement.
     pub terraced_cells: HashSet<(i32, i32, i32)>,
     /// Worm paths per region key, for cross-region worm sharing.
     pub region_worm_paths: HashMap<(i32, i32, i32), Vec<Vec<WormSegment>>>,
@@ -1000,7 +1000,7 @@ impl ChunkStore {
             .map(|(_, pos)| pos)
     }
 
-    /// Flatten a 10x10 terrace footprint for building placement.
+    /// Flatten an 11x11 terrace footprint for building placement.
     /// Sets the floor layer to solid host_material and clears 2 layers above for clearance.
     /// Returns the re-meshed dirty chunks (in UE coords).
     pub fn flatten_terrace(
@@ -1053,17 +1053,23 @@ impl ChunkStore {
 
         // Build dirty chunks with full-chunk bounds for remeshing
         let chunk_size = config.chunk_size;
-        let dirty_chunks: Vec<_> = dirty_set
+        let mut dirty_chunks: Vec<_> = dirty_set
             .into_iter()
             .map(|key| (key, 0usize, 0usize, 0usize, chunk_size, chunk_size, chunk_size))
             .collect();
 
+        // Sync boundary density between dirty chunks and face neighbors (fixes seams)
+        let extra_dirty = sync_boundary_density(
+            &mut self.density_fields, &dirty_chunks, config.chunk_size,
+        );
+        dirty_chunks.extend(extra_dirty);
+
         self.remesh_dirty(&dirty_chunks, config, world_scale)
     }
 
-    /// Query floor support for a 10x10 flatten preview.
+    /// Query floor support for an 11x11 flatten preview.
     /// Checks cells one layer below the terrace floor; density > 0 = solid.
-    /// Returns count of solid cells (0–100).
+    /// Returns count of solid cells (0–121).
     pub fn query_flatten_support(&self, base: glam::IVec3, chunk_size: i32) -> u8 {
         let mut solid_count = 0u8;
         let check_y = base.y - 1;
@@ -1088,19 +1094,18 @@ impl ChunkStore {
         solid_count
     }
 
-    /// Query whether a 2x2 terrace exists at the given base position.
-    /// Returns Some(material) of the floor if all 4 cells are terraced, None otherwise.
+    /// Query whether an 11x11 terrace exists at the given base position.
+    /// Returns Some(material) of the floor if all cells are terraced, None otherwise.
     pub fn query_terrace(&self, base: glam::IVec3) -> Option<Material> {
-        // Check all 4 cells
-        for dx in 0..2 {
-            for dz in 0..2 {
+        for dx in 0..TERRACE_SIZE {
+            for dz in 0..TERRACE_SIZE {
                 if !self.terraced_cells.contains(&(base.x + dx, base.y, base.z + dz)) {
                     return None;
                 }
             }
         }
 
-        // All 4 cells present; read material from the floor voxel
+        // All cells present; read material from the floor voxel
         let cs = 16i32; // standard chunk size
         let cx = base.x.div_euclid(cs);
         let cy = base.y.div_euclid(cs);

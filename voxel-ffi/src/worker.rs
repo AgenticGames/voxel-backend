@@ -443,9 +443,18 @@ fn handle_request(
             let mat = voxel_core::material::Material::from_u8(host_material);
             let mut s = store.write().unwrap();
             let meshes = s.flatten_terrace(glam::IVec3::new(base_x, base_y, base_z), mat, &cfg, world_scale);
+
+            // Collect dirty chunk keys for seam regeneration
+            let dirty_keys: Vec<(i32, i32, i32)> = meshes.iter().map(|(k, _)| *k).collect();
+
             drop(s);
             for (key, mesh) in meshes {
                 let _ = result_tx.send(WorkerResult::ChunkMesh { chunk: key, mesh, generation: 0 });
+            }
+
+            // Regenerate seams for dirty chunks and their neighbors (matches mining path)
+            for key in dirty_keys {
+                let _ = incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
             }
         }
         WorkerRequest::Mine { request } => {
