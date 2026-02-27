@@ -3,12 +3,6 @@ use crate::density::DensityField;
 use voxel_core::material::Material;
 
 /// Carve worm tunnel into density field using smooth sphere falloff.
-///
-/// For each WormSegment, finds affected grid cells within the bounding box
-/// of the segment's radius, then applies a smooth falloff:
-/// `density *= smoothstep(distance / radius) ^ falloff_power`
-///
-/// This ensures smooth transitions at tunnel edges.
 pub fn carve_worm_into_density(
     density: &mut DensityField,
     segments: &[WormSegment],
@@ -16,35 +10,26 @@ pub fn carve_worm_into_density(
     falloff_power: f32,
 ) {
     let size = density.size;
-
     for segment in segments {
         let local_pos = segment.position - world_origin;
         let r = segment.radius;
         let r2 = r * r;
-
-        // Compute bounding box in grid space
         let min_x = ((local_pos.x - r).floor() as i32).max(0) as usize;
         let min_y = ((local_pos.y - r).floor() as i32).max(0) as usize;
         let min_z = ((local_pos.z - r).floor() as i32).max(0) as usize;
         let max_x = ((local_pos.x + r).ceil() as usize + 1).min(size);
         let max_y = ((local_pos.y + r).ceil() as usize + 1).min(size);
         let max_z = ((local_pos.z + r).ceil() as usize + 1).min(size);
-
         for z in min_z..max_z {
             for y in min_y..max_y {
                 for x in min_x..max_x {
                     let grid_pos = glam::Vec3::new(x as f32, y as f32, z as f32);
                     let dist2 = grid_pos.distance_squared(local_pos);
-
                     if dist2 < r2 {
                         let t = (dist2 / r2).sqrt();
-                        // smoothstep falloff: stronger carving near center
                         let falloff = smoothstep(t).powf(falloff_power);
-
                         let sample = density.get_mut(x, y, z);
-                        // Reduce density toward negative (air)
                         sample.density = sample.density * falloff - (1.0 - falloff);
-
                         if sample.density <= 0.0 {
                             sample.material = Material::Air;
                         }
@@ -55,9 +40,48 @@ pub fn carve_worm_into_density(
     }
 }
 
+/// Carve a junction sphere at a worm connection point to guarantee an opening.
+///
+/// Used at worm start/end positions to ensure tunnels connect to caverns
+/// even if the worm path drifts away from the target. Out-of-chunk centers
+/// are harmless no-ops due to AABB clamping.
+pub fn carve_junction_sphere(
+    density: &mut DensityField,
+    center: glam::Vec3,
+    radius: f32,
+    world_origin: glam::Vec3,
+    falloff_power: f32,
+) {
+    let size = density.size;
+    let local_pos = center - world_origin;
+    let r = radius;
+    let r2 = r * r;
+    let min_x = ((local_pos.x - r).floor() as i32).max(0) as usize;
+    let min_y = ((local_pos.y - r).floor() as i32).max(0) as usize;
+    let min_z = ((local_pos.z - r).floor() as i32).max(0) as usize;
+    let max_x = ((local_pos.x + r).ceil() as usize + 1).min(size);
+    let max_y = ((local_pos.y + r).ceil() as usize + 1).min(size);
+    let max_z = ((local_pos.z + r).ceil() as usize + 1).min(size);
+    for z in min_z..max_z {
+        for y in min_y..max_y {
+            for x in min_x..max_x {
+                let grid_pos = glam::Vec3::new(x as f32, y as f32, z as f32);
+                let dist2 = grid_pos.distance_squared(local_pos);
+                if dist2 < r2 {
+                    let t = (dist2 / r2).sqrt();
+                    let falloff = smoothstep(t).powf(falloff_power);
+                    let sample = density.get_mut(x, y, z);
+                    sample.density = sample.density * falloff - (1.0 - falloff);
+                    if sample.density <= 0.0 {
+                        sample.material = Material::Air;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Check if any worm segment actually overlaps a chunk's density grid.
-/// Uses point-to-AABB distance test for fast rejection of chunks
-/// that fall within the conservative worm AABB but no segment touches.
 pub fn worm_overlaps_chunk(
     segments: &[WormSegment],
     world_origin: glam::Vec3,
@@ -67,7 +91,6 @@ pub fn worm_overlaps_chunk(
     for segment in segments {
         let local = segment.position - world_origin;
         let r = segment.radius;
-        // Nearest point on [0, size) cube to segment center
         let nx = local.x.clamp(0.0, size_f);
         let ny = local.y.clamp(0.0, size_f);
         let nz = local.z.clamp(0.0, size_f);
@@ -81,7 +104,6 @@ pub fn worm_overlaps_chunk(
     false
 }
 
-/// Smoothstep interpolation for falloff
 #[inline]
 fn smoothstep(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
@@ -97,23 +119,16 @@ mod tests {
     #[test]
     fn test_carve_single_segment() {
         let mut field = DensityField::new(10);
-        // All density defaults to 1.0 (solid)
-
         let segment = WormSegment {
             position: Vec3::new(5.0, 5.0, 5.0),
             radius: 3.0,
         };
-
         carve_worm_into_density(&mut field, &[segment], Vec3::ZERO, 2.0);
-
-        // Center should be carved (negative density)
         assert!(
             field.get(5, 5, 5).density < 0.0,
             "Center should be air, got {}",
             field.get(5, 5, 5).density
         );
-
-        // Far corner should be untouched
         assert_eq!(field.get(0, 0, 0).density, 1.0);
     }
 
@@ -124,10 +139,7 @@ mod tests {
             position: Vec3::new(5.0, 5.0, 5.0),
             radius: 2.0,
         };
-
         carve_worm_into_density(&mut field, &[segment], Vec3::ZERO, 2.0);
-
-        // Corners far from the segment should be untouched
         assert_eq!(field.get(0, 0, 0).density, 1.0);
         assert_eq!(field.get(9, 9, 9).density, 1.0);
     }
@@ -137,13 +149,10 @@ mod tests {
         let mut field = DensityField::new(10);
         let origin = Vec3::new(10.0, 10.0, 10.0);
         let segment = WormSegment {
-            position: Vec3::new(15.0, 15.0, 15.0), // center of field in world coords
+            position: Vec3::new(15.0, 15.0, 15.0),
             radius: 3.0,
         };
-
         carve_worm_into_density(&mut field, &[segment], origin, 2.0);
-
-        // Grid position (5,5,5) corresponds to world (15,15,15), should be carved
         assert!(field.get(5, 5, 5).density < 0.0);
     }
 
@@ -151,7 +160,6 @@ mod tests {
     fn test_carve_empty_segments() {
         let mut field = DensityField::new(5);
         carve_worm_into_density(&mut field, &[], Vec3::ZERO, 2.0);
-        // No changes
         for sample in &field.samples {
             assert_eq!(sample.density, 1.0);
         }
@@ -177,7 +185,6 @@ mod tests {
 
     #[test]
     fn test_worm_overlaps_chunk_edge_touch() {
-        // Segment center at (-2, 8, 8), radius 3 — just touches the x=0 face
         let segments = vec![WormSegment {
             position: glam::Vec3::new(-2.0, 8.0, 8.0),
             radius: 3.0,
@@ -187,11 +194,43 @@ mod tests {
 
     #[test]
     fn test_worm_overlaps_chunk_just_outside() {
-        // Segment center at (-4, 8, 8), radius 3 — doesn't reach x=0 face
         let segments = vec![WormSegment {
             position: glam::Vec3::new(-4.0, 8.0, 8.0),
             radius: 3.0,
         }];
         assert!(!worm_overlaps_chunk(&segments, glam::Vec3::ZERO, 17));
+    }
+
+    #[test]
+    fn test_carve_junction_sphere_center_carved() {
+        let mut field = DensityField::new(10);
+        carve_junction_sphere(
+            &mut field,
+            glam::Vec3::new(5.0, 5.0, 5.0),
+            3.0,
+            glam::Vec3::ZERO,
+            2.0,
+        );
+        assert!(
+            field.get(5, 5, 5).density < 0.0,
+            "Junction sphere center should be carved, got {}",
+            field.get(5, 5, 5).density
+        );
+        assert_eq!(field.get(0, 0, 0).density, 1.0);
+    }
+
+    #[test]
+    fn test_carve_junction_sphere_out_of_chunk_is_noop() {
+        let mut field = DensityField::new(10);
+        carve_junction_sphere(
+            &mut field,
+            glam::Vec3::new(200.0, 200.0, 200.0),
+            3.0,
+            glam::Vec3::ZERO,
+            2.0,
+        );
+        for sample in &field.samples {
+            assert_eq!(sample.density, 1.0, "Out-of-chunk sphere should not modify field");
+        }
     }
 }

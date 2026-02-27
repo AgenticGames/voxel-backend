@@ -13,7 +13,7 @@ use voxel_core::mesh::{Mesh, Vertex, Triangle};
 use voxel_gen::config::GenerationConfig;
 use voxel_gen::density::DensityField;
 use voxel_gen::hermite_extract::extract_hermite_data;
-use voxel_gen::worm::carve::carve_worm_into_density;
+use voxel_gen::worm::carve::{carve_worm_into_density, carve_junction_sphere};
 use voxel_gen::worm::connect::{find_cavern_centers, plan_worm_connections};
 use voxel_gen::worm::path::generate_worm_path;
 
@@ -168,11 +168,12 @@ pub fn run(args: &[String]) {
 
     // ── Phase 4: Generate worm paths and carve into all overlapping chunks ──
     let chunk_size_f = config.chunk_size as f32;
-    for (i, (worm_start, _end)) in connections.iter().enumerate() {
+    for (i, (worm_start, worm_end)) in connections.iter().enumerate() {
         let worm_seed = config.seed.wrapping_add(0x1000).wrapping_add(i as u64 * 1000);
         let segments = generate_worm_path(
             worm_seed,
             *worm_start,
+            *worm_end,
             config.worm.step_length,
             config.worm.max_steps,
             config.worm.radius_min,
@@ -211,6 +212,33 @@ pub fn run(args: &[String]) {
                             coord.world_origin_sized(gs),
                             config.worm.falloff_power,
                         );
+                    }
+                }
+            }
+        }
+
+        // Carve junction spheres at worm endpoints to guarantee openings
+        let junction_radius = config.worm.radius_max * 1.5;
+        for &junction_center in &[*worm_start, *worm_end] {
+            let j_min_cx = ((junction_center.x - junction_radius) / chunk_size_f).floor() as i32;
+            let j_max_cx = ((junction_center.x + junction_radius) / chunk_size_f).floor() as i32;
+            let j_min_cy = ((junction_center.y - junction_radius) / chunk_size_f).floor() as i32;
+            let j_max_cy = ((junction_center.y + junction_radius) / chunk_size_f).floor() as i32;
+            let j_min_cz = ((junction_center.z - junction_radius) / chunk_size_f).floor() as i32;
+            let j_max_cz = ((junction_center.z + junction_radius) / chunk_size_f).floor() as i32;
+            for jcz in j_min_cz..=j_max_cz {
+                for jcy in j_min_cy..=j_max_cy {
+                    for jcx in j_min_cx..=j_max_cx {
+                        if let Some(density) = density_fields.get_mut(&(jcx, jcy, jcz)) {
+                            let coord = ChunkCoord::new(jcx, jcy, jcz);
+                            carve_junction_sphere(
+                                density,
+                                junction_center,
+                                junction_radius,
+                                coord.world_origin_sized(gs),
+                                config.worm.falloff_power,
+                            );
+                        }
                     }
                 }
             }

@@ -48,11 +48,13 @@ pub fn generate_density(coord: ChunkCoord, config: &GenerationConfig) -> (Densit
     );
 
     // Step 3: Generate worm paths and carve into density
-    for (i, (start, _end)) in connections.iter().enumerate() {
+    let junction_radius = config.worm.radius_max * 1.5;
+    for (i, (start, end)) in connections.iter().enumerate() {
         let worm_seed = c_seed.wrapping_add(i as u64 * 1000);
         let segments = worm::path::generate_worm_path(
             worm_seed,
             *start,
+            *end,
             config.worm.step_length,
             config.worm.max_steps,
             config.worm.radius_min,
@@ -64,6 +66,8 @@ pub fn generate_density(coord: ChunkCoord, config: &GenerationConfig) -> (Densit
             world_origin,
             config.worm.falloff_power,
         );
+        worm::carve::carve_junction_sphere(&mut density, *start, junction_radius, world_origin, config.worm.falloff_power);
+        worm::carve::carve_junction_sphere(&mut density, *end, junction_radius, world_origin, config.worm.falloff_power);
     }
 
     // Step 3b: Place cave pools (water/lava lakes on cave floors)

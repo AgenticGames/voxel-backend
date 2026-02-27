@@ -118,13 +118,14 @@ pub fn generate_region_densities(
     // Phase 4: Generate worm paths and carve across all chunks they touch
     let t3 = Instant::now();
     let mut all_worm_paths: Vec<Vec<WormSegment>> = Vec::new();
-    for (i, (worm_start, _end)) in connections.iter().enumerate() {
+    for (i, (worm_start, worm_end)) in connections.iter().enumerate() {
         let worm_seed = global_worm_seed
             .wrapping_add(0x1000)
             .wrapping_add(i as u64 * 1000);
         let segments = worm::path::generate_worm_path(
             worm_seed,
             *worm_start,
+            *worm_end,
             config.worm.step_length,
             config.worm.max_steps,
             config.worm.radius_min,
@@ -155,6 +156,33 @@ pub fn generate_region_densities(
                             coord.world_origin_bounds(eb),
                             config.worm.falloff_power,
                         );
+                    }
+                }
+            }
+        }
+
+        // Carve junction spheres at start and end to guarantee openings
+        let junction_radius = config.worm.radius_max * 1.5;
+        for &junction_center in &[*worm_start, *worm_end] {
+            let j_min_cx = ((junction_center.x - junction_radius) / chunk_size_f).floor() as i32;
+            let j_max_cx = ((junction_center.x + junction_radius) / chunk_size_f).floor() as i32;
+            let j_min_cy = ((junction_center.y - junction_radius) / chunk_size_f).floor() as i32;
+            let j_max_cy = ((junction_center.y + junction_radius) / chunk_size_f).floor() as i32;
+            let j_min_cz = ((junction_center.z - junction_radius) / chunk_size_f).floor() as i32;
+            let j_max_cz = ((junction_center.z + junction_radius) / chunk_size_f).floor() as i32;
+            for jcz in j_min_cz..=j_max_cz {
+                for jcy in j_min_cy..=j_max_cy {
+                    for jcx in j_min_cx..=j_max_cx {
+                        if let Some(density) = density_fields.get_mut(&(jcx, jcy, jcz)) {
+                            let coord = ChunkCoord::new(jcx, jcy, jcz);
+                            worm::carve::carve_junction_sphere(
+                                density,
+                                junction_center,
+                                junction_radius,
+                                coord.world_origin_bounds(eb),
+                                config.worm.falloff_power,
+                            );
+                        }
                     }
                 }
             }
