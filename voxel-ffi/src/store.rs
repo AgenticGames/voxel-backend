@@ -1068,9 +1068,10 @@ impl ChunkStore {
 
     /// Query floor support for a flatten preview.
     /// Checks cells one layer below the terrace floor; density > 0 = solid.
-    /// Returns count of solid cells (0..terrace_size²).
-    pub fn query_flatten_support(&self, base: glam::IVec3, chunk_size: i32, terrace_size: i32) -> u8 {
+    /// Returns (solid_count, clearance_count) — solid floor cells and solid cells at dy=1,2 above base.
+    pub fn query_flatten_support(&self, base: glam::IVec3, chunk_size: i32, terrace_size: i32) -> (u8, u8) {
         let mut solid_count = 0u8;
+        let mut clearance_count = 0u8;
         let check_y = base.y - 1;
         for dx in 0..terrace_size {
             for dz in 0..terrace_size {
@@ -1088,9 +1089,21 @@ impl ChunkStore {
                     }
                 }
                 // Missing chunk = no support (stays 0)
+
+                // Clearance (dy=1 and dy=2)
+                for dy in 1i32..=2 {
+                    let vy = base.y + dy;
+                    let (cx2, cy2, cz2) = (wx.div_euclid(chunk_size), vy.div_euclid(chunk_size), wz.div_euclid(chunk_size));
+                    let (lx2, ly2, lz2) = (wx.rem_euclid(chunk_size) as usize, vy.rem_euclid(chunk_size) as usize, wz.rem_euclid(chunk_size) as usize);
+                    if let Some(df) = self.density_fields.get(&(cx2, cy2, cz2)) {
+                        if df.get(lx2, ly2, lz2).density > 0.0 {
+                            clearance_count = clearance_count.saturating_add(1);
+                        }
+                    }
+                }
             }
         }
-        solid_count
+        (solid_count, clearance_count)
     }
 
     /// Query whether a terrace exists at the given base position.
@@ -1509,7 +1522,7 @@ pub fn extract_solid_mask(density: &DensityField, chunk_size: usize) -> Vec<u64>
 /// Average two voxel samples at the same world position for boundary sync.
 /// Density is averaged; material = Air if either side was mined to Air.
 fn average_boundary_voxel(a: &VoxelSample, b: &VoxelSample) -> (f32, Material) {
-    let avg_density = (a.density + b.density) * 0.5;
+    let avg_density = a.density.min(b.density);  // carved side wins, no 0.0 degenerate surface
     let material = if !a.material.is_solid() || !b.material.is_solid() {
         Material::Air
     } else {

@@ -259,6 +259,46 @@ fn handle_request(
                     backward_dirty_count = backward_dirty.len() as u32;
 
                     let t_bwd_remesh = Instant::now();
+                    for &key in &backward_dirty {
+                        // 1. Solve DC + generate mesh from updated hermite (read lock)
+                        let computed = {
+                            let s = store.read().unwrap();
+                            let density = s.density_fields.get(&key);
+                            let hermite = s.hermite_data.get(&key);
+                            if let (Some(density), Some(hermite)) = (density, hermite) {
+                                let cell_size = density.size - 1;
+                                let dc_verts = solve_dc_vertices(hermite, cell_size);
+                                let mut m = generate_mesh(hermite, &dc_verts, cell_size);
+                                m.smooth(cfg.mesh_smooth_iterations, cfg.mesh_smooth_strength,
+                                         cfg.mesh_boundary_smooth, Some(cell_size));
+                                if cfg.mesh_recalc_normals > 0 { m.recalculate_normals(); }
+                                let b_edges = region_gen::extract_boundary_edges(hermite, cfg.chunk_size);
+                                Some((dc_verts, m, b_edges))
+                            } else { None }
+                        };
+                        if let Some((dc_verts, mesh, b_edges)) = computed {
+                            // 2. Update seam data + base mesh (write lock)
+                            {
+                                let mut s = store.write().unwrap();
+                                s.add_seam_data(key, ChunkSeamData {
+                                    dc_vertices: dc_verts,
+                                    world_origin: glam::Vec3::ZERO,
+                                    boundary_edges: b_edges,
+                                });
+                                s.base_meshes.insert(key, mesh.clone());
+                            }
+                            // 3. Send updated base mesh to UE
+                            let mut converted = convert_mesh_to_ue_scaled(&mesh, cfg.voxel_scale(), world_scale);
+                            crate::convert::bucket_mesh_by_material(&mut converted);
+                            if !converted.indices.is_empty() {
+                                let _ = result_tx.send(WorkerResult::ChunkMesh {
+                                    chunk: key, mesh: converted, generation: 0,
+                                });
+                            }
+                            // 4. Regenerate seams for this chunk + its neighbors
+                            incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
+                        }
+                    }
                     if profiling { t_worm_backward_remesh = t_bwd_remesh.elapsed(); }
                 }
 
