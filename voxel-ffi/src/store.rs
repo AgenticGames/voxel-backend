@@ -1066,6 +1066,73 @@ impl ChunkStore {
         self.remesh_dirty(&dirty_chunks, config, world_scale)
     }
 
+    /// Flatten multiple terrace tiles in a single write lock + one remesh pass.
+    /// Identical per-cell logic to `flatten_terrace` but all tiles share one dirty_set,
+    /// one `sync_boundary_density` call, and one `remesh_dirty` call.
+    pub fn flatten_terrace_batch(
+        &mut self,
+        tiles: &[(glam::IVec3, Material)],
+        config: &GenerationConfig,
+        world_scale: f32,
+    ) -> Vec<((i32, i32, i32), ConvertedMesh)> {
+        if tiles.is_empty() {
+            return Vec::new();
+        }
+
+        let cs = config.chunk_size as i32;
+        let terrace_size = (150.0f32 / world_scale).round().max(2.0) as i32;
+
+        let mut dirty_set: HashSet<(i32, i32, i32)> = HashSet::new();
+
+        for (base, host_material) in tiles {
+            for dx in 0..terrace_size {
+                for dz in 0..terrace_size {
+                    let wx = base.x + dx;
+                    let wy = base.y;
+                    let wz = base.z + dz;
+
+                    for dy in 0..3i32 {
+                        let vy = wy + dy;
+                        let cx = wx.div_euclid(cs);
+                        let cy = vy.div_euclid(cs);
+                        let cz = wz.div_euclid(cs);
+                        let lx = wx.rem_euclid(cs) as usize;
+                        let ly = vy.rem_euclid(cs) as usize;
+                        let lz = wz.rem_euclid(cs) as usize;
+                        let key = (cx, cy, cz);
+
+                        if let Some(density) = self.density_fields.get_mut(&key) {
+                            let sample = density.get_mut(lx, ly, lz);
+                            if dy == 0 {
+                                sample.density = 1.0;
+                                sample.material = *host_material;
+                            } else {
+                                sample.density = -1.0;
+                                sample.material = Material::Air;
+                            }
+                            dirty_set.insert(key);
+                        }
+                    }
+
+                    self.terraced_cells.insert((wx, wy, wz));
+                }
+            }
+        }
+
+        let chunk_size = config.chunk_size;
+        let mut dirty_chunks: Vec<_> = dirty_set
+            .into_iter()
+            .map(|key| (key, 0usize, 0usize, 0usize, chunk_size, chunk_size, chunk_size))
+            .collect();
+
+        let extra_dirty = sync_boundary_density(
+            &mut self.density_fields, &dirty_chunks, config.chunk_size,
+        );
+        dirty_chunks.extend(extra_dirty);
+
+        self.remesh_dirty(&dirty_chunks, config, world_scale)
+    }
+
     /// Query floor support for a flatten preview.
     /// Checks cells one layer below the terrace floor; density > 0 = solid.
     /// Returns (solid_count, clearance_count) — solid floor cells and solid cells at dy=1,2 above base.

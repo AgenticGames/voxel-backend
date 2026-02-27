@@ -20,9 +20,9 @@ use crate::store::ChunkStore;
 use crate::types::*;
 use crate::worker::worker_loop;
 
-/// Compute terrace size in voxels from world scale, targeting ~150 UU snap steps.
+/// Compute terrace size in voxels from world scale, targeting ~40 UU snap steps (1 voxel).
 fn terrace_size_for_scale(scale: f32) -> i32 {
-    (150.0f32 / scale).round().max(2.0) as i32
+    (40.0f32 / scale).round().max(1.0) as i32
 }
 
 /// Data returned when a sleep cycle completes.
@@ -608,6 +608,42 @@ impl VoxelEngine {
         }
     }
 
+    /// Request flattening a batch of terrace tiles in a single lock + remesh pass.
+    /// Each UE position is converted to Rust space and snapped to the terrace grid independently.
+    /// Duplicate tile positions are deduplicated. Returns 1 on success, 0 if queue full.
+    pub fn request_flatten_batch(&self, ue_positions: &[(f32, f32, f32)], scale: f32) -> u32 {
+        if ue_positions.is_empty() {
+            return 0;
+        }
+
+        let ts = terrace_size_for_scale(scale);
+        let mut seen: std::collections::HashSet<glam::IVec3> = std::collections::HashSet::new();
+        let mut tiles: Vec<(glam::IVec3, voxel_core::material::Material)> = Vec::new();
+
+        let cfg = self.config.read().unwrap();
+        for &(ue_x, ue_y, ue_z) in ue_positions {
+            let rust_x = ue_x / scale;
+            let rust_y = ue_z / scale;
+            let rust_z = -ue_y / scale;
+
+            let base_x = (rust_x as i32).div_euclid(ts) * ts;
+            let base_y = (rust_y as i32).div_euclid(ts) * ts;
+            let base_z = (rust_z as i32).div_euclid(ts) * ts;
+            let key = glam::IVec3::new(base_x, base_y, base_z);
+
+            if seen.insert(key) {
+                let mat = voxel_gen::density::host_rock_for_depth(rust_y as f64, &cfg.ore.host_rock);
+                tiles.push((key, mat));
+            }
+        }
+        drop(cfg);
+
+        match self.mine_tx.try_send(WorkerRequest::FlattenBatch { tiles }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
     /// Query whether a terrace exists at a UE world position.
     /// Returns Some(material_id) if terraced, None otherwise.
     pub fn query_terrace(&self, ue_x: f32, ue_y: f32, ue_z: f32, scale: f32) -> Option<u8> {
@@ -627,8 +663,8 @@ impl VoxelEngine {
     }
 
     /// Query floor support for a flatten ghost preview.
-    /// Returns (solid_count, snapped_ue_x, snapped_ue_y, snapped_ue_z).
-    pub fn query_flatten_support(&self, ue_x: f32, ue_y: f32, ue_z: f32, scale: f32) -> (u8, f32, f32, f32) {
+    /// Returns (solid_count, clearance_count, snapped_ue_x, snapped_ue_y, snapped_ue_z).
+    pub fn query_flatten_support(&self, ue_x: f32, ue_y: f32, ue_z: f32, scale: f32) -> (u8, u8, f32, f32, f32) {
         let rust_x = ue_x / scale;
         let rust_y = ue_z / scale;
         let rust_z = -ue_y / scale;
@@ -640,14 +676,14 @@ impl VoxelEngine {
 
         let cs = { self.config.read().unwrap().chunk_size as i32 };
         let store = self.store.read().unwrap();
-        let count = store.query_flatten_support(glam::IVec3::new(base_x, base_y, base_z), cs, ts);
+        let (count, clearance) = store.query_flatten_support(glam::IVec3::new(base_x, base_y, base_z), cs, ts);
 
         // Convert snapped position back to UE coords
         let snapped_ue_x = base_x as f32 * scale;
         let snapped_ue_y = -(base_z as f32) * scale;
         let snapped_ue_z = base_y as f32 * scale;
 
-        (count, snapped_ue_x, snapped_ue_y, snapped_ue_z)
+        (count, clearance, snapped_ue_x, snapped_ue_y, snapped_ue_z)
     }
 
     /// Query the host rock material at a UE world position based on depth.

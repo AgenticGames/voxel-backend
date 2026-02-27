@@ -497,6 +497,19 @@ fn handle_request(
                 let _ = incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
             }
         }
+        WorkerRequest::FlattenBatch { tiles } => {
+            let cfg = config.read().unwrap().clone();
+            let mut s = store.write().unwrap();
+            let meshes = s.flatten_terrace_batch(&tiles, &cfg, world_scale);
+            let dirty_keys: Vec<_> = meshes.iter().map(|(k, _)| *k).collect();
+            drop(s);
+            for (key, mesh) in meshes {
+                let _ = result_tx.send(WorkerResult::ChunkMesh { chunk: key, mesh, generation: 0 });
+            }
+            for key in dirty_keys {
+                let _ = incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
+            }
+        }
         WorkerRequest::Mine { request } => {
             let cfg = config.read().unwrap().clone();
 

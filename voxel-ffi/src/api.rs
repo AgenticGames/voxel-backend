@@ -772,6 +772,30 @@ pub unsafe extern "C" fn voxel_request_flatten(
     engine.request_flatten(x, y, z, scale)
 }
 
+/// Request batch-flattening of multiple terrace tiles in a single lock + remesh pass.
+/// xs/ys/zs are parallel arrays of UE world positions; count is the array length.
+/// Returns 1 on success, 0 if queue full or invalid args.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_request_flatten_batch(
+    engine: *mut c_void,
+    xs: *const f32,
+    ys: *const f32,
+    zs: *const f32,
+    count: u32,
+    scale: f32,
+) -> u32 {
+    if engine.is_null() || xs.is_null() || ys.is_null() || zs.is_null() || count == 0 {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let n = count as usize;
+    let xs = std::slice::from_raw_parts(xs, n);
+    let ys = std::slice::from_raw_parts(ys, n);
+    let zs = std::slice::from_raw_parts(zs, n);
+    let positions: Vec<(f32, f32, f32)> = (0..n).map(|i| (xs[i], ys[i], zs[i])).collect();
+    engine.request_flatten_batch(&positions, scale)
+}
+
 /// Query whether a 2x2 terrace exists at a UE world position.
 /// Returns 1 if found (out_mat written), 0 if not found.
 #[no_mangle]
@@ -798,8 +822,9 @@ pub unsafe extern "C" fn voxel_query_terrace(
     }
 }
 
-/// Query floor support for a 2x2 flatten ghost preview.
-/// Returns solid count (0–4). Writes snapped UE position to out pointers.
+/// Query floor support for a flatten ghost preview.
+/// Returns solid count. Writes snapped UE position to out pointers.
+/// out_clearance_solids receives count of solid voxels in the 2-voxel clearance zone above.
 #[no_mangle]
 pub unsafe extern "C" fn voxel_query_flatten_support(
     engine: *mut c_void,
@@ -810,15 +835,17 @@ pub unsafe extern "C" fn voxel_query_flatten_support(
     out_x: *mut f32,
     out_y: *mut f32,
     out_z: *mut f32,
+    out_clearance_solids: *mut u8,
 ) -> u8 {
     if engine.is_null() {
         return 0;
     }
     let engine = &*(engine as *const VoxelEngine);
-    let (count, sx, sy, sz) = engine.query_flatten_support(x, y, z, scale);
+    let (count, clearance, sx, sy, sz) = engine.query_flatten_support(x, y, z, scale);
     if !out_x.is_null() { *out_x = sx; }
     if !out_y.is_null() { *out_y = sy; }
     if !out_z.is_null() { *out_z = sz; }
+    if !out_clearance_solids.is_null() { *out_clearance_solids = clearance; }
     count
 }
 
