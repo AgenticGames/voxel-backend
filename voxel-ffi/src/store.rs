@@ -43,6 +43,8 @@ pub struct ChunkStore {
     pub support_fields: HashMap<(i32, i32, i32), SupportField>,
     /// Tracks which cells have been terraced for building placement.
     pub terraced_cells: HashSet<(i32, i32, i32)>,
+    /// Maps (x, z) → floor_y for terraced columns (fast nearby-terrace lookup).
+    pub terraced_columns: HashMap<(i32, i32), i32>,
     /// Worm paths per region key, for cross-region worm sharing.
     pub region_worm_paths: HashMap<(i32, i32, i32), Vec<Vec<WormSegment>>>,
     /// Region size for computing region keys (needed by unload).
@@ -60,6 +62,7 @@ impl ChunkStore {
             stress_fields: HashMap::new(),
             support_fields: HashMap::new(),
             terraced_cells: HashSet::new(),
+            terraced_columns: HashMap::new(),
             region_worm_paths: HashMap::new(),
             region_size,
         }
@@ -1047,6 +1050,7 @@ impl ChunkStore {
 
                 // Track this cell as terraced
                 self.terraced_cells.insert((wx, wy, wz));
+                self.terraced_columns.insert((wx, wz), wy);
             }
         }
 
@@ -1115,6 +1119,7 @@ impl ChunkStore {
                     }
 
                     self.terraced_cells.insert((wx, wy, wz));
+                    self.terraced_columns.insert((wx, wz), wy);
                 }
             }
         }
@@ -1175,28 +1180,58 @@ impl ChunkStore {
 
     /// Query whether a terrace exists at the given base position.
     /// Returns Some(material) of the floor if all cells are terraced, None otherwise.
+    /// Checks both `base.y` and `base.y - 1` because the mesh surface sits ~0.5
+    /// voxels above the floor, so building traces can snap to either Y or Y+1.
     pub fn query_terrace(&self, base: glam::IVec3, terrace_size: i32) -> Option<Material> {
-        for dx in 0..terrace_size {
-            for dz in 0..terrace_size {
-                if !self.terraced_cells.contains(&(base.x + dx, base.y, base.z + dz)) {
-                    return None;
+        for y_offset in [0, -1] {
+            let check_y = base.y + y_offset;
+            let all_present = (0..terrace_size).all(|dx| {
+                (0..terrace_size).all(|dz| {
+                    self.terraced_cells.contains(&(base.x + dx, check_y, base.z + dz))
+                })
+            });
+            if all_present {
+                let cs = 16i32;
+                let cx = base.x.div_euclid(cs);
+                let cy = check_y.div_euclid(cs);
+                let cz = base.z.div_euclid(cs);
+                let lx = base.x.rem_euclid(cs) as usize;
+                let ly = check_y.rem_euclid(cs) as usize;
+                let lz = base.z.rem_euclid(cs) as usize;
+                return self.density_fields
+                    .get(&(cx, cy, cz))
+                    .map(|df| df.get(lx, ly, lz).material);
+            }
+        }
+        None
+    }
+
+    /// Find the nearest terraced column within `search_radius` XY voxels and
+    /// `max_y_diff` vertical voxels of `approx_y`. Returns the floor Y if found.
+    pub fn query_nearby_terrace_y(
+        &self,
+        base_x: i32,
+        base_z: i32,
+        approx_y: i32,
+        search_radius: i32,
+        max_y_diff: i32,
+    ) -> Option<i32> {
+        let mut best_dist_sq = i32::MAX;
+        let mut best_y = None;
+        for dx in -search_radius..=search_radius {
+            for dz in -search_radius..=search_radius {
+                if let Some(&y) = self.terraced_columns.get(&(base_x + dx, base_z + dz)) {
+                    if (y - approx_y).abs() <= max_y_diff {
+                        let dist_sq = dx * dx + dz * dz;
+                        if dist_sq < best_dist_sq {
+                            best_dist_sq = dist_sq;
+                            best_y = Some(y);
+                        }
+                    }
                 }
             }
         }
-
-        // All cells present; read material from the floor voxel
-        let cs = 16i32; // standard chunk size
-        let cx = base.x.div_euclid(cs);
-        let cy = base.y.div_euclid(cs);
-        let cz = base.z.div_euclid(cs);
-        let lx = base.x.rem_euclid(cs) as usize;
-        let ly = base.y.rem_euclid(cs) as usize;
-        let lz = base.z.rem_euclid(cs) as usize;
-        let key = (cx, cy, cz);
-
-        self.density_fields
-            .get(&key)
-            .map(|df| df.get(lx, ly, lz).material)
+        best_y
     }
 
     /// Check if an air cell is inside a geode (crystal/amethyst shell nearby).

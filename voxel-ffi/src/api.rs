@@ -849,6 +849,34 @@ pub unsafe extern "C" fn voxel_query_flatten_support(
     count
 }
 
+/// Query nearby existing terrace for Z-snap when extending terraces.
+/// Returns 1 if a nearby terrace was found (writes snapped UE position), 0 otherwise.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_query_nearby_terrace(
+    engine: *mut c_void,
+    x: f32,
+    y: f32,
+    z: f32,
+    scale: f32,
+    out_x: *mut f32,
+    out_y: *mut f32,
+    out_z: *mut f32,
+) -> u8 {
+    if engine.is_null() || out_x.is_null() || out_y.is_null() || out_z.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    match engine.query_nearby_terrace(x, y, z, scale) {
+        Some((sx, sy, sz)) => {
+            *out_x = sx;
+            *out_y = sy;
+            *out_z = sz;
+            1
+        }
+        None => 0,
+    }
+}
+
 /// Find a capsule-validated spawn location for the player.
 /// Returns 1 if found (out pointers written), 0 if no suitable location.
 /// All coordinates are UE world space. Clearance: height=13, radius=3 voxels.

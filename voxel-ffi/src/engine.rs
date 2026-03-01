@@ -686,6 +686,37 @@ impl VoxelEngine {
         (count, clearance, snapped_ue_x, snapped_ue_y, snapped_ue_z)
     }
 
+    /// Query nearby existing terrace to snap Z for extending terraces on the same plane.
+    /// Returns Some((snapped_ue_x, snapped_ue_y, snapped_ue_z)) if found within range.
+    pub fn query_nearby_terrace(
+        &self,
+        ue_x: f32,
+        ue_y: f32,
+        ue_z: f32,
+        scale: f32,
+    ) -> Option<(f32, f32, f32)> {
+        let rust_x = ue_x / scale;
+        let rust_y = ue_z / scale;
+        let rust_z = -ue_y / scale;
+
+        let ts = terrace_size_for_scale(scale);
+        let base_x = (rust_x as i32).div_euclid(ts) * ts;
+        let base_z = (rust_z as i32).div_euclid(ts) * ts;
+        let approx_y = (rust_y as i32).div_euclid(ts) * ts;
+
+        let store = self.store.read().unwrap();
+        let search_radius = 10;
+        let max_y_diff = 3;
+        store
+            .query_nearby_terrace_y(base_x, base_z, approx_y, search_radius, max_y_diff)
+            .map(|found_y| {
+                let snap_ue_x = base_x as f32 * scale;
+                let snap_ue_y = -(base_z as f32) * scale;
+                let snap_ue_z = found_y as f32 * scale;
+                (snap_ue_x, snap_ue_y, snap_ue_z)
+            })
+    }
+
     /// Query the host rock material at a UE world position based on depth.
     /// Returns material id as u8.
     pub fn query_host_rock_at(&self, _ue_x: f32, _ue_y: f32, ue_z: f32, scale: f32) -> u8 {
