@@ -199,6 +199,19 @@ pub struct FfiEngineConfig {
     pub mesh_smooth_strength: f32,
     pub mesh_boundary_smooth: f32,
     pub mesh_recalc_normals: u32,
+    // ── Pool Config (12 fields) ──
+    pub pool_enabled: u8,           // 0=disabled, nonzero=enabled
+    pub pool_placement_freq: f64,
+    pub pool_placement_thresh: f64,
+    pub pool_chance: f32,
+    pub pool_min_area: u32,
+    pub pool_max_radius: u32,
+    pub pool_basin_depth: u32,
+    pub pool_rim_height: u32,
+    pub pool_water_pct: f32,
+    pub pool_lava_pct: f32,
+    pub pool_empty_pct: f32,
+    pub pool_min_air_above: u32,
 }
 
 #[repr(C)]

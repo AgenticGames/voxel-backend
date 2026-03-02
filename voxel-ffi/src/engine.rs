@@ -913,7 +913,24 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
             ore_detail_weight: c.ore_detail_weight,
         },
         formations: FormationConfig::default(),
-        pools: PoolConfig::default(),
+        pools: PoolConfig {
+            enabled: c.pool_enabled != 0,
+            placement_frequency: if c.pool_placement_freq > 0.0 { c.pool_placement_freq } else { 0.08 },
+            placement_threshold: if c.pool_placement_thresh > 0.0 { c.pool_placement_thresh } else { 0.75 },
+            pool_chance: if c.pool_chance > 0.0 { c.pool_chance } else { 0.3 },
+            min_area: if c.pool_min_area > 0 { c.pool_min_area as usize } else { 6 },
+            max_radius: if c.pool_max_radius > 0 { c.pool_max_radius as usize } else { 4 },
+            basin_depth: if c.pool_basin_depth > 0 { c.pool_basin_depth as usize } else { 2 },
+            rim_height: if c.pool_rim_height > 0 { c.pool_rim_height as usize } else { 1 },
+            water_pct: if c.pool_water_pct > 0.0 || c.pool_lava_pct > 0.0 || c.pool_empty_pct > 0.0 {
+                c.pool_water_pct
+            } else { 0.75 },
+            lava_pct: if c.pool_water_pct > 0.0 || c.pool_lava_pct > 0.0 || c.pool_empty_pct > 0.0 {
+                c.pool_lava_pct
+            } else { 0.25 },
+            empty_pct: c.pool_empty_pct,
+            min_air_above: if c.pool_min_air_above > 0 { c.pool_min_air_above as usize } else { 3 },
+        },
         mine: MineConfig {
             smooth_iterations: if c.mine_smooth_iterations == 0 && c.mine_smooth_strength == 0.0 {
                 2 // default

@@ -1311,6 +1311,19 @@ mod tests {
             mesh_smooth_strength: 0.3,
             mesh_boundary_smooth: 0.3,
             mesh_recalc_normals: 1,
+            // Pool Config
+            pool_enabled: 1,
+            pool_placement_freq: 0.08,
+            pool_placement_thresh: 0.75,
+            pool_chance: 0.3,
+            pool_min_area: 6,
+            pool_max_radius: 4,
+            pool_basin_depth: 2,
+            pool_rim_height: 1,
+            pool_water_pct: 0.75,
+            pool_lava_pct: 0.25,
+            pool_empty_pct: 0.0,
+            pool_min_air_above: 3,
         }
     }
 
