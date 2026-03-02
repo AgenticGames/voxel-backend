@@ -14,7 +14,7 @@ use voxel_core::mesh::{Mesh, Triangle, Vertex};
 
 use crate::config::GenerationConfig;
 use crate::density::{DensityField, generate_density_field};
-use crate::pools::PoolDescriptor;
+use crate::pools::{FluidSeed, PoolDescriptor};
 use crate::worm;
 use crate::worm::path::WormSegment;
 
@@ -71,7 +71,7 @@ pub fn region_chunks(region: (i32, i32, i32), region_size: i32) -> Vec<(i32, i32
 pub fn generate_region_densities(
     coords: &[(i32, i32, i32)],
     config: &GenerationConfig,
-) -> (HashMap<(i32, i32, i32), DensityField>, Vec<PoolDescriptor>, Vec<Vec<WormSegment>>, RegionTimings) {
+) -> (HashMap<(i32, i32, i32), DensityField>, Vec<PoolDescriptor>, Vec<FluidSeed>, Vec<Vec<WormSegment>>, RegionTimings) {
     let eb = config.effective_bounds();
     let chunk_size_f = eb;
     let mut timings = RegionTimings::default();
@@ -197,6 +197,7 @@ pub fn generate_region_densities(
     // Phase 5: Place cave pools per chunk (sort keys for determinism)
     let t4 = Instant::now();
     let mut all_pool_descriptors = Vec::new();
+    let mut all_fluid_seeds = Vec::new();
     if config.pools.enabled {
         let mut sorted_keys: Vec<_> = density_fields.keys().copied().collect();
         sorted_keys.sort();
@@ -204,7 +205,7 @@ pub fn generate_region_densities(
             let coord = ChunkCoord::new(cx, cy, cz);
             let c_seed = crate::seed::chunk_seed(config.seed, coord);
             if let Some(density) = density_fields.get_mut(&(cx, cy, cz)) {
-                let mut pools = crate::pools::place_pools(
+                let (mut pools, mut seeds) = crate::pools::place_pools(
                     density,
                     &config.pools,
                     coord.world_origin_bounds(eb),
@@ -212,6 +213,7 @@ pub fn generate_region_densities(
                     c_seed,
                 );
                 all_pool_descriptors.append(&mut pools);
+                all_fluid_seeds.append(&mut seeds);
             }
         }
     }
@@ -241,7 +243,7 @@ pub fn generate_region_densities(
     }
     timings.metadata = t6.elapsed();
 
-    (density_fields, all_pool_descriptors, all_worm_paths, timings)
+    (density_fields, all_pool_descriptors, all_fluid_seeds, all_worm_paths, timings)
 }
 
 /// Compute a deterministic worm seed for a set of coordinates.
@@ -635,7 +637,7 @@ mod tests {
             ..GenerationConfig::default()
         };
         let coords = region_chunks((0, 0, 0), 2);
-        let (densities, _pools, _worms, _timings) = generate_region_densities(&coords, &config);
+        let (densities, _pools, _seeds, _worms, _timings) = generate_region_densities(&coords, &config);
         assert_eq!(densities.len(), 8);
         for &c in &coords {
             assert!(densities.contains_key(&c));

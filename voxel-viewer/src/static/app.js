@@ -70,7 +70,7 @@
         "gen-pool-placement-freq", "gen-pool-placement-threshold",
         "gen-pool-chance", "gen-pool-min-area", "gen-pool-max-radius",
         "gen-pool-basin-depth", "gen-pool-rim-height",
-        "gen-pool-lava-fraction", "gen-pool-lava-depth-max", "gen-pool-min-air-above",
+        "gen-pool-water-pct", "gen-pool-lava-pct", "gen-pool-empty-pct", "gen-pool-min-air-above",
         // Formation settings
         "gen-formations-enabled",
         "gen-form-placement-threshold", "gen-form-stalactite-chance",
@@ -1116,8 +1116,9 @@
             appendParam(parts, "pool_max_radius", "gen-pool-max-radius");
             appendParam(parts, "pool_basin_depth", "gen-pool-basin-depth");
             appendParam(parts, "pool_rim_height", "gen-pool-rim-height");
-            appendParam(parts, "pool_lava_fraction", "gen-pool-lava-fraction");
-            appendParam(parts, "pool_lava_depth_max", "gen-pool-lava-depth-max");
+            appendParam(parts, "pool_water_pct", "gen-pool-water-pct");
+            appendParam(parts, "pool_lava_pct", "gen-pool-lava-pct");
+            appendParam(parts, "pool_empty_pct", "gen-pool-empty-pct");
             appendParam(parts, "pool_min_air_above", "gen-pool-min-air-above");
             // Formation settings
             appendParam(parts, "formations_enabled", "gen-formations-enabled");

@@ -44,6 +44,21 @@ pub struct PoolDescriptor {
     pub fluid_type: PoolFluid,
 }
 
+/// A fluid source cell to be injected into the fluid simulation.
+#[derive(Debug, Clone)]
+pub struct FluidSeed {
+    /// Chunk coordinate
+    pub chunk: (i32, i32, i32),
+    /// Local X within chunk
+    pub lx: u8,
+    /// Local Y within chunk
+    pub ly: u8,
+    /// Local Z within chunk
+    pub lz: u8,
+    /// Water or Lava
+    pub fluid_type: PoolFluid,
+}
+
 /// A cluster of adjacent floor cells at similar Y levels.
 struct FloorCluster {
     cells: Vec<(usize, usize, usize)>, // (x, y, z) in grid coords
@@ -53,21 +68,21 @@ struct FloorCluster {
     min_y: usize,
 }
 
-/// Place cave pools in a density field. Returns descriptors for placed pools.
+/// Place cave pools in a density field. Returns descriptors and fluid seeds for placed pools.
 pub fn place_pools(
     density: &mut DensityField,
     config: &PoolConfig,
     world_origin: Vec3,
     global_seed: u64,
     chunk_seed: u64,
-) -> Vec<PoolDescriptor> {
+) -> (Vec<PoolDescriptor>, Vec<FluidSeed>) {
     if !config.enabled {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
 
     let size = density.size;
     if size < 4 {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
 
     // Step 1: Detect floor surfaces — solid voxels with air above
@@ -85,14 +100,14 @@ pub fn place_pools(
     }
 
     if floor_cells.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
 
     // Step 2: Cluster adjacent floors via BFS flood-fill on XZ at similar Y
     let clusters = cluster_floors(&floor_cells, size, config.min_area);
 
     if clusters.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
 
     // Noise and RNG for filtering
@@ -100,6 +115,13 @@ pub fn place_pools(
     let mut rng = ChaCha8Rng::seed_from_u64(chunk_seed.wrapping_add(0xB001_CAFE));
 
     let mut descriptors = Vec::new();
+    let mut fluid_seeds = Vec::new();
+
+    // Compute chunk coordinate from world origin and chunk size
+    let chunk_size = density.size - 1; // density grid is chunk_size + 1
+    let chunk_cx = (world_origin.x / chunk_size as f32).floor() as i32;
+    let chunk_cy = (world_origin.y / chunk_size as f32).floor() as i32;
+    let chunk_cz = (world_origin.z / chunk_size as f32).floor() as i32;
 
     for cluster in &clusters {
         // Step 3: Noise filter at cluster centroid (world-space)
@@ -121,10 +143,16 @@ pub fn place_pools(
             continue;
         }
 
-        // Determine fluid type based on depth and lava_fraction
-        let fluid_type = if world_cy < config.lava_depth_max as f32
-            && rng.gen::<f32>() < config.lava_fraction
-        {
+        // Three-way probability: empty / lava / water
+        let sum = config.water_pct + config.lava_pct + config.empty_pct;
+        if sum <= 0.0 {
+            continue;
+        }
+        let roll = rng.gen::<f32>() * sum;
+        if roll < config.empty_pct {
+            continue; // skip this site entirely
+        }
+        let fluid_type = if roll < config.empty_pct + config.lava_pct {
             PoolFluid::Lava
         } else {
             PoolFluid::Water
@@ -253,9 +281,33 @@ pub fn place_pools(
             floor_y: world_origin.y + (floor_y as f32 - config.basin_depth as f32),
             fluid_type,
         });
+
+        // Step 7: Collect fluid seeds at the pool surface level within the basin
+        for dz in -(effective_radius as i32)..=(effective_radius as i32) {
+            for dx in -(effective_radius as i32)..=(effective_radius as i32) {
+                if dx * dx + dz * dz > r2 {
+                    continue;
+                }
+                let gx = center_x as i32 + dx;
+                let gz = center_z as i32 + dz;
+                if gx < 0 || gx >= size as i32 || gz < 0 || gz >= size as i32 {
+                    continue;
+                }
+                if surface_y >= size {
+                    continue;
+                }
+                fluid_seeds.push(FluidSeed {
+                    chunk: (chunk_cx, chunk_cy, chunk_cz),
+                    lx: gx as u8,
+                    ly: surface_y as u8,
+                    lz: gz as u8,
+                    fluid_type,
+                });
+            }
+        }
     }
 
-    descriptors
+    (descriptors, fluid_seeds)
 }
 
 /// Check if a pool's rim is still intact (for drainable pool support).
@@ -430,14 +482,15 @@ mod tests {
             ..Default::default()
         };
         let mut density = DensityField::new(17);
-        let result = place_pools(
+        let (descriptors, seeds) = place_pools(
             &mut density,
             &config,
             Vec3::ZERO,
             42,
             42,
         );
-        assert!(result.is_empty());
+        assert!(descriptors.is_empty());
+        assert!(seeds.is_empty());
     }
 
     #[test]
@@ -475,15 +528,88 @@ mod tests {
             }
         }
 
-        let r1 = place_pools(&mut density1, &config, Vec3::ZERO, 42, 100);
-        let r2 = place_pools(&mut density2, &config, Vec3::ZERO, 42, 100);
+        let (r1, s1) = place_pools(&mut density1, &config, Vec3::ZERO, 42, 100);
+        let (r2, s2) = place_pools(&mut density2, &config, Vec3::ZERO, 42, 100);
 
         assert_eq!(r1.len(), r2.len(), "Pool count should be deterministic");
+        assert_eq!(s1.len(), s2.len(), "Seed count should be deterministic");
         for (a, b) in r1.iter().zip(r2.iter()) {
             assert_eq!(a.world_x, b.world_x);
             assert_eq!(a.world_y, b.world_y);
             assert_eq!(a.world_z, b.world_z);
             assert_eq!(a.fluid_type, b.fluid_type);
+        }
+    }
+
+    #[test]
+    fn test_empty_pct_produces_no_pools() {
+        let config = PoolConfig {
+            pool_chance: 1.0,
+            placement_threshold: -1.0,
+            min_area: 2,
+            water_pct: 0.0,
+            lava_pct: 0.0,
+            empty_pct: 1.0,
+            ..Default::default()
+        };
+
+        let size = 17;
+        let mut density = DensityField::new(size);
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..size {
+                    let sample = density.get_mut(x, y, z);
+                    if y < size / 2 {
+                        sample.density = 1.0;
+                        sample.material = Material::Limestone;
+                    } else {
+                        sample.density = -1.0;
+                        sample.material = Material::Air;
+                    }
+                }
+            }
+        }
+
+        let (descriptors, seeds) = place_pools(&mut density, &config, Vec3::ZERO, 42, 100);
+        assert!(descriptors.is_empty(), "empty_pct=1.0 should produce no pools");
+        assert!(seeds.is_empty(), "empty_pct=1.0 should produce no seeds");
+    }
+
+    #[test]
+    fn test_water_pct_produces_water_seeds() {
+        let config = PoolConfig {
+            pool_chance: 1.0,
+            placement_threshold: -1.0,
+            min_area: 2,
+            water_pct: 1.0,
+            lava_pct: 0.0,
+            empty_pct: 0.0,
+            ..Default::default()
+        };
+
+        let size = 17;
+        let mut density = DensityField::new(size);
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..size {
+                    let sample = density.get_mut(x, y, z);
+                    if y < size / 2 {
+                        sample.density = 1.0;
+                        sample.material = Material::Limestone;
+                    } else {
+                        sample.density = -1.0;
+                        sample.material = Material::Air;
+                    }
+                }
+            }
+        }
+
+        let (descriptors, seeds) = place_pools(&mut density, &config, Vec3::ZERO, 42, 100);
+        for d in &descriptors {
+            assert_eq!(d.fluid_type, PoolFluid::Water, "water_pct=1.0 should produce only water pools");
+        }
+        for s in &seeds {
+            assert_eq!(s.fluid_type, PoolFluid::Water, "water_pct=1.0 should produce only water seeds");
         }
     }
 

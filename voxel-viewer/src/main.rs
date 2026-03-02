@@ -328,8 +328,9 @@ fn serve_generate(
     let mut pool_max_radius: Option<usize> = None;
     let mut pool_basin_depth: Option<usize> = None;
     let mut pool_rim_height: Option<usize> = None;
-    let mut pool_lava_fraction: Option<f32> = None;
-    let mut pool_lava_depth_max: Option<f64> = None;
+    let mut pool_water_pct: Option<f32> = None;
+    let mut pool_lava_pct: Option<f32> = None;
+    let mut pool_empty_pct: Option<f32> = None;
     let mut pool_min_air_above: Option<usize> = None;
     // Formation settings
     let mut formations_enabled: Option<bool> = None;
@@ -421,8 +422,9 @@ fn serve_generate(
             "pool_max_radius" => { pool_max_radius = val.parse().ok(); }
             "pool_basin_depth" => { pool_basin_depth = val.parse().ok(); }
             "pool_rim_height" => { pool_rim_height = val.parse().ok(); }
-            "pool_lava_fraction" => { pool_lava_fraction = val.parse().ok(); }
-            "pool_lava_depth_max" => { pool_lava_depth_max = val.parse().ok(); }
+            "pool_water_pct" => { pool_water_pct = val.parse().ok(); }
+            "pool_lava_pct" => { pool_lava_pct = val.parse().ok(); }
+            "pool_empty_pct" => { pool_empty_pct = val.parse().ok(); }
             "pool_min_air_above" => { pool_min_air_above = val.parse().ok(); }
             // Formation settings
             "formations_enabled" => { formations_enabled = Some(val == "1" || val == "true"); }
@@ -525,8 +527,9 @@ fn serve_generate(
     if let Some(v) = pool_max_radius { config.pools.max_radius = v; }
     if let Some(v) = pool_basin_depth { config.pools.basin_depth = v; }
     if let Some(v) = pool_rim_height { config.pools.rim_height = v; }
-    if let Some(v) = pool_lava_fraction { config.pools.lava_fraction = v; }
-    if let Some(v) = pool_lava_depth_max { config.pools.lava_depth_max = v; }
+    if let Some(v) = pool_water_pct { config.pools.water_pct = v; }
+    if let Some(v) = pool_lava_pct { config.pools.lava_pct = v; }
+    if let Some(v) = pool_empty_pct { config.pools.empty_pct = v; }
     if let Some(v) = pool_min_air_above { config.pools.min_air_above = v; }
     // Formation settings
     if let Some(v) = formations_enabled { config.formations.enabled = v; }

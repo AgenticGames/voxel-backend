@@ -13,7 +13,7 @@ pub mod region_gen;
 use voxel_core::chunk::{Chunk, ChunkCoord};
 use config::GenerationConfig;
 use density::DensityField;
-pub use pools::PoolDescriptor;
+pub use pools::{FluidSeed, PoolDescriptor};
 
 /// Top-level function to generate a single chunk
 pub fn generate_chunk(coord: ChunkCoord, config: &GenerationConfig) -> Chunk {
@@ -22,8 +22,8 @@ pub fn generate_chunk(coord: ChunkCoord, config: &GenerationConfig) -> Chunk {
 
 /// Generate the full density field for a chunk, including noise + worm carving + pools.
 /// This is the shared density pipeline used by both the full pipeline and CLI commands.
-/// Returns the density field and any pool descriptors placed in this chunk.
-pub fn generate_density(coord: ChunkCoord, config: &GenerationConfig) -> (DensityField, Vec<PoolDescriptor>) {
+/// Returns the density field, pool descriptors, and fluid seeds placed in this chunk.
+pub fn generate_density(coord: ChunkCoord, config: &GenerationConfig) -> (DensityField, Vec<PoolDescriptor>, Vec<FluidSeed>) {
     let world_origin = coord.world_origin_sized(config.chunk_size);
     let c_seed = seed::chunk_seed(config.seed, coord);
 
@@ -71,7 +71,7 @@ pub fn generate_density(coord: ChunkCoord, config: &GenerationConfig) -> (Densit
     }
 
     // Step 3b: Place cave pools (water/lava lakes on cave floors)
-    let pool_descriptors = pools::place_pools(
+    let (pool_descriptors, fluid_seeds) = pools::place_pools(
         &mut density,
         &config.pools,
         world_origin,
@@ -87,5 +87,5 @@ pub fn generate_density(coord: ChunkCoord, config: &GenerationConfig) -> (Densit
     // Step 5: Compute cached metadata (geode flag, air count) for search optimization
     density.compute_metadata();
 
-    (density, pool_descriptors)
+    (density, pool_descriptors, fluid_seeds)
 }

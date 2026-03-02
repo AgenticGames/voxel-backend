@@ -384,10 +384,12 @@ pub struct PoolConfig {
     pub basin_depth: usize,
     /// Solid rim height above floor
     pub rim_height: usize,
-    /// Fraction of pools that become lava (0-1)
-    pub lava_fraction: f32,
-    /// Lava only below this world Y
-    pub lava_depth_max: f64,
+    /// Probability weight for water pools (normalized with lava_pct + empty_pct)
+    pub water_pct: f32,
+    /// Probability weight for lava pools (normalized with water_pct + empty_pct)
+    pub lava_pct: f32,
+    /// Probability weight for empty (skip site entirely)
+    pub empty_pct: f32,
     /// Minimum air voxels above pool surface
     pub min_air_above: usize,
 }
@@ -403,8 +405,9 @@ impl Default for PoolConfig {
             max_radius: 4,
             basin_depth: 2,
             rim_height: 1,
-            lava_fraction: 0.25,
-            lava_depth_max: -30.0,
+            water_pct: 0.75,
+            lava_pct: 0.25,
+            empty_pct: 0.0,
             min_air_above: 3,
         }
     }

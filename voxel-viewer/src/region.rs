@@ -53,7 +53,7 @@ impl GeneratedRegion {
             .collect();
 
         // Phases 1-5: Generate density fields with global worm carving + pools (shared pipeline)
-        let (mut density_fields, pool_descriptors, _worm_paths, _timings) = region_gen::generate_region_densities(&coords, &config);
+        let (mut density_fields, pool_descriptors, _fluid_seeds, _worm_paths, _timings) = region_gen::generate_region_densities(&coords, &config);
 
         // Phase 5: Seal boundary faces
         if closed {

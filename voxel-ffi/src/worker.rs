@@ -138,6 +138,8 @@ fn handle_request(
                 }
             };
 
+            let mut pool_fluid_seeds: Vec<voxel_gen::pools::FluidSeed> = Vec::new();
+
             let (mesh, dc_vertices, boundary_edges) = if let Some(result) = mesh_result {
                 result
             } else {
@@ -146,7 +148,8 @@ fn handle_request(
 
                 let t0 = Instant::now();
                 let coords = region_chunks(rk, cfg.region_size);
-                let (mut densities, _pools, worm_paths, rt) = generate_region_densities(&coords, &cfg);
+                let (mut densities, _pools, fluid_seeds, worm_paths, rt) = generate_region_densities(&coords, &cfg);
+                pool_fluid_seeds = fluid_seeds;
                 if profiling {
                     t_region_density += t0.elapsed();
                     region_timings = rt;
@@ -366,6 +369,24 @@ fn handle_request(
                         mask,
                     });
                     let _ = fluid_event_tx.send(FluidEvent::PlaceSources { chunk });
+                }
+            }
+
+            // Inject pool fluid seeds into the fluid simulation
+            if was_slow_path {
+                for seed in &pool_fluid_seeds {
+                    let _ = fluid_event_tx.send(FluidEvent::AddFluid {
+                        chunk: seed.chunk,
+                        x: seed.lx,
+                        y: seed.ly,
+                        z: seed.lz,
+                        fluid_type: match seed.fluid_type {
+                            voxel_gen::pools::PoolFluid::Water => voxel_fluid::cell::FluidType::Water,
+                            voxel_gen::pools::PoolFluid::Lava => voxel_fluid::cell::FluidType::Lava,
+                        },
+                        level: 1.0,
+                        is_source: true,
+                    });
                 }
             }
 
