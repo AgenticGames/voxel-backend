@@ -164,8 +164,27 @@ pub fn place_formations(
         return;
     }
 
-    // Step C: RNG filter + Step D: Column detection + Step E: Dimension rolls
+    // Step B2: Material preference gate — formations cluster in carbonate rocks
     let mut rng = ChaCha8Rng::seed_from_u64(chunk_seed.wrapping_add(0xF0E4A710));
+    let surfaces: Vec<SurfacePoint> = surfaces
+        .into_iter()
+        .filter(|sp| {
+            if sp.material.is_carbonate() {
+                true // limestone/marble: 100%
+            } else if sp.material == Material::Sandstone {
+                rng.gen::<f32>() < 0.15 // secondary calcite deposits
+            } else {
+                rng.gen::<f32>() < 0.03 // granite/basalt/slate/ores: very rare
+            }
+        })
+        .collect();
+
+    if surfaces.is_empty() {
+        return;
+    }
+
+    // Step C: RNG filter + Step D: Column detection + Step E: Dimension rolls
+    // (rng continues from material gate — deterministic sequence preserved)
     let column_noise = Simplex3D::new(world_seed.wrapping_add(201));
 
     // Separate surfaces by kind for column detection
@@ -620,6 +639,7 @@ pub fn place_formations(
                     *material,
                     config,
                     size,
+                    &mut rng,
                 );
             }
         }
@@ -1198,7 +1218,7 @@ fn write_drapery(
     for step in 0..=steps {
         let t = step as f32 / steps as f32;
         let cx = anchor_x as f32 + direction_x * t * length;
-        let drop = t * t * length * 0.5; // progressive drop
+        let drop = t * t * length * 0.25; // gentle drop — calcite sheets hang stiffly
         let wave =
             (step as f32 * config.drapery_wave_frequency).sin() * config.drapery_wave_amplitude;
         let cy = anchor_y as f32 - drop - wave.max(0.0);
@@ -1253,12 +1273,17 @@ fn write_rimstone_dam(
     let perp_z = slope_x;
     let arc_radius = 3.0_f32;
 
-    // Generate 2-3 dams in sequence
-    for dam_idx in 0..3 {
-        let offset = dam_idx as f32 * 2.5;
-        let base_x = anchor_x as f32 + slope_x * offset;
-        let base_z = anchor_z as f32 + slope_z * offset;
-        let base_y = anchor_y as f32 - offset * 0.3; // follows slope down
+    // Variable dam count scales with height — taller dams form more terraces
+    let dam_count = (1 + (dam_height * 1.5) as usize).min(4);
+    let mut cumulative_offset = 0.0_f32;
+    for dam_idx in 0..dam_count {
+        let spacing = 1.5 + dam_idx as f32 * 0.7; // increasing spacing downslope
+        if dam_idx > 0 {
+            cumulative_offset += spacing;
+        }
+        let base_x = anchor_x as f32 + slope_x * cumulative_offset;
+        let base_z = anchor_z as f32 + slope_z * cumulative_offset;
+        let base_y = anchor_y as f32 - cumulative_offset * 0.3; // follows slope down
 
         // Arc across the slope
         for arc_step in -3..=3i32 {
@@ -1325,8 +1350,20 @@ fn write_cave_shield(
     material: Material,
     config: &FormationConfig,
     size: usize,
+    rng: &mut ChaCha8Rng,
 ) {
-    // Build orthogonal basis from normal
+    // Bias normal upward ~30° from wall (real shields project upward from cracks)
+    let biased_nx = normal_x;
+    let biased_ny = normal_y + 0.577; // tan(30°) ≈ 0.577
+    let biased_nz = normal_z;
+    let bmag = (biased_nx * biased_nx + biased_ny * biased_ny + biased_nz * biased_nz).sqrt();
+    let (normal_x, normal_y, normal_z) = if bmag > 0.001 {
+        (biased_nx / bmag, biased_ny / bmag, biased_nz / bmag)
+    } else {
+        (normal_x, normal_y, normal_z)
+    };
+
+    // Build orthogonal basis from biased normal
     let up = if normal_y.abs() < 0.9 {
         (0.0_f32, 1.0, 0.0)
     } else {
@@ -1385,6 +1422,54 @@ fn write_cave_shield(
                     sample.density = new_density;
                     sample.material = material;
                 }
+            }
+        }
+    }
+
+    // Stalactite from lowest disc edge (real shields often have stalactites hanging below)
+    if rng.gen::<f32>() < config.shield_stalactite_chance {
+        // Sample 8 points around the disc edge, find lowest Y
+        let mut lowest_y = f32::MAX;
+        let mut lowest_pos = (anchor_x as f32, anchor_y as f32, anchor_z as f32);
+        for i in 0..8 {
+            let angle = i as f32 * std::f32::consts::TAU / 8.0;
+            let eu = angle.cos() * radius;
+            let ev = angle.sin() * radius;
+            let tilt_offset = eu * tilt_rad_x.sin() + ev * tilt_rad_y.sin();
+            let py = anchor_y as f32 + ty * eu + by * ev + normal_y * tilt_offset;
+            if py < lowest_y {
+                lowest_y = py;
+                lowest_pos = (
+                    anchor_x as f32 + tx * eu + bx * ev + normal_x * tilt_offset,
+                    py,
+                    anchor_z as f32 + tz * eu + bz * ev + normal_z * tilt_offset,
+                );
+            }
+        }
+
+        // Write a small downward cone from the lowest edge point
+        let stalk_len = rng.gen_range(2.0_f32..=3.0);
+        let stalk_radius = rng.gen_range(0.3_f32..=0.5);
+        let base_ix = lowest_pos.0.round() as i32;
+        let base_iy = lowest_pos.1.round() as i32;
+        let base_iz = lowest_pos.2.round() as i32;
+        if base_ix >= 0 && base_iy >= 0 && base_iz >= 0 {
+            let bx_u = base_ix as usize;
+            let by_u = base_iy as usize;
+            let bz_u = base_iz as usize;
+            if bx_u < size && by_u < size && bz_u < size {
+                write_cone(
+                    density,
+                    bx_u,
+                    by_u,
+                    bz_u,
+                    stalk_len,
+                    stalk_radius,
+                    -1, // downward
+                    material,
+                    config.smoothness,
+                    size,
+                );
             }
         }
     }

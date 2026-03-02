@@ -75,6 +75,10 @@ impl Material {
         )
     }
 
+    pub fn is_carbonate(self) -> bool {
+        matches!(self, Material::Limestone | Material::Marble)
+    }
+
     pub fn is_host_rock(self) -> bool {
         matches!(
             self,
