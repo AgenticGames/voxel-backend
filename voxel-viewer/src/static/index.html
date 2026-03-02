@@ -191,16 +191,71 @@
                         <summary>Formation Settings</summary>
                         <div class="settings-grid">
                             <label title="Master on/off for cave formations (stalactites, stalagmites, columns, flowstone)">Enabled <select id="gen-formations-enabled"><option value="">default (on)</option><option value="1">On</option><option value="0">Off</option></select></label>
+                            <label title="Noise frequency for placement field">Placement Frequency <input type="number" id="gen-form-placement-frequency" step="0.01" placeholder="0.15"></label>
                             <label title="Higher = sparser placement (0-1)">Placement Threshold <input type="number" id="gen-form-placement-threshold" step="0.05" placeholder="0.65"></label>
                             <label title="Per-ceiling probability for stalactite (0-1)">Stalactite Chance <input type="number" id="gen-form-stalactite-chance" step="0.02" placeholder="0.12"></label>
                             <label title="Per-floor probability for stalagmite (0-1)">Stalagmite Chance <input type="number" id="gen-form-stalagmite-chance" step="0.02" placeholder="0.08"></label>
                             <label title="Per-wall probability for flowstone shelf (0-1)">Flowstone Chance <input type="number" id="gen-form-flowstone-chance" step="0.02" placeholder="0.05"></label>
                             <label title="Probability when ceiling+floor align (0-1)">Column Chance <input type="number" id="gen-form-column-chance" step="0.02" placeholder="0.15"></label>
+                            <label title="Max gap for column attempt (voxels)">Column Max Gap <input type="number" id="gen-form-column-max-gap" step="1" min="1" placeholder="10"></label>
                             <label title="Minimum cone length in voxels">Length Min <input type="number" id="gen-form-length-min" step="0.5" min="0.5" placeholder="2.0"></label>
                             <label title="Maximum cone length in voxels">Length Max <input type="number" id="gen-form-length-max" step="0.5" min="1" placeholder="5.0"></label>
+                            <label title="Cone base radius range (min)">Radius Min <input type="number" id="gen-form-radius-min" step="0.1" min="0.1" placeholder="0.6"></label>
+                            <label title="Cone base radius range (max)">Radius Max <input type="number" id="gen-form-radius-max" step="0.1" min="0.1" placeholder="1.2"></label>
                             <label title="Maximum base radius (navigation safety cap)">Max Radius <input type="number" id="gen-form-max-radius" step="0.1" min="0.3" placeholder="1.5"></label>
+                            <label title="Column radius range (min)">Column Radius Min <input type="number" id="gen-form-column-radius-min" step="0.1" min="0.1" placeholder="0.5"></label>
+                            <label title="Column radius range (max)">Column Radius Max <input type="number" id="gen-form-column-radius-max" step="0.1" min="0.1" placeholder="1.0"></label>
+                            <label title="Flowstone shelf extent (min)">Flowstone Length Min <input type="number" id="gen-form-flowstone-length-min" step="0.5" min="0.5" placeholder="1.5"></label>
+                            <label title="Flowstone shelf extent (max)">Flowstone Length Max <input type="number" id="gen-form-flowstone-length-max" step="0.5" min="0.5" placeholder="3.0"></label>
+                            <label title="Flowstone vertical extent">Flowstone Thickness <input type="number" id="gen-form-flowstone-thickness" step="0.1" min="0.1" placeholder="0.8"></label>
                             <label title="Minimum air voxels for formation placement">Min Air Gap <input type="number" id="gen-form-min-air-gap" step="1" min="2" placeholder="5"></label>
                             <label title="Air clearance maintained at formation tip">Min Clearance <input type="number" id="gen-form-min-clearance" step="1" min="1" placeholder="3"></label>
+                            <label title="Density blending factor (higher = smoother)">Smoothness <input type="number" id="gen-form-smoothness" step="0.5" min="0.5" placeholder="2.0"></label>
+                        </div>
+                        <!-- Mega-Columns -->
+                        <div class="param-group" style="border-left:3px solid #ffd700;">
+                            <h4>Mega-Columns</h4>
+                            <div class="settings-grid">
+                                <label title="Probability of mega-column at valid gap">Chance <input type="number" id="gen-form-mega-column-chance" step="0.01" min="0" max="1" placeholder="0.03"></label>
+                                <label title="Minimum floor-to-ceiling gap (voxels)">Min Gap <input type="number" id="gen-form-mega-column-min-gap" step="1" min="1" placeholder="12"></label>
+                                <label title="Minimum base radius">Radius Min <input type="number" id="gen-form-mega-column-radius-min" step="0.1" min="0.5" placeholder="3.0"></label>
+                                <label title="Maximum base radius">Radius Max <input type="number" id="gen-form-mega-column-radius-max" step="0.1" min="0.5" placeholder="5.0"></label>
+                                <label title="Surface noise modulation strength">Noise Strength <input type="number" id="gen-form-mega-column-noise-strength" step="0.01" min="0" max="1" placeholder="0.3"></label>
+                                <label title="Horizontal ring bump frequency">Ring Frequency <input type="number" id="gen-form-mega-column-ring-frequency" step="0.1" min="0" placeholder="0.8"></label>
+                            </div>
+                        </div>
+                        <!-- Draperies -->
+                        <div class="param-group" style="border-left:3px solid #d2b48c;">
+                            <h4>Draperies</h4>
+                            <div class="settings-grid">
+                                <label title="Probability of drapery at ceiling slope">Chance <input type="number" id="gen-form-drapery-chance" step="0.01" min="0" max="1" placeholder="0.06"></label>
+                                <label title="Minimum drapery length">Length Min <input type="number" id="gen-form-drapery-length-min" step="0.5" min="1" placeholder="3.0"></label>
+                                <label title="Maximum drapery length">Length Max <input type="number" id="gen-form-drapery-length-max" step="0.5" min="1" placeholder="8.0"></label>
+                                <label title="Lower edge wave frequency">Wave Frequency <input type="number" id="gen-form-drapery-wave-frequency" step="0.1" min="0" placeholder="1.5"></label>
+                                <label title="Lower edge wave amplitude">Wave Amplitude <input type="number" id="gen-form-drapery-wave-amplitude" step="0.1" min="0" placeholder="0.8"></label>
+                            </div>
+                        </div>
+                        <!-- Rimstone Dams -->
+                        <div class="param-group" style="border-left:3px solid #4682b4;">
+                            <h4>Rimstone Dams</h4>
+                            <div class="settings-grid">
+                                <label title="Probability of rimstone dam at sloped floor">Chance <input type="number" id="gen-form-rimstone-chance" step="0.01" min="0" max="1" placeholder="0.04"></label>
+                                <label title="Minimum dam height">Dam Height Min <input type="number" id="gen-form-rimstone-dam-height-min" step="0.1" min="0.5" placeholder="1.0"></label>
+                                <label title="Maximum dam height">Dam Height Max <input type="number" id="gen-form-rimstone-dam-height-max" step="0.1" min="0.5" placeholder="2.0"></label>
+                                <label title="Basin depth behind dam">Pool Depth <input type="number" id="gen-form-rimstone-pool-depth" step="0.1" min="0" placeholder="1.0"></label>
+                                <label title="Minimum floor slope to trigger placement">Min Slope <input type="number" id="gen-form-rimstone-min-slope" step="0.01" min="0" max="1" placeholder="0.15"></label>
+                            </div>
+                        </div>
+                        <!-- Cave Shields -->
+                        <div class="param-group" style="border-left:3px solid #808080;">
+                            <h4>Cave Shields</h4>
+                            <div class="settings-grid">
+                                <label title="Probability of cave shield at wall">Chance <input type="number" id="gen-form-shield-chance" step="0.01" min="0" max="1" placeholder="0.03"></label>
+                                <label title="Minimum disc radius">Radius Min <input type="number" id="gen-form-shield-radius-min" step="0.5" min="1" placeholder="3.0"></label>
+                                <label title="Maximum disc radius">Radius Max <input type="number" id="gen-form-shield-radius-max" step="0.5" min="1" placeholder="6.0"></label>
+                                <label title="Maximum tilt angle (degrees)">Max Tilt <input type="number" id="gen-form-shield-max-tilt" step="1" min="0" max="90" placeholder="30.0"></label>
+                                <label title="Chance of stalactite from shield edge">Stalactite Chance <input type="number" id="gen-form-shield-stalactite-chance" step="0.01" min="0" max="1" placeholder="0.5"></label>
+                            </div>
                         </div>
                     </details>
 

@@ -73,10 +73,30 @@
         "gen-pool-water-pct", "gen-pool-lava-pct", "gen-pool-empty-pct", "gen-pool-min-air-above",
         // Formation settings
         "gen-formations-enabled",
-        "gen-form-placement-threshold", "gen-form-stalactite-chance",
+        "gen-form-placement-frequency", "gen-form-placement-threshold",
+        "gen-form-stalactite-chance",
         "gen-form-stalagmite-chance", "gen-form-flowstone-chance", "gen-form-column-chance",
-        "gen-form-length-min", "gen-form-length-max", "gen-form-max-radius",
+        "gen-form-column-max-gap",
+        "gen-form-length-min", "gen-form-length-max",
+        "gen-form-radius-min", "gen-form-radius-max",
+        "gen-form-max-radius",
+        "gen-form-column-radius-min", "gen-form-column-radius-max",
+        "gen-form-flowstone-length-min", "gen-form-flowstone-length-max", "gen-form-flowstone-thickness",
         "gen-form-min-air-gap", "gen-form-min-clearance",
+        "gen-form-smoothness",
+        // Mega-Column settings
+        "gen-form-mega-column-chance", "gen-form-mega-column-min-gap",
+        "gen-form-mega-column-radius-min", "gen-form-mega-column-radius-max",
+        "gen-form-mega-column-noise-strength", "gen-form-mega-column-ring-frequency",
+        // Drapery settings
+        "gen-form-drapery-chance", "gen-form-drapery-length-min", "gen-form-drapery-length-max",
+        "gen-form-drapery-wave-frequency", "gen-form-drapery-wave-amplitude",
+        // Rimstone Dam settings
+        "gen-form-rimstone-chance", "gen-form-rimstone-dam-height-min", "gen-form-rimstone-dam-height-max",
+        "gen-form-rimstone-pool-depth", "gen-form-rimstone-min-slope",
+        // Cave Shield settings
+        "gen-form-shield-chance", "gen-form-shield-radius-min", "gen-form-shield-radius-max",
+        "gen-form-shield-max-tilt", "gen-form-shield-stalactite-chance",
         // Stress & collapse settings
         "gen-stress-gravity", "gen-stress-lateral", "gen-stress-vertical",
         "gen-stress-prop-radius", "gen-stress-max-collapse",
@@ -1122,16 +1142,51 @@
             appendParam(parts, "pool_min_air_above", "gen-pool-min-air-above");
             // Formation settings
             appendParam(parts, "formations_enabled", "gen-formations-enabled");
+            appendParam(parts, "form_placement_frequency", "gen-form-placement-frequency");
             appendParam(parts, "form_placement_threshold", "gen-form-placement-threshold");
             appendParam(parts, "form_stalactite_chance", "gen-form-stalactite-chance");
             appendParam(parts, "form_stalagmite_chance", "gen-form-stalagmite-chance");
             appendParam(parts, "form_flowstone_chance", "gen-form-flowstone-chance");
             appendParam(parts, "form_column_chance", "gen-form-column-chance");
+            appendParam(parts, "form_column_max_gap", "gen-form-column-max-gap");
             appendParam(parts, "form_length_min", "gen-form-length-min");
             appendParam(parts, "form_length_max", "gen-form-length-max");
+            appendParam(parts, "form_radius_min", "gen-form-radius-min");
+            appendParam(parts, "form_radius_max", "gen-form-radius-max");
             appendParam(parts, "form_max_radius", "gen-form-max-radius");
+            appendParam(parts, "form_column_radius_min", "gen-form-column-radius-min");
+            appendParam(parts, "form_column_radius_max", "gen-form-column-radius-max");
+            appendParam(parts, "form_flowstone_length_min", "gen-form-flowstone-length-min");
+            appendParam(parts, "form_flowstone_length_max", "gen-form-flowstone-length-max");
+            appendParam(parts, "form_flowstone_thickness", "gen-form-flowstone-thickness");
             appendParam(parts, "form_min_air_gap", "gen-form-min-air-gap");
             appendParam(parts, "form_min_clearance", "gen-form-min-clearance");
+            appendParam(parts, "form_smoothness", "gen-form-smoothness");
+            // Mega-Column settings
+            appendParam(parts, "form_mega_column_chance", "gen-form-mega-column-chance");
+            appendParam(parts, "form_mega_column_min_gap", "gen-form-mega-column-min-gap");
+            appendParam(parts, "form_mega_column_radius_min", "gen-form-mega-column-radius-min");
+            appendParam(parts, "form_mega_column_radius_max", "gen-form-mega-column-radius-max");
+            appendParam(parts, "form_mega_column_noise_strength", "gen-form-mega-column-noise-strength");
+            appendParam(parts, "form_mega_column_ring_frequency", "gen-form-mega-column-ring-frequency");
+            // Drapery settings
+            appendParam(parts, "form_drapery_chance", "gen-form-drapery-chance");
+            appendParam(parts, "form_drapery_length_min", "gen-form-drapery-length-min");
+            appendParam(parts, "form_drapery_length_max", "gen-form-drapery-length-max");
+            appendParam(parts, "form_drapery_wave_frequency", "gen-form-drapery-wave-frequency");
+            appendParam(parts, "form_drapery_wave_amplitude", "gen-form-drapery-wave-amplitude");
+            // Rimstone Dam settings
+            appendParam(parts, "form_rimstone_chance", "gen-form-rimstone-chance");
+            appendParam(parts, "form_rimstone_dam_height_min", "gen-form-rimstone-dam-height-min");
+            appendParam(parts, "form_rimstone_dam_height_max", "gen-form-rimstone-dam-height-max");
+            appendParam(parts, "form_rimstone_pool_depth", "gen-form-rimstone-pool-depth");
+            appendParam(parts, "form_rimstone_min_slope", "gen-form-rimstone-min-slope");
+            // Cave Shield settings
+            appendParam(parts, "form_shield_chance", "gen-form-shield-chance");
+            appendParam(parts, "form_shield_radius_min", "gen-form-shield-radius-min");
+            appendParam(parts, "form_shield_radius_max", "gen-form-shield-radius-max");
+            appendParam(parts, "form_shield_max_tilt", "gen-form-shield-max-tilt");
+            appendParam(parts, "form_shield_stalactite_chance", "gen-form-shield-stalactite-chance");
             // Stress settings
             appendParam(parts, "stress_gravity", "gen-stress-gravity");
             appendParam(parts, "stress_lateral", "gen-stress-lateral");

@@ -334,16 +334,51 @@ fn serve_generate(
     let mut pool_min_air_above: Option<usize> = None;
     // Formation settings
     let mut formations_enabled: Option<bool> = None;
+    let mut form_placement_frequency: Option<f64> = None;
     let mut form_placement_threshold: Option<f64> = None;
     let mut form_stalactite_chance: Option<f32> = None;
     let mut form_stalagmite_chance: Option<f32> = None;
     let mut form_flowstone_chance: Option<f32> = None;
     let mut form_column_chance: Option<f32> = None;
+    let mut form_column_max_gap: Option<usize> = None;
     let mut form_length_min: Option<f32> = None;
     let mut form_length_max: Option<f32> = None;
+    let mut form_radius_min: Option<f32> = None;
+    let mut form_radius_max: Option<f32> = None;
     let mut form_max_radius: Option<f32> = None;
+    let mut form_column_radius_min: Option<f32> = None;
+    let mut form_column_radius_max: Option<f32> = None;
+    let mut form_flowstone_length_min: Option<f32> = None;
+    let mut form_flowstone_length_max: Option<f32> = None;
+    let mut form_flowstone_thickness: Option<f32> = None;
     let mut form_min_air_gap: Option<usize> = None;
     let mut form_min_clearance: Option<usize> = None;
+    let mut form_smoothness: Option<f32> = None;
+    // Mega-Column settings
+    let mut form_mega_column_chance: Option<f32> = None;
+    let mut form_mega_column_min_gap: Option<usize> = None;
+    let mut form_mega_column_radius_min: Option<f32> = None;
+    let mut form_mega_column_radius_max: Option<f32> = None;
+    let mut form_mega_column_noise_strength: Option<f32> = None;
+    let mut form_mega_column_ring_frequency: Option<f32> = None;
+    // Drapery settings
+    let mut form_drapery_chance: Option<f32> = None;
+    let mut form_drapery_length_min: Option<f32> = None;
+    let mut form_drapery_length_max: Option<f32> = None;
+    let mut form_drapery_wave_frequency: Option<f32> = None;
+    let mut form_drapery_wave_amplitude: Option<f32> = None;
+    // Rimstone Dam settings
+    let mut form_rimstone_chance: Option<f32> = None;
+    let mut form_rimstone_dam_height_min: Option<f32> = None;
+    let mut form_rimstone_dam_height_max: Option<f32> = None;
+    let mut form_rimstone_pool_depth: Option<f32> = None;
+    let mut form_rimstone_min_slope: Option<f32> = None;
+    // Cave Shield settings
+    let mut form_shield_chance: Option<f32> = None;
+    let mut form_shield_radius_min: Option<f32> = None;
+    let mut form_shield_radius_max: Option<f32> = None;
+    let mut form_shield_max_tilt: Option<f32> = None;
+    let mut form_shield_stalactite_chance: Option<f32> = None;
     // Stress settings
     let mut stress_gravity: Option<f32> = None;
     let mut stress_lateral: Option<f32> = None;
@@ -428,16 +463,51 @@ fn serve_generate(
             "pool_min_air_above" => { pool_min_air_above = val.parse().ok(); }
             // Formation settings
             "formations_enabled" => { formations_enabled = Some(val == "1" || val == "true"); }
+            "form_placement_frequency" => { form_placement_frequency = val.parse().ok(); }
             "form_placement_threshold" => { form_placement_threshold = val.parse().ok(); }
             "form_stalactite_chance" => { form_stalactite_chance = val.parse().ok(); }
             "form_stalagmite_chance" => { form_stalagmite_chance = val.parse().ok(); }
             "form_flowstone_chance" => { form_flowstone_chance = val.parse().ok(); }
             "form_column_chance" => { form_column_chance = val.parse().ok(); }
+            "form_column_max_gap" => { form_column_max_gap = val.parse().ok(); }
             "form_length_min" => { form_length_min = val.parse().ok(); }
             "form_length_max" => { form_length_max = val.parse().ok(); }
+            "form_radius_min" => { form_radius_min = val.parse().ok(); }
+            "form_radius_max" => { form_radius_max = val.parse().ok(); }
             "form_max_radius" => { form_max_radius = val.parse().ok(); }
+            "form_column_radius_min" => { form_column_radius_min = val.parse().ok(); }
+            "form_column_radius_max" => { form_column_radius_max = val.parse().ok(); }
+            "form_flowstone_length_min" => { form_flowstone_length_min = val.parse().ok(); }
+            "form_flowstone_length_max" => { form_flowstone_length_max = val.parse().ok(); }
+            "form_flowstone_thickness" => { form_flowstone_thickness = val.parse().ok(); }
             "form_min_air_gap" => { form_min_air_gap = val.parse().ok(); }
             "form_min_clearance" => { form_min_clearance = val.parse().ok(); }
+            "form_smoothness" => { form_smoothness = val.parse().ok(); }
+            // Mega-Column settings
+            "form_mega_column_chance" => { form_mega_column_chance = val.parse().ok(); }
+            "form_mega_column_min_gap" => { form_mega_column_min_gap = val.parse().ok(); }
+            "form_mega_column_radius_min" => { form_mega_column_radius_min = val.parse().ok(); }
+            "form_mega_column_radius_max" => { form_mega_column_radius_max = val.parse().ok(); }
+            "form_mega_column_noise_strength" => { form_mega_column_noise_strength = val.parse().ok(); }
+            "form_mega_column_ring_frequency" => { form_mega_column_ring_frequency = val.parse().ok(); }
+            // Drapery settings
+            "form_drapery_chance" => { form_drapery_chance = val.parse().ok(); }
+            "form_drapery_length_min" => { form_drapery_length_min = val.parse().ok(); }
+            "form_drapery_length_max" => { form_drapery_length_max = val.parse().ok(); }
+            "form_drapery_wave_frequency" => { form_drapery_wave_frequency = val.parse().ok(); }
+            "form_drapery_wave_amplitude" => { form_drapery_wave_amplitude = val.parse().ok(); }
+            // Rimstone Dam settings
+            "form_rimstone_chance" => { form_rimstone_chance = val.parse().ok(); }
+            "form_rimstone_dam_height_min" => { form_rimstone_dam_height_min = val.parse().ok(); }
+            "form_rimstone_dam_height_max" => { form_rimstone_dam_height_max = val.parse().ok(); }
+            "form_rimstone_pool_depth" => { form_rimstone_pool_depth = val.parse().ok(); }
+            "form_rimstone_min_slope" => { form_rimstone_min_slope = val.parse().ok(); }
+            // Cave Shield settings
+            "form_shield_chance" => { form_shield_chance = val.parse().ok(); }
+            "form_shield_radius_min" => { form_shield_radius_min = val.parse().ok(); }
+            "form_shield_radius_max" => { form_shield_radius_max = val.parse().ok(); }
+            "form_shield_max_tilt" => { form_shield_max_tilt = val.parse().ok(); }
+            "form_shield_stalactite_chance" => { form_shield_stalactite_chance = val.parse().ok(); }
             // Stress settings
             "stress_gravity" => { stress_gravity = val.parse().ok(); }
             "stress_lateral" => { stress_lateral = val.parse().ok(); }
@@ -533,16 +603,51 @@ fn serve_generate(
     if let Some(v) = pool_min_air_above { config.pools.min_air_above = v; }
     // Formation settings
     if let Some(v) = formations_enabled { config.formations.enabled = v; }
+    if let Some(v) = form_placement_frequency { config.formations.placement_frequency = v; }
     if let Some(v) = form_placement_threshold { config.formations.placement_threshold = v; }
     if let Some(v) = form_stalactite_chance { config.formations.stalactite_chance = v; }
     if let Some(v) = form_stalagmite_chance { config.formations.stalagmite_chance = v; }
     if let Some(v) = form_flowstone_chance { config.formations.flowstone_chance = v; }
     if let Some(v) = form_column_chance { config.formations.column_chance = v; }
+    if let Some(v) = form_column_max_gap { config.formations.column_max_gap = v; }
     if let Some(v) = form_length_min { config.formations.length_min = v; }
     if let Some(v) = form_length_max { config.formations.length_max = v; }
+    if let Some(v) = form_radius_min { config.formations.radius_min = v; }
+    if let Some(v) = form_radius_max { config.formations.radius_max = v; }
     if let Some(v) = form_max_radius { config.formations.max_radius = v; }
+    if let Some(v) = form_column_radius_min { config.formations.column_radius_min = v; }
+    if let Some(v) = form_column_radius_max { config.formations.column_radius_max = v; }
+    if let Some(v) = form_flowstone_length_min { config.formations.flowstone_length_min = v; }
+    if let Some(v) = form_flowstone_length_max { config.formations.flowstone_length_max = v; }
+    if let Some(v) = form_flowstone_thickness { config.formations.flowstone_thickness = v; }
     if let Some(v) = form_min_air_gap { config.formations.min_air_gap = v; }
     if let Some(v) = form_min_clearance { config.formations.min_clearance = v; }
+    if let Some(v) = form_smoothness { config.formations.smoothness = v; }
+    // Mega-Column settings
+    if let Some(v) = form_mega_column_chance { config.formations.mega_column_chance = v; }
+    if let Some(v) = form_mega_column_min_gap { config.formations.mega_column_min_gap = v; }
+    if let Some(v) = form_mega_column_radius_min { config.formations.mega_column_radius_min = v; }
+    if let Some(v) = form_mega_column_radius_max { config.formations.mega_column_radius_max = v; }
+    if let Some(v) = form_mega_column_noise_strength { config.formations.mega_column_noise_strength = v; }
+    if let Some(v) = form_mega_column_ring_frequency { config.formations.mega_column_ring_frequency = v; }
+    // Drapery settings
+    if let Some(v) = form_drapery_chance { config.formations.drapery_chance = v; }
+    if let Some(v) = form_drapery_length_min { config.formations.drapery_length_min = v; }
+    if let Some(v) = form_drapery_length_max { config.formations.drapery_length_max = v; }
+    if let Some(v) = form_drapery_wave_frequency { config.formations.drapery_wave_frequency = v; }
+    if let Some(v) = form_drapery_wave_amplitude { config.formations.drapery_wave_amplitude = v; }
+    // Rimstone Dam settings
+    if let Some(v) = form_rimstone_chance { config.formations.rimstone_chance = v; }
+    if let Some(v) = form_rimstone_dam_height_min { config.formations.rimstone_dam_height_min = v; }
+    if let Some(v) = form_rimstone_dam_height_max { config.formations.rimstone_dam_height_max = v; }
+    if let Some(v) = form_rimstone_pool_depth { config.formations.rimstone_pool_depth = v; }
+    if let Some(v) = form_rimstone_min_slope { config.formations.rimstone_min_slope = v; }
+    // Cave Shield settings
+    if let Some(v) = form_shield_chance { config.formations.shield_chance = v; }
+    if let Some(v) = form_shield_radius_min { config.formations.shield_radius_min = v; }
+    if let Some(v) = form_shield_radius_max { config.formations.shield_radius_max = v; }
+    if let Some(v) = form_shield_max_tilt { config.formations.shield_max_tilt = v; }
+    if let Some(v) = form_shield_stalactite_chance { config.formations.shield_stalactite_chance = v; }
 
     // Build sleep config from UI overrides (stress settings embedded in sleep config)
     let mut sleep_cfg = SleepConfig::default();

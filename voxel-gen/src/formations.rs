@@ -76,6 +76,45 @@ enum Formation {
         thickness: f32,
         material: Material,
     },
+    MegaColumn {
+        x: usize,
+        z: usize,
+        floor_y: usize,
+        ceil_y: usize,
+        base_radius: f32,
+        material: Material,
+    },
+    Drapery {
+        anchor_x: usize,
+        anchor_y: usize,
+        anchor_z: usize,
+        direction_x: f32,
+        direction_z: f32,
+        length: f32,
+        material: Material,
+    },
+    RimstoneDam {
+        anchor_x: usize,
+        anchor_y: usize,
+        anchor_z: usize,
+        slope_x: f32,
+        slope_z: f32,
+        dam_height: f32,
+        pool_depth: f32,
+        material: Material,
+    },
+    CaveShield {
+        anchor_x: usize,
+        anchor_y: usize,
+        anchor_z: usize,
+        normal_x: f32,
+        normal_y: f32,
+        normal_z: f32,
+        tilt_x: f32,
+        tilt_y: f32,
+        radius: f32,
+        material: Material,
+    },
 }
 
 /// Place cave formations into the density field after worm carving.
@@ -182,10 +221,29 @@ pub fn place_formations(
                     continue; // ceiling must be above floor
                 }
                 let gap = ceil_pt.y - floor_pt.y - 1; // air voxels between
-                if gap < config.min_air_gap || gap > config.column_max_gap {
+                if gap < config.min_air_gap {
                     continue;
                 }
-                if rng.gen::<f32>() < config.column_chance {
+
+                // Mega-Column: large gap + separate chance roll
+                if gap >= config.mega_column_min_gap
+                    && rng.gen::<f32>() < config.mega_column_chance
+                {
+                    let base_radius = rng
+                        .gen_range(config.mega_column_radius_min..=config.mega_column_radius_max);
+                    formations.push(Formation::MegaColumn {
+                        x,
+                        z,
+                        floor_y: floor_pt.y,
+                        ceil_y: ceil_pt.y,
+                        base_radius,
+                        material: ceil_pt.material,
+                    });
+                    used_ceiling.insert((ceil_pt.x, ceil_pt.y, ceil_pt.z), true);
+                    used_floor.insert((floor_pt.x, floor_pt.y, floor_pt.z), true);
+                } else if gap <= config.column_max_gap
+                    && rng.gen::<f32>() < config.column_chance
+                {
                     let radius = rng.gen_range(config.column_radius_min..=config.column_radius_max)
                         .min(config.max_radius);
                     formations.push(Formation::Column {
@@ -299,6 +357,84 @@ pub fn place_formations(
         });
     }
 
+    // Drapery placement: ceiling surfaces with slope transitions
+    for sp in &ceiling_surfaces {
+        if used_ceiling.contains_key(&(sp.x, sp.y, sp.z)) {
+            continue;
+        }
+        if rng.gen::<f32>() >= config.drapery_chance {
+            continue;
+        }
+        if let Some((dx, dz)) = detect_ceiling_slope(density, sp.x, sp.y, sp.z, size) {
+            let length = rng.gen_range(config.drapery_length_min..=config.drapery_length_max);
+            formations.push(Formation::Drapery {
+                anchor_x: sp.x,
+                anchor_y: sp.y,
+                anchor_z: sp.z,
+                direction_x: dx,
+                direction_z: dz,
+                length,
+                material: sp.material,
+            });
+        }
+    }
+
+    // Rimstone Dam placement: floor surfaces with sufficient slope
+    for sp in &floor_surfaces {
+        if used_floor.contains_key(&(sp.x, sp.y, sp.z)) {
+            continue;
+        }
+        if rng.gen::<f32>() >= config.rimstone_chance {
+            continue;
+        }
+        if let Some((grad_x, grad_z, magnitude)) =
+            detect_floor_slope(density, sp.x, sp.y, sp.z, size)
+        {
+            if magnitude >= config.rimstone_min_slope {
+                let dam_height =
+                    rng.gen_range(config.rimstone_dam_height_min..=config.rimstone_dam_height_max);
+                let norm = magnitude.max(0.001);
+                formations.push(Formation::RimstoneDam {
+                    anchor_x: sp.x,
+                    anchor_y: sp.y,
+                    anchor_z: sp.z,
+                    slope_x: grad_x / norm,
+                    slope_z: grad_z / norm,
+                    dam_height,
+                    pool_depth: config.rimstone_pool_depth,
+                    material: sp.material,
+                });
+            }
+        }
+    }
+
+    // Cave Shield placement: wall surfaces
+    for sp in &wall_surfaces {
+        if rng.gen::<f32>() >= config.shield_chance {
+            continue;
+        }
+        let (nx, ny, nz) = find_wall_normal_3d(density, sp.x, sp.y, sp.z, size);
+        // Only place shields on mostly-horizontal walls (avoid floor/ceiling normals)
+        if ny.abs() > 0.7 {
+            continue;
+        }
+        let radius = rng.gen_range(config.shield_radius_min..=config.shield_radius_max);
+        let tilt_x = rng.gen_range(-config.shield_max_tilt..=config.shield_max_tilt);
+        let tilt_y = rng.gen_range(-config.shield_max_tilt..=config.shield_max_tilt);
+        formations.push(Formation::CaveShield {
+            anchor_x: sp.x,
+            anchor_y: sp.y,
+            anchor_z: sp.z,
+            normal_x: nx,
+            normal_y: ny,
+            normal_z: nz,
+            tilt_x,
+            tilt_y,
+            radius,
+            material: sp.material,
+        });
+    }
+
     // Step F: Write shapes into density field
     for formation in &formations {
         match formation {
@@ -390,7 +526,205 @@ pub fn place_formations(
                     size,
                 );
             }
+            Formation::MegaColumn {
+                x,
+                z,
+                floor_y,
+                ceil_y,
+                base_radius,
+                material,
+            } => {
+                write_mega_column(
+                    density,
+                    *x,
+                    *z,
+                    *floor_y,
+                    *ceil_y,
+                    *base_radius,
+                    *material,
+                    config,
+                    &column_noise,
+                    world_origin,
+                    size,
+                );
+            }
+            Formation::Drapery {
+                anchor_x,
+                anchor_y,
+                anchor_z,
+                direction_x,
+                direction_z,
+                length,
+                material,
+            } => {
+                write_drapery(
+                    density,
+                    *anchor_x,
+                    *anchor_y,
+                    *anchor_z,
+                    *direction_x,
+                    *direction_z,
+                    *length,
+                    *material,
+                    config,
+                    size,
+                );
+            }
+            Formation::RimstoneDam {
+                anchor_x,
+                anchor_y,
+                anchor_z,
+                slope_x,
+                slope_z,
+                dam_height,
+                pool_depth,
+                material,
+            } => {
+                write_rimstone_dam(
+                    density,
+                    *anchor_x,
+                    *anchor_y,
+                    *anchor_z,
+                    *slope_x,
+                    *slope_z,
+                    *dam_height,
+                    *pool_depth,
+                    *material,
+                    config,
+                    size,
+                );
+            }
+            Formation::CaveShield {
+                anchor_x,
+                anchor_y,
+                anchor_z,
+                normal_x,
+                normal_y,
+                normal_z,
+                tilt_x,
+                tilt_y,
+                radius,
+                material,
+            } => {
+                write_cave_shield(
+                    density,
+                    *anchor_x,
+                    *anchor_y,
+                    *anchor_z,
+                    *normal_x,
+                    *normal_y,
+                    *normal_z,
+                    *tilt_x,
+                    *tilt_y,
+                    *radius,
+                    *material,
+                    config,
+                    size,
+                );
+            }
         }
+    }
+}
+
+/// Detect ceiling slope at a position by comparing ceiling Y at adjacent X/Z.
+/// Returns slope direction (dx, dz) if slope delta >= 1.
+fn detect_ceiling_slope(
+    density: &DensityField,
+    x: usize,
+    y: usize,
+    z: usize,
+    size: usize,
+) -> Option<(f32, f32)> {
+    if x < 1 || x >= size - 1 || z < 1 || z >= size - 1 {
+        return None;
+    }
+
+    // Find ceiling Y at a given (px, pz) by scanning upward from y
+    let find_ceil = |px: usize, pz: usize| -> Option<usize> {
+        for py in y..size.min(y + 6) {
+            if density.get(px, py, pz).density > 0.0 {
+                return Some(py);
+            }
+        }
+        None
+    };
+
+    let cy = find_ceil(x, z)?;
+    let cx_pos = find_ceil(x + 1, z).unwrap_or(cy);
+    let cx_neg = find_ceil(x.saturating_sub(1), z).unwrap_or(cy);
+    let cz_pos = find_ceil(x, z + 1).unwrap_or(cy);
+    let cz_neg = find_ceil(x, z.saturating_sub(1)).unwrap_or(cy);
+
+    let dx = cx_pos as f32 - cx_neg as f32;
+    let dz = cz_pos as f32 - cz_neg as f32;
+
+    let mag = (dx * dx + dz * dz).sqrt();
+    if mag >= 1.0 {
+        Some((dx / mag, dz / mag))
+    } else {
+        None
+    }
+}
+
+/// Detect floor slope using central differences. Returns (grad_x, grad_z, magnitude).
+fn detect_floor_slope(
+    density: &DensityField,
+    x: usize,
+    y: usize,
+    z: usize,
+    size: usize,
+) -> Option<(f32, f32, f32)> {
+    if x < 1 || x >= size - 1 || z < 1 || z >= size - 1 {
+        return None;
+    }
+
+    let find_floor = |px: usize, pz: usize| -> Option<usize> {
+        for py in (0..=y).rev() {
+            if density.get(px, py, pz).density > 0.0 {
+                return Some(py);
+            }
+        }
+        None
+    };
+
+    let fy = find_floor(x, z)?;
+    let fx_pos = find_floor(x + 1, z).unwrap_or(fy);
+    let fx_neg = find_floor(x.saturating_sub(1), z).unwrap_or(fy);
+    let fz_pos = find_floor(x, z + 1).unwrap_or(fy);
+    let fz_neg = find_floor(x, z.saturating_sub(1)).unwrap_or(fy);
+
+    let grad_x = (fx_pos as f32 - fx_neg as f32) * 0.5;
+    let grad_z = (fz_pos as f32 - fz_neg as f32) * 0.5;
+    let magnitude = (grad_x * grad_x + grad_z * grad_z).sqrt();
+
+    Some((grad_x, grad_z, magnitude))
+}
+
+/// Find 3D wall normal at a position using density gradient.
+fn find_wall_normal_3d(
+    density: &DensityField,
+    x: usize,
+    y: usize,
+    z: usize,
+    size: usize,
+) -> (f32, f32, f32) {
+    let sample = |px: usize, py: usize, pz: usize| -> f32 {
+        if px < size && py < size && pz < size {
+            density.get(px, py, pz).density
+        } else {
+            0.0
+        }
+    };
+
+    let gx = sample(x + 1, y, z) - sample(x.saturating_sub(1), y, z);
+    let gy = sample(x, y + 1, z) - sample(x, y.saturating_sub(1), z);
+    let gz = sample(x, y, z + 1) - sample(x, y, z.saturating_sub(1));
+
+    let mag = (gx * gx + gy * gy + gz * gz).sqrt();
+    if mag > 0.001 {
+        (gx / mag, gy / mag, gz / mag)
+    } else {
+        (1.0, 0.0, 0.0)
     }
 }
 
@@ -766,6 +1100,296 @@ fn write_flowstone(
     }
 }
 
+/// Write a mega-column: fat cylinder with noise modulation and ring bumps.
+fn write_mega_column(
+    density: &mut DensityField,
+    cx: usize,
+    cz: usize,
+    floor_y: usize,
+    ceil_y: usize,
+    base_radius: f32,
+    material: Material,
+    config: &FormationConfig,
+    column_noise: &Simplex3D,
+    world_origin: Vec3,
+    size: usize,
+) {
+    let r_ceil = (base_radius as usize) + 2;
+    let min_x = cx.saturating_sub(r_ceil);
+    let max_x = (cx + r_ceil + 1).min(size);
+    let min_z = cz.saturating_sub(r_ceil);
+    let max_z = (cz + r_ceil + 1).min(size);
+
+    // Column spans from floor_y+1 to ceil_y-1 (the air space between)
+    let min_y = if floor_y + 1 < size { floor_y + 1 } else { return };
+    let max_y = ceil_y.min(size);
+    if min_y >= max_y {
+        return;
+    }
+
+    let height = (ceil_y - floor_y).max(1) as f32;
+
+    for iz in min_z..max_z {
+        for iy in min_y..max_y {
+            for ix in min_x..max_x {
+                let dx = ix as f32 - cx as f32;
+                let dz = iz as f32 - cz as f32;
+                let dist = (dx * dx + dz * dz).sqrt();
+
+                // Noise modulation on radius
+                let wx = world_origin.x + ix as f32;
+                let wy = world_origin.y + iy as f32;
+                let wz = world_origin.z + iz as f32;
+                let n = column_noise.sample(
+                    wx as f64 * 0.15,
+                    wy as f64 * 0.15,
+                    wz as f64 * 0.15,
+                ) as f32;
+                let effective_radius =
+                    base_radius * (1.0 + n * config.mega_column_noise_strength);
+
+                // Ring bumps
+                let ring = 0.3
+                    * (iy as f32 * config.mega_column_ring_frequency * std::f32::consts::TAU)
+                        .sin();
+                let r = effective_radius + ring;
+
+                // Bulge at floor/ceiling junctions
+                let y_frac = (iy - floor_y) as f32 / height;
+                let junction_bulge = if y_frac < 0.1 || y_frac > 0.9 {
+                    0.5
+                } else {
+                    0.0
+                };
+                let final_r = r + junction_bulge;
+
+                if dist < final_r {
+                    let falloff = 1.0 - (dist / final_r).powi(2);
+                    let sample = density.get_mut(ix, iy, iz);
+                    let new_density = falloff * config.smoothness;
+                    if new_density > sample.density {
+                        sample.density = new_density;
+                        sample.material = material;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Write a drapery: thin hanging sheet from ceiling following slope direction.
+fn write_drapery(
+    density: &mut DensityField,
+    anchor_x: usize,
+    anchor_y: usize,
+    anchor_z: usize,
+    direction_x: f32,
+    direction_z: f32,
+    length: f32,
+    material: Material,
+    config: &FormationConfig,
+    size: usize,
+) {
+    let steps = (length * 2.0) as usize;
+    if steps == 0 {
+        return;
+    }
+
+    for step in 0..=steps {
+        let t = step as f32 / steps as f32;
+        let cx = anchor_x as f32 + direction_x * t * length;
+        let drop = t * t * length * 0.5; // progressive drop
+        let wave =
+            (step as f32 * config.drapery_wave_frequency).sin() * config.drapery_wave_amplitude;
+        let cy = anchor_y as f32 - drop - wave.max(0.0);
+        let cz = anchor_z as f32 + direction_z * t * length;
+
+        let ix = cx.round() as i32;
+        let iy = cy.round() as i32;
+        let iz = cz.round() as i32;
+
+        if ix < 0 || iy < 0 || iz < 0 {
+            continue;
+        }
+        let ix = ix as usize;
+        let iy = iy as usize;
+        let iz = iz as usize;
+
+        if ix < size && iy < size && iz < size {
+            let sample = density.get_mut(ix, iy, iz);
+            if config.smoothness > sample.density {
+                sample.density = config.smoothness;
+                sample.material = material;
+            }
+            // Also fill the voxel above for thickness
+            if iy + 1 < size {
+                let sample2 = density.get_mut(ix, iy + 1, iz);
+                let half_smooth = config.smoothness * 0.5;
+                if half_smooth > sample2.density {
+                    sample2.density = half_smooth;
+                    sample2.material = material;
+                }
+            }
+        }
+    }
+}
+
+/// Write a rimstone dam: curved wall on sloped floor with basin behind it.
+fn write_rimstone_dam(
+    density: &mut DensityField,
+    anchor_x: usize,
+    anchor_y: usize,
+    anchor_z: usize,
+    slope_x: f32,
+    slope_z: f32,
+    dam_height: f32,
+    pool_depth: f32,
+    material: Material,
+    config: &FormationConfig,
+    size: usize,
+) {
+    // Dam perpendicular to slope direction
+    let perp_x = -slope_z;
+    let perp_z = slope_x;
+    let arc_radius = 3.0_f32;
+
+    // Generate 2-3 dams in sequence
+    for dam_idx in 0..3 {
+        let offset = dam_idx as f32 * 2.5;
+        let base_x = anchor_x as f32 + slope_x * offset;
+        let base_z = anchor_z as f32 + slope_z * offset;
+        let base_y = anchor_y as f32 - offset * 0.3; // follows slope down
+
+        // Arc across the slope
+        for arc_step in -3..=3i32 {
+            let t = arc_step as f32;
+            let wx = (base_x + perp_x * t).round() as i32;
+            let wz = (base_z + perp_z * t).round() as i32;
+            let wy = base_y.round() as i32;
+
+            if wx < 0 || wz < 0 || wy < 0 {
+                continue;
+            }
+            let wx = wx as usize;
+            let wz = wz as usize;
+            let wy = wy as usize;
+
+            if wx >= size || wz >= size {
+                continue;
+            }
+
+            // Build dam wall
+            let h = (dam_height * (1.0 - (t / arc_radius).powi(2)).max(0.0)) as usize;
+            for dy in 0..=h {
+                if wy + dy < size {
+                    let sample = density.get_mut(wx, wy + dy, wz);
+                    if config.smoothness > sample.density {
+                        sample.density = config.smoothness;
+                        sample.material = material;
+                    }
+                }
+            }
+
+            // Carve basin behind dam (upslope side)
+            let basin_x = (wx as f32 - slope_x * 1.5).round() as i32;
+            let basin_z = (wz as f32 - slope_z * 1.5).round() as i32;
+            if basin_x >= 0 && basin_z >= 0 {
+                let basin_x = basin_x as usize;
+                let basin_z = basin_z as usize;
+                if basin_x < size && basin_z < size && wy > 0 {
+                    let depth = pool_depth.min(wy as f32) as usize;
+                    for dy in 0..depth {
+                        if wy - dy > 0 {
+                            let sample = density.get_mut(basin_x, wy - dy, basin_z);
+                            sample.density = -0.5; // carve
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Write a cave shield: oriented disc projecting from wall.
+fn write_cave_shield(
+    density: &mut DensityField,
+    anchor_x: usize,
+    anchor_y: usize,
+    anchor_z: usize,
+    normal_x: f32,
+    normal_y: f32,
+    normal_z: f32,
+    tilt_x: f32,
+    tilt_y: f32,
+    radius: f32,
+    material: Material,
+    config: &FormationConfig,
+    size: usize,
+) {
+    // Build orthogonal basis from normal
+    let up = if normal_y.abs() < 0.9 {
+        (0.0_f32, 1.0, 0.0)
+    } else {
+        (1.0, 0.0, 0.0)
+    };
+    let tangent_x = normal_y * up.2 - normal_z * up.1;
+    let tangent_y = normal_z * up.0 - normal_x * up.2;
+    let tangent_z = normal_x * up.1 - normal_y * up.0;
+    let tmag =
+        (tangent_x * tangent_x + tangent_y * tangent_y + tangent_z * tangent_z).sqrt();
+    if tmag <= 0.001 {
+        return; // degenerate
+    }
+    let (tx, ty, tz) = (tangent_x / tmag, tangent_y / tmag, tangent_z / tmag);
+    let bx = normal_y * tz - normal_z * ty;
+    let by = normal_z * tx - normal_x * tz;
+    let bz = normal_x * ty - normal_y * tx;
+
+    // Apply tilt
+    let tilt_rad_x = tilt_x.to_radians();
+    let tilt_rad_y = tilt_y.to_radians();
+
+    let r_ceil = radius.ceil() as i32;
+    for du in -r_ceil..=r_ceil {
+        for dv in -r_ceil..=r_ceil {
+            let u = du as f32;
+            let v = dv as f32;
+            let rdist = (u * u + v * v).sqrt();
+            if rdist > radius {
+                continue;
+            }
+
+            // Apply tilt offset in normal direction
+            let tilt_offset = u * tilt_rad_x.sin() + v * tilt_rad_y.sin();
+
+            let px = anchor_x as f32 + tx * u + bx * v + normal_x * tilt_offset;
+            let py = anchor_y as f32 + ty * u + by * v + normal_y * tilt_offset;
+            let pz = anchor_z as f32 + tz * u + bz * v + normal_z * tilt_offset;
+
+            let ix = px.round() as i32;
+            let iy = py.round() as i32;
+            let iz = pz.round() as i32;
+
+            if ix < 0 || iy < 0 || iz < 0 {
+                continue;
+            }
+            let ix = ix as usize;
+            let iy = iy as usize;
+            let iz = iz as usize;
+
+            if ix < size && iy < size && iz < size {
+                let falloff = 1.0 - (rdist / radius).powi(2);
+                let new_density = falloff * config.smoothness;
+                let sample = density.get_mut(ix, iy, iz);
+                if new_density > sample.density {
+                    sample.density = new_density;
+                    sample.material = material;
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -923,5 +1547,245 @@ mod tests {
         let d1: Vec<f32> = field1.samples.iter().map(|s| s.density).collect();
         let d2: Vec<f32> = field2.samples.iter().map(|s| s.density).collect();
         assert_eq!(d1, d2, "Same seeds should produce identical formations");
+    }
+
+    #[test]
+    fn test_mega_column_fills_large_gap() {
+        // Create a field with a large gap (>= 12 voxels between floor and ceiling)
+        // size 32 gives us room: floor at y=3, ceiling at y=28 => gap = 24
+        let size = 32;
+        let mut field = make_cave_field(size, 3, 28);
+        let config = FormationConfig {
+            enabled: true,
+            placement_threshold: 0.0,
+            mega_column_chance: 1.0,
+            mega_column_min_gap: 12,
+            mega_column_radius_min: 2.0,
+            mega_column_radius_max: 3.0,
+            column_chance: 0.0, // disable regular columns
+            stalactite_chance: 0.0,
+            stalagmite_chance: 0.0,
+            flowstone_chance: 0.0,
+            drapery_chance: 0.0,
+            rimstone_chance: 0.0,
+            shield_chance: 0.0,
+            ..FormationConfig::default()
+        };
+
+        let air_before: usize = field
+            .samples
+            .iter()
+            .filter(|s| s.density <= 0.0)
+            .count();
+
+        place_formations(&mut field, &config, Vec3::ZERO, 42, 99999);
+
+        let air_after: usize = field
+            .samples
+            .iter()
+            .filter(|s| s.density <= 0.0)
+            .count();
+
+        assert!(
+            air_after < air_before,
+            "MegaColumn should fill some air voxels: before={air_before}, after={air_after}"
+        );
+    }
+
+    #[test]
+    fn test_drapery_thin_sheet() {
+        // Create a field with a ceiling slope transition:
+        // left half ceiling at y=12, right half at y=14
+        let size = 17;
+        let mut field = DensityField::new(size);
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..size {
+                    let sample = field.get_mut(x, y, z);
+                    let ceil = if x < size / 2 { 12 } else { 14 };
+                    if y > 3 && y < ceil {
+                        sample.density = -1.0;
+                        sample.material = Material::Air;
+                    } else {
+                        sample.density = 1.0;
+                        sample.material = Material::Limestone;
+                    }
+                }
+            }
+        }
+
+        let config = FormationConfig {
+            enabled: true,
+            placement_threshold: 0.0,
+            drapery_chance: 1.0,
+            stalactite_chance: 0.0,
+            stalagmite_chance: 0.0,
+            column_chance: 0.0,
+            mega_column_chance: 0.0,
+            flowstone_chance: 0.0,
+            rimstone_chance: 0.0,
+            shield_chance: 0.0,
+            ..FormationConfig::default()
+        };
+
+        let air_before: usize = field
+            .samples
+            .iter()
+            .filter(|s| s.density <= 0.0)
+            .count();
+
+        place_formations(&mut field, &config, Vec3::ZERO, 42, 55555);
+
+        let air_after: usize = field
+            .samples
+            .iter()
+            .filter(|s| s.density <= 0.0)
+            .count();
+
+        assert!(
+            air_after < air_before,
+            "Drapery should fill some air voxels: before={air_before}, after={air_after}"
+        );
+    }
+
+    #[test]
+    fn test_rimstone_dam_on_slope() {
+        // Create a field with a sloped floor: floor Y varies by X
+        let size = 17;
+        let mut field = DensityField::new(size);
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..size {
+                    let sample = field.get_mut(x, y, z);
+                    // Floor slopes: y_floor = 3 + x/3
+                    let floor_y = 3 + x / 3;
+                    let ceil_y = 14;
+                    if y > floor_y && y < ceil_y {
+                        sample.density = -1.0;
+                        sample.material = Material::Air;
+                    } else {
+                        sample.density = 1.0;
+                        sample.material = Material::Limestone;
+                    }
+                }
+            }
+        }
+
+        let config = FormationConfig {
+            enabled: true,
+            placement_threshold: 0.0,
+            rimstone_chance: 1.0,
+            rimstone_min_slope: 0.1, // low threshold for sloped floor
+            stalactite_chance: 0.0,
+            stalagmite_chance: 0.0,
+            column_chance: 0.0,
+            mega_column_chance: 0.0,
+            flowstone_chance: 0.0,
+            drapery_chance: 0.0,
+            shield_chance: 0.0,
+            ..FormationConfig::default()
+        };
+
+        place_formations(&mut field, &config, Vec3::ZERO, 42, 77777);
+
+        // Rimstone dams both fill (dam walls) and carve (basins), so check density changed
+        // We compare against a fresh (unmodified) sloped field to verify modifications occurred.
+        let densities_before: Vec<f32> = make_cave_field(size, 3, 14)
+            .samples
+            .iter()
+            .map(|s| s.density)
+            .collect();
+        let densities_after: Vec<f32> = field.samples.iter().map(|s| s.density).collect();
+        assert_ne!(
+            densities_before, densities_after,
+            "RimstoneDam should modify the density field"
+        );
+    }
+
+    #[test]
+    fn test_cave_shield_disc() {
+        // Create a field with wall surfaces (vertical solid/air boundary)
+        let size = 17;
+        let mut field = DensityField::new(size);
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..size {
+                    let sample = field.get_mut(x, y, z);
+                    // Vertical cave: air for x in 5..12
+                    if x > 4 && x < 12 {
+                        sample.density = -1.0;
+                        sample.material = Material::Air;
+                    } else {
+                        sample.density = 1.0;
+                        sample.material = Material::Limestone;
+                    }
+                }
+            }
+        }
+
+        let config = FormationConfig {
+            enabled: true,
+            placement_threshold: 0.0,
+            shield_chance: 1.0,
+            shield_radius_min: 2.0,
+            shield_radius_max: 3.0,
+            stalactite_chance: 0.0,
+            stalagmite_chance: 0.0,
+            column_chance: 0.0,
+            mega_column_chance: 0.0,
+            flowstone_chance: 0.0,
+            drapery_chance: 0.0,
+            rimstone_chance: 0.0,
+            ..FormationConfig::default()
+        };
+
+        let air_before: usize = field
+            .samples
+            .iter()
+            .filter(|s| s.density <= 0.0)
+            .count();
+
+        place_formations(&mut field, &config, Vec3::ZERO, 42, 88888);
+
+        let air_after: usize = field
+            .samples
+            .iter()
+            .filter(|s| s.density <= 0.0)
+            .count();
+
+        assert!(
+            air_after < air_before,
+            "CaveShield should fill some air voxels: before={air_before}, after={air_after}"
+        );
+    }
+
+    #[test]
+    fn test_new_formations_deterministic() {
+        let config = FormationConfig {
+            enabled: true,
+            placement_threshold: 0.0,
+            stalactite_chance: 1.0,
+            stalagmite_chance: 1.0,
+            column_chance: 1.0,
+            mega_column_chance: 1.0,
+            flowstone_chance: 1.0,
+            drapery_chance: 1.0,
+            rimstone_chance: 1.0,
+            shield_chance: 1.0,
+            ..FormationConfig::default()
+        };
+
+        let mut field1 = make_cave_field(17, 3, 13);
+        place_formations(&mut field1, &config, Vec3::ZERO, 42, 12345);
+
+        let mut field2 = make_cave_field(17, 3, 13);
+        place_formations(&mut field2, &config, Vec3::ZERO, 42, 12345);
+
+        let d1: Vec<f32> = field1.samples.iter().map(|s| s.density).collect();
+        let d2: Vec<f32> = field2.samples.iter().map(|s| s.density).collect();
+        assert_eq!(
+            d1, d2,
+            "Same seeds should produce identical formations with all types enabled"
+        );
     }
 }

@@ -69,6 +69,7 @@ pub struct VoxelEngine {
 
 impl VoxelEngine {
     pub fn new(ffi_config: &FfiEngineConfig) -> Self {
+        debug_log_pool_config(ffi_config);
         let config = ffi_config_to_generation(ffi_config);
         let fluid_config = ffi_config_to_fluid(ffi_config);
         let world_scale = ffi_config.world_scale;
@@ -912,11 +913,61 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
             ore_edge_falloff: c.ore_edge_falloff,
             ore_detail_weight: c.ore_detail_weight,
         },
-        formations: FormationConfig::default(),
+        formations: FormationConfig {
+            enabled: c.formation_enabled != 0,
+            placement_frequency: if c.formation_placement_frequency > 0.0 { c.formation_placement_frequency as f64 } else { FormationConfig::default().placement_frequency },
+            placement_threshold: if c.formation_placement_threshold > 0.0 { c.formation_placement_threshold as f64 } else { FormationConfig::default().placement_threshold },
+            stalactite_chance: if c.formation_stalactite_chance > 0.0 { c.formation_stalactite_chance } else { FormationConfig::default().stalactite_chance },
+            stalagmite_chance: if c.formation_stalagmite_chance > 0.0 { c.formation_stalagmite_chance } else { FormationConfig::default().stalagmite_chance },
+            flowstone_chance: if c.formation_flowstone_chance > 0.0 { c.formation_flowstone_chance } else { FormationConfig::default().flowstone_chance },
+            column_chance: if c.formation_column_chance > 0.0 { c.formation_column_chance } else { FormationConfig::default().column_chance },
+            column_max_gap: if c.formation_column_max_gap > 0 { c.formation_column_max_gap as usize } else { FormationConfig::default().column_max_gap },
+            length_min: if c.formation_length_min > 0.0 { c.formation_length_min } else { FormationConfig::default().length_min },
+            length_max: if c.formation_length_max > 0.0 { c.formation_length_max } else { FormationConfig::default().length_max },
+            radius_min: if c.formation_radius_min > 0.0 { c.formation_radius_min } else { FormationConfig::default().radius_min },
+            radius_max: if c.formation_radius_max > 0.0 { c.formation_radius_max } else { FormationConfig::default().radius_max },
+            max_radius: if c.formation_max_radius > 0.0 { c.formation_max_radius } else { FormationConfig::default().max_radius },
+            column_radius_min: if c.formation_column_radius_min > 0.0 { c.formation_column_radius_min } else { FormationConfig::default().column_radius_min },
+            column_radius_max: if c.formation_column_radius_max > 0.0 { c.formation_column_radius_max } else { FormationConfig::default().column_radius_max },
+            flowstone_length_min: if c.formation_flowstone_length_min > 0.0 { c.formation_flowstone_length_min } else { FormationConfig::default().flowstone_length_min },
+            flowstone_length_max: if c.formation_flowstone_length_max > 0.0 { c.formation_flowstone_length_max } else { FormationConfig::default().flowstone_length_max },
+            flowstone_thickness: if c.formation_flowstone_thickness > 0.0 { c.formation_flowstone_thickness } else { FormationConfig::default().flowstone_thickness },
+            min_air_gap: if c.formation_min_air_gap > 0 { c.formation_min_air_gap as usize } else { FormationConfig::default().min_air_gap },
+            min_clearance: if c.formation_min_clearance > 0 { c.formation_min_clearance as usize } else { FormationConfig::default().min_clearance },
+            smoothness: if c.formation_smoothness > 0.0 { c.formation_smoothness } else { FormationConfig::default().smoothness },
+            // Mega-Column
+            mega_column_chance: if c.formation_mega_column_chance > 0.0 { c.formation_mega_column_chance } else { FormationConfig::default().mega_column_chance },
+            mega_column_min_gap: if c.formation_mega_column_min_gap > 0 { c.formation_mega_column_min_gap as usize } else { FormationConfig::default().mega_column_min_gap },
+            mega_column_radius_min: if c.formation_mega_column_radius_min > 0.0 { c.formation_mega_column_radius_min } else { FormationConfig::default().mega_column_radius_min },
+            mega_column_radius_max: if c.formation_mega_column_radius_max > 0.0 { c.formation_mega_column_radius_max } else { FormationConfig::default().mega_column_radius_max },
+            mega_column_noise_strength: if c.formation_mega_column_noise_strength > 0.0 { c.formation_mega_column_noise_strength } else { FormationConfig::default().mega_column_noise_strength },
+            mega_column_ring_frequency: if c.formation_mega_column_ring_frequency > 0.0 { c.formation_mega_column_ring_frequency } else { FormationConfig::default().mega_column_ring_frequency },
+            // Drapery
+            drapery_chance: if c.formation_drapery_chance > 0.0 { c.formation_drapery_chance } else { FormationConfig::default().drapery_chance },
+            drapery_length_min: if c.formation_drapery_length_min > 0.0 { c.formation_drapery_length_min } else { FormationConfig::default().drapery_length_min },
+            drapery_length_max: if c.formation_drapery_length_max > 0.0 { c.formation_drapery_length_max } else { FormationConfig::default().drapery_length_max },
+            drapery_wave_frequency: if c.formation_drapery_wave_frequency > 0.0 { c.formation_drapery_wave_frequency } else { FormationConfig::default().drapery_wave_frequency },
+            drapery_wave_amplitude: if c.formation_drapery_wave_amplitude > 0.0 { c.formation_drapery_wave_amplitude } else { FormationConfig::default().drapery_wave_amplitude },
+            // Rimstone Dam
+            rimstone_chance: if c.formation_rimstone_chance > 0.0 { c.formation_rimstone_chance } else { FormationConfig::default().rimstone_chance },
+            rimstone_dam_height_min: if c.formation_rimstone_dam_height_min > 0.0 { c.formation_rimstone_dam_height_min } else { FormationConfig::default().rimstone_dam_height_min },
+            rimstone_dam_height_max: if c.formation_rimstone_dam_height_max > 0.0 { c.formation_rimstone_dam_height_max } else { FormationConfig::default().rimstone_dam_height_max },
+            rimstone_pool_depth: if c.formation_rimstone_pool_depth > 0.0 { c.formation_rimstone_pool_depth } else { FormationConfig::default().rimstone_pool_depth },
+            rimstone_min_slope: if c.formation_rimstone_min_slope > 0.0 { c.formation_rimstone_min_slope } else { FormationConfig::default().rimstone_min_slope },
+            // Cave Shield
+            shield_chance: if c.formation_shield_chance > 0.0 { c.formation_shield_chance } else { FormationConfig::default().shield_chance },
+            shield_radius_min: if c.formation_shield_radius_min > 0.0 { c.formation_shield_radius_min } else { FormationConfig::default().shield_radius_min },
+            shield_radius_max: if c.formation_shield_radius_max > 0.0 { c.formation_shield_radius_max } else { FormationConfig::default().shield_radius_max },
+            shield_max_tilt: if c.formation_shield_max_tilt > 0.0 { c.formation_shield_max_tilt } else { FormationConfig::default().shield_max_tilt },
+            shield_stalactite_chance: if c.formation_shield_stalactite_chance > 0.0 { c.formation_shield_stalactite_chance } else { FormationConfig::default().shield_stalactite_chance },
+        },
         pools: PoolConfig {
             enabled: c.pool_enabled != 0,
-            placement_frequency: if c.pool_placement_freq > 0.0 { c.pool_placement_freq } else { 0.08 },
-            placement_threshold: if c.pool_placement_thresh > 0.0 { c.pool_placement_thresh } else { 0.75 },
+            // Pool fields pass through directly — the C++ struct already has correct
+            // default initializers, and placement_threshold legitimately uses negative
+            // values (e.g. -1.0 = accept all noise values).
+            placement_frequency: if c.pool_placement_freq != 0.0 { c.pool_placement_freq } else { 0.08 },
+            placement_threshold: c.pool_placement_thresh, // can be negative
             pool_chance: if c.pool_chance > 0.0 { c.pool_chance } else { 0.3 },
             min_area: if c.pool_min_area > 0 { c.pool_min_area as usize } else { 6 },
             max_radius: if c.pool_max_radius > 0 { c.pool_max_radius as usize } else { 4 },
@@ -948,6 +999,16 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
         mesh_boundary_smooth: if c.mesh_boundary_smooth > 0.0 { c.mesh_boundary_smooth } else { 0.3 },
         mesh_recalc_normals: c.mesh_recalc_normals,
     }
+}
+
+/// Debug: log pool config as received from FFI (temporary diagnostic).
+fn debug_log_pool_config(c: &FfiEngineConfig) {
+    eprintln!("[FFI-POOL] enabled={} freq={} thresh={} chance={} min_area={} max_radius={} \
+              basin_depth={} rim_height={} water={} lava={} empty={} air_above={}",
+        c.pool_enabled, c.pool_placement_freq, c.pool_placement_thresh,
+        c.pool_chance, c.pool_min_area, c.pool_max_radius,
+        c.pool_basin_depth, c.pool_rim_height,
+        c.pool_water_pct, c.pool_lava_pct, c.pool_empty_pct, c.pool_min_air_above);
 }
 
 /// Convert FFI config to FluidConfig.

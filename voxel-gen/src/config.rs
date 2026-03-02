@@ -364,6 +364,35 @@ pub struct FormationConfig {
     pub min_clearance: usize,
     /// Density blending factor
     pub smoothness: f32,
+
+    // Mega-Column settings
+    pub mega_column_chance: f32,
+    pub mega_column_min_gap: usize,
+    pub mega_column_radius_min: f32,
+    pub mega_column_radius_max: f32,
+    pub mega_column_noise_strength: f32,
+    pub mega_column_ring_frequency: f32,
+
+    // Drapery settings
+    pub drapery_chance: f32,
+    pub drapery_length_min: f32,
+    pub drapery_length_max: f32,
+    pub drapery_wave_frequency: f32,
+    pub drapery_wave_amplitude: f32,
+
+    // Rimstone Dam settings
+    pub rimstone_chance: f32,
+    pub rimstone_dam_height_min: f32,
+    pub rimstone_dam_height_max: f32,
+    pub rimstone_pool_depth: f32,
+    pub rimstone_min_slope: f32,
+
+    // Cave Shield settings
+    pub shield_chance: f32,
+    pub shield_radius_min: f32,
+    pub shield_radius_max: f32,
+    pub shield_max_tilt: f32,
+    pub shield_stalactite_chance: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -437,6 +466,31 @@ impl Default for FormationConfig {
             min_air_gap: 5,
             min_clearance: 3,
             smoothness: 2.0,
+            // Mega-Column defaults
+            mega_column_chance: 0.03,
+            mega_column_min_gap: 12,
+            mega_column_radius_min: 3.0,
+            mega_column_radius_max: 5.0,
+            mega_column_noise_strength: 0.3,
+            mega_column_ring_frequency: 0.8,
+            // Drapery defaults
+            drapery_chance: 0.06,
+            drapery_length_min: 3.0,
+            drapery_length_max: 8.0,
+            drapery_wave_frequency: 1.5,
+            drapery_wave_amplitude: 0.8,
+            // Rimstone Dam defaults
+            rimstone_chance: 0.04,
+            rimstone_dam_height_min: 1.0,
+            rimstone_dam_height_max: 2.0,
+            rimstone_pool_depth: 1.0,
+            rimstone_min_slope: 0.15,
+            // Cave Shield defaults
+            shield_chance: 0.03,
+            shield_radius_min: 3.0,
+            shield_radius_max: 6.0,
+            shield_max_tilt: 30.0,
+            shield_stalactite_chance: 0.5,
         }
     }
 }
