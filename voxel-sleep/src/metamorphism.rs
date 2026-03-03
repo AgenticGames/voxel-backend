@@ -148,7 +148,7 @@ pub fn apply_metamorphism(
                     let wz = cz * (chunk_size as i32) + lz as i32;
 
                     match material {
-                        Material::Limestone => {
+                        Material::Limestone if config.limestone_to_marble_enabled => {
                             // Limestone -> Marble: deep OR adjacent to Basalt/Kimberlite
                             let deep = (wy as f32) < config.limestone_to_marble_depth;
                             let has_hot_neighbor = if !deep {
@@ -175,7 +175,7 @@ pub fn apply_metamorphism(
                                 });
                             }
                         }
-                        Material::Sandstone => {
+                        Material::Sandstone if config.sandstone_to_granite_enabled => {
                             // Sandstone -> Granite: deep AND 4+ solid neighbors
                             let deep = (wy as f32) < config.sandstone_to_granite_depth;
                             if deep {
@@ -199,7 +199,7 @@ pub fn apply_metamorphism(
                                 }
                             }
                         }
-                        Material::Slate => {
+                        Material::Slate if config.slate_to_marble_enabled => {
                             // Slate -> Marble: has adjacent Kimberlite neighbor
                             let has_kimberlite = count_neighbors(
                                 density_fields,
@@ -220,7 +220,7 @@ pub fn apply_metamorphism(
                                 });
                             }
                         }
-                        Material::Granite => {
+                        Material::Granite if config.granite_to_basalt_enabled => {
                             // Granite -> Basalt: has 2+ adjacent air voxels
                             let air_count = count_neighbors(
                                 density_fields,
@@ -241,7 +241,7 @@ pub fn apply_metamorphism(
                                 });
                             }
                         }
-                        Material::Iron => {
+                        Material::Iron if config.iron_to_pyrite_enabled => {
                             // Iron -> Pyrite: has Sulfide within search radius
                             let radius = config.iron_to_pyrite_search_radius as i32;
                             let has_sulfide = has_material_within_radius(
@@ -264,7 +264,7 @@ pub fn apply_metamorphism(
                                 });
                             }
                         }
-                        Material::Copper => {
+                        Material::Copper if config.copper_to_malachite_enabled => {
                             // Copper -> Malachite: has 1+ adjacent air voxel
                             let air_count = count_neighbors(
                                 density_fields,

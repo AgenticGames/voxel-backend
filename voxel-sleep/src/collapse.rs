@@ -268,6 +268,7 @@ mod tests {
             stress_multiplier: 1.5,
             max_cascade_iterations: 8,
             rubble_fill_ratio: 0.40,
+            ..CollapseConfig::default()
         }
     }
 
@@ -280,6 +281,7 @@ mod tests {
             stress_multiplier: 1.5,
             max_cascade_iterations: 8,
             rubble_fill_ratio: 0.40,
+            ..CollapseConfig::default()
         }
     }
 
@@ -348,6 +350,7 @@ mod tests {
             stress_multiplier: multiplier,
             max_cascade_iterations: 0,   // No cascade -- only test amplification
             rubble_fill_ratio: 0.40,
+            ..CollapseConfig::default()
         };
 
         // Carve a void below chunk (0,0,0) to create ceiling stress

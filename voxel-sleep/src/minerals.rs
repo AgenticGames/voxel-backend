@@ -177,14 +177,14 @@ pub fn apply_mineral_growth(
 
                     // --- Crystal growth ---
                     // Air voxel with 2+ Crystal/Amethyst neighbors
-                    {
+                    if config.crystal_growth_enabled {
                         let crystal_neighbors = count_neighbors_matching(
                             density_fields,
                             wx, wy, wz,
                             chunk_size,
                             |m| m == Material::Crystal || m == Material::Amethyst,
                         );
-                        if crystal_neighbors >= 2 {
+                        if crystal_neighbors >= 2 && rng.gen::<f32>() < config.crystal_growth_prob {
                             candidates.push(GrowthCandidate {
                                 chunk_key,
                                 lx, ly, lz,
@@ -198,10 +198,10 @@ pub fn apply_mineral_growth(
 
                     // --- Malachite stalactite ---
                     // Air voxel where (x, y+1, z) is Copper AND Limestone within 2 Manhattan distance
-                    {
+                    if config.malachite_stalactite_enabled {
                         let above_mat =
                             sample_material(density_fields, wx, wy + 1, wz, chunk_size);
-                        if above_mat == Some(Material::Copper) {
+                        if above_mat == Some(Material::Copper) && rng.gen::<f32>() < config.malachite_stalactite_prob {
                             let has_limestone = has_material_within_radius(
                                 density_fields,
                                 wx, wy, wz,
@@ -224,7 +224,7 @@ pub fn apply_mineral_growth(
 
                     // --- Quartz extension ---
                     // Air voxel at quartz vein tip: exactly 1 Quartz neighbor, 5 non-Quartz
-                    {
+                    if config.quartz_extension_enabled {
                         let quartz_neighbors = count_neighbors_matching(
                             density_fields,
                             wx, wy, wz,
@@ -249,8 +249,10 @@ pub fn apply_mineral_growth(
                     // --- Calcite infill ---
                     // Air with 3+ (calcite_infill_min_faces) Limestone 6-connected neighbors
                     // AND world Y < calcite_infill_depth
-                    {
-                        if (wy as f32) < config.calcite_infill_depth {
+                    if config.calcite_infill_enabled {
+                        if (wy as f32) < config.calcite_infill_depth
+                            && rng.gen::<f32>() < config.calcite_infill_prob
+                        {
                             let limestone_neighbors = count_neighbors_matching(
                                 density_fields,
                                 wx, wy, wz,
@@ -272,7 +274,7 @@ pub fn apply_mineral_growth(
 
                     // --- Pyrite crust ---
                     // Air adjacent to Pyrite, where the Pyrite source has pyrite_crust_min_solid solid neighbors
-                    {
+                    if config.pyrite_crust_enabled && rng.gen::<f32>() < config.pyrite_crust_prob {
                         // Check each face neighbor for Pyrite
                         let mut found_pyrite_source = false;
                         for &(dx, dy, dz) in &FACE_OFFSETS {
@@ -404,6 +406,7 @@ mod tests {
         let chunks = vec![chunk_key];
         let config = MineralConfig {
             crystal_growth_max: 10,
+            crystal_growth_prob: 1.0, // guarantee for testing
             ..MineralConfig::default()
         };
         let mut rng = ChaCha8Rng::seed_from_u64(42);
@@ -444,6 +447,7 @@ mod tests {
         let chunks = vec![chunk_key];
         let config = MineralConfig {
             calcite_infill_max: 10,
+            calcite_infill_prob: 1.0, // guarantee for testing
             ..MineralConfig::default()
         };
         let mut rng = ChaCha8Rng::seed_from_u64(42);
@@ -503,6 +507,7 @@ mod tests {
         let chunks = vec![chunk_key];
         let config = MineralConfig {
             crystal_growth_max: 100,
+            crystal_growth_prob: 1.0, // guarantee for testing
             growth_density_min: 0.3,
             growth_density_max: 0.6,
             ..MineralConfig::default()

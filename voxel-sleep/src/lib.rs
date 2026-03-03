@@ -91,9 +91,20 @@ pub fn execute_sleep(
         .map(|(k, _)| *k)
         .collect();
 
-    // Classify all loaded chunks into priority tiers
-    let mut loaded_chunks: Vec<(i32, i32, i32)> = density_fields.keys().copied().collect();
+    // Filter chunks by Chebyshev distance from player chunk
+    let radius = config.chunk_radius as i32;
+    let mut loaded_chunks: Vec<(i32, i32, i32)> = density_fields.keys()
+        .copied()
+        .filter(|&(cx, cy, cz)| {
+            let dx = (cx - player_chunk.0).abs();
+            let dy = (cy - player_chunk.1).abs();
+            let dz = (cz - player_chunk.2).abs();
+            dx.max(dy).max(dz) <= radius
+        })
+        .collect();
     loaded_chunks.sort();
+
+    // Classify filtered chunks into priority tiers
     let classified = classify_chunks(player_chunk, &loaded_chunks, &chunks_with_supports);
 
     let critical_chunks: Vec<(i32, i32, i32)> = classified.iter()
@@ -132,82 +143,99 @@ pub fn execute_sleep(
     // --- Phase 0: Metamorphism (all chunks) ---
     send_progress(progress_tx, 0, 0.0, 0, total_chunks, None, 0);
 
-    let meta_result = apply_metamorphism(
-        &config.metamorphism,
-        density_fields,
-        &all_chunks,
-        chunk_size,
-        &mut rng,
-    );
-    total_metamorphosed = meta_result.voxels_transformed;
-    result_manifest.merge_sleep_changes(&meta_result.manifest);
-    transform_log.extend(meta_result.transform_log);
-    if meta_result.voxels_transformed > 0 {
-        // Mark all metamorphism-affected chunks as dirty
-        for key in meta_result.manifest.chunk_deltas.keys() {
-            all_dirty.insert(*key);
+    if config.metamorphism_enabled {
+        let meta_result = apply_metamorphism(
+            &config.metamorphism,
+            density_fields,
+            &all_chunks,
+            chunk_size,
+            &mut rng,
+        );
+        total_metamorphosed = meta_result.voxels_transformed;
+        result_manifest.merge_sleep_changes(&meta_result.manifest);
+        transform_log.extend(meta_result.transform_log);
+        if meta_result.voxels_transformed > 0 {
+            // Mark all metamorphism-affected chunks as dirty
+            for key in meta_result.manifest.chunk_deltas.keys() {
+                all_dirty.insert(*key);
+            }
         }
-    }
 
-    send_progress(
-        progress_tx, 0, 1.0, total_chunks, total_chunks,
-        meta_result.glimpse_chunk, if meta_result.glimpse_chunk.is_some() { 1 } else { 0 },
-    );
+        send_progress(
+            progress_tx, 0, 1.0, total_chunks, total_chunks,
+            meta_result.glimpse_chunk, if meta_result.glimpse_chunk.is_some() { 1 } else { 0 },
+        );
+    } else {
+        total_metamorphosed = 0;
+        send_progress(progress_tx, 0, 1.0, total_chunks, total_chunks, None, 0);
+    }
 
     // --- Phase 1: Mineral growth (critical + important chunks) ---
     send_progress(progress_tx, 1, 0.0, 0, mineral_chunks.len() as u32, None, 0);
 
-    let mineral_result = apply_mineral_growth(
-        &config.minerals,
-        density_fields,
-        &mineral_chunks,
-        chunk_size,
-        &mut rng,
-    );
-    total_minerals = mineral_result.minerals_grown;
-    result_manifest.merge_sleep_changes(&mineral_result.manifest);
-    transform_log.extend(mineral_result.transform_log);
-    if mineral_result.minerals_grown > 0 {
-        for key in mineral_result.manifest.chunk_deltas.keys() {
-            all_dirty.insert(*key);
+    if config.minerals_enabled {
+        let mineral_result = apply_mineral_growth(
+            &config.minerals,
+            density_fields,
+            &mineral_chunks,
+            chunk_size,
+            &mut rng,
+        );
+        total_minerals = mineral_result.minerals_grown;
+        result_manifest.merge_sleep_changes(&mineral_result.manifest);
+        transform_log.extend(mineral_result.transform_log);
+        if mineral_result.minerals_grown > 0 {
+            for key in mineral_result.manifest.chunk_deltas.keys() {
+                all_dirty.insert(*key);
+            }
         }
-    }
 
-    send_progress(
-        progress_tx, 1, 1.0, mineral_chunks.len() as u32, mineral_chunks.len() as u32,
-        mineral_result.glimpse_chunk, if mineral_result.glimpse_chunk.is_some() { 2 } else { 0 },
-    );
+        send_progress(
+            progress_tx, 1, 1.0, mineral_chunks.len() as u32, mineral_chunks.len() as u32,
+            mineral_result.glimpse_chunk, if mineral_result.glimpse_chunk.is_some() { 2 } else { 0 },
+        );
+    } else {
+        total_minerals = 0;
+        send_progress(progress_tx, 1, 1.0, mineral_chunks.len() as u32, mineral_chunks.len() as u32, None, 0);
+    }
 
     // --- Phase 2: Structural collapse (critical + important chunks) ---
     send_progress(progress_tx, 2, 0.0, 0, collapse_chunks.len() as u32, None, 0);
 
-    let stress_config = &config.stress;
-    let collapse_result = apply_collapse(
-        &config.collapse,
-        stress_config,
-        density_fields,
-        stress_fields,
-        support_fields,
-        &collapse_chunks,
-        chunk_size,
-        &mut rng,
-    );
-    total_supports_degraded = collapse_result.supports_degraded;
-    total_collapses = collapse_result.collapses_triggered;
-    all_collapse_events = collapse_result.collapse_events;
-    result_manifest.merge_sleep_changes(&collapse_result.manifest);
-    transform_log.extend(collapse_result.transform_log);
-    for key in &collapse_result.dirty_chunks {
-        all_dirty.insert(*key);
-    }
-    for key in collapse_result.manifest.chunk_deltas.keys() {
-        all_dirty.insert(*key);
-    }
+    if config.collapse_enabled {
+        let stress_config = &config.stress;
+        let collapse_result = apply_collapse(
+            &config.collapse,
+            stress_config,
+            density_fields,
+            stress_fields,
+            support_fields,
+            &collapse_chunks,
+            chunk_size,
+            &mut rng,
+        );
+        total_supports_degraded = collapse_result.supports_degraded;
+        total_collapses = collapse_result.collapses_triggered;
+        all_collapse_events = collapse_result.collapse_events;
+        result_manifest.merge_sleep_changes(&collapse_result.manifest);
+        transform_log.extend(collapse_result.transform_log);
+        for key in &collapse_result.dirty_chunks {
+            all_dirty.insert(*key);
+        }
+        for key in collapse_result.manifest.chunk_deltas.keys() {
+            all_dirty.insert(*key);
+        }
 
-    send_progress(
-        progress_tx, 2, 1.0, collapse_chunks.len() as u32, collapse_chunks.len() as u32,
-        collapse_result.glimpse_chunk, if collapse_result.glimpse_chunk.is_some() { 3 } else { 0 },
-    );
+        send_progress(
+            progress_tx, 2, 1.0, collapse_chunks.len() as u32, collapse_chunks.len() as u32,
+            collapse_result.glimpse_chunk, if collapse_result.glimpse_chunk.is_some() { 3 } else { 0 },
+        );
+    } else {
+        total_supports_degraded = 0;
+        total_collapses = 0;
+        all_collapse_events = Vec::new();
+        send_progress(progress_tx, 2, 1.0, collapse_chunks.len() as u32, collapse_chunks.len() as u32, None, 0);
+    }
 
     // --- Done ---
     send_progress(progress_tx, 3, 1.0, total_chunks, total_chunks, None, 0);

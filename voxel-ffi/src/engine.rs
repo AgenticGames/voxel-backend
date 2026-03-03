@@ -48,6 +48,7 @@ pub struct VoxelEngine {
     store: Arc<RwLock<ChunkStore>>,
     config: Arc<RwLock<GenerationConfig>>,
     stress_config: Arc<RwLock<StressConfig>>,
+    sleep_config: Arc<RwLock<voxel_sleep::SleepConfig>>,
     generation_counters: Arc<DashMap<(i32, i32, i32), AtomicU64>>,
     shutdown: Arc<AtomicBool>,
 
@@ -94,6 +95,7 @@ impl VoxelEngine {
         let store = Arc::new(RwLock::new(ChunkStore::new(region_size)));
         let config = Arc::new(RwLock::new(config));
         let stress_config = Arc::new(RwLock::new(StressConfig::default()));
+        let sleep_config = Arc::new(RwLock::new(voxel_sleep::SleepConfig::default()));
         let generation_counters: Arc<DashMap<(i32, i32, i32), AtomicU64>> =
             Arc::new(DashMap::new());
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -155,6 +157,7 @@ impl VoxelEngine {
             store,
             config,
             stress_config,
+            sleep_config,
             generation_counters,
             shutdown,
             sleep_complete: Arc::new(Mutex::new(None)),
@@ -267,9 +270,11 @@ impl VoxelEngine {
     /// (which has exclusive write-lock priority).
     /// Returns 1 on success, 0 if queue full.
     pub fn start_sleep(&self, player_chunk: (i32, i32, i32), sleep_count: u32) -> u32 {
+        let sc = self.sleep_config.read().unwrap().clone();
         match self.mine_tx.try_send(WorkerRequest::Sleep {
             player_chunk,
             sleep_count,
+            sleep_config: sc,
         }) {
             Ok(()) => 1,
             Err(_) => 0,
@@ -733,6 +738,13 @@ impl VoxelEngine {
         }
     }
 
+    /// Update the sleep configuration.
+    pub fn update_sleep_config(&self, new_config: voxel_sleep::SleepConfig) {
+        if let Ok(mut cfg) = self.sleep_config.write() {
+            *cfg = new_config;
+        }
+    }
+
     /// Hot-reload configuration (affects future generation requests).
     pub fn update_config(&self, ffi_config: &FfiEngineConfig) {
         let new_config = ffi_config_to_generation(ffi_config);
@@ -1081,6 +1093,75 @@ pub fn ffi_scan_config_to_scan_config(c: &FfiScanConfig) -> ScanConfig {
         max_edge_length: c.max_edge_length,
         thin_wall_max_thickness: c.thin_wall_max_thickness,
         self_intersection_tri_limit: c.self_intersection_tri_limit,
+    }
+}
+
+/// Convert FFI config to SleepConfig.
+pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
+    use voxel_sleep::config::{MetamorphismConfig, MineralConfig, CollapseConfig};
+    voxel_sleep::SleepConfig {
+        time_budget_ms: if c.sleep_time_budget_ms > 0 { c.sleep_time_budget_ms } else { 8000 },
+        chunk_radius: c.sleep_chunk_radius.min(10),
+        metamorphism_enabled: c.sleep_metamorphism_enabled != 0,
+        minerals_enabled: c.sleep_minerals_enabled != 0,
+        collapse_enabled: c.sleep_collapse_enabled != 0,
+        sleep_count: if c.sleep_count > 0 { c.sleep_count } else { 1 },
+        metamorphism: MetamorphismConfig {
+            limestone_to_marble_prob: if c.sleep_limestone_to_marble_prob > 0.0 { c.sleep_limestone_to_marble_prob } else { 0.40 },
+            limestone_to_marble_depth: if c.sleep_limestone_to_marble_depth != 0.0 { c.sleep_limestone_to_marble_depth } else { -50.0 },
+            limestone_to_marble_enabled: c.sleep_limestone_to_marble_enabled != 0,
+            sandstone_to_granite_prob: if c.sleep_sandstone_to_granite_prob > 0.0 { c.sleep_sandstone_to_granite_prob } else { 0.25 },
+            sandstone_to_granite_depth: if c.sleep_sandstone_to_granite_depth != 0.0 { c.sleep_sandstone_to_granite_depth } else { -100.0 },
+            sandstone_to_granite_min_neighbors: if c.sleep_sandstone_to_granite_min_neighbors > 0 { c.sleep_sandstone_to_granite_min_neighbors } else { 4 },
+            sandstone_to_granite_enabled: c.sleep_sandstone_to_granite_enabled != 0,
+            slate_to_marble_prob: if c.sleep_slate_to_marble_prob > 0.0 { c.sleep_slate_to_marble_prob } else { 0.60 },
+            slate_to_marble_enabled: c.sleep_slate_to_marble_enabled != 0,
+            granite_to_basalt_prob: if c.sleep_granite_to_basalt_prob > 0.0 { c.sleep_granite_to_basalt_prob } else { 0.15 },
+            granite_to_basalt_min_air: if c.sleep_granite_to_basalt_min_air > 0 { c.sleep_granite_to_basalt_min_air } else { 2 },
+            granite_to_basalt_enabled: c.sleep_granite_to_basalt_enabled != 0,
+            iron_to_pyrite_prob: if c.sleep_iron_to_pyrite_prob > 0.0 { c.sleep_iron_to_pyrite_prob } else { 0.35 },
+            iron_to_pyrite_search_radius: if c.sleep_iron_to_pyrite_search_radius > 0 { c.sleep_iron_to_pyrite_search_radius } else { 2 },
+            iron_to_pyrite_enabled: c.sleep_iron_to_pyrite_enabled != 0,
+            copper_to_malachite_prob: if c.sleep_copper_to_malachite_prob > 0.0 { c.sleep_copper_to_malachite_prob } else { 0.50 },
+            copper_to_malachite_enabled: c.sleep_copper_to_malachite_enabled != 0,
+        },
+        minerals: MineralConfig {
+            crystal_growth_max: if c.sleep_crystal_growth_max > 0 { c.sleep_crystal_growth_max } else { 2 },
+            crystal_growth_enabled: c.sleep_crystal_growth_enabled != 0,
+            crystal_growth_prob: if c.sleep_crystal_growth_prob > 0.0 { c.sleep_crystal_growth_prob } else { 0.3 },
+            malachite_stalactite_max: if c.sleep_malachite_stalactite_max > 0 { c.sleep_malachite_stalactite_max } else { 1 },
+            malachite_stalactite_enabled: c.sleep_malachite_stalactite_enabled != 0,
+            malachite_stalactite_prob: if c.sleep_malachite_stalactite_prob > 0.0 { c.sleep_malachite_stalactite_prob } else { 0.2 },
+            quartz_extension_prob: if c.sleep_quartz_extension_prob > 0.0 { c.sleep_quartz_extension_prob } else { 0.10 },
+            quartz_extension_max: if c.sleep_quartz_extension_max > 0 { c.sleep_quartz_extension_max } else { 1 },
+            quartz_extension_enabled: c.sleep_quartz_extension_enabled != 0,
+            calcite_infill_max: if c.sleep_calcite_infill_max > 0 { c.sleep_calcite_infill_max } else { 1 },
+            calcite_infill_depth: if c.sleep_calcite_infill_depth != 0.0 { c.sleep_calcite_infill_depth } else { -30.0 },
+            calcite_infill_min_faces: if c.sleep_calcite_infill_min_faces > 0 { c.sleep_calcite_infill_min_faces } else { 3 },
+            calcite_infill_enabled: c.sleep_calcite_infill_enabled != 0,
+            calcite_infill_prob: if c.sleep_calcite_infill_prob > 0.0 { c.sleep_calcite_infill_prob } else { 0.15 },
+            pyrite_crust_max: if c.sleep_pyrite_crust_max > 0 { c.sleep_pyrite_crust_max } else { 1 },
+            pyrite_crust_min_solid: if c.sleep_pyrite_crust_min_solid > 0 { c.sleep_pyrite_crust_min_solid } else { 2 },
+            pyrite_crust_enabled: c.sleep_pyrite_crust_enabled != 0,
+            pyrite_crust_prob: if c.sleep_pyrite_crust_prob > 0.0 { c.sleep_pyrite_crust_prob } else { 0.1 },
+            growth_density_min: if c.sleep_growth_density_min > 0.0 { c.sleep_growth_density_min } else { 0.3 },
+            growth_density_max: if c.sleep_growth_density_max > 0.0 { c.sleep_growth_density_max } else { 0.6 },
+        },
+        collapse: CollapseConfig {
+            strut_survival: if c.sleep_strut_survival[1..].iter().any(|&v| v > 0.0) {
+                c.sleep_strut_survival
+            } else {
+                CollapseConfig::default().strut_survival
+            },
+            stress_multiplier: if c.sleep_stress_multiplier > 0.0 { c.sleep_stress_multiplier } else { 1.5 },
+            max_cascade_iterations: if c.sleep_max_cascade_iterations > 0 { c.sleep_max_cascade_iterations } else { 8 },
+            rubble_fill_ratio: if c.sleep_rubble_fill_ratio > 0.0 { c.sleep_rubble_fill_ratio } else { 0.40 },
+            min_stress_for_cascade: if c.sleep_min_stress_for_cascade > 0.0 { c.sleep_min_stress_for_cascade } else { 0.7 },
+            rubble_material_match: c.sleep_rubble_material_match != 0,
+            support_stress_penalty: if c.sleep_support_stress_penalty > 0.0 { c.sleep_support_stress_penalty } else { 1.0 },
+            collapse_enabled: c.sleep_collapse_sub_enabled != 0,
+        },
+        stress: voxel_core::stress::StressConfig::default(),
     }
 }
 

@@ -575,6 +575,21 @@ pub unsafe extern "C" fn voxel_set_stress_config(
     engine.update_stress_config(stress_config);
 }
 
+/// Update the sleep configuration from FFI config fields.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_set_sleep_config(
+    engine: *mut c_void,
+    config: *const FfiEngineConfig,
+) {
+    if engine.is_null() || config.is_null() {
+        return;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let ffi_config = &*config;
+    let sleep_config = crate::engine::ffi_config_to_sleep(ffi_config);
+    engine.update_sleep_config(sleep_config);
+}
+
 /// Start a deep sleep cycle. player_chunk coordinates are in UE space.
 /// Returns 1 on success, 0 if queue full.
 #[no_mangle]
@@ -1390,6 +1405,61 @@ mod tests {
             ore_coal_sedimentary_host: 0,
             ore_coal_shallow_ceiling: 0,
             ore_coal_depth_enrichment: 0,
+            // Sleep Config
+            sleep_time_budget_ms: 8000,
+            sleep_chunk_radius: 1,
+            sleep_metamorphism_enabled: 1,
+            sleep_minerals_enabled: 1,
+            sleep_collapse_enabled: 1,
+            sleep_count: 1,
+            // Sleep Metamorphism
+            sleep_limestone_to_marble_prob: 0.40,
+            sleep_limestone_to_marble_depth: -50.0,
+            sleep_limestone_to_marble_enabled: 1,
+            sleep_sandstone_to_granite_prob: 0.25,
+            sleep_sandstone_to_granite_depth: -100.0,
+            sleep_sandstone_to_granite_min_neighbors: 4,
+            sleep_sandstone_to_granite_enabled: 1,
+            sleep_slate_to_marble_prob: 0.60,
+            sleep_slate_to_marble_enabled: 1,
+            sleep_granite_to_basalt_prob: 0.15,
+            sleep_granite_to_basalt_min_air: 2,
+            sleep_granite_to_basalt_enabled: 1,
+            sleep_iron_to_pyrite_prob: 0.35,
+            sleep_iron_to_pyrite_search_radius: 2,
+            sleep_iron_to_pyrite_enabled: 1,
+            sleep_copper_to_malachite_prob: 0.50,
+            sleep_copper_to_malachite_enabled: 1,
+            // Sleep Minerals
+            sleep_crystal_growth_max: 2,
+            sleep_crystal_growth_enabled: 1,
+            sleep_crystal_growth_prob: 0.3,
+            sleep_malachite_stalactite_max: 1,
+            sleep_malachite_stalactite_enabled: 1,
+            sleep_malachite_stalactite_prob: 0.2,
+            sleep_quartz_extension_prob: 0.10,
+            sleep_quartz_extension_max: 1,
+            sleep_quartz_extension_enabled: 1,
+            sleep_calcite_infill_max: 1,
+            sleep_calcite_infill_depth: -30.0,
+            sleep_calcite_infill_min_faces: 3,
+            sleep_calcite_infill_enabled: 1,
+            sleep_calcite_infill_prob: 0.15,
+            sleep_pyrite_crust_max: 1,
+            sleep_pyrite_crust_min_solid: 2,
+            sleep_pyrite_crust_enabled: 1,
+            sleep_pyrite_crust_prob: 0.1,
+            sleep_growth_density_min: 0.3,
+            sleep_growth_density_max: 0.6,
+            // Sleep Collapse
+            sleep_strut_survival: [0.0, 0.25, 0.30, 0.25, 0.55, 0.70, 0.85, 0.95],
+            sleep_stress_multiplier: 1.5,
+            sleep_max_cascade_iterations: 8,
+            sleep_rubble_fill_ratio: 0.40,
+            sleep_min_stress_for_cascade: 0.7,
+            sleep_rubble_material_match: 1,
+            sleep_support_stress_penalty: 1.0,
+            sleep_collapse_sub_enabled: 1,
         }
     }
 

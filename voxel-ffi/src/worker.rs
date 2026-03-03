@@ -703,9 +703,9 @@ fn handle_request(
                 meshes: mesh_pairs,
             });
         }
-        WorkerRequest::Sleep { player_chunk, sleep_count } => {
+        WorkerRequest::Sleep { player_chunk, sleep_count, sleep_config: sc } => {
             let cfg = config.read().unwrap().clone();
-            let sleep_config = voxel_sleep::SleepConfig::default();
+            let sleep_config = sc;
 
             let mut s = store.write().unwrap();
 
