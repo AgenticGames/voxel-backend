@@ -32,6 +32,9 @@ pub fn extract_hermite_data(density: &DensityField) -> HermiteData {
                     } else {
                         mat_a
                     };
+                    debug_assert!(material.is_solid(),
+                        "Hermite edge at ({},{},{}) axis 0 has Air material: mat_a={:?} mat_b={:?} da={} db={}",
+                        x, y, z, mat_a, mat_b, da, db);
                     let key = EdgeKey::new(x as u8, y as u8, z as u8, 0);
                     data.edges.insert(key, EdgeIntersection { t, normal, material });
                 }
@@ -59,6 +62,9 @@ pub fn extract_hermite_data(density: &DensityField) -> HermiteData {
                     } else {
                         mat_a
                     };
+                    debug_assert!(material.is_solid(),
+                        "Hermite edge at ({},{},{}) axis 1 has Air material: mat_a={:?} mat_b={:?} da={} db={}",
+                        x, y, z, mat_a, mat_b, da, db);
                     let key = EdgeKey::new(x as u8, y as u8, z as u8, 1);
                     data.edges.insert(key, EdgeIntersection { t, normal, material });
                 }
@@ -86,6 +92,9 @@ pub fn extract_hermite_data(density: &DensityField) -> HermiteData {
                     } else {
                         mat_a
                     };
+                    debug_assert!(material.is_solid(),
+                        "Hermite edge at ({},{},{}) axis 2 has Air material: mat_a={:?} mat_b={:?} da={} db={}",
+                        x, y, z, mat_a, mat_b, da, db);
                     let key = EdgeKey::new(x as u8, y as u8, z as u8, 2);
                     data.edges.insert(key, EdgeIntersection { t, normal, material });
                 }
@@ -135,6 +144,9 @@ pub fn patch_hermite_data(
                     } else {
                         mat_a
                     };
+                    debug_assert!(material.is_solid(),
+                        "Hermite patch edge at ({},{},{}) axis 0 has Air material: mat_a={:?} mat_b={:?} da={} db={}",
+                        x, y, z, mat_a, mat_b, da, db);
                     hermite.edges.insert(
                         EdgeKey::new(x as u8, y as u8, z as u8, 0),
                         EdgeIntersection { t, normal, material },
@@ -164,6 +176,9 @@ pub fn patch_hermite_data(
                     } else {
                         mat_a
                     };
+                    debug_assert!(material.is_solid(),
+                        "Hermite patch edge at ({},{},{}) axis 1 has Air material: mat_a={:?} mat_b={:?} da={} db={}",
+                        x, y, z, mat_a, mat_b, da, db);
                     hermite.edges.insert(
                         EdgeKey::new(x as u8, y as u8, z as u8, 1),
                         EdgeIntersection { t, normal, material },
@@ -193,6 +208,9 @@ pub fn patch_hermite_data(
                     } else {
                         mat_a
                     };
+                    debug_assert!(material.is_solid(),
+                        "Hermite patch edge at ({},{},{}) axis 2 has Air material: mat_a={:?} mat_b={:?} da={} db={}",
+                        x, y, z, mat_a, mat_b, da, db);
                     hermite.edges.insert(
                         EdgeKey::new(x as u8, y as u8, z as u8, 2),
                         EdgeIntersection { t, normal, material },

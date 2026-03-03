@@ -306,6 +306,51 @@ fn handle_request(
                     if profiling { t_worm_backward_remesh = t_bwd_remesh.elapsed(); }
                 }
 
+                // Cross-region boundary density sync: ensure region edge chunks
+                // match their already-loaded neighbors from other regions
+                {
+                    let mut s = store.write().unwrap();
+                    let boundary_remesh_keys = s.sync_cross_region_boundaries(&coords, cfg.chunk_size);
+                    drop(s);
+
+                    for &key in &boundary_remesh_keys {
+                        let computed = {
+                            let s = store.read().unwrap();
+                            let density = s.density_fields.get(&key);
+                            let hermite = s.hermite_data.get(&key);
+                            if let (Some(density), Some(hermite)) = (density, hermite) {
+                                let cell_size = density.size - 1;
+                                let dc_verts = solve_dc_vertices(hermite, cell_size);
+                                let mut m = generate_mesh(hermite, &dc_verts, cell_size);
+                                m.smooth(cfg.mesh_smooth_iterations, cfg.mesh_smooth_strength,
+                                         cfg.mesh_boundary_smooth, Some(cell_size));
+                                if cfg.mesh_recalc_normals > 0 { m.recalculate_normals(); }
+                                let b_edges = region_gen::extract_boundary_edges(hermite, cfg.chunk_size);
+                                Some((dc_verts, m, b_edges))
+                            } else { None }
+                        };
+                        if let Some((dc_verts, mesh, b_edges)) = computed {
+                            {
+                                let mut s = store.write().unwrap();
+                                s.add_seam_data(key, ChunkSeamData {
+                                    dc_vertices: dc_verts,
+                                    world_origin: glam::Vec3::ZERO,
+                                    boundary_edges: b_edges,
+                                });
+                                s.base_meshes.insert(key, mesh.clone());
+                            }
+                            let mut converted = convert_mesh_to_ue_scaled(&mesh, cfg.voxel_scale(), world_scale);
+                            crate::convert::bucket_mesh_by_material(&mut converted);
+                            if !converted.indices.is_empty() {
+                                let _ = result_tx.send(WorkerResult::ChunkMesh {
+                                    chunk: key, mesh: converted, generation: 0,
+                                });
+                            }
+                            incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
+                        }
+                    }
+                }
+
                 // Mesh under fresh read lock
                 let t3 = Instant::now();
                 let s = store.read().unwrap();

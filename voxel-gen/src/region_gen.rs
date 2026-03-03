@@ -12,6 +12,9 @@ use voxel_core::chunk::ChunkCoord;
 use voxel_core::hermite::{EdgeIntersection, EdgeKey, HermiteData};
 use voxel_core::mesh::{Mesh, Triangle, Vertex};
 
+use voxel_core::material::Material;
+use voxel_core::octree::node::VoxelSample;
+
 use crate::config::GenerationConfig;
 use crate::density::{DensityField, generate_density_field};
 use crate::pools::{FluidSeed, PoolDescriptor};
@@ -27,6 +30,7 @@ pub struct RegionTimings {
     pub worm_carving: Duration,
     pub pools: Duration,
     pub formations: Duration,
+    pub boundary_sync: Duration,
     pub metadata: Duration,
     pub worm_count: u32,
     pub worm_segment_count: u32,
@@ -242,6 +246,11 @@ pub fn generate_region_densities(
             crate::density::apply_ore_protrusion(density, config.ore_protrusion);
         }
     }
+
+    // Phase 6c: Sync boundary densities between adjacent chunks in the region
+    let t_bsync = Instant::now();
+    sync_region_boundary_densities(&mut density_fields, config.chunk_size);
+    timings.boundary_sync = t_bsync.elapsed();
 
     // Phase 7: Compute cached metadata for all density fields (search optimization)
     let t6 = Instant::now();
@@ -612,6 +621,98 @@ fn is_degenerate(vertices: &[Vertex], indices: [u32; 3]) -> bool {
     let v1 = vertices[indices[1] as usize].position;
     let v2 = vertices[indices[2] as usize].position;
     (v1 - v0).cross(v2 - v0).length_squared() < 1e-10
+}
+
+// ── Intra-region boundary sync ──────────────────────────────────────────────
+
+/// Sync boundary densities between adjacent chunks within a region.
+/// Ensures overlapping boundary voxels have identical density/material,
+/// preventing seam gaps from chunk-local modifications (formations, pools, ore protrusion).
+fn sync_region_boundary_densities(
+    density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
+    chunk_size: usize,
+) {
+    let gs = chunk_size;
+    let keys: Vec<_> = density_fields.keys().copied().collect();
+    let mut updates: Vec<((i32, i32, i32), usize, usize, usize, f32, Material)> = Vec::new();
+
+    // 13 "forward" neighbor offsets (first nonzero component is positive).
+    // Processing only forward directions avoids syncing each pair twice.
+    let offsets: [(i32, i32, i32); 13] = [
+        // Faces (3)
+        (1, 0, 0), (0, 1, 0), (0, 0, 1),
+        // Edges (6)
+        (1, 1, 0), (1, -1, 0), (1, 0, 1), (1, 0, -1), (0, 1, 1), (0, 1, -1),
+        // Corners (4)
+        (1, 1, 1), (1, 1, -1), (1, -1, 1), (1, -1, -1),
+    ];
+
+    for &(cx, cy, cz) in &keys {
+        for &(dx, dy, dz) in &offsets {
+            let neighbor = (cx + dx, cy + dy, cz + dz);
+            if !density_fields.contains_key(&neighbor) {
+                continue;
+            }
+
+            let x_pairs = axis_boundary_pairs(dx, gs);
+            let y_pairs = axis_boundary_pairs(dy, gs);
+            let z_pairs = axis_boundary_pairs(dz, gs);
+
+            for &(az, bz) in &z_pairs {
+                for &(ay, by) in &y_pairs {
+                    for &(ax, bx) in &x_pairs {
+                        let sample_a = density_fields[&(cx, cy, cz)].get(ax, ay, az);
+                        let sample_b = density_fields[&neighbor].get(bx, by, bz);
+                        let (d, m) = avg_boundary(sample_a, sample_b);
+                        updates.push(((cx, cy, cz), ax, ay, az, d, m));
+                        updates.push((neighbor, bx, by, bz, d, m));
+                    }
+                }
+            }
+        }
+    }
+
+    for (key, x, y, z, d, m) in updates {
+        if let Some(field) = density_fields.get_mut(&key) {
+            let sample = field.get_mut(x, y, z);
+            sample.density = d;
+            sample.material = m;
+        }
+    }
+}
+
+/// For a neighbor offset component, return the boundary coordinate pairs (a, b).
+/// d=+1: chunk A at gs, chunk B at 0 (single pair).
+/// d=-1: chunk A at 0, chunk B at gs (single pair).
+/// d= 0: both iterate together 0..=gs (shared plane).
+fn axis_boundary_pairs(d: i32, gs: usize) -> Vec<(usize, usize)> {
+    if d == 1 {
+        vec![(gs, 0)]
+    } else if d == -1 {
+        vec![(0, gs)]
+    } else {
+        (0..=gs).map(|i| (i, i)).collect()
+    }
+}
+
+/// Same logic as average_boundary_voxel in store.rs.
+/// Density uses min (carved side wins); material preserves solid when possible.
+fn avg_boundary(a: &VoxelSample, b: &VoxelSample) -> (f32, Material) {
+    let density = a.density.min(b.density);
+    let material = if a.material.is_solid() && b.material.is_solid() {
+        if a.density >= b.density { a.material } else { b.material }
+    } else if a.material.is_solid() {
+        a.material
+    } else if b.material.is_solid() {
+        b.material
+    } else {
+        Material::Air
+    };
+    if !material.is_solid() && density > 0.0 {
+        (0.0, material)
+    } else {
+        (density, material)
+    }
 }
 
 #[cfg(test)]

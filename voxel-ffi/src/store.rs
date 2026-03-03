@@ -217,7 +217,9 @@ impl ChunkStore {
                                             // instead of flat -1.0 which kills DC normals
                                             let sdf = dist2.sqrt() - radius;
                                             sample.density = sdf.min(sample.density);
-                                            sample.material = Material::Air;
+                                            if sample.density <= 0.0 {
+                                                sample.material = Material::Air;
+                                            }
                                             changed = true;
                                         }
                                     }
@@ -345,9 +347,14 @@ impl ChunkStore {
                             let dist = (world_pos - adjusted_center).length();
                             let sdf = dist - radius;
                             let sample = density.get_mut(x, y, z);
+                            let original_material = sample.material;
                             mined_counts[sample.material as u8 as usize] += 1;
                             sample.density = sdf.min(sample.density);
-                            sample.material = Material::Air;
+                            if sample.density <= 0.0 {
+                                sample.material = Material::Air;
+                            } else {
+                                sample.material = original_material;
+                            }
                             changed = true;
                         }
 
@@ -1651,6 +1658,91 @@ impl ChunkStore {
 
         Some(CavernLocations { spring, chrysalis, spawn })
     }
+
+    /// Sync boundary densities between newly generated region chunks and their
+    /// already-loaded cross-region face neighbors. Re-extracts hermite for all
+    /// modified chunks. Returns the list of modified non-region neighbor keys
+    /// that need remeshing.
+    pub fn sync_cross_region_boundaries(
+        &mut self,
+        region_coords: &[(i32, i32, i32)],
+        chunk_size: usize,
+    ) -> Vec<(i32, i32, i32)> {
+        let gs = chunk_size;
+        let region_set: HashSet<_> = region_coords.iter().copied().collect();
+        let mut updates: Vec<((i32, i32, i32), usize, usize, usize, f32, Material)> = Vec::new();
+        let mut dirty: HashSet<(i32, i32, i32)> = HashSet::new();
+
+        for &(cx, cy, cz) in region_coords {
+            let face_neighbors: [(i32, i32, i32); 6] = [
+                (cx + 1, cy, cz), (cx - 1, cy, cz),
+                (cx, cy + 1, cz), (cx, cy - 1, cz),
+                (cx, cy, cz + 1), (cx, cy, cz - 1),
+            ];
+            for &neighbor in &face_neighbors {
+                if region_set.contains(&neighbor) { continue; }
+                if !self.density_fields.contains_key(&neighbor) { continue; }
+
+                // Determine shared face axis and boundary coordinates
+                let (axis, a_coord, b_coord) = if neighbor.0 != cx {
+                    (0, if neighbor.0 > cx { gs } else { 0 }, if neighbor.0 > cx { 0 } else { gs })
+                } else if neighbor.1 != cy {
+                    (1, if neighbor.1 > cy { gs } else { 0 }, if neighbor.1 > cy { 0 } else { gs })
+                } else {
+                    (2, if neighbor.2 > cz { gs } else { 0 }, if neighbor.2 > cz { 0 } else { gs })
+                };
+
+                for u in 0..=gs {
+                    for v in 0..=gs {
+                        let (ax, ay, az) = match axis {
+                            0 => (a_coord, u, v),
+                            1 => (u, a_coord, v),
+                            _ => (u, v, a_coord),
+                        };
+                        let (bx, by, bz) = match axis {
+                            0 => (b_coord, u, v),
+                            1 => (u, b_coord, v),
+                            _ => (u, v, b_coord),
+                        };
+
+                        let sample_a = self.density_fields[&(cx, cy, cz)].get(ax, ay, az);
+                        let sample_b = self.density_fields[&neighbor].get(bx, by, bz);
+                        let (d, m) = average_boundary_voxel(sample_a, sample_b);
+                        updates.push(((cx, cy, cz), ax, ay, az, d, m));
+                        updates.push((neighbor, bx, by, bz, d, m));
+                    }
+                }
+                dirty.insert((cx, cy, cz));
+                dirty.insert(neighbor);
+            }
+        }
+
+        if updates.is_empty() {
+            return Vec::new();
+        }
+
+        // Apply all density updates
+        for (key, x, y, z, d, m) in updates {
+            if let Some(field) = self.density_fields.get_mut(&key) {
+                let sample = field.get_mut(x, y, z);
+                sample.density = d;
+                sample.material = m;
+            }
+        }
+
+        // Re-extract hermite for all modified chunks
+        for &key in &dirty {
+            let hermite = {
+                let density = self.density_fields.get_mut(&key).unwrap();
+                density.compute_metadata();
+                extract_hermite_data(density)
+            };
+            self.hermite_data.insert(key, hermite);
+        }
+
+        // Return only non-region neighbors that need remeshing
+        dirty.into_iter().filter(|k| !region_set.contains(k)).collect()
+    }
 }
 
 /// Extract a solid mask bitfield from a density field.
@@ -1692,7 +1784,12 @@ fn average_boundary_voxel(a: &VoxelSample, b: &VoxelSample) -> (f32, Material) {
     } else {
         Material::Air
     };
-    (avg_density, material)
+    // Enforce invariant: Air density must be non-positive
+    if !material.is_solid() && avg_density > 0.0 {
+        (0.0, material)
+    } else {
+        (avg_density, material)
+    }
 }
 
 /// Post-smoothing boundary density sync: average overlap voxels between
@@ -1948,9 +2045,14 @@ fn smooth_mine_boundary(
             }
         }
 
-        // Apply all updates (only density, not material)
+        // Apply all updates (density, with invariant enforcement)
         for (x, y, z, new_density) in updates {
-            density.get_mut(x, y, z).density = new_density;
+            let sample = density.get_mut(x, y, z);
+            sample.density = new_density;
+            // Enforce invariant: Air material must have non-positive density
+            if !sample.material.is_solid() && sample.density > 0.0 {
+                sample.density = 0.0;
+            }
         }
     }
 }
