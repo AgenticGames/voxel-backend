@@ -529,7 +529,7 @@ impl Default for FormationConfig {
             rimstone_dam_height_min: 1.0,
             rimstone_dam_height_max: 1.5,
             rimstone_pool_depth: 1.0,
-            rimstone_min_slope: 0.15,
+            rimstone_min_slope: 0.05,
             // Cave Shield defaults
             shield_chance: 0.008,
             shield_radius_min: 1.5,

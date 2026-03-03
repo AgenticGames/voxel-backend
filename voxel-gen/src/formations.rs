@@ -686,7 +686,12 @@ fn detect_ceiling_slope(
     }
 }
 
-/// Detect floor slope using central differences. Returns (grad_x, grad_z, magnitude).
+/// Detect floor slope using central differences with wide sampling.
+/// Returns (grad_x, grad_z, magnitude).
+///
+/// Uses a sampling radius of 3 voxels (±3) to catch gentle slopes that
+/// change only 1 voxel over several horizontal steps. Also searches both
+/// up and down from the anchor Y to find floor surfaces at neighbor columns.
 fn detect_floor_slope(
     density: &DensityField,
     x: usize,
@@ -694,27 +699,49 @@ fn detect_floor_slope(
     z: usize,
     size: usize,
 ) -> Option<(f32, f32, f32)> {
-    if x < 1 || x >= size - 1 || z < 1 || z >= size - 1 {
+    let radius: usize = 3;
+    if x < radius || x >= size - radius || z < radius || z >= size - radius {
         return None;
     }
 
+    // Find nearest floor surface at (px, pz): solid with air above,
+    // searching both up and down from anchor y.
     let find_floor = |px: usize, pz: usize| -> Option<usize> {
-        for py in (0..=y).rev() {
-            if density.get(px, py, pz).density > 0.0 {
-                return Some(py);
+        let search_range = 4usize;
+        for dy in 0..=search_range {
+            // Check y - dy
+            if dy <= y {
+                let py = y - dy;
+                if py + 1 < size
+                    && density.get(px, py, pz).density > 0.0
+                    && density.get(px, py + 1, pz).density <= 0.0
+                {
+                    return Some(py);
+                }
+            }
+            // Check y + dy (skip dy=0 to avoid double-checking)
+            if dy > 0 {
+                let py = y + dy;
+                if py + 1 < size
+                    && density.get(px, py, pz).density > 0.0
+                    && density.get(px, py + 1, pz).density <= 0.0
+                {
+                    return Some(py);
+                }
             }
         }
         None
     };
 
     let fy = find_floor(x, z)?;
-    let fx_pos = find_floor(x + 1, z).unwrap_or(fy);
-    let fx_neg = find_floor(x.saturating_sub(1), z).unwrap_or(fy);
-    let fz_pos = find_floor(x, z + 1).unwrap_or(fy);
-    let fz_neg = find_floor(x, z.saturating_sub(1)).unwrap_or(fy);
+    let fx_pos = find_floor(x + radius, z).unwrap_or(fy);
+    let fx_neg = find_floor(x - radius, z).unwrap_or(fy);
+    let fz_pos = find_floor(x, z + radius).unwrap_or(fy);
+    let fz_neg = find_floor(x, z - radius).unwrap_or(fy);
 
-    let grad_x = (fx_pos as f32 - fx_neg as f32) * 0.5;
-    let grad_z = (fz_pos as f32 - fz_neg as f32) * 0.5;
+    let r = radius as f32;
+    let grad_x = (fx_pos as f32 - fx_neg as f32) / (2.0 * r);
+    let grad_z = (fz_pos as f32 - fz_neg as f32) / (2.0 * r);
     let magnitude = (grad_x * grad_x + grad_z * grad_z).sqrt();
 
     Some((grad_x, grad_z, magnitude))
@@ -1774,7 +1801,6 @@ mod tests {
         place_formations(&mut field, &config, Vec3::ZERO, 42, 77777);
 
         // Rimstone dams both fill (dam walls) and carve (basins), so check density changed
-        // We compare against a fresh (unmodified) sloped field to verify modifications occurred.
         let densities_before: Vec<f32> = make_cave_field(size, 3, 14)
             .samples
             .iter()
@@ -1784,6 +1810,72 @@ mod tests {
         assert_ne!(
             densities_before, densities_after,
             "RimstoneDam should modify the density field"
+        );
+    }
+
+    #[test]
+    fn test_rimstone_dam_gentle_slope() {
+        // Gentle slope: 1 voxel rise per 4 horizontal steps (floor_y = 3 + x/4).
+        // The old ±1 sampling missed this; the ±3 radius should detect it.
+        let size = 17;
+        let mut field = DensityField::new(size);
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..size {
+                    let sample = field.get_mut(x, y, z);
+                    let floor_y = 3 + x / 4;
+                    let ceil_y = 14;
+                    if y > floor_y && y < ceil_y {
+                        sample.density = -1.0;
+                        sample.material = Material::Air;
+                    } else {
+                        sample.density = 1.0;
+                        sample.material = Material::Limestone;
+                    }
+                }
+            }
+        }
+
+        let config = FormationConfig {
+            enabled: true,
+            placement_threshold: 0.0,
+            rimstone_chance: 1.0,
+            rimstone_min_slope: 0.05, // match new default
+            stalactite_chance: 0.0,
+            stalagmite_chance: 0.0,
+            column_chance: 0.0,
+            mega_column_chance: 0.0,
+            flowstone_chance: 0.0,
+            drapery_chance: 0.0,
+            shield_chance: 0.0,
+            ..FormationConfig::default()
+        };
+
+        place_formations(&mut field, &config, Vec3::ZERO, 42, 88888);
+
+        // Verify density field was modified (dams were placed)
+        let mut reference = DensityField::new(size);
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..size {
+                    let sample = reference.get_mut(x, y, z);
+                    let floor_y = 3 + x / 4;
+                    let ceil_y = 14;
+                    if y > floor_y && y < ceil_y {
+                        sample.density = -1.0;
+                        sample.material = Material::Air;
+                    } else {
+                        sample.density = 1.0;
+                        sample.material = Material::Limestone;
+                    }
+                }
+            }
+        }
+        let densities_before: Vec<f32> = reference.samples.iter().map(|s| s.density).collect();
+        let densities_after: Vec<f32> = field.samples.iter().map(|s| s.density).collect();
+        assert_ne!(
+            densities_before, densities_after,
+            "RimstoneDam should spawn on gentle slope (1 voxel per 4 horizontal)"
         );
     }
 

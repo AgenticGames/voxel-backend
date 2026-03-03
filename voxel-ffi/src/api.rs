@@ -1376,7 +1376,7 @@ mod tests {
             formation_rimstone_dam_height_min: 1.0,
             formation_rimstone_dam_height_max: 1.5,
             formation_rimstone_pool_depth: 1.0,
-            formation_rimstone_min_slope: 0.15,
+            formation_rimstone_min_slope: 0.05,
             formation_shield_chance: 0.008,
             formation_shield_radius_min: 1.5,
             formation_shield_radius_max: 3.0,
