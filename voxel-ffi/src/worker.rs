@@ -2,8 +2,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use std::collections::HashSet;
+
 use crossbeam_channel::{Receiver, Sender};
 use dashmap::DashMap;
+use rayon::prelude::*;
 use voxel_core::dual_contouring::mesh_gen::generate_mesh;
 use voxel_core::dual_contouring::solve::solve_dc_vertices;
 use voxel_core::stress::SupportType;
@@ -184,7 +187,7 @@ fn handle_request(
                 // Pre-extract hermite data BEFORE acquiring write lock (expensive part)
                 let t2 = Instant::now();
                 let keyed_data: Vec<_> = densities
-                    .into_iter()
+                    .into_par_iter()
                     .map(|(key, density)| {
                         let hermite = extract_hermite_data(&density);
                         (key, density, hermite)
@@ -215,6 +218,7 @@ fn handle_request(
                     let eb = cfg.effective_bounds();
                     let mut backward_dirty: Vec<(i32, i32, i32)> = Vec::new();
                     let t_bwd_carve = Instant::now();
+                    // Phase 1: Carve worms + compute_metadata (write lock)
                     {
                         let mut s = store.write().unwrap();
                         for path in &worm_paths {
@@ -248,14 +252,28 @@ fn handle_request(
                                                 cfg.worm.falloff_power,
                                             );
                                             density.compute_metadata();
-                                            let hermite = extract_hermite_data(density);
-                                            s.hermite_data.insert(key, hermite);
                                             if !backward_dirty.contains(&key) {
                                                 backward_dirty.push(key);
                                             }
                                         }
                                     }
                                 }
+                            }
+                        }
+                    }
+                    // Phase 2: Extract hermite (read lock — doesn't block other readers)
+                    if !backward_dirty.is_empty() {
+                        let hermite_updates: Vec<_> = {
+                            let s = store.read().unwrap();
+                            backward_dirty.iter().filter_map(|&key| {
+                                s.density_fields.get(&key).map(|d| (key, extract_hermite_data(d)))
+                            }).collect()
+                        };
+                        // Phase 3: Store hermite results (brief write lock)
+                        {
+                            let mut s = store.write().unwrap();
+                            for (key, hermite) in hermite_updates {
+                                s.hermite_data.insert(key, hermite);
                             }
                         }
                     }
@@ -299,8 +317,6 @@ fn handle_request(
                                     chunk: key, mesh: converted, generation: 0,
                                 });
                             }
-                            // 4. Regenerate seams for this chunk + its neighbors
-                            incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
                         }
                     }
                     if profiling { t_worm_backward_remesh = t_bwd_remesh.elapsed(); }
@@ -309,44 +325,66 @@ fn handle_request(
                 // Cross-region boundary density sync: ensure region edge chunks
                 // match their already-loaded neighbors from other regions
                 {
-                    let mut s = store.write().unwrap();
-                    let boundary_remesh_keys = s.sync_cross_region_boundaries(&coords, cfg.chunk_size);
-                    drop(s);
+                    // Phase 1: Sync densities (write lock)
+                    let all_dirty_keys: Vec<(i32, i32, i32)>;
+                    {
+                        let mut s = store.write().unwrap();
+                        all_dirty_keys = s.sync_cross_region_densities(&coords, cfg.chunk_size);
+                    }
 
-                    for &key in &boundary_remesh_keys {
-                        let computed = {
+                    if !all_dirty_keys.is_empty() {
+                        // Phase 2: Extract hermite for all dirty chunks (read lock)
+                        let hermite_updates: Vec<_> = {
                             let s = store.read().unwrap();
-                            let density = s.density_fields.get(&key);
-                            let hermite = s.hermite_data.get(&key);
-                            if let (Some(density), Some(hermite)) = (density, hermite) {
-                                let cell_size = density.size - 1;
-                                let dc_verts = solve_dc_vertices(hermite, cell_size);
-                                let mut m = generate_mesh(hermite, &dc_verts, cell_size);
-                                m.smooth(cfg.mesh_smooth_iterations, cfg.mesh_smooth_strength,
-                                         cfg.mesh_boundary_smooth, Some(cell_size));
-                                if cfg.mesh_recalc_normals > 0 { m.recalculate_normals(); }
-                                let b_edges = region_gen::extract_boundary_edges(hermite, cfg.chunk_size);
-                                Some((dc_verts, m, b_edges))
-                            } else { None }
+                            all_dirty_keys.iter().filter_map(|&key| {
+                                s.density_fields.get(&key).map(|d| (key, extract_hermite_data(d)))
+                            }).collect()
                         };
-                        if let Some((dc_verts, mesh, b_edges)) = computed {
-                            {
-                                let mut s = store.write().unwrap();
-                                s.add_seam_data(key, ChunkSeamData {
-                                    dc_vertices: dc_verts,
-                                    world_origin: glam::Vec3::ZERO,
-                                    boundary_edges: b_edges,
-                                });
-                                s.base_meshes.insert(key, mesh.clone());
+
+                        // Phase 3: Store hermite results (brief write lock)
+                        {
+                            let mut s = store.write().unwrap();
+                            for (key, hermite) in hermite_updates {
+                                s.hermite_data.insert(key, hermite);
                             }
-                            let mut converted = convert_mesh_to_ue_scaled(&mesh, cfg.voxel_scale(), world_scale);
-                            crate::convert::bucket_mesh_by_material(&mut converted);
-                            if !converted.indices.is_empty() {
-                                let _ = result_tx.send(WorkerResult::ChunkMesh {
-                                    chunk: key, mesh: converted, generation: 0,
-                                });
+                        }
+
+                        // Phase 4: Remesh non-region dirty chunks
+                        let region_set: HashSet<_> = coords.iter().copied().collect();
+                        for &key in all_dirty_keys.iter().filter(|k| !region_set.contains(k)) {
+                            let computed = {
+                                let s = store.read().unwrap();
+                                let density = s.density_fields.get(&key);
+                                let hermite = s.hermite_data.get(&key);
+                                if let (Some(density), Some(hermite)) = (density, hermite) {
+                                    let cell_size = density.size - 1;
+                                    let dc_verts = solve_dc_vertices(hermite, cell_size);
+                                    let mut m = generate_mesh(hermite, &dc_verts, cell_size);
+                                    m.smooth(cfg.mesh_smooth_iterations, cfg.mesh_smooth_strength,
+                                             cfg.mesh_boundary_smooth, Some(cell_size));
+                                    if cfg.mesh_recalc_normals > 0 { m.recalculate_normals(); }
+                                    let b_edges = region_gen::extract_boundary_edges(hermite, cfg.chunk_size);
+                                    Some((dc_verts, m, b_edges))
+                                } else { None }
+                            };
+                            if let Some((dc_verts, mesh, b_edges)) = computed {
+                                {
+                                    let mut s = store.write().unwrap();
+                                    s.add_seam_data(key, ChunkSeamData {
+                                        dc_vertices: dc_verts,
+                                        world_origin: glam::Vec3::ZERO,
+                                        boundary_edges: b_edges,
+                                    });
+                                    s.base_meshes.insert(key, mesh.clone());
+                                }
+                                let mut converted = convert_mesh_to_ue_scaled(&mesh, cfg.voxel_scale(), world_scale);
+                                crate::convert::bucket_mesh_by_material(&mut converted);
+                                if !converted.indices.is_empty() {
+                                    let _ = result_tx.send(WorkerResult::ChunkMesh {
+                                        chunk: key, mesh: converted, generation: 0,
+                                    });
+                                }
                             }
-                            incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
                         }
                     }
                 }

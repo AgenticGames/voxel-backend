@@ -1660,10 +1660,11 @@ impl ChunkStore {
     }
 
     /// Sync boundary densities between newly generated region chunks and their
-    /// already-loaded cross-region face neighbors. Re-extracts hermite for all
-    /// modified chunks. Returns the list of modified non-region neighbor keys
-    /// that need remeshing.
-    pub fn sync_cross_region_boundaries(
+    /// already-loaded cross-region face neighbors. Only marks chunks dirty when
+    /// voxel values actually change. Returns ALL dirty keys (both region and
+    /// non-region) — caller is responsible for hermite re-extraction and
+    /// filtering to non-region keys for remeshing.
+    pub fn sync_cross_region_densities(
         &mut self,
         region_coords: &[(i32, i32, i32)],
         chunk_size: usize,
@@ -1692,6 +1693,9 @@ impl ChunkStore {
                     (2, if neighbor.2 > cz { gs } else { 0 }, if neighbor.2 > cz { 0 } else { gs })
                 };
 
+                let mut face_a_changed = false;
+                let mut face_b_changed = false;
+
                 for u in 0..=gs {
                     for v in 0..=gs {
                         let (ax, ay, az) = match axis {
@@ -1708,12 +1712,18 @@ impl ChunkStore {
                         let sample_a = self.density_fields[&(cx, cy, cz)].get(ax, ay, az);
                         let sample_b = self.density_fields[&neighbor].get(bx, by, bz);
                         let (d, m) = average_boundary_voxel(sample_a, sample_b);
-                        updates.push(((cx, cy, cz), ax, ay, az, d, m));
-                        updates.push((neighbor, bx, by, bz, d, m));
+                        if sample_a.density != d || sample_a.material != m {
+                            updates.push(((cx, cy, cz), ax, ay, az, d, m));
+                            face_a_changed = true;
+                        }
+                        if sample_b.density != d || sample_b.material != m {
+                            updates.push((neighbor, bx, by, bz, d, m));
+                            face_b_changed = true;
+                        }
                     }
                 }
-                dirty.insert((cx, cy, cz));
-                dirty.insert(neighbor);
+                if face_a_changed { dirty.insert((cx, cy, cz)); }
+                if face_b_changed { dirty.insert(neighbor); }
             }
         }
 
@@ -1730,18 +1740,14 @@ impl ChunkStore {
             }
         }
 
-        // Re-extract hermite for all modified chunks
+        // Recompute metadata for dirty chunks (requires &mut, is cheap)
         for &key in &dirty {
-            let hermite = {
-                let density = self.density_fields.get_mut(&key).unwrap();
+            if let Some(density) = self.density_fields.get_mut(&key) {
                 density.compute_metadata();
-                extract_hermite_data(density)
-            };
-            self.hermite_data.insert(key, hermite);
+            }
         }
 
-        // Return only non-region neighbors that need remeshing
-        dirty.into_iter().filter(|k| !region_set.contains(k)).collect()
+        dirty.into_iter().collect()
     }
 }
 
