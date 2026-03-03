@@ -191,7 +191,11 @@ pub fn place_pools(
 
         let center_x = (min_x + max_x) / 2;
         let center_z = (min_z + max_z) / 2;
-        let floor_y = cluster.min_y;
+        // Use the actual floor Y at the center position, not the cluster minimum.
+        // This prevents pools from being carved at the wrong Y level when a
+        // sloped tunnel produces a cluster spanning several Y levels.
+        let floor_y = find_floor_y_at_center(&cluster.cells, center_x, center_z)
+            .unwrap_or(cluster.min_y);
         let surface_y = floor_y + 1; // pool surface is at the air layer above floor
 
         // Verify headroom: sample multiple points around the center and accept
@@ -227,6 +231,20 @@ pub fn place_pools(
                 cluster.cells.len(), center_x, surface_y, center_z);
             continue;
         }
+
+        // Validate: floor_y should be solid and surface_y should be air at center.
+        // This catches cases where the chosen Y doesn't have a valid floor/air interface.
+        if floor_y < size && surface_y < size {
+            let floor_sample = density.get(center_x, floor_y, center_z);
+            let surface_sample = density.get(center_x, surface_y, center_z);
+            if !floor_sample.material.is_solid() || surface_sample.material.is_solid() {
+                eprintln!("[POOL]   cluster cells={} invalid floor/air at center ({},{},{}) floor_solid={} surface_air={} → skip",
+                    cluster.cells.len(), center_x, floor_y, center_z,
+                    floor_sample.material.is_solid(), !surface_sample.material.is_solid());
+                continue;
+            }
+        }
+
         eprintln!("[POOL]   CARVING pool: center=({},{},{}) radius={} basin_depth={} fluid={:?}",
             center_x, floor_y, center_z, effective_radius, config.basin_depth, fluid_type);
 
@@ -437,9 +455,10 @@ fn cluster_floors(
 
                 if let Some(ys) = floor_map.get(&(nx, nz)) {
                     for &ny in ys {
-                        // Similar Y level: within 2 voxels
+                        // Similar Y level: within 1 voxel (tighter to avoid
+                        // merging floor cells at very different heights)
                         if !visited.contains(&(nx, ny, nz))
-                            && (ny as i32 - cy as i32).unsigned_abs() <= 2
+                            && (ny as i32 - cy as i32).unsigned_abs() <= 1
                         {
                             visited.insert((nx, ny, nz));
                             queue.push_back((nx, ny, nz));
@@ -476,6 +495,46 @@ fn cluster_floors(
     }
 
     clusters
+}
+
+/// Find the floor Y at the pool center position, or nearest floor cell.
+/// Falls back to modal Y (most common Y level) if no nearby cell exists.
+fn find_floor_y_at_center(
+    cells: &[(usize, usize, usize)],
+    cx: usize,
+    cz: usize,
+) -> Option<usize> {
+    // 1. Exact match at (cx, cz)
+    for &(x, y, z) in cells {
+        if x == cx && z == cz {
+            return Some(y);
+        }
+    }
+
+    // 2. Nearest cell within radius 2 on XZ plane
+    let mut best_dist = u32::MAX;
+    let mut best_y = None;
+    for &(x, y, z) in cells {
+        let dx = (x as i32 - cx as i32).unsigned_abs();
+        let dz = (z as i32 - cz as i32).unsigned_abs();
+        if dx <= 2 && dz <= 2 {
+            let dist = dx * dx + dz * dz;
+            if dist < best_dist {
+                best_dist = dist;
+                best_y = Some(y);
+            }
+        }
+    }
+    if best_y.is_some() {
+        return best_y;
+    }
+
+    // 3. Modal Y (most common Y level in the cluster)
+    let mut y_counts: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    for &(_, y, _) in cells {
+        *y_counts.entry(y).or_insert(0) += 1;
+    }
+    y_counts.into_iter().max_by_key(|&(_, count)| count).map(|(y, _)| y)
 }
 
 /// Find the material of a nearby solid voxel (for rim reinforcement).
@@ -757,5 +816,104 @@ mod tests {
             total_floors,
             chunks_with_caves
         );
+    }
+
+    #[test]
+    fn test_pool_floor_y_matches_center() {
+        // Create a density field with a sloped floor: Y=5 at x<8, Y=10 at x>=8.
+        // The cluster center will be at x=8 where floor is Y=10.
+        // The bug was using min_y=5 which would place the pool inside the wall.
+        let config = PoolConfig {
+            pool_chance: 1.0,
+            placement_threshold: -1.0,
+            min_area: 2,
+            water_pct: 1.0,
+            lava_pct: 0.0,
+            empty_pct: 0.0,
+            basin_depth: 2,
+            max_radius: 3,
+            min_air_above: 1,
+            ..Default::default()
+        };
+
+        let size = 17;
+        let mut density = DensityField::new(size);
+
+        // Fill everything solid first
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..size {
+                    let sample = density.get_mut(x, y, z);
+                    sample.density = 1.0;
+                    sample.material = Material::Limestone;
+                }
+            }
+        }
+
+        // Carve a tunnel with a sloped floor:
+        // At x < 8, floor is at Y=5 (air from Y=6..12)
+        // At x >= 8, floor is at Y=10 (air from Y=11..12)
+        // The slope is within ±1 Y per step so BFS will still connect them
+        let floor_heights: Vec<(usize, usize)> = (3usize..14).map(|x| {
+            let floor_y = if x < 8 { 5 + (x.saturating_sub(3).min(5)) } else { 10 };
+            (x, floor_y)
+        }).collect();
+
+        for &(x, floor_y) in &floor_heights {
+            for z in 5..12 {
+                for y in (floor_y + 1)..13 {
+                    let sample = density.get_mut(x, y, z);
+                    sample.density = -1.0;
+                    sample.material = Material::Air;
+                }
+            }
+        }
+
+        let (descriptors, _seeds) = place_pools(&mut density, &config, Vec3::ZERO, 42, 100);
+
+        // If any pool is placed, its floor_y (in world space) should NOT be at Y=5
+        // (the old min_y). It should be at the actual floor level near the center.
+        for d in &descriptors {
+            let pool_floor_y = d.surface_y - 1.0; // surface_y = floor_y + 1
+            let pool_center_x = d.world_x as usize;
+
+            // Look up what the actual floor Y is at the pool center
+            let expected_floor_y = floor_heights.iter()
+                .find(|&&(x, _)| x == pool_center_x)
+                .map(|&(_, fy)| fy as f32);
+
+            if let Some(expected) = expected_floor_y {
+                let diff = (pool_floor_y - expected).abs();
+                assert!(
+                    diff <= 1.0,
+                    "Pool at x={} has floor_y={} but actual floor is at y={}. \
+                     Pool placed at wrong Y level (off by {} voxels).",
+                    pool_center_x, pool_floor_y, expected, diff
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_find_floor_y_at_center_exact() {
+        let cells = vec![(5, 10, 5), (6, 10, 5), (7, 8, 5)];
+        // Exact match at (5, 5)
+        assert_eq!(find_floor_y_at_center(&cells, 5, 5), Some(10));
+        // Exact match at (7, 5) — different Y
+        assert_eq!(find_floor_y_at_center(&cells, 7, 5), Some(8));
+    }
+
+    #[test]
+    fn test_find_floor_y_at_center_nearest() {
+        let cells = vec![(5, 10, 5), (6, 10, 5)];
+        // No exact match at (5, 6), but (5, 5) is within radius 2
+        assert_eq!(find_floor_y_at_center(&cells, 5, 6), Some(10));
+    }
+
+    #[test]
+    fn test_find_floor_y_at_center_modal() {
+        // No cells near (0, 0), should return modal Y (10 appears twice)
+        let cells = vec![(10, 10, 10), (11, 10, 10), (12, 8, 10)];
+        assert_eq!(find_floor_y_at_center(&cells, 0, 0), Some(10));
     }
 }
