@@ -234,22 +234,43 @@ pub fn generate_density_field(config: &GenerationConfig, world_origin: glam::Vec
                 let mut geode_shell = false;
                 let geode_cfg = &config.ore.geode;
                 if wy >= geode_cfg.depth_min && wy <= geode_cfg.depth_max {
-                    let gf = geode_cfg.frequency;
-                    let geode_val =
-                        mat_noise.geode_noise.sample(wx * gf, wy * gf, wz * gf);
-                    let geode_norm = geode_val * 0.5 + 0.5;
+                    // Volcanic host: geodes only in basalt/granite
+                    let geode_host_ok = if config.ore.geode_volcanic_host {
+                        let host = host_rock_for_depth(wy, &config.ore.host_rock);
+                        host == Material::Basalt || host == Material::Granite
+                    } else {
+                        true
+                    };
+                    if geode_host_ok {
+                        let gf = geode_cfg.frequency;
+                        let geode_val =
+                            mat_noise.geode_noise.sample(wx * gf, wy * gf, wz * gf);
+                        let geode_norm = geode_val * 0.5 + 0.5;
 
-                    if geode_norm > geode_cfg.center_threshold {
-                        let excess = geode_norm - geode_cfg.center_threshold;
-                        if excess < geode_cfg.shell_thickness {
-                            // Crystal/Amethyst shell — force solid
-                            geode_shell = true;
-                            if density <= 0.0 {
-                                density = 0.5;
+                        if geode_norm > geode_cfg.center_threshold {
+                            let excess = geode_norm - geode_cfg.center_threshold;
+                            // Depth scaling: thicker shells deeper
+                            let effective_shell = if config.ore.geode_depth_scaling {
+                                let range = geode_cfg.depth_max - geode_cfg.depth_min;
+                                let depth_frac = if range > 0.0 {
+                                    (geode_cfg.depth_max - wy) / range
+                                } else {
+                                    0.0
+                                };
+                                geode_cfg.shell_thickness * (1.0 + depth_frac * 0.5)
+                            } else {
+                                geode_cfg.shell_thickness
+                            };
+                            if excess < effective_shell {
+                                // Crystal/Amethyst shell — force solid
+                                geode_shell = true;
+                                if density <= 0.0 {
+                                    density = 0.5;
+                                }
+                            } else {
+                                // Hollow interior
+                                density = geode_cfg.hollow_factor;
                             }
-                        } else {
-                            // Hollow interior
-                            density = geode_cfg.hollow_factor;
                         }
                     }
                 }
@@ -338,12 +359,28 @@ fn assign_material(
         let pf = kimb.pipe_frequency_2d;
         let pipe_val = noise.pipe_noise.sample(wwx * pf, 0.0, wwz * pf);
         let pipe_norm = pipe_val * 0.5 + 0.5;
-        if ore_threshold_check(pipe_norm, kimb.pipe_threshold, falloff, wx, wy, wz) {
+        // Carrot taper: pipes narrow with depth
+        let mut pipe_thresh = kimb.pipe_threshold;
+        if ore.kimberlite_carrot_taper {
+            let range = kimb.depth_max - kimb.depth_min;
+            if range > 0.0 {
+                pipe_thresh += ((kimb.depth_max - wy) / range) * 0.03;
+            }
+        }
+        if ore_threshold_check(pipe_norm, pipe_thresh, falloff, wx, wy, wz) {
             // Inside kimberlite pipe — check for diamond
             let df = kimb.diamond_frequency;
             let diamond_val = noise.diamond_noise.sample(wwx * df, wwy * df, wwz * df);
             let diamond_norm = diamond_val * 0.5 + 0.5;
-            if ore_threshold_check(diamond_norm, kimb.diamond_threshold, falloff, wx, wy, wz) {
+            // Depth grading: more diamonds deeper
+            let mut diamond_thresh = kimb.diamond_threshold;
+            if ore.diamond_depth_grade {
+                let range = kimb.depth_max - kimb.depth_min;
+                if range > 0.0 {
+                    diamond_thresh -= ((kimb.depth_max - wy) / range) * 0.08;
+                }
+            }
+            if ore_threshold_check(diamond_norm, diamond_thresh, falloff, wx, wy, wz) {
                 return Material::Diamond;
             }
             return Material::Kimberlite;
@@ -354,15 +391,21 @@ fn assign_material(
     // RidgedMulti produces sharp ridge-like patterns perfect for vein structures.
     if wy >= ore.quartz.depth_min && wy <= ore.quartz.depth_max {
         let rf = ore.quartz.frequency;
-        let reef_val = noise.reef_noise.sample(wwx * rf, wwy * rf, wwz * rf);
+        // Planar veins: compress Z-axis for sheet-like geometry
+        let reef_z_scale = if ore.quartz_planar_veins { 2.0 } else { 1.0 };
+        let reef_val = noise.reef_noise.sample(wwx * rf, wwy * rf, wwz * rf * reef_z_scale);
         let reef_norm = reef_val * 0.5 + 0.5;
         if ore_threshold_check(reef_norm, ore.quartz.threshold, falloff, wx, wy, wz) {
             // Inside quartz reef — gold at higher threshold
-            if wy >= ore.gold.depth_min
-                && wy <= ore.gold.depth_max
-                && ore_threshold_check(reef_norm, ore.gold.threshold, falloff, wx, wy, wz)
-            {
-                return Material::Gold;
+            if wy >= ore.gold.depth_min && wy <= ore.gold.depth_max {
+                // Bonanza zones: gold concentrates in richest vein cores
+                let mut gold_thresh = ore.gold.threshold;
+                if ore.gold_bonanza {
+                    gold_thresh -= (reef_norm - ore.quartz.threshold).max(0.0) * 0.3;
+                }
+                if ore_threshold_check(reef_norm, gold_thresh, falloff, wx, wy, wz) {
+                    return Material::Gold;
+                }
             }
             return Material::Quartz;
         }
@@ -371,7 +414,14 @@ fn assign_material(
     // ── 3. Massive sulfide blobs (with tin pockets) ──
     // Low frequency for large irregular deposits.
     let sulf = &ore.sulfide;
-    if wy >= sulf.depth_min && wy <= sulf.depth_max {
+    let sulf_range = sulf.depth_max - sulf.depth_min;
+    // Gossan cap: shrink effective range from top by 15%
+    let sulf_depth_max_eff = if ore.sulfide_gossan_cap && sulf_range > 0.0 {
+        sulf.depth_max - sulf_range * 0.15
+    } else {
+        sulf.depth_max
+    };
+    if wy >= sulf.depth_min && wy <= sulf_depth_max_eff {
         let sf = sulf.frequency;
         let sulfide_val = noise.sulfide_noise.sample(wwx * sf, wwy * sf, wwz * sf);
         let sulfide_norm = sulfide_val * 0.5 + 0.5;
@@ -381,6 +431,14 @@ fn assign_material(
             }
             return Material::Sulfide;
         }
+        // Disseminated halo: scattered sulfide around main deposits
+        if ore.sulfide_disseminated {
+            let halo_val = noise.sulfide_noise.sample(wwx * sf * 1.5, wwy * sf * 1.5, wwz * sf * 1.5);
+            let halo_norm = halo_val * 0.5 + 0.5;
+            if ore_threshold_check(halo_norm, sulf.threshold - 0.06, falloff, wx, wy, wz) {
+                return Material::Sulfide;
+            }
+        }
     }
 
     // ── 4. Dendritic copper (shallow, branching tendrils) ──
@@ -389,7 +447,23 @@ fn assign_material(
         let cf = ore.copper.frequency;
         let copper_val = noise.copper_ridged.sample(wwx * cf, wwy * cf, wwz * cf);
         let copper_norm = copper_val * 0.5 + 0.5;
-        if ore_threshold_check(copper_norm, ore.copper.threshold, falloff, wx, wy, wz) {
+        let mut copper_thresh = ore.copper.threshold;
+        // Supergene enrichment: richer at shallower depths
+        if ore.copper_supergene {
+            let range = ore.copper.depth_max - ore.copper.depth_min;
+            if range > 0.0 {
+                let depth_frac = (wy - ore.copper.depth_min) / range;
+                copper_thresh -= depth_frac * 0.05;
+            }
+        }
+        // Porphyry contact: concentrates near granite
+        if ore.copper_granite_contact {
+            let host = host_rock_for_depth(wy, &ore.host_rock);
+            if host == Material::Granite {
+                copper_thresh -= 0.04;
+            }
+        }
+        if ore_threshold_check(copper_norm, copper_thresh, falloff, wx, wy, wz) {
             return Material::Copper;
         }
     }
@@ -399,7 +473,16 @@ fn assign_material(
         let mf = ore.malachite.frequency;
         let mal_val = noise.malachite_noise.sample(wwx * mf, wwy * mf, wwz * mf);
         let mal_norm = mal_val * 0.5 + 0.5;
-        if ore_threshold_check(mal_norm, ore.malachite.threshold, falloff, wx, wy, wz) {
+        // Oxidation front: denser near top of range
+        let mut mal_thresh = ore.malachite.threshold;
+        if ore.malachite_depth_bias {
+            let range = ore.malachite.depth_max - ore.malachite.depth_min;
+            if range > 0.0 {
+                let depth_frac = (wy - ore.malachite.depth_min) / range;
+                mal_thresh -= depth_frac * 0.04;
+            }
+        }
+        if ore_threshold_check(mal_norm, mal_thresh, falloff, wx, wy, wz) {
             return Material::Malachite;
         }
     }
@@ -411,7 +494,22 @@ fn assign_material(
         let pf = ore.pyrite.frequency;
         let pyrite_val = noise.pyrite_noise.sample(wwx * pf, wwy * pf, wwz * pf);
         let pyrite_norm = pyrite_val * 0.5 + 0.5;
-        if ore_threshold_check(pyrite_norm, ore.pyrite.threshold, falloff, wx, wy, wz) {
+        // Ore association: clusters near sulfide/copper deposits
+        let mut pyrite_thresh = ore.pyrite.threshold;
+        if ore.pyrite_ore_halo {
+            let sf = ore.sulfide.frequency;
+            let sulfide_val = noise.sulfide_noise.sample(wwx * sf, wwy * sf, wwz * sf);
+            let sulfide_norm = sulfide_val * 0.5 + 0.5;
+            let cf = ore.copper.frequency;
+            let copper_val = noise.copper_ridged.sample(wwx * cf, wwy * cf, wwz * cf);
+            let copper_norm = copper_val * 0.5 + 0.5;
+            if (sulfide_norm - ore.sulfide.threshold).abs() < 0.1
+                || (copper_norm - ore.copper.threshold).abs() < 0.1
+            {
+                pyrite_thresh -= 0.06;
+            }
+        }
+        if ore_threshold_check(pyrite_norm, pyrite_thresh, falloff, wx, wy, wz) {
             return Material::Pyrite;
         }
     }
@@ -422,13 +520,40 @@ fn assign_material(
     // but warped coordinates for the noise perturbation.
     let iron = &ore.iron;
     if wy >= iron.depth_min && wy <= iron.depth_max {
-        let band = (wy * iron.band_frequency).sin();
-        let nf = iron.noise_frequency;
-        let perturbation =
-            noise.iron_noise.sample(wwx * nf, wwy * nf, wwz * nf) * iron.noise_perturbation;
-        let iron_val = (band + perturbation) * 0.5 + 0.5;
-        if ore_threshold_check(iron_val, iron.threshold, falloff, wx, wy, wz) {
-            return Material::Iron;
+        // Sedimentary host: skip iron if not in sandstone/limestone
+        if ore.iron_sedimentary_only {
+            let host = host_rock_for_depth(wy, &ore.host_rock);
+            if host != Material::Sandstone && host != Material::Limestone {
+                // Fall through to host rock
+            } else {
+                let band = (wy * iron.band_frequency).sin();
+                let nf = iron.noise_frequency;
+                let perturbation =
+                    noise.iron_noise.sample(wwx * nf, wwy * nf, wwz * nf) * iron.noise_perturbation;
+                let iron_val = (band + perturbation) * 0.5 + 0.5;
+                // Surface thinning: raise threshold near surface
+                let mut iron_thresh = iron.threshold;
+                if ore.iron_depth_fade {
+                    iron_thresh += (wy - 100.0).max(0.0) * 0.008;
+                }
+                if ore_threshold_check(iron_val, iron_thresh, falloff, wx, wy, wz) {
+                    return Material::Iron;
+                }
+            }
+        } else {
+            let band = (wy * iron.band_frequency).sin();
+            let nf = iron.noise_frequency;
+            let perturbation =
+                noise.iron_noise.sample(wwx * nf, wwy * nf, wwz * nf) * iron.noise_perturbation;
+            let iron_val = (band + perturbation) * 0.5 + 0.5;
+            // Surface thinning: raise threshold near surface
+            let mut iron_thresh = iron.threshold;
+            if ore.iron_depth_fade {
+                iron_thresh += (wy - 100.0).max(0.0) * 0.008;
+            }
+            if ore_threshold_check(iron_val, iron_thresh, falloff, wx, wy, wz) {
+                return Material::Iron;
+            }
         }
     }
 

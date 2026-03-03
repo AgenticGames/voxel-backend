@@ -396,6 +396,21 @@ fn serve_generate(
     let mut collapse_stress_mult: Option<f32> = None;
     let mut collapse_max_cascade: Option<u32> = None;
     let mut collapse_rubble: Option<f32> = None;
+    // Geological realism toggles
+    let mut iron_sedimentary_only: Option<bool> = None;
+    let mut iron_depth_fade: Option<bool> = None;
+    let mut copper_supergene: Option<bool> = None;
+    let mut copper_granite_contact: Option<bool> = None;
+    let mut malachite_depth_bias: Option<bool> = None;
+    let mut kimberlite_carrot_taper: Option<bool> = None;
+    let mut diamond_depth_grade: Option<bool> = None;
+    let mut sulfide_gossan_cap: Option<bool> = None;
+    let mut sulfide_disseminated: Option<bool> = None;
+    let mut pyrite_ore_halo: Option<bool> = None;
+    let mut quartz_planar_veins: Option<bool> = None;
+    let mut gold_bonanza: Option<bool> = None;
+    let mut geode_volcanic_host: Option<bool> = None;
+    let mut geode_depth_scaling: Option<bool> = None;
 
     for pair in body.split('&') {
         let mut kv = pair.splitn(2, '=');
@@ -525,6 +540,21 @@ fn serve_generate(
             "collapse_stress_mult" => { collapse_stress_mult = val.parse().ok(); }
             "collapse_max_cascade" => { collapse_max_cascade = val.parse().ok(); }
             "collapse_rubble" => { collapse_rubble = val.parse().ok(); }
+            // Geological realism toggles
+            "iron_sedimentary_only" => { iron_sedimentary_only = Some(val == "1" || val == "true"); }
+            "iron_depth_fade" => { iron_depth_fade = Some(val == "1" || val == "true"); }
+            "copper_supergene" => { copper_supergene = Some(val == "1" || val == "true"); }
+            "copper_granite_contact" => { copper_granite_contact = Some(val == "1" || val == "true"); }
+            "malachite_depth_bias" => { malachite_depth_bias = Some(val == "1" || val == "true"); }
+            "kimberlite_carrot_taper" => { kimberlite_carrot_taper = Some(val == "1" || val == "true"); }
+            "diamond_depth_grade" => { diamond_depth_grade = Some(val == "1" || val == "true"); }
+            "sulfide_gossan_cap" => { sulfide_gossan_cap = Some(val == "1" || val == "true"); }
+            "sulfide_disseminated" => { sulfide_disseminated = Some(val == "1" || val == "true"); }
+            "pyrite_ore_halo" => { pyrite_ore_halo = Some(val == "1" || val == "true"); }
+            "quartz_planar_veins" => { quartz_planar_veins = Some(val == "1" || val == "true"); }
+            "gold_bonanza" => { gold_bonanza = Some(val == "1" || val == "true"); }
+            "geode_volcanic_host" => { geode_volcanic_host = Some(val == "1" || val == "true"); }
+            "geode_depth_scaling" => { geode_depth_scaling = Some(val == "1" || val == "true"); }
             _ => {}
         }
     }
@@ -588,6 +618,21 @@ fn serve_generate(
     if let Some(v) = geode_center_threshold { config.ore.geode.center_threshold = v; }
     if let Some(v) = geode_shell_thickness { config.ore.geode.shell_thickness = v; }
     if let Some(v) = geode_hollow_factor { config.ore.geode.hollow_factor = v; }
+    // Geological realism toggles
+    if let Some(v) = iron_sedimentary_only { config.ore.iron_sedimentary_only = v; }
+    if let Some(v) = iron_depth_fade { config.ore.iron_depth_fade = v; }
+    if let Some(v) = copper_supergene { config.ore.copper_supergene = v; }
+    if let Some(v) = copper_granite_contact { config.ore.copper_granite_contact = v; }
+    if let Some(v) = malachite_depth_bias { config.ore.malachite_depth_bias = v; }
+    if let Some(v) = kimberlite_carrot_taper { config.ore.kimberlite_carrot_taper = v; }
+    if let Some(v) = diamond_depth_grade { config.ore.diamond_depth_grade = v; }
+    if let Some(v) = sulfide_gossan_cap { config.ore.sulfide_gossan_cap = v; }
+    if let Some(v) = sulfide_disseminated { config.ore.sulfide_disseminated = v; }
+    if let Some(v) = pyrite_ore_halo { config.ore.pyrite_ore_halo = v; }
+    if let Some(v) = quartz_planar_veins { config.ore.quartz_planar_veins = v; }
+    if let Some(v) = gold_bonanza { config.ore.gold_bonanza = v; }
+    if let Some(v) = geode_volcanic_host { config.ore.geode_volcanic_host = v; }
+    if let Some(v) = geode_depth_scaling { config.ore.geode_depth_scaling = v; }
     // Pool settings
     if let Some(v) = pools_enabled { config.pools.enabled = v; }
     if let Some(v) = pool_placement_freq { config.pools.placement_frequency = v; }

@@ -256,6 +256,21 @@ pub struct FfiEngineConfig {
     pub formation_shield_radius_max: f32,
     pub formation_shield_max_tilt: f32,
     pub formation_shield_stalactite_chance: f32,
+    // ── Geological Realism Toggles (14 fields, u8 booleans) ──
+    pub ore_iron_sedimentary_only: u8,
+    pub ore_iron_depth_fade: u8,
+    pub ore_copper_supergene: u8,
+    pub ore_copper_granite_contact: u8,
+    pub ore_malachite_depth_bias: u8,
+    pub ore_kimberlite_carrot_taper: u8,
+    pub ore_diamond_depth_grade: u8,
+    pub ore_sulfide_gossan_cap: u8,
+    pub ore_sulfide_disseminated: u8,
+    pub ore_pyrite_ore_halo: u8,
+    pub ore_quartz_planar_veins: u8,
+    pub ore_gold_bonanza: u8,
+    pub ore_geode_volcanic_host: u8,
+    pub ore_geode_depth_scaling: u8,
 }
 
 #[repr(C)]

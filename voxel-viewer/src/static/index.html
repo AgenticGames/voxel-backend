@@ -106,6 +106,14 @@
                                 <label title="Higher = noisier band edges">Perturbation <input type="number" id="gen-iron-perturbation" step="0.01" placeholder="0.15"></label>
                                 <label title="Higher = rarer deposits, Lower = more common">Threshold <input type="number" id="gen-iron-threshold" step="0.01" placeholder="0.7"></label>
                             </div>
+                            <div class="ore-realism-toggles">
+                                <label class="toggle-label" title="Iron bands only form in sandstone/limestone, skipping granite/basalt/slate — matching real BIF geology">
+                                    <input type="checkbox" id="gen-iron-sedimentary-only"> Sedimentary Host
+                                </label>
+                                <label class="toggle-label" title="Iron bands thin and fade near the surface — real BIF is deep-seated">
+                                    <input type="checkbox" id="gen-iron-depth-fade"> Surface Thinning
+                                </label>
+                            </div>
                         </div>
                         <div class="ore-subsection">
                             <span class="ore-label" style="color:#B87333;">Copper</span> <em class="ore-hint">dendritic branching tendrils</em>
@@ -113,12 +121,25 @@
                                 <label title="Higher = smaller deposit features, Lower = larger blobs">Frequency <input type="number" id="gen-copper-freq" step="0.01" placeholder="0.18"></label>
                                 <label title="Higher = rarer deposits, Lower = more common">Threshold <input type="number" id="gen-copper-threshold" step="0.01" placeholder="0.72"></label>
                             </div>
+                            <div class="ore-realism-toggles">
+                                <label class="toggle-label" title="Copper is richer at shallower depths, modeling the supergene zone above the water table">
+                                    <input type="checkbox" id="gen-copper-supergene"> Supergene Enrichment
+                                </label>
+                                <label class="toggle-label" title="Copper concentrates near granite, modeling porphyry copper deposits">
+                                    <input type="checkbox" id="gen-copper-granite-contact"> Porphyry Contact
+                                </label>
+                            </div>
                         </div>
                         <div class="ore-subsection">
                             <span class="ore-label" style="color:#0BDA51;">Malachite</span> <em class="ore-hint">deep green indicator zones</em>
                             <div class="settings-grid">
                                 <label title="Higher = smaller deposit features, Lower = larger blobs">Frequency <input type="number" id="gen-malachite-freq" step="0.01" placeholder="0.10"></label>
                                 <label title="Higher = rarer deposits, Lower = more common">Threshold <input type="number" id="gen-malachite-threshold" step="0.01" placeholder="0.55"></label>
+                            </div>
+                            <div class="ore-realism-toggles">
+                                <label class="toggle-label" title="Malachite clusters more densely near the top of its depth range, closest to the copper oxidation zone">
+                                    <input type="checkbox" id="gen-malachite-depth-bias"> Oxidation Front
+                                </label>
                             </div>
                         </div>
                         <div class="ore-subsection">
@@ -129,6 +150,14 @@
                                 <label title="Higher = smaller deposit features, Lower = larger blobs">Diamond Frequency <input type="number" id="gen-diamond-freq" step="0.01" placeholder="0.2"></label>
                                 <label title="Higher = rarer deposits, Lower = more common">Diamond Threshold <input type="number" id="gen-diamond-threshold" step="0.01" placeholder="0.75"></label>
                             </div>
+                            <div class="ore-realism-toggles">
+                                <label class="toggle-label" title="Pipes narrow with depth, modeling the classic carrot-shaped kimberlite geometry">
+                                    <input type="checkbox" id="gen-kimberlite-carrot-taper"> Carrot Taper
+                                </label>
+                                <label class="toggle-label" title="Diamond concentration increases with depth — higher pressure produces more diamonds">
+                                    <input type="checkbox" id="gen-diamond-depth-grade"> Depth Grading
+                                </label>
+                            </div>
                         </div>
                         <div class="ore-subsection">
                             <span class="ore-label" style="color:#8B8000;">Sulfide Blob</span> <em class="ore-hint">massive irregular deposits</em>
@@ -137,12 +166,25 @@
                                 <label title="Higher = rarer deposits, Lower = more common">Threshold <input type="number" id="gen-sulfide-threshold" step="0.01" placeholder="0.55"></label>
                                 <label title="Higher = rarer deposits, Lower = more common">Tin Threshold <input type="number" id="gen-tin-threshold" step="0.01" placeholder="0.72"></label>
                             </div>
+                            <div class="ore-realism-toggles">
+                                <label class="toggle-label" title="Sulfide absent near surface — real massive sulfides have an oxidized leached cap">
+                                    <input type="checkbox" id="gen-sulfide-gossan-cap"> Gossan Cap
+                                </label>
+                                <label class="toggle-label" title="Scattered sulfide voxels surround main deposits — the low-grade halo around massive sulfide bodies">
+                                    <input type="checkbox" id="gen-sulfide-disseminated"> Disseminated Halo
+                                </label>
+                            </div>
                         </div>
                         <div class="ore-subsection">
                             <span class="ore-label" style="color:#CBA135;">Pyrite</span> <em class="ore-hint">indicator halo near ores</em>
                             <div class="settings-grid">
                                 <label title="Higher = smaller deposit features, Lower = larger blobs">Frequency <input type="number" id="gen-pyrite-freq" step="0.01" placeholder="0.18"></label>
                                 <label title="Higher = rarer deposits, Lower = more common">Threshold <input type="number" id="gen-pyrite-threshold" step="0.01" placeholder="0.60"></label>
+                            </div>
+                            <div class="ore-realism-toggles">
+                                <label class="toggle-label" title="Pyrite clusters near sulfide and copper deposits, acting as a geological pathfinder mineral">
+                                    <input type="checkbox" id="gen-pyrite-ore-halo"> Ore Association
+                                </label>
                             </div>
                         </div>
                         <div class="ore-subsection">
@@ -151,11 +193,21 @@
                                 <label title="Higher = smaller deposit features, Lower = larger blobs">Frequency <input type="number" id="gen-quartz-freq" step="0.01" placeholder="0.08"></label>
                                 <label title="Higher = rarer deposits, Lower = more common">Threshold <input type="number" id="gen-quartz-threshold" step="0.01" placeholder="0.65"></label>
                             </div>
+                            <div class="ore-realism-toggles">
+                                <label class="toggle-label" title="Quartz veins become sheet-like, modeling hydrothermal veins along fault planes">
+                                    <input type="checkbox" id="gen-quartz-planar-veins"> Planar Veins
+                                </label>
+                            </div>
                         </div>
                         <div class="ore-subsection">
                             <span class="ore-label" style="color:#FFD700;">Gold</span> <em class="ore-hint">within quartz reef</em>
                             <div class="settings-grid">
                                 <label title="Higher = rarer deposits, Lower = more common">Threshold <input type="number" id="gen-gold-threshold" step="0.01" placeholder="0.82"></label>
+                            </div>
+                            <div class="ore-realism-toggles">
+                                <label class="toggle-label" title="Gold concentrates in the richest vein cores — ore-shoot enrichment in quartz-gold systems">
+                                    <input type="checkbox" id="gen-gold-bonanza"> Bonanza Zones
+                                </label>
                             </div>
                         </div>
                         <div class="ore-subsection">
@@ -165,6 +217,14 @@
                                 <label title="Higher = rarer deposits, Lower = more common">Center Threshold <input type="number" id="gen-geode-center-threshold" step="0.01" placeholder="0.88"></label>
                                 <label title="Higher = thicker geode shell walls">Shell Thickness <input type="number" id="gen-geode-shell-thickness" step="0.01" placeholder="0.05"></label>
                                 <label title="More negative = more hollow interior">Hollow Factor <input type="number" id="gen-geode-hollow-factor" step="0.1" placeholder="-0.3"></label>
+                            </div>
+                            <div class="ore-realism-toggles">
+                                <label class="toggle-label" title="Geodes only form in basalt and granite — real geodes grow in vesicular lava cavities">
+                                    <input type="checkbox" id="gen-geode-volcanic-host"> Volcanic Host
+                                </label>
+                                <label class="toggle-label" title="Deeper geodes grow thicker crystal shells — more time and mineral-rich water at depth">
+                                    <input type="checkbox" id="gen-geode-depth-scaling"> Depth Scaling
+                                </label>
                             </div>
                         </div>
                     </details>

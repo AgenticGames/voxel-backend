@@ -251,6 +251,35 @@ pub struct OreConfig {
     pub ore_edge_falloff: f64,
     /// Multi-freq detail blend. 0=off, 0.15-0.3=natural
     pub ore_detail_weight: f64,
+    // ── Geological realism toggles (all default false) ──
+    /// Iron bands only in sandstone/limestone (real BIF geology)
+    pub iron_sedimentary_only: bool,
+    /// Iron bands thin near surface (real BIF is deep-seated)
+    pub iron_depth_fade: bool,
+    /// Copper richer at shallow depths (supergene enrichment)
+    pub copper_supergene: bool,
+    /// Copper concentrates near granite (porphyry deposits)
+    pub copper_granite_contact: bool,
+    /// Malachite denser near top of range (oxidation front)
+    pub malachite_depth_bias: bool,
+    /// Kimberlite pipes narrow with depth (carrot shape)
+    pub kimberlite_carrot_taper: bool,
+    /// Diamond concentration increases with depth
+    pub diamond_depth_grade: bool,
+    /// Sulfide absent near surface (gossan cap)
+    pub sulfide_gossan_cap: bool,
+    /// Scattered sulfide halo around main deposits
+    pub sulfide_disseminated: bool,
+    /// Pyrite clusters near sulfide/copper deposits
+    pub pyrite_ore_halo: bool,
+    /// Quartz veins become sheet-like (planar fault veins)
+    pub quartz_planar_veins: bool,
+    /// Gold concentrates in richest vein cores (bonanza zones)
+    pub gold_bonanza: bool,
+    /// Geodes only in basalt/granite (vesicular lava cavities)
+    pub geode_volcanic_host: bool,
+    /// Deeper geodes grow thicker crystal shells
+    pub geode_depth_scaling: bool,
 }
 
 impl Default for HostRockConfig {
@@ -537,6 +566,20 @@ impl Default for OreConfig {
             ore_warp_frequency: 0.02,
             ore_edge_falloff: 0.0,
             ore_detail_weight: 0.0,
+            iron_sedimentary_only: false,
+            iron_depth_fade: false,
+            copper_supergene: false,
+            copper_granite_contact: false,
+            malachite_depth_bias: false,
+            kimberlite_carrot_taper: false,
+            diamond_depth_grade: false,
+            sulfide_gossan_cap: false,
+            sulfide_disseminated: false,
+            pyrite_ore_halo: false,
+            quartz_planar_veins: false,
+            gold_bonanza: false,
+            geode_volcanic_host: false,
+            geode_depth_scaling: false,
         }
     }
 }

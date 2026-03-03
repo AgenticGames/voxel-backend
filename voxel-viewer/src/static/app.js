@@ -103,6 +103,16 @@
         "gen-collapse-slate", "gen-collapse-granite", "gen-collapse-limestone",
         "gen-collapse-copper", "gen-collapse-iron", "gen-collapse-steel", "gen-collapse-crystal",
         "gen-collapse-stress-mult", "gen-collapse-max-cascade", "gen-collapse-rubble",
+        // Geological realism toggles
+        "gen-iron-sedimentary-only", "gen-iron-depth-fade",
+        "gen-copper-supergene", "gen-copper-granite-contact",
+        "gen-malachite-depth-bias",
+        "gen-kimberlite-carrot-taper", "gen-diamond-depth-grade",
+        "gen-sulfide-gossan-cap", "gen-sulfide-disseminated",
+        "gen-pyrite-ore-halo",
+        "gen-quartz-planar-veins",
+        "gen-gold-bonanza",
+        "gen-geode-volcanic-host", "gen-geode-depth-scaling",
     ];
     var activePresetSlot = 0;
 
@@ -121,7 +131,12 @@
         var settings = {};
         for (var i = 0; i < PRESET_SETTING_IDS.length; i++) {
             var el = document.getElementById(PRESET_SETTING_IDS[i]);
-            if (el) settings[PRESET_SETTING_IDS[i]] = el.value;
+            if (!el) continue;
+            if (el.type === "checkbox") {
+                settings[PRESET_SETTING_IDS[i]] = el.checked;
+            } else {
+                settings[PRESET_SETTING_IDS[i]] = el.value;
+            }
         }
         return settings;
     }
@@ -129,14 +144,24 @@
     function applySettings(settings) {
         for (var id in settings) {
             var el = document.getElementById(id);
-            if (el) el.value = settings[id];
+            if (!el) continue;
+            if (el.type === "checkbox") {
+                el.checked = (settings[id] === true || settings[id] === "true");
+            } else {
+                el.value = settings[id];
+            }
         }
     }
 
     function clearAllSettings() {
         for (var i = 0; i < PRESET_SETTING_IDS.length; i++) {
             var el = document.getElementById(PRESET_SETTING_IDS[i]);
-            if (el) el.value = "";
+            if (!el) continue;
+            if (el.type === "checkbox") {
+                el.checked = false;
+            } else {
+                el.value = "";
+            }
         }
     }
 
@@ -1053,6 +1078,13 @@
         }
     }
 
+    function appendCheckbox(parts, key, elementId) {
+        var el = document.getElementById(elementId);
+        if (el && el.checked) {
+            parts.push(key + "=1");
+        }
+    }
+
     genBtn.addEventListener("click", async function () {
         var seed = document.getElementById("gen-seed").value || "1";
         var cx = document.getElementById("gen-x").value || "3";
@@ -1204,6 +1236,21 @@
             appendParam(parts, "collapse_stress_mult", "gen-collapse-stress-mult");
             appendParam(parts, "collapse_max_cascade", "gen-collapse-max-cascade");
             appendParam(parts, "collapse_rubble", "gen-collapse-rubble");
+            // Geological realism toggles
+            appendCheckbox(parts, "iron_sedimentary_only", "gen-iron-sedimentary-only");
+            appendCheckbox(parts, "iron_depth_fade", "gen-iron-depth-fade");
+            appendCheckbox(parts, "copper_supergene", "gen-copper-supergene");
+            appendCheckbox(parts, "copper_granite_contact", "gen-copper-granite-contact");
+            appendCheckbox(parts, "malachite_depth_bias", "gen-malachite-depth-bias");
+            appendCheckbox(parts, "kimberlite_carrot_taper", "gen-kimberlite-carrot-taper");
+            appendCheckbox(parts, "diamond_depth_grade", "gen-diamond-depth-grade");
+            appendCheckbox(parts, "sulfide_gossan_cap", "gen-sulfide-gossan-cap");
+            appendCheckbox(parts, "sulfide_disseminated", "gen-sulfide-disseminated");
+            appendCheckbox(parts, "pyrite_ore_halo", "gen-pyrite-ore-halo");
+            appendCheckbox(parts, "quartz_planar_veins", "gen-quartz-planar-veins");
+            appendCheckbox(parts, "gold_bonanza", "gen-gold-bonanza");
+            appendCheckbox(parts, "geode_volcanic_host", "gen-geode-volcanic-host");
+            appendCheckbox(parts, "geode_depth_scaling", "gen-geode-depth-scaling");
             var body = parts.join("&");
             var resp = await fetch("/api/generate", {
                 method: "POST",

@@ -1367,6 +1367,21 @@ mod tests {
             formation_shield_radius_max: 3.0,
             formation_shield_max_tilt: 30.0,
             formation_shield_stalactite_chance: 0.5,
+            // Geological Realism Toggles (all off in tests)
+            ore_iron_sedimentary_only: 0,
+            ore_iron_depth_fade: 0,
+            ore_copper_supergene: 0,
+            ore_copper_granite_contact: 0,
+            ore_malachite_depth_bias: 0,
+            ore_kimberlite_carrot_taper: 0,
+            ore_diamond_depth_grade: 0,
+            ore_sulfide_gossan_cap: 0,
+            ore_sulfide_disseminated: 0,
+            ore_pyrite_ore_halo: 0,
+            ore_quartz_planar_veins: 0,
+            ore_gold_bonanza: 0,
+            ore_geode_volcanic_host: 0,
+            ore_geode_depth_scaling: 0,
         }
     }
 

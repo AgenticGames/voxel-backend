@@ -455,6 +455,22 @@ body {
     font-style: italic;
 }
 
+.ore-realism-toggles {
+    padding: 4px 10px 6px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 16px;
+}
+
+.ore-realism-toggles .toggle-label {
+    font-size: 11px;
+    color: #8a8aaa;
+}
+
+.ore-realism-toggles input[type="checkbox"] {
+    margin-right: 3px;
+}
+
 #custom-exports {
     margin-top: 10px;
 }
