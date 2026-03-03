@@ -31,7 +31,7 @@ typedef struct {
 /* ── Mined material counts ── */
 
 typedef struct {
-    uint32_t counts[19];
+    uint32_t counts[20];
 } FfiMinedMaterials;
 
 /* ── Result type enum (repr(u8) in Rust) ── */

@@ -113,6 +113,9 @@
         "gen-quartz-planar-veins",
         "gen-gold-bonanza",
         "gen-geode-volcanic-host", "gen-geode-depth-scaling",
+        // Coal settings
+        "gen-coal-freq", "gen-coal-threshold", "gen-coal-depth-min", "gen-coal-depth-max",
+        "gen-coal-sedimentary-host", "gen-coal-shallow-ceiling", "gen-coal-depth-enrichment",
     ];
     var activePresetSlot = 0;
 
@@ -1159,6 +1162,11 @@
             appendParam(parts, "geode_center_threshold", "gen-geode-center-threshold");
             appendParam(parts, "geode_shell_thickness", "gen-geode-shell-thickness");
             appendParam(parts, "geode_hollow_factor", "gen-geode-hollow-factor");
+            // Coal
+            appendParam(parts, "coal_freq", "gen-coal-freq");
+            appendParam(parts, "coal_threshold", "gen-coal-threshold");
+            appendParam(parts, "coal_depth_min", "gen-coal-depth-min");
+            appendParam(parts, "coal_depth_max", "gen-coal-depth-max");
             // Pool settings
             appendParam(parts, "pools_enabled", "gen-pools-enabled");
             appendParam(parts, "pool_placement_freq", "gen-pool-placement-freq");
@@ -1251,6 +1259,14 @@
             appendCheckbox(parts, "gold_bonanza", "gen-gold-bonanza");
             appendCheckbox(parts, "geode_volcanic_host", "gen-geode-volcanic-host");
             appendCheckbox(parts, "geode_depth_scaling", "gen-geode-depth-scaling");
+            // Coal
+            appendParam(parts, "coal_freq", "gen-coal-freq");
+            appendParam(parts, "coal_threshold", "gen-coal-threshold");
+            appendParam(parts, "coal_depth_min", "gen-coal-depth-min");
+            appendParam(parts, "coal_depth_max", "gen-coal-depth-max");
+            appendCheckbox(parts, "coal_sedimentary_host", "gen-coal-sedimentary-host");
+            appendCheckbox(parts, "coal_shallow_ceiling", "gen-coal-shallow-ceiling");
+            appendCheckbox(parts, "coal_depth_enrichment", "gen-coal-depth-enrichment");
             var body = parts.join("&");
             var resp = await fetch("/api/generate", {
                 method: "POST",

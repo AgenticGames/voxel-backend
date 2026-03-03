@@ -908,6 +908,12 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
                 depth_min: c.geode_depth_min,
                 depth_max: c.geode_depth_max,
             },
+            coal: OreVeinParams {
+                frequency: if c.ore_coal_frequency > 0.0 { c.ore_coal_frequency } else { 0.03 },
+                threshold: if c.ore_coal_threshold > 0.0 { c.ore_coal_threshold } else { 0.62 },
+                depth_min: c.ore_coal_depth_min,
+                depth_max: if c.ore_coal_depth_max > 0.0 { c.ore_coal_depth_max } else { 80.0 },
+            },
             ore_domain_warp_strength: c.ore_domain_warp_strength,
             ore_warp_frequency: if c.ore_warp_frequency > 0.0 { c.ore_warp_frequency } else { 0.02 },
             ore_edge_falloff: c.ore_edge_falloff,
@@ -926,6 +932,9 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
             gold_bonanza: c.ore_gold_bonanza != 0,
             geode_volcanic_host: c.ore_geode_volcanic_host != 0,
             geode_depth_scaling: c.ore_geode_depth_scaling != 0,
+            coal_sedimentary_host: c.ore_coal_sedimentary_host != 0,
+            coal_shallow_ceiling: c.ore_coal_shallow_ceiling != 0,
+            coal_depth_enrichment: c.ore_coal_depth_enrichment != 0,
         },
         formations: FormationConfig {
             enabled: c.formation_enabled != 0,

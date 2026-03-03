@@ -43,7 +43,7 @@ pub struct FfiMeshData {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct FfiMinedMaterials {
-    pub counts: [u32; 19],
+    pub counts: [u32; 20],
 }
 
 #[repr(u8)]
@@ -271,6 +271,14 @@ pub struct FfiEngineConfig {
     pub ore_gold_bonanza: u8,
     pub ore_geode_volcanic_host: u8,
     pub ore_geode_depth_scaling: u8,
+    // Coal (4 params + 3 toggles)
+    pub ore_coal_frequency: f64,
+    pub ore_coal_threshold: f64,
+    pub ore_coal_depth_min: f64,
+    pub ore_coal_depth_max: f64,
+    pub ore_coal_sedimentary_host: u8,
+    pub ore_coal_shallow_ceiling: u8,
+    pub ore_coal_depth_enrichment: u8,
 }
 
 #[repr(C)]
@@ -315,7 +323,7 @@ pub struct FfiCollapseEvent {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct FfiStressConfig {
-    pub material_hardness: [f32; 19],
+    pub material_hardness: [f32; 20],
     pub gravity_weight: f32,
     pub lateral_support_factor: f32,
     pub vertical_support_factor: f32,

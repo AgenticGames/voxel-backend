@@ -227,6 +227,26 @@
                                 </label>
                             </div>
                         </div>
+                        <div class="ore-subsection">
+                            <span class="ore-label" style="color:#2C2C2C;">Coal Seams</span> <em class="ore-hint">layered sedimentary deposits</em>
+                            <div class="settings-grid">
+                                <label title="Higher = smaller seam features, Lower = larger seams">Frequency <input type="number" id="gen-coal-freq" step="0.01" placeholder="0.03"></label>
+                                <label title="Higher = rarer seams, Lower = more common">Threshold <input type="number" id="gen-coal-threshold" step="0.01" placeholder="0.62"></label>
+                                <label title="Shallowest depth for coal seams">Depth Min <input type="number" id="gen-coal-depth-min" step="5" placeholder="10.0"></label>
+                                <label title="Deepest depth for coal seams">Depth Max <input type="number" id="gen-coal-depth-max" step="5" placeholder="80.0"></label>
+                            </div>
+                            <div class="ore-realism-toggles">
+                                <label class="toggle-label" title="Coal only forms in sandstone and limestone — real coal is exclusively sedimentary">
+                                    <input type="checkbox" id="gen-coal-sedimentary-host"> Sedimentary Host
+                                </label>
+                                <label class="toggle-label" title="Coal thins and vanishes near the surface, modeling erosion of shallow seams">
+                                    <input type="checkbox" id="gen-coal-shallow-ceiling"> Shallow Ceiling
+                                </label>
+                                <label class="toggle-label" title="Coal seams thicken with depth — deeper burial produces thicker, higher-rank deposits">
+                                    <input type="checkbox" id="gen-coal-depth-enrichment"> Depth Enrichment
+                                </label>
+                            </div>
+                        </div>
                     </details>
 
                     <details class="settings-section">
@@ -415,6 +435,7 @@
                 <span class="legend-item"><span class="legend-swatch" style="background:#B9F2FF;"></span>Diamond</span>
                 <span class="legend-item"><span class="legend-swatch" style="background:#9B59B6;"></span>Amethyst</span>
                 <span class="legend-item"><span class="legend-swatch" style="background:#85C1E9;"></span>Crystal</span>
+                <span class="legend-item"><span class="legend-swatch" style="background:#2C2C2C;"></span>Coal</span>
                 <span class="legend-item"><span class="legend-swatch" style="background:rgba(30,120,255,0.5);border:1px solid #1e78ff;"></span>Water Pool</span>
                 <span class="legend-item"><span class="legend-swatch" style="background:rgba(255,80,20,0.5);border:1px solid #ff5014;"></span>Lava Pool</span>
             </div>

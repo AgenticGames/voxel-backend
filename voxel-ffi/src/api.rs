@@ -130,7 +130,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     result_type: FfiResultType::FluidMesh,
                     chunk: FfiChunkCoord { x: ue.0, y: ue.1, z: ue.2 },
                     mesh: empty_mesh_data(),
-                    mined: FfiMinedMaterials { counts: [0; 19] },
+                    mined: FfiMinedMaterials { counts: [0; 20] },
                     generation: 0,
                     fluid_mesh: converted_fluid_mesh_to_ffi(mesh),
                 };
@@ -142,7 +142,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     result_type: FfiResultType::Error,
                     chunk: FfiChunkCoord { x: ue.0, y: ue.1, z: ue.2 },
                     mesh: empty_mesh_data(),
-                    mined: FfiMinedMaterials { counts: [0; 19] },
+                    mined: FfiMinedMaterials { counts: [0; 20] },
                     generation,
                     fluid_mesh: empty_fluid_mesh_data(),
                 };
@@ -175,7 +175,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                         z: ev.center_z as i32,
                     },
                     mesh: empty_mesh_data(),
-                    mined: FfiMinedMaterials { counts: [0; 19] },
+                    mined: FfiMinedMaterials { counts: [0; 20] },
                     generation: ev.volume as u64,
                     fluid_mesh: empty_fluid_mesh_data(),
                 };
@@ -192,7 +192,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     result_type: FfiResultType::MineResult,
                     chunk: FfiChunkCoord { x: 0, y: 0, z: 0 },
                     mesh: empty_mesh_data(),
-                    mined: FfiMinedMaterials { counts: [if success { 1 } else { 0 }; 19] },
+                    mined: FfiMinedMaterials { counts: [if success { 1 } else { 0 }; 20] },
                     generation: 0,
                     fluid_mesh: empty_fluid_mesh_data(),
                 };
@@ -1096,7 +1096,7 @@ fn convert_mesh_to_ffi_result(
             z: ue.2,
         },
         mesh: converted_mesh_to_ffi(mesh),
-        mined: FfiMinedMaterials { counts: [0; 19] },
+        mined: FfiMinedMaterials { counts: [0; 20] },
         generation,
         fluid_mesh: empty_fluid_mesh_data(),
     }
@@ -1382,6 +1382,14 @@ mod tests {
             ore_gold_bonanza: 0,
             ore_geode_volcanic_host: 0,
             ore_geode_depth_scaling: 0,
+            // Coal
+            ore_coal_frequency: 0.03,
+            ore_coal_threshold: 0.62,
+            ore_coal_depth_min: 10.0,
+            ore_coal_depth_max: 80.0,
+            ore_coal_sedimentary_host: 0,
+            ore_coal_shallow_ceiling: 0,
+            ore_coal_depth_enrichment: 0,
         }
     }
 

@@ -411,6 +411,14 @@ fn serve_generate(
     let mut gold_bonanza: Option<bool> = None;
     let mut geode_volcanic_host: Option<bool> = None;
     let mut geode_depth_scaling: Option<bool> = None;
+    // Coal
+    let mut coal_freq: Option<f64> = None;
+    let mut coal_threshold: Option<f64> = None;
+    let mut coal_depth_min: Option<f64> = None;
+    let mut coal_depth_max: Option<f64> = None;
+    let mut coal_sedimentary_host: Option<bool> = None;
+    let mut coal_shallow_ceiling: Option<bool> = None;
+    let mut coal_depth_enrichment: Option<bool> = None;
 
     for pair in body.split('&') {
         let mut kv = pair.splitn(2, '=');
@@ -555,6 +563,14 @@ fn serve_generate(
             "gold_bonanza" => { gold_bonanza = Some(val == "1" || val == "true"); }
             "geode_volcanic_host" => { geode_volcanic_host = Some(val == "1" || val == "true"); }
             "geode_depth_scaling" => { geode_depth_scaling = Some(val == "1" || val == "true"); }
+            // Coal
+            "coal_freq" => { coal_freq = val.parse().ok(); }
+            "coal_threshold" => { coal_threshold = val.parse().ok(); }
+            "coal_depth_min" => { coal_depth_min = val.parse().ok(); }
+            "coal_depth_max" => { coal_depth_max = val.parse().ok(); }
+            "coal_sedimentary_host" => { coal_sedimentary_host = Some(val == "1" || val == "true"); }
+            "coal_shallow_ceiling" => { coal_shallow_ceiling = Some(val == "1" || val == "true"); }
+            "coal_depth_enrichment" => { coal_depth_enrichment = Some(val == "1" || val == "true"); }
             _ => {}
         }
     }
@@ -633,6 +649,14 @@ fn serve_generate(
     if let Some(v) = gold_bonanza { config.ore.gold_bonanza = v; }
     if let Some(v) = geode_volcanic_host { config.ore.geode_volcanic_host = v; }
     if let Some(v) = geode_depth_scaling { config.ore.geode_depth_scaling = v; }
+    // Coal
+    if let Some(v) = coal_freq { config.ore.coal.frequency = v; }
+    if let Some(v) = coal_threshold { config.ore.coal.threshold = v; }
+    if let Some(v) = coal_depth_min { config.ore.coal.depth_min = v; }
+    if let Some(v) = coal_depth_max { config.ore.coal.depth_max = v; }
+    if let Some(v) = coal_sedimentary_host { config.ore.coal_sedimentary_host = v; }
+    if let Some(v) = coal_shallow_ceiling { config.ore.coal_shallow_ceiling = v; }
+    if let Some(v) = coal_depth_enrichment { config.ore.coal_depth_enrichment = v; }
     // Pool settings
     if let Some(v) = pools_enabled { config.pools.enabled = v; }
     if let Some(v) = pool_placement_freq { config.pools.placement_frequency = v; }

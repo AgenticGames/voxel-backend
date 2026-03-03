@@ -170,7 +170,7 @@ impl ChunkStore {
         let eb = config.effective_bounds();
         let vs = config.voxel_scale();
         let r2 = radius * radius;
-        let mut mined_counts = [0u32; 19];
+        let mut mined_counts = [0u32; 20];
 
         let min_cx = ((center.x - radius) / eb).floor() as i32;
         let max_cx = ((center.x + radius) / eb).floor() as i32;
@@ -278,7 +278,7 @@ impl ChunkStore {
         let eb = config.effective_bounds();
         let vs = config.voxel_scale();
         let r2 = radius * radius;
-        let mut mined_counts = [0u32; 19];
+        let mut mined_counts = [0u32; 20];
         let adjusted_center = center - normal * 0.5;
 
         let min_cx = ((adjusted_center.x - radius) / eb).floor() as i32;

@@ -105,7 +105,7 @@ impl SupportField {
 
 /// Default hardness per Material (index by Material as u8).
 /// Air = 0.0 (no resistance). Higher = harder to collapse.
-pub const DEFAULT_MATERIAL_HARDNESS: [f32; 19] = [
+pub const DEFAULT_MATERIAL_HARDNESS: [f32; 20] = [
     0.0,   // Air
     0.45,  // Sandstone (soft)
     0.55,  // Limestone
@@ -125,6 +125,7 @@ pub const DEFAULT_MATERIAL_HARDNESS: [f32; 19] = [
     0.55,  // Pyrite
     0.60,  // Amethyst
     0.70,  // Crystal
+    0.30,  // Coal (soft sedimentary)
 ];
 
 /// Support hardness values (how much stress each support type absorbs).
@@ -145,7 +146,7 @@ pub const SUPPORT_HARDNESS: [f32; 8] = [
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StressConfig {
     /// Per-material hardness thresholds (indexed by Material as u8).
-    pub material_hardness: [f32; 19],
+    pub material_hardness: [f32; 20],
     /// Weight per solid voxel above (column load factor).
     pub gravity_weight: f32,
     /// Contribution factor for lateral (side) neighbors.
@@ -743,7 +744,7 @@ mod tests {
 
     #[test]
     fn hardness_tables_correct_length() {
-        assert_eq!(DEFAULT_MATERIAL_HARDNESS.len(), 19);
+        assert_eq!(DEFAULT_MATERIAL_HARDNESS.len(), 20);
         assert_eq!(SUPPORT_HARDNESS.len(), 8);
     }
 

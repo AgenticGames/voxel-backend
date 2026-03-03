@@ -21,6 +21,7 @@ struct MaterialNoiseSources {
     pyrite_noise: Simplex3D,
     basalt_noise: Simplex3D,
     geode_noise: Simplex3D,
+    coal_noise: Fbm<Simplex3D>,
     boundary_noise: Simplex3D,
     warp_x: Simplex3D,
     warp_y: Simplex3D,
@@ -48,6 +49,7 @@ impl MaterialNoiseSources {
             pyrite_noise: Simplex3D::new(seed.wrapping_add(109)),
             basalt_noise: Simplex3D::new(seed.wrapping_add(110)),
             geode_noise: Simplex3D::new(seed.wrapping_add(111)),
+            coal_noise: Fbm::new(Simplex3D::new(seed.wrapping_add(113)), 3, 2.0, 0.5),
             boundary_noise: Simplex3D::new(seed.wrapping_add(112)),
             warp_x: Simplex3D::new(seed.wrapping_add(200)),
             warp_y: Simplex3D::new(seed.wrapping_add(201)),
@@ -511,6 +513,40 @@ fn assign_material(
         }
         if ore_threshold_check(pyrite_norm, pyrite_thresh, falloff, wx, wy, wz) {
             return Material::Pyrite;
+        }
+    }
+
+    // ── 6.5. Coal seams (layered sedimentary deposits) ──
+    // FBM noise for layered seam morphology, shallow depth range.
+    if wy >= ore.coal.depth_min && wy <= ore.coal.depth_max {
+        let mut coal_ok = true;
+        // Sedimentary host: coal only in sandstone/limestone
+        if ore.coal_sedimentary_host {
+            let host = host_rock_for_depth(wy, &ore.host_rock);
+            if host != Material::Sandstone && host != Material::Limestone {
+                coal_ok = false;
+            }
+        }
+        if coal_ok {
+            let cf = ore.coal.frequency;
+            let coal_val = noise.coal_noise.sample(wwx * cf, wwy * cf, wwz * cf);
+            let coal_norm = coal_val * 0.5 + 0.5;
+            let mut coal_thresh = ore.coal.threshold;
+            // Shallow ceiling: coal thins near surface (above y=60)
+            if ore.coal_shallow_ceiling {
+                coal_thresh += (wy - 60.0).max(0.0) * 0.01;
+            }
+            // Depth enrichment: seams thicken with depth
+            if ore.coal_depth_enrichment {
+                let range = ore.coal.depth_max - ore.coal.depth_min;
+                if range > 0.0 {
+                    let depth_frac = (ore.coal.depth_max - wy) / range;
+                    coal_thresh -= depth_frac * 0.04;
+                }
+            }
+            if ore_threshold_check(coal_norm, coal_thresh, falloff, wx, wy, wz) {
+                return Material::Coal;
+            }
         }
     }
 

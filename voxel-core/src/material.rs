@@ -31,6 +31,9 @@ pub enum Material {
     Pyrite = 16,
     Amethyst = 17,
     Crystal = 18,
+
+    // Sedimentary fuel
+    Coal = 19,
 }
 
 impl Material {
@@ -54,6 +57,7 @@ impl Material {
             16 => Material::Pyrite,
             17 => Material::Amethyst,
             18 => Material::Crystal,
+            19 => Material::Coal,
             _ => Material::Air,
         }
     }
@@ -72,6 +76,7 @@ impl Material {
                 | Material::Gold
                 | Material::Diamond
                 | Material::Sulfide
+                | Material::Coal
         )
     }
 
@@ -116,6 +121,7 @@ impl Material {
             Material::Pyrite => "Pyrite",
             Material::Amethyst => "Amethyst",
             Material::Crystal => "Crystal",
+            Material::Coal => "Coal",
         }
     }
 
@@ -140,6 +146,7 @@ impl Material {
             Material::Pyrite => 0xCBA135,
             Material::Amethyst => 0x9B59B6,
             Material::Crystal => 0x85C1E9,
+            Material::Coal => 0x2C2C2C,
         }
     }
 
@@ -164,6 +171,7 @@ impl Material {
             Material::Pyrite,
             Material::Amethyst,
             Material::Crystal,
+            Material::Coal,
         ]
     }
 }

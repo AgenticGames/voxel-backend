@@ -241,6 +241,8 @@ pub struct OreConfig {
     pub sulfide: SulfideBlobConfig,
     /// Geodes — crystal-lined hollow pockets
     pub geode: GeodeConfig,
+    /// Coal seams — layered sedimentary deposits
+    pub coal: OreVeinParams,
     /// Host rock depth layering
     pub host_rock: HostRockConfig,
     /// Domain warp amplitude for ore shapes. 0=off, 2-5=organic
@@ -280,6 +282,12 @@ pub struct OreConfig {
     pub geode_volcanic_host: bool,
     /// Deeper geodes grow thicker crystal shells
     pub geode_depth_scaling: bool,
+    /// Coal only forms in sandstone and limestone (real coal is exclusively sedimentary)
+    pub coal_sedimentary_host: bool,
+    /// Coal thins and vanishes near the surface, modeling erosion of shallow seams
+    pub coal_shallow_ceiling: bool,
+    /// Coal seams thicken with depth — deeper burial produces thicker, higher-rank deposits
+    pub coal_depth_enrichment: bool,
 }
 
 impl Default for HostRockConfig {
@@ -561,6 +569,12 @@ impl Default for OreConfig {
             kimberlite: KimberlitePipeConfig::default(),
             sulfide: SulfideBlobConfig::default(),
             geode: GeodeConfig::default(),
+            coal: OreVeinParams {
+                frequency: 0.03,
+                threshold: 0.62,
+                depth_min: 10.0,
+                depth_max: 80.0,
+            },
             host_rock: HostRockConfig::default(),
             ore_domain_warp_strength: 0.0,
             ore_warp_frequency: 0.02,
@@ -580,6 +594,9 @@ impl Default for OreConfig {
             gold_bonanza: false,
             geode_volcanic_host: false,
             geode_depth_scaling: false,
+            coal_sedimentary_host: false,
+            coal_shallow_ceiling: false,
+            coal_depth_enrichment: false,
         }
     }
 }
