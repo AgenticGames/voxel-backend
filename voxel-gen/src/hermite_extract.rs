@@ -21,10 +21,16 @@ pub fn extract_hermite_data(density: &DensityField) -> HermiteData {
                 if (da > 0.0) != (db > 0.0) {
                     let t = da / (da - db);
                     let normal = estimate_normal_fast(density, x, y, z, t, 0);
-                    let material = if da > 0.0 {
-                        density.get(x, y, z).material
+                    let mat_a = density.get(x, y, z).material;
+                    let mat_b = density.get(x + 1, y, z).material;
+                    let material = if mat_a.is_solid() && mat_b.is_solid() {
+                        if da > 0.0 { mat_a } else { mat_b }
+                    } else if mat_a.is_solid() {
+                        mat_a
+                    } else if mat_b.is_solid() {
+                        mat_b
                     } else {
-                        density.get(x + 1, y, z).material
+                        mat_a
                     };
                     let key = EdgeKey::new(x as u8, y as u8, z as u8, 0);
                     data.edges.insert(key, EdgeIntersection { t, normal, material });
@@ -42,10 +48,16 @@ pub fn extract_hermite_data(density: &DensityField) -> HermiteData {
                 if (da > 0.0) != (db > 0.0) {
                     let t = da / (da - db);
                     let normal = estimate_normal_fast(density, x, y, z, t, 1);
-                    let material = if da > 0.0 {
-                        density.get(x, y, z).material
+                    let mat_a = density.get(x, y, z).material;
+                    let mat_b = density.get(x, y + 1, z).material;
+                    let material = if mat_a.is_solid() && mat_b.is_solid() {
+                        if da > 0.0 { mat_a } else { mat_b }
+                    } else if mat_a.is_solid() {
+                        mat_a
+                    } else if mat_b.is_solid() {
+                        mat_b
                     } else {
-                        density.get(x, y + 1, z).material
+                        mat_a
                     };
                     let key = EdgeKey::new(x as u8, y as u8, z as u8, 1);
                     data.edges.insert(key, EdgeIntersection { t, normal, material });
@@ -63,10 +75,16 @@ pub fn extract_hermite_data(density: &DensityField) -> HermiteData {
                 if (da > 0.0) != (db > 0.0) {
                     let t = da / (da - db);
                     let normal = estimate_normal_fast(density, x, y, z, t, 2);
-                    let material = if da > 0.0 {
-                        density.get(x, y, z).material
+                    let mat_a = density.get(x, y, z).material;
+                    let mat_b = density.get(x, y, z + 1).material;
+                    let material = if mat_a.is_solid() && mat_b.is_solid() {
+                        if da > 0.0 { mat_a } else { mat_b }
+                    } else if mat_a.is_solid() {
+                        mat_a
+                    } else if mat_b.is_solid() {
+                        mat_b
                     } else {
-                        density.get(x, y, z + 1).material
+                        mat_a
                     };
                     let key = EdgeKey::new(x as u8, y as u8, z as u8, 2);
                     data.edges.insert(key, EdgeIntersection { t, normal, material });
@@ -106,10 +124,16 @@ pub fn patch_hermite_data(
                 if (da > 0.0) != (db > 0.0) {
                     let t = da / (da - db);
                     let normal = estimate_normal_fast(density, x, y, z, t, 0);
-                    let material = if da > 0.0 {
-                        density.get(x, y, z).material
+                    let mat_a = density.get(x, y, z).material;
+                    let mat_b = density.get(x + 1, y, z).material;
+                    let material = if mat_a.is_solid() && mat_b.is_solid() {
+                        if da > 0.0 { mat_a } else { mat_b }
+                    } else if mat_a.is_solid() {
+                        mat_a
+                    } else if mat_b.is_solid() {
+                        mat_b
                     } else {
-                        density.get(x + 1, y, z).material
+                        mat_a
                     };
                     hermite.edges.insert(
                         EdgeKey::new(x as u8, y as u8, z as u8, 0),
@@ -129,10 +153,16 @@ pub fn patch_hermite_data(
                 if (da > 0.0) != (db > 0.0) {
                     let t = da / (da - db);
                     let normal = estimate_normal_fast(density, x, y, z, t, 1);
-                    let material = if da > 0.0 {
-                        density.get(x, y, z).material
+                    let mat_a = density.get(x, y, z).material;
+                    let mat_b = density.get(x, y + 1, z).material;
+                    let material = if mat_a.is_solid() && mat_b.is_solid() {
+                        if da > 0.0 { mat_a } else { mat_b }
+                    } else if mat_a.is_solid() {
+                        mat_a
+                    } else if mat_b.is_solid() {
+                        mat_b
                     } else {
-                        density.get(x, y + 1, z).material
+                        mat_a
                     };
                     hermite.edges.insert(
                         EdgeKey::new(x as u8, y as u8, z as u8, 1),
@@ -152,10 +182,16 @@ pub fn patch_hermite_data(
                 if (da > 0.0) != (db > 0.0) {
                     let t = da / (da - db);
                     let normal = estimate_normal_fast(density, x, y, z, t, 2);
-                    let material = if da > 0.0 {
-                        density.get(x, y, z).material
+                    let mat_a = density.get(x, y, z).material;
+                    let mat_b = density.get(x, y, z + 1).material;
+                    let material = if mat_a.is_solid() && mat_b.is_solid() {
+                        if da > 0.0 { mat_a } else { mat_b }
+                    } else if mat_a.is_solid() {
+                        mat_a
+                    } else if mat_b.is_solid() {
+                        mat_b
                     } else {
-                        density.get(x, y, z + 1).material
+                        mat_a
                     };
                     hermite.edges.insert(
                         EdgeKey::new(x as u8, y as u8, z as u8, 2),
@@ -260,6 +296,56 @@ mod tests {
         // Should produce some hermite data (depends on noise, but should be consistent)
         // At minimum, verify it runs without panic
         let _ = data.edges.len();
+    }
+
+    #[test]
+    fn test_material_prefers_solid_over_air() {
+        // Regression: if one endpoint has positive density but Air material
+        // (corrupted boundary state), the hermite edge should get the solid
+        // material from the other endpoint instead of Air.
+        let mut field = DensityField::new(4);
+
+        // (0,0,0): positive density, Air material (corrupted)
+        let a = field.get_mut(0, 0, 0);
+        a.density = 0.5;
+        a.material = Material::Air;
+
+        // (1,0,0): negative density, Granite material (solid, air side)
+        let b = field.get_mut(1, 0, 0);
+        b.density = -0.3;
+        b.material = Material::Granite;
+
+        let data = extract_hermite_data(&field);
+        let key = EdgeKey::new(0, 0, 0, 0); // X-edge at (0,0,0)
+        let edge = data.edges.get(&key).expect("Expected sign change at X-edge (0,0,0)");
+
+        // Old code would pick Air (da > 0 → endpoint A). New code should pick Granite.
+        assert_eq!(edge.material, Material::Granite,
+            "Should prefer solid material over Air at boundary");
+    }
+
+    #[test]
+    fn test_material_both_solid_uses_density_sign() {
+        // When both endpoints are solid, material should follow density sign
+        // (positive density = solid side = that material).
+        let mut field = DensityField::new(4);
+
+        // (0,0,0): positive density, Granite
+        let a = field.get_mut(0, 0, 0);
+        a.density = 0.5;
+        a.material = Material::Granite;
+
+        // (1,0,0): negative density, Iron
+        let b = field.get_mut(1, 0, 0);
+        b.density = -0.3;
+        b.material = Material::Iron;
+
+        let data = extract_hermite_data(&field);
+        let key = EdgeKey::new(0, 0, 0, 0);
+        let edge = data.edges.get(&key).expect("Expected sign change at X-edge (0,0,0)");
+
+        // da > 0, both solid → pick mat_a (Granite)
+        assert_eq!(edge.material, Material::Granite);
     }
 
     #[test]

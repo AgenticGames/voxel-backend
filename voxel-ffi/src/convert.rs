@@ -119,8 +119,6 @@ pub fn bucket_mesh_by_material(mesh: &mut ConvertedMesh) {
         buckets.entry(mat_id).or_default().push(tri as u32);
     }
 
-    buckets.remove(&0); // Drop Air (material 0) — should never have geometry
-
     let mut new_positions = Vec::with_capacity(mesh.positions.len());
     let mut new_normals = Vec::with_capacity(mesh.normals.len());
     let mut new_material_ids = Vec::with_capacity(mesh.material_ids.len());
