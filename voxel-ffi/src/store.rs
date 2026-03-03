@@ -1001,8 +1001,9 @@ impl ChunkStore {
             .map(|(_, pos)| pos)
     }
 
-    /// Flatten an 11x11 terrace footprint for building placement.
-    /// Sets the floor layer to solid host_material and clears 2 layers above for clearance.
+    /// Flatten a terrace footprint for building placement.
+    /// Sets the floor layer to solid host_material, clears 2 layers above for clearance,
+    /// and fills down up to 2 voxels below to connect the platform to the cave floor.
     /// Returns the re-meshed dirty chunks (in UE coords).
     pub fn flatten_terrace(
         &mut self,
@@ -1010,9 +1011,9 @@ impl ChunkStore {
         host_material: Material,
         config: &GenerationConfig,
         world_scale: f32,
+        terrace_size: i32,
     ) -> Vec<((i32, i32, i32), ConvertedMesh)> {
         let cs = config.chunk_size as i32;
-        let terrace_size = (150.0f32 / world_scale).round().max(2.0) as i32;
 
         let mut dirty_set: HashSet<(i32, i32, i32)> = HashSet::new();
 
@@ -1048,6 +1049,31 @@ impl ChunkStore {
                     }
                 }
 
+                // Fill-down: scan up to 2 voxels below the floor, filling air with solid
+                for dy in 1..=2i32 {
+                    let vy = wy - dy;
+                    let cx = wx.div_euclid(cs);
+                    let cy = vy.div_euclid(cs);
+                    let cz = wz.div_euclid(cs);
+                    let lx = wx.rem_euclid(cs) as usize;
+                    let ly = vy.rem_euclid(cs) as usize;
+                    let lz = wz.rem_euclid(cs) as usize;
+                    let key = (cx, cy, cz);
+
+                    if let Some(density) = self.density_fields.get_mut(&key) {
+                        let sample = density.get_mut(lx, ly, lz);
+                        if sample.density < 0.0 {
+                            // Air gap: fill with host material
+                            sample.density = 1.0;
+                            sample.material = host_material;
+                            dirty_set.insert(key);
+                        } else {
+                            // Already solid (hit cave floor): stop filling this column
+                            break;
+                        }
+                    }
+                }
+
                 // Track this cell as terraced
                 self.terraced_cells.insert((wx, wy, wz));
                 self.terraced_columns.insert((wx, wz), wy);
@@ -1078,13 +1104,13 @@ impl ChunkStore {
         tiles: &[(glam::IVec3, Material)],
         config: &GenerationConfig,
         world_scale: f32,
+        terrace_size: i32,
     ) -> Vec<((i32, i32, i32), ConvertedMesh)> {
         if tiles.is_empty() {
             return Vec::new();
         }
 
         let cs = config.chunk_size as i32;
-        let terrace_size = (150.0f32 / world_scale).round().max(2.0) as i32;
 
         let mut dirty_set: HashSet<(i32, i32, i32)> = HashSet::new();
 
@@ -1118,6 +1144,29 @@ impl ChunkStore {
                         }
                     }
 
+                    // Fill-down: scan up to 2 voxels below the floor, filling air with solid
+                    for dy in 1..=2i32 {
+                        let vy = wy - dy;
+                        let cx = wx.div_euclid(cs);
+                        let cy = vy.div_euclid(cs);
+                        let cz = wz.div_euclid(cs);
+                        let lx = wx.rem_euclid(cs) as usize;
+                        let ly = vy.rem_euclid(cs) as usize;
+                        let lz = wz.rem_euclid(cs) as usize;
+                        let key = (cx, cy, cz);
+
+                        if let Some(density) = self.density_fields.get_mut(&key) {
+                            let sample = density.get_mut(lx, ly, lz);
+                            if sample.density < 0.0 {
+                                sample.density = 1.0;
+                                sample.material = *host_material;
+                                dirty_set.insert(key);
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+
                     self.terraced_cells.insert((wx, wy, wz));
                     self.terraced_columns.insert((wx, wz), wy);
                 }
@@ -1139,28 +1188,37 @@ impl ChunkStore {
     }
 
     /// Query floor support for a flatten preview.
-    /// Checks cells one layer below the terrace floor; density > 0 = solid.
-    /// Returns (solid_count, clearance_count) — solid floor cells and solid cells at dy=1,2 above base.
+    /// Checks cells in the 2-voxel column below the terrace floor (base.y-1, base.y-2).
+    /// A column counts as supported if any voxel in that range is solid.
+    /// Returns (solid_count, clearance_count) — supported columns and solid cells at dy=1,2 above base.
     pub fn query_flatten_support(&self, base: glam::IVec3, chunk_size: i32, terrace_size: i32) -> (u8, u8) {
         let mut solid_count = 0u8;
         let mut clearance_count = 0u8;
-        let check_y = base.y - 1;
         for dx in 0..terrace_size {
             for dz in 0..terrace_size {
                 let wx = base.x + dx;
                 let wz = base.z + dz;
-                let cx = wx.div_euclid(chunk_size);
-                let cy = check_y.div_euclid(chunk_size);
-                let cz = wz.div_euclid(chunk_size);
-                let lx = wx.rem_euclid(chunk_size) as usize;
-                let ly = check_y.rem_euclid(chunk_size) as usize;
-                let lz = wz.rem_euclid(chunk_size) as usize;
-                if let Some(df) = self.density_fields.get(&(cx, cy, cz)) {
-                    if df.get(lx, ly, lz).density > 0.0 {
-                        solid_count += 1;
+
+                // Check 2-voxel column below: any solid = supported
+                let mut column_supported = false;
+                for dy in 1..=2i32 {
+                    let check_y = base.y - dy;
+                    let cx = wx.div_euclid(chunk_size);
+                    let cy = check_y.div_euclid(chunk_size);
+                    let cz = wz.div_euclid(chunk_size);
+                    let lx = wx.rem_euclid(chunk_size) as usize;
+                    let ly = check_y.rem_euclid(chunk_size) as usize;
+                    let lz = wz.rem_euclid(chunk_size) as usize;
+                    if let Some(df) = self.density_fields.get(&(cx, cy, cz)) {
+                        if df.get(lx, ly, lz).density > 0.0 {
+                            column_supported = true;
+                            break;
+                        }
                     }
                 }
-                // Missing chunk = no support (stays 0)
+                if column_supported {
+                    solid_count += 1;
+                }
 
                 // Clearance (dy=1 and dy=2)
                 for dy in 1i32..=2 {
@@ -1622,19 +1680,24 @@ pub fn extract_solid_mask(density: &DensityField, chunk_size: usize) -> Vec<u64>
 }
 
 /// Average two voxel samples at the same world position for boundary sync.
-/// Density is averaged; material = Air if either side was mined to Air.
+/// Density uses min (carved side wins); material preserves solid when possible.
 fn average_boundary_voxel(a: &VoxelSample, b: &VoxelSample) -> (f32, Material) {
     let avg_density = a.density.min(b.density);  // carved side wins, no 0.0 degenerate surface
-    let material = if !a.material.is_solid() || !b.material.is_solid() {
-        Material::Air
-    } else {
+    let material = if a.material.is_solid() && b.material.is_solid() {
+        if a.density >= b.density { a.material } else { b.material }
+    } else if a.material.is_solid() {
         a.material
+    } else if b.material.is_solid() {
+        b.material
+    } else {
+        Material::Air
     };
     (avg_density, material)
 }
 
 /// Post-smoothing boundary density sync: average overlap voxels between
-/// dirty chunks and their face neighbors so hermite edges match at seams.
+/// dirty chunks and their face, edge, and corner neighbors so hermite edges
+/// match at seams.
 ///
 /// Returns extra neighbor chunks that need remeshing but weren't already dirty.
 fn sync_boundary_density(
@@ -1700,6 +1763,105 @@ fn sync_boundary_density(
                         extra_neighbors.insert(neighbor);
                     }
                 }
+            }
+        }
+
+        // --- Edge sync (12 edges): sync the 1D line of voxels shared with diagonal neighbors ---
+        // Each edge is the intersection of two face boundaries.
+        // dir_i, dir_j are +1 or -1 for the two boundary axes; the free axis iterates 0..=cs.
+        let edge_defs: [(bool, bool, i32, i32, usize, usize, usize, usize, u8, u8); 12] = [
+            // (touches_i, touches_j, di, dj, coord_a_i, coord_b_i, coord_a_j, coord_b_j, axis_i, axis_j)
+            // X-Y edges (free axis = Z)
+            (max_x >= cs, max_y >= cs, 1, 1, cs, 0, cs, 0, 0, 1),
+            (max_x >= cs, min_y == 0,  1,-1, cs, 0,  0,cs, 0, 1),
+            (min_x == 0,  max_y >= cs,-1, 1,  0,cs, cs, 0, 0, 1),
+            (min_x == 0,  min_y == 0, -1,-1,  0,cs,  0,cs, 0, 1),
+            // X-Z edges (free axis = Y)
+            (max_x >= cs, max_z >= cs, 1, 1, cs, 0, cs, 0, 0, 2),
+            (max_x >= cs, min_z == 0,  1,-1, cs, 0,  0,cs, 0, 2),
+            (min_x == 0,  max_z >= cs,-1, 1,  0,cs, cs, 0, 0, 2),
+            (min_x == 0,  min_z == 0, -1,-1,  0,cs,  0,cs, 0, 2),
+            // Y-Z edges (free axis = X)
+            (max_y >= cs, max_z >= cs, 1, 1, cs, 0, cs, 0, 1, 2),
+            (max_y >= cs, min_z == 0,  1,-1, cs, 0,  0,cs, 1, 2),
+            (min_y == 0,  max_z >= cs,-1, 1,  0,cs, cs, 0, 1, 2),
+            (min_y == 0,  min_z == 0, -1,-1,  0,cs,  0,cs, 1, 2),
+        ];
+
+        for &(touches_i, touches_j, di, dj, ca_i, cb_i, ca_j, cb_j, axis_i, axis_j) in &edge_defs {
+            if !touches_i || !touches_j {
+                continue;
+            }
+            let neighbor = match (axis_i, axis_j) {
+                (0, 1) => (cx + di, cy + dj, cz),
+                (0, 2) => (cx + di, cy, cz + dj),
+                _      => (cx, cy + di, cz + dj), // (1, 2)
+            };
+            if !density_fields.contains_key(&neighbor) {
+                continue;
+            }
+            // Free axis is the one that's neither axis_i nor axis_j: 0+1+2=3
+            let free_axis = 3 - axis_i - axis_j;
+            for t in 0..=cs {
+                let (ax, ay, az) = {
+                    let mut c = [0usize; 3];
+                    c[axis_i as usize] = ca_i;
+                    c[axis_j as usize] = ca_j;
+                    c[free_axis as usize] = t;
+                    (c[0], c[1], c[2])
+                };
+                let (bx, by, bz) = {
+                    let mut c = [0usize; 3];
+                    c[axis_i as usize] = cb_i;
+                    c[axis_j as usize] = cb_j;
+                    c[free_axis as usize] = t;
+                    (c[0], c[1], c[2])
+                };
+
+                let sample_a = density_fields[&key].get(ax, ay, az);
+                let sample_b = density_fields[&neighbor].get(bx, by, bz);
+                let (avg_d, avg_m) = average_boundary_voxel(sample_a, sample_b);
+
+                updates.push((key, ax, ay, az, avg_d, avg_m));
+                updates.push((neighbor, bx, by, bz, avg_d, avg_m));
+
+                if !dirty_keys.contains(&neighbor) {
+                    extra_neighbors.insert(neighbor);
+                }
+            }
+        }
+
+        // --- Corner sync (8 corners): sync single voxel shared with diagonal corner neighbor ---
+        let corner_defs: [(bool, bool, bool, i32, i32, i32, usize, usize, usize, usize, usize, usize); 8] = [
+            // (touches_x, touches_y, touches_z, dx, dy, dz, ax, bx, ay, by, az, bz)
+            (max_x >= cs, max_y >= cs, max_z >= cs,  1, 1, 1, cs, 0, cs, 0, cs, 0),
+            (max_x >= cs, max_y >= cs, min_z == 0,   1, 1,-1, cs, 0, cs, 0,  0,cs),
+            (max_x >= cs, min_y == 0,  max_z >= cs,  1,-1, 1, cs, 0,  0,cs, cs, 0),
+            (max_x >= cs, min_y == 0,  min_z == 0,   1,-1,-1, cs, 0,  0,cs,  0,cs),
+            (min_x == 0,  max_y >= cs, max_z >= cs, -1, 1, 1,  0,cs, cs, 0, cs, 0),
+            (min_x == 0,  max_y >= cs, min_z == 0,  -1, 1,-1,  0,cs, cs, 0,  0,cs),
+            (min_x == 0,  min_y == 0,  max_z >= cs, -1,-1, 1,  0,cs,  0,cs, cs, 0),
+            (min_x == 0,  min_y == 0,  min_z == 0,  -1,-1,-1,  0,cs,  0,cs,  0,cs),
+        ];
+
+        for &(tx, ty, tz, dx, dy, dz, ax, bx, ay, by, az, bz) in &corner_defs {
+            if !tx || !ty || !tz {
+                continue;
+            }
+            let neighbor = (cx + dx, cy + dy, cz + dz);
+            if !density_fields.contains_key(&neighbor) {
+                continue;
+            }
+
+            let sample_a = density_fields[&key].get(ax, ay, az);
+            let sample_b = density_fields[&neighbor].get(bx, by, bz);
+            let (avg_d, avg_m) = average_boundary_voxel(sample_a, sample_b);
+
+            updates.push((key, ax, ay, az, avg_d, avg_m));
+            updates.push((neighbor, bx, by, bz, avg_d, avg_m));
+
+            if !dirty_keys.contains(&neighbor) {
+                extra_neighbors.insert(neighbor);
             }
         }
     }
@@ -2067,5 +2229,43 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_boundary_voxel_solid_plus_air_preserves_solid() {
+        let solid = VoxelSample { density: 0.8, material: Material::Granite };
+        let air = VoxelSample { density: -0.5, material: Material::Air };
+
+        // Solid + Air → preserves solid material
+        let (d, m) = average_boundary_voxel(&solid, &air);
+        assert_eq!(m, Material::Granite, "solid+air should preserve solid material");
+        assert!((d - (-0.5)).abs() < 1e-6, "density should be min of the two");
+
+        // Air + Solid → preserves solid material
+        let (d2, m2) = average_boundary_voxel(&air, &solid);
+        assert_eq!(m2, Material::Granite, "air+solid should preserve solid material");
+        assert!((d2 - (-0.5)).abs() < 1e-6, "density should be min of the two");
+    }
+
+    #[test]
+    fn test_boundary_voxel_solid_solid_picks_higher_density() {
+        let a = VoxelSample { density: 0.9, material: Material::Granite };
+        let b = VoxelSample { density: 0.5, material: Material::Iron };
+
+        let (_, m) = average_boundary_voxel(&a, &b);
+        assert_eq!(m, Material::Granite, "should pick material with higher density");
+
+        // Swap: b has higher density
+        let (_, m2) = average_boundary_voxel(&b, &a);
+        assert_eq!(m2, Material::Granite, "should pick material with higher density (a)");
+    }
+
+    #[test]
+    fn test_boundary_voxel_air_plus_air_stays_air() {
+        let a = VoxelSample { density: -1.0, material: Material::Air };
+        let b = VoxelSample { density: -0.3, material: Material::Air };
+
+        let (_, m) = average_boundary_voxel(&a, &b);
+        assert_eq!(m, Material::Air, "air+air should remain air");
     }
 }

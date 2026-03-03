@@ -15,6 +15,7 @@ use voxel_gen::region_gen::{
 };
 
 use crate::convert::{convert_mesh_to_ue_scaled, from_ue_normal, from_ue_world_pos};
+use crate::engine::terrace_size_for_scale;
 use crate::profiler::{ChunkTimings, StreamingProfiler};
 use crate::store::{extract_solid_mask, ChunkStore};
 use crate::types::{FfiCollapseEvent, WorkerRequest, WorkerResult};
@@ -503,7 +504,8 @@ fn handle_request(
             let cfg = config.read().unwrap().clone();
             let mat = voxel_core::material::Material::from_u8(host_material);
             let mut s = store.write().unwrap();
-            let meshes = s.flatten_terrace(glam::IVec3::new(base_x, base_y, base_z), mat, &cfg, world_scale);
+            let ts = terrace_size_for_scale(world_scale);
+            let meshes = s.flatten_terrace(glam::IVec3::new(base_x, base_y, base_z), mat, &cfg, world_scale, ts);
 
             // Collect dirty chunk keys for seam regeneration
             let dirty_keys: Vec<(i32, i32, i32)> = meshes.iter().map(|(k, _)| *k).collect();
@@ -521,7 +523,8 @@ fn handle_request(
         WorkerRequest::FlattenBatch { tiles } => {
             let cfg = config.read().unwrap().clone();
             let mut s = store.write().unwrap();
-            let meshes = s.flatten_terrace_batch(&tiles, &cfg, world_scale);
+            let ts = terrace_size_for_scale(world_scale);
+            let meshes = s.flatten_terrace_batch(&tiles, &cfg, world_scale, ts);
             let dirty_keys: Vec<_> = meshes.iter().map(|(k, _)| *k).collect();
             drop(s);
             for (key, mesh) in meshes {
@@ -855,9 +858,9 @@ struct SeamPassTimings {
     pub candidates_sent: u32,
 }
 
-/// After meshing chunk C, attempt seam generation for C and its 6 face-adjacent
-/// neighbors. Any chunk that produces non-empty seam quads gets combined with
-/// the cached base mesh and re-sent.
+/// After meshing chunk C, attempt seam generation for C and its full
+/// 26-neighborhood (face, edge, and corner neighbors). Any chunk that produces
+/// non-empty seam quads gets combined with the cached base mesh and re-sent.
 ///
 /// generate_chunk_seam_quads gracefully handles missing neighbors — it simply
 /// skips quads where neighbor data isn't available yet. So calling it repeatedly
@@ -876,15 +879,14 @@ fn incremental_seam_pass(
     let mut candidates_tried: u32 = 0;
     let mut candidates_sent: u32 = 0;
 
-    let candidates = [
-        chunk,
-        (chunk.0 - 1, chunk.1, chunk.2),
-        (chunk.0 + 1, chunk.1, chunk.2),
-        (chunk.0, chunk.1 - 1, chunk.2),
-        (chunk.0, chunk.1 + 1, chunk.2),
-        (chunk.0, chunk.1, chunk.2 - 1),
-        (chunk.0, chunk.1, chunk.2 + 1),
-    ];
+    let mut candidates = Vec::with_capacity(27);
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            for dz in -1..=1 {
+                candidates.push((chunk.0 + dx, chunk.1 + dy, chunk.2 + dz));
+            }
+        }
+    }
 
     // Batch: acquire ONE read lock, generate all seam quads + clone base meshes
     let mut to_send: Vec<((i32, i32, i32), voxel_core::mesh::Mesh)> = Vec::new();

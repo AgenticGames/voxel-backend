@@ -77,6 +77,7 @@ pub fn place_pools(
     chunk_seed: u64,
 ) -> (Vec<PoolDescriptor>, Vec<FluidSeed>) {
     if !config.enabled {
+        eprintln!("[POOL] disabled, skipping");
         return (Vec::new(), Vec::new());
     }
 
@@ -100,11 +101,18 @@ pub fn place_pools(
     }
 
     if floor_cells.is_empty() {
+        eprintln!("[POOL] chunk ({},{},{}) no floor cells found (size={})",
+            world_origin.x, world_origin.y, world_origin.z, size);
         return (Vec::new(), Vec::new());
     }
 
     // Step 2: Cluster adjacent floors via BFS flood-fill on XZ at similar Y
     let clusters = cluster_floors(&floor_cells, size, config.min_area);
+    eprintln!("[POOL] chunk ({},{},{}) floors={} clusters={} (min_area={}, thresh={:.2}, chance={:.2}, basin_depth={}, max_radius={})",
+        world_origin.x, world_origin.y, world_origin.z,
+        floor_cells.len(), clusters.len(),
+        config.min_area, config.placement_threshold, config.pool_chance,
+        config.basin_depth, config.max_radius);
 
     if clusters.is_empty() {
         return (Vec::new(), Vec::new());
@@ -135,11 +143,16 @@ pub fn place_pools(
             world_cz as f64 * config.placement_frequency,
         );
         if noise_val < config.placement_threshold {
+            eprintln!("[POOL]   cluster cells={} noise={:.3} < thresh={:.2} → skip",
+                cluster.cells.len(), noise_val, config.placement_threshold);
             continue;
         }
 
         // Step 4: RNG filter
-        if rng.gen::<f32>() >= config.pool_chance {
+        let rng_roll = rng.gen::<f32>();
+        if rng_roll >= config.pool_chance {
+            eprintln!("[POOL]   cluster cells={} rng={:.3} >= chance={:.2} → skip",
+                cluster.cells.len(), rng_roll, config.pool_chance);
             continue;
         }
 
@@ -159,7 +172,10 @@ pub fn place_pools(
         };
 
         // Step 5: Carve basin
-        // Compute cluster extent on XZ to determine effective radius
+        // Compute cluster extent on XZ to determine effective radius.
+        // Use area-based radius (sqrt(cells/PI)) instead of min-extent,
+        // because worm tunnels produce elongated clusters where min-extent
+        // would give radius=1 even for large clusters.
         let mut min_x = usize::MAX;
         let mut max_x = 0usize;
         let mut min_z = usize::MAX;
@@ -170,32 +186,49 @@ pub fn place_pools(
             min_z = min_z.min(cz);
             max_z = max_z.max(cz);
         }
-        let extent_x = (max_x - min_x + 1) as f32;
-        let extent_z = (max_z - min_z + 1) as f32;
-        let half_extent = (extent_x.min(extent_z) / 2.0).floor() as usize;
-        let effective_radius = half_extent.min(config.max_radius).max(1);
+        let area_radius = ((cluster.cells.len() as f32) / std::f32::consts::PI).sqrt() as usize;
+        let effective_radius = area_radius.min(config.max_radius).max(1);
 
         let center_x = (min_x + max_x) / 2;
         let center_z = (min_z + max_z) / 2;
         let floor_y = cluster.min_y;
         let surface_y = floor_y + 1; // pool surface is at the air layer above floor
 
-        // Verify headroom
-        let mut has_headroom = true;
-        for dy in 1..=config.min_air_above {
-            let check_y = surface_y + dy;
-            if check_y >= size {
-                break;
+        // Verify headroom: sample multiple points around the center and accept
+        // if ANY point has sufficient air above. In curved worm tunnels, the
+        // geometric center may have low clearance while nearby points are fine.
+        let headroom_offsets: [(i32, i32); 5] = [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)];
+        let mut has_headroom = false;
+        for &(hdx, hdz) in &headroom_offsets {
+            let hx = center_x as i32 + hdx;
+            let hz = center_z as i32 + hdz;
+            if hx < 0 || hx >= size as i32 || hz < 0 || hz >= size as i32 {
+                continue;
             }
-            let sample = density.get(center_x, check_y, center_z);
-            if sample.material.is_solid() {
-                has_headroom = false;
+            let mut point_ok = true;
+            for dy in 1..=config.min_air_above {
+                let check_y = surface_y + dy;
+                if check_y >= size {
+                    break;
+                }
+                let sample = density.get(hx as usize, check_y, hz as usize);
+                if sample.material.is_solid() {
+                    point_ok = false;
+                    break;
+                }
+            }
+            if point_ok {
+                has_headroom = true;
                 break;
             }
         }
         if !has_headroom {
+            eprintln!("[POOL]   cluster cells={} no headroom at center ({},{},{}) → skip",
+                cluster.cells.len(), center_x, surface_y, center_z);
             continue;
         }
+        eprintln!("[POOL]   CARVING pool: center=({},{},{}) radius={} basin_depth={} fluid={:?}",
+            center_x, floor_y, center_z, effective_radius, config.basin_depth, fluid_type);
 
         let r2 = (effective_radius * effective_radius) as i32;
 
@@ -628,5 +661,101 @@ mod tests {
         let cells = vec![(5, 8, 5), (6, 8, 5)];
         let clusters = cluster_floors(&cells, 17, 3);
         assert!(clusters.is_empty());
+    }
+
+    /// Diagnostic: Generate real cave density and check if pools are placed.
+    /// This uses the full generation pipeline (noise + worms) to create
+    /// realistic terrain and then tests pool placement with extreme settings.
+    #[test]
+    fn test_pools_in_real_cave_terrain() {
+        use crate::config::GenerationConfig;
+        use voxel_core::chunk::ChunkCoord;
+
+        let mut config = GenerationConfig::default();
+        // Extreme pool settings: every floor cluster should get a pool
+        config.pools = PoolConfig {
+            enabled: true,
+            placement_frequency: 0.08,
+            placement_threshold: -1.0, // accept everything (noise >= -1 always true)
+            pool_chance: 1.0,          // every candidate becomes a pool
+            min_area: 2,               // tiny clusters qualify
+            max_radius: 4,
+            basin_depth: 3,
+            rim_height: 1,
+            water_pct: 1.0,
+            lava_pct: 0.0,
+            empty_pct: 0.0,
+            min_air_above: 1, // reduced headroom requirement
+        };
+        // Disable formations so they don't interfere
+        config.formations.enabled = false;
+
+        let mut total_pools = 0;
+        let mut total_floors = 0;
+        let mut total_clusters = 0;
+        let mut chunks_with_caves = 0;
+
+        // Try a 4x4x4 grid of chunks to find ones with caves
+        for cx in -2..2 {
+            for cy in -2..2 {
+                for cz in -2..2 {
+                    let coord = ChunkCoord::new(cx, cy, cz);
+                    let (density, pool_descs, fluid_seeds) =
+                        crate::generate_density(coord, &config);
+
+                    // Count floor cells manually to diagnose
+                    let size = density.size;
+                    let mut floor_count = 0;
+                    for z in 1..size - 1 {
+                        for y in 1..size - 2 {
+                            for x in 1..size - 1 {
+                                let sample = density.get(x, y, z);
+                                let above = density.get(x, y + 1, z);
+                                if sample.material.is_solid() && !above.material.is_solid() {
+                                    floor_count += 1;
+                                }
+                            }
+                        }
+                    }
+
+                    if floor_count > 0 {
+                        chunks_with_caves += 1;
+                    }
+                    total_floors += floor_count;
+                    total_pools += pool_descs.len();
+
+                    if !pool_descs.is_empty() {
+                        eprintln!(
+                            "[DIAG] chunk ({},{},{}) floors={} pools={} seeds={}",
+                            cx, cy, cz, floor_count, pool_descs.len(), fluid_seeds.len()
+                        );
+                        for d in &pool_descs {
+                            eprintln!(
+                                "  pool at ({:.0},{:.0},{:.0}) r={:.0} fluid={:?}",
+                                d.world_x, d.world_y, d.world_z, d.radius, d.fluid_type
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        eprintln!(
+            "\n[DIAG SUMMARY] chunks_with_caves={} total_floors={} total_pools={}",
+            chunks_with_caves, total_floors, total_pools
+        );
+
+        // We expect SOME pools to be placed across 64 chunks
+        assert!(
+            chunks_with_caves > 0,
+            "No chunks with caves found in 4x4x4 grid — terrain gen may not produce caves at these coords"
+        );
+        assert!(
+            total_pools > 0,
+            "No pools placed despite {} floor cells across {} chunks with caves. \
+             Floor detection or clustering may not work with real cave geometry.",
+            total_floors,
+            chunks_with_caves
+        );
     }
 }
