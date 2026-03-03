@@ -279,6 +279,9 @@ pub struct FfiEngineConfig {
     pub ore_coal_sedimentary_host: u8,
     pub ore_coal_shallow_ceiling: u8,
     pub ore_coal_depth_enrichment: u8,
+    // ── Ore Detail ──
+    pub ore_detail_multiplier: u32,
+    pub ore_protrusion: f32,
     // ── Sleep Config ──
     // Top-level sleep
     pub sleep_time_budget_ms: u32,

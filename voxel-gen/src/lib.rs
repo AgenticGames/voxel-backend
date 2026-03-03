@@ -84,6 +84,11 @@ pub fn generate_density(coord: ChunkCoord, config: &GenerationConfig) -> (Densit
         formations::place_formations(&mut density, &config.formations, world_origin, config.seed, c_seed);
     }
 
+    // Step 4b: Apply ore protrusion (push ore surfaces outward with smooth falloff)
+    if config.ore_protrusion > 0.0 {
+        density::apply_ore_protrusion(&mut density, config.ore_protrusion);
+    }
+
     // Step 5: Compute cached metadata (geode flag, air count) for search optimization
     density.compute_metadata();
 

@@ -1124,6 +1124,8 @@
             // Mesh quality settings
             appendParam(parts, "chunk_size", "gen-chunk-size");
             appendParam(parts, "max_edge_length", "gen-max-edge-length");
+            appendParam(parts, "ore_detail_multiplier", "gen-ore-detail-multiplier");
+            appendParam(parts, "ore_protrusion", "gen-ore-protrusion");
             // Host rock settings
             appendParam(parts, "sandstone_depth", "gen-sandstone-depth");
             appendParam(parts, "granite_depth", "gen-granite-depth");

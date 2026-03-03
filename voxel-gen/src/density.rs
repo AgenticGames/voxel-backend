@@ -659,6 +659,121 @@ fn select_host_rock(
     }
 }
 
+/// Check if a base-resolution density field has any exposed ore surfaces.
+/// Returns true if any cell has at least one corner with a detail material
+/// and at least one corner with density <= 0 (sign change = surface).
+/// Fast early-exit scan.
+pub fn has_exposed_ore(field: &DensityField) -> bool {
+    let cell_size = field.size - 1;
+    for z in 0..cell_size {
+        for y in 0..cell_size {
+            for x in 0..cell_size {
+                let mut has_detail = false;
+                let mut has_air = false;
+                // Check all 8 corners of this cell
+                for &(dx, dy, dz) in &[
+                    (0,0,0),(1,0,0),(0,1,0),(1,1,0),
+                    (0,0,1),(1,0,1),(0,1,1),(1,1,1),
+                ] {
+                    let s = field.get(x+dx, y+dy, z+dz);
+                    if s.material.is_detail_material() {
+                        has_detail = true;
+                    }
+                    if s.density <= 0.0 {
+                        has_air = true;
+                    }
+                    if has_detail && has_air {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Apply ore protrusion: push ore surfaces outward with smooth distance-based falloff.
+/// Uses BFS from ore voxels through solid host rock to create a natural-looking bulge.
+pub fn apply_ore_protrusion(field: &mut DensityField, protrusion: f32) {
+    use std::collections::VecDeque;
+
+    let size = field.size;
+    let max_dist: f32 = 1.5;
+
+    // Distance field: f32::MAX means unvisited
+    let mut dist = vec![f32::MAX; size * size * size];
+    let mut queue: VecDeque<(usize, usize, usize)> = VecDeque::new();
+
+    // Seed BFS from all solid detail-material voxels
+    for z in 0..size {
+        for y in 0..size {
+            for x in 0..size {
+                let s = field.get(x, y, z);
+                if s.density > 0.0 && s.material.is_detail_material() {
+                    let idx = z * size * size + y * size + x;
+                    dist[idx] = 0.0;
+                    queue.push_back((x, y, z));
+                }
+            }
+        }
+    }
+
+    // BFS flood-fill through solid host rock
+    while let Some((x, y, z)) = queue.pop_front() {
+        let idx = z * size * size + y * size + x;
+        let current_dist = dist[idx];
+        if current_dist >= max_dist {
+            continue;
+        }
+
+        let neighbors: [(i32, i32, i32); 6] = [
+            (-1,0,0),(1,0,0),(0,-1,0),(0,1,0),(0,0,-1),(0,0,1),
+        ];
+
+        for (dx, dy, dz) in neighbors {
+            let nx = x as i32 + dx;
+            let ny = y as i32 + dy;
+            let nz = z as i32 + dz;
+            if nx < 0 || ny < 0 || nz < 0 {
+                continue;
+            }
+            let (nx, ny, nz) = (nx as usize, ny as usize, nz as usize);
+            if nx >= size || ny >= size || nz >= size {
+                continue;
+            }
+            let ns = field.get(nx, ny, nz);
+            // Only flood through solid voxels
+            if ns.density <= 0.0 {
+                continue;
+            }
+            let new_dist = current_dist + 1.0;
+            let nidx = nz * size * size + ny * size + nx;
+            if new_dist < dist[nidx] {
+                dist[nidx] = new_dist;
+                queue.push_back((nx, ny, nz));
+            }
+        }
+    }
+
+    // Apply protrusion based on distance
+    for z in 0..size {
+        for y in 0..size {
+            for x in 0..size {
+                let idx = z * size * size + y * size + x;
+                let d = dist[idx];
+                if d < f32::MAX {
+                    let s = field.get_mut(x, y, z);
+                    // Only affect solid voxels
+                    if s.density > 0.0 {
+                        let falloff = (1.0 - d / max_dist).max(0.0);
+                        s.density += protrusion * falloff;
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

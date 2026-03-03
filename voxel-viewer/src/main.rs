@@ -419,6 +419,8 @@ fn serve_generate(
     let mut coal_sedimentary_host: Option<bool> = None;
     let mut coal_shallow_ceiling: Option<bool> = None;
     let mut coal_depth_enrichment: Option<bool> = None;
+    let mut ore_detail_multiplier: Option<u32> = None;
+    let mut ore_protrusion: Option<f32> = None;
 
     for pair in body.split('&') {
         let mut kv = pair.splitn(2, '=');
@@ -571,6 +573,8 @@ fn serve_generate(
             "coal_sedimentary_host" => { coal_sedimentary_host = Some(val == "1" || val == "true"); }
             "coal_shallow_ceiling" => { coal_shallow_ceiling = Some(val == "1" || val == "true"); }
             "coal_depth_enrichment" => { coal_depth_enrichment = Some(val == "1" || val == "true"); }
+            "ore_detail_multiplier" => { ore_detail_multiplier = val.parse().ok(); }
+            "ore_protrusion" => { ore_protrusion = val.parse().ok(); }
             _ => {}
         }
     }
@@ -657,6 +661,8 @@ fn serve_generate(
     if let Some(v) = coal_sedimentary_host { config.ore.coal_sedimentary_host = v; }
     if let Some(v) = coal_shallow_ceiling { config.ore.coal_shallow_ceiling = v; }
     if let Some(v) = coal_depth_enrichment { config.ore.coal_depth_enrichment = v; }
+    if let Some(v) = ore_detail_multiplier { config.ore_detail_multiplier = v.max(1).min(4); }
+    if let Some(v) = ore_protrusion { config.ore_protrusion = v.max(0.0).min(0.5); }
     // Pool settings
     if let Some(v) = pools_enabled { config.pools.enabled = v; }
     if let Some(v) = pool_placement_freq { config.pools.placement_frequency = v; }

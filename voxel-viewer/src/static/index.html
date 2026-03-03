@@ -84,6 +84,8 @@
                         <div class="settings-grid">
                             <label title="Larger = more detail but slower, each chunk is NxNxN voxels">Chunk Size <input type="number" id="gen-chunk-size" step="1" min="4" max="64" placeholder="16"></label>
                             <label title="Lower = more triangles kept, Higher = removes stretched triangles">Max Edge Length <input type="number" id="gen-max-edge-length" step="0.5" min="1" placeholder="4.0"></label>
+                            <label title="Resolution multiplier for chunks with ore (2 = 4x triangles)">Ore Detail Multiplier <input type="number" id="gen-ore-detail-multiplier" min="1" max="4" step="1" value="1"></label>
+                            <label title="How far ore surfaces bulge from cave walls (0 = flush)">Ore Protrusion <input type="number" id="gen-ore-protrusion" min="0" max="0.5" step="0.05" value="0"></label>
                         </div>
                     </details>
 

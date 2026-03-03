@@ -100,6 +100,12 @@ impl Material {
         matches!(self, Material::Crystal | Material::Amethyst)
     }
 
+    /// Returns true for non-host-rock solid materials (ores, minerals, special formations).
+    /// Used to identify chunks that benefit from higher mesh resolution.
+    pub fn is_detail_material(self) -> bool {
+        self != Material::Air && !self.is_host_rock()
+    }
+
     pub fn display_name(self) -> &'static str {
         match self {
             Material::Air => "Air",

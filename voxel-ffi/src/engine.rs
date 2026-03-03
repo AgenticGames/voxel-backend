@@ -20,9 +20,9 @@ use crate::store::ChunkStore;
 use crate::types::*;
 use crate::worker::worker_loop;
 
-/// Compute terrace size in voxels from world scale, targeting ~40 UU snap steps (1 voxel).
-fn terrace_size_for_scale(scale: f32) -> i32 {
-    (40.0f32 / scale).round().max(1.0) as i32
+/// Compute terrace size in voxels from world scale, targeting ~80 UU snap steps (2 voxels).
+pub(crate) fn terrace_size_for_scale(scale: f32) -> i32 {
+    (80.0f32 / scale).round().max(1.0) as i32
 }
 
 /// Data returned when a sleep cycle completes.
@@ -1033,6 +1033,8 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
         mesh_smooth_strength: if c.mesh_smooth_strength > 0.0 { c.mesh_smooth_strength } else { 0.3 },
         mesh_boundary_smooth: if c.mesh_boundary_smooth > 0.0 { c.mesh_boundary_smooth } else { 0.3 },
         mesh_recalc_normals: c.mesh_recalc_normals,
+        ore_detail_multiplier: if c.ore_detail_multiplier > 0 { c.ore_detail_multiplier.min(4) } else { 1 },
+        ore_protrusion: c.ore_protrusion.max(0.0).min(0.5),
     }
 }
 

@@ -10,7 +10,7 @@ use voxel_core::material::Material;
 use voxel_core::mesh::Mesh;
 use voxel_core::stress::{StressField, SupportField};
 use voxel_gen::config::GenerationConfig;
-use voxel_gen::density::DensityField;
+use voxel_gen::density::{self as gen_density, DensityField};
 use voxel_gen::hermite_extract::{extract_hermite_data, patch_hermite_data};
 use voxel_gen::pools::{self, PoolDescriptor};
 use voxel_gen::region_gen::{self, ChunkSeamData};
@@ -55,7 +55,40 @@ impl GeneratedRegion {
         // Phases 1-5: Generate density fields with global worm carving + pools (shared pipeline)
         let (mut density_fields, pool_descriptors, _fluid_seeds, _worm_paths, _timings) = region_gen::generate_region_densities(&coords, &config);
 
-        // Phase 5: Seal boundary faces
+        // Phase 5b: Ore detail supersampling — regenerate ore chunks at higher resolution
+        let multiplier = config.ore_detail_multiplier.max(1).min(4) as usize;
+        if multiplier > 1 {
+            let ore_chunks: Vec<(i32, i32, i32)> = coords
+                .par_iter()
+                .filter(|&&key| {
+                    density_fields.get(&key)
+                        .map(|d| gen_density::has_exposed_ore(d))
+                        .unwrap_or(false)
+                })
+                .copied()
+                .collect();
+
+            if !ore_chunks.is_empty() {
+                let eb = config.effective_bounds();
+                let hires_results: Vec<_> = ore_chunks
+                    .par_iter()
+                    .map(|&(cx, cy, cz)| {
+                        let mut hires_config = config.clone();
+                        hires_config.chunk_size = gs * multiplier;
+                        hires_config.bounds_size = eb;
+                        let coord = ChunkCoord::new(cx, cy, cz);
+                        let origin = coord.world_origin_bounds(eb);
+                        let density = gen_density::generate_density_field(&hires_config, origin);
+                        ((cx, cy, cz), density)
+                    })
+                    .collect();
+                for (key, density) in hires_results {
+                    density_fields.insert(key, density);
+                }
+            }
+        }
+
+        // Phase 5c: Seal boundary faces
         if closed {
             for (&(cx, cy, cz), density) in &mut density_fields {
                 density.clamp_boundary_faces(
@@ -70,29 +103,49 @@ impl GeneratedRegion {
         }
 
         // Phase 6: Extract hermite, mesh per chunk, collect seam data (PARALLEL)
+        // Each chunk meshes at its own resolution (base or high-res).
+        // Seam data always uses base resolution for cross-chunk stitching.
+        let eb = config.effective_bounds();
         let chunk_results: Vec<_> = coords
             .par_iter()
             .map(|&(cx, cy, cz)| {
                 let density = &density_fields[&(cx, cy, cz)];
                 let coord = ChunkCoord::new(cx, cy, cz);
+                let is_hires = density.size > gs + 1;
 
                 let hermite = extract_hermite_data(density);
                 let cell_size = density.size - 1;
                 let dc_vertices = solve_dc_vertices(&hermite, cell_size);
                 let mut mesh = generate_mesh(&hermite, &dc_vertices, cell_size);
 
-                let boundary_edges = region_gen::extract_boundary_edges(&hermite, gs);
-
-                let world_origin = coord.world_origin_sized(gs);
+                // Scale vertices to world coordinates
+                let world_origin = coord.world_origin_bounds(eb);
+                let voxel_scale = eb / cell_size as f32;
                 for v in &mut mesh.vertices {
-                    v.position += world_origin;
+                    v.position = v.position * voxel_scale + world_origin;
                 }
 
-                ((cx, cy, cz), hermite, mesh, ChunkSeamData {
-                    dc_vertices,
+                // Seam data: always at base resolution (dc_vertices in local grid coords)
+                let (seam_hermite, seam_dc, seam_boundary) = if is_hires {
+                    // Downsample high-res density to base resolution for seam data
+                    let factor = cell_size / gs;
+                    let base_density = density.downsample(factor);
+                    let base_hermite = extract_hermite_data(&base_density);
+                    let base_dc = solve_dc_vertices(&base_hermite, gs);
+                    let base_boundary = region_gen::extract_boundary_edges(&base_hermite, gs);
+                    (base_hermite, base_dc, base_boundary)
+                } else {
+                    let boundary_edges = region_gen::extract_boundary_edges(&hermite, gs);
+                    (hermite, dc_vertices, boundary_edges)
+                };
+
+                let seam_data = ChunkSeamData {
+                    dc_vertices: seam_dc,
                     world_origin,
-                    boundary_edges,
-                })
+                    boundary_edges: seam_boundary,
+                };
+
+                ((cx, cy, cz), seam_hermite, mesh, seam_data)
             })
             .collect();
 
@@ -151,10 +204,12 @@ impl GeneratedRegion {
         // Re-mesh all dirty chunks
         if !result.dirty_chunks.is_empty() {
             // Build full-chunk dirty bounds for each dirty chunk
-            let gs = self.config.chunk_size;
             let dirty_bounds: Vec<_> = result.dirty_chunks.iter()
                 .filter(|key| self.density_fields.contains_key(key))
-                .map(|&key| (key, 0, 0, 0, gs, gs, gs))
+                .map(|&key| {
+                    let cell_size = self.density_fields[&key].size - 1;
+                    (key, 0, 0, 0, cell_size, cell_size, cell_size)
+                })
                 .collect();
             self.remesh_dirty_parallel(&dirty_bounds);
         }
@@ -166,16 +221,16 @@ impl GeneratedRegion {
     /// Mine a sphere: set solid voxels within radius to Air, return what was mined.
     pub fn mine_sphere(&mut self, center: Vec3, radius: f32) -> MineResult {
         let mut mined = HashMap::new();
-        let cs = self.config.chunk_size as f32;
+        let eb = self.config.effective_bounds();
         let r2 = radius * radius;
 
         // Find affected chunks
-        let min_cx = ((center.x - radius) / cs).floor() as i32;
-        let max_cx = ((center.x + radius) / cs).floor() as i32;
-        let min_cy = ((center.y - radius) / cs).floor() as i32;
-        let max_cy = ((center.y + radius) / cs).floor() as i32;
-        let min_cz = ((center.z - radius) / cs).floor() as i32;
-        let max_cz = ((center.z + radius) / cs).floor() as i32;
+        let min_cx = ((center.x - radius) / eb).floor() as i32;
+        let max_cx = ((center.x + radius) / eb).floor() as i32;
+        let min_cy = ((center.y - radius) / eb).floor() as i32;
+        let max_cy = ((center.y + radius) / eb).floor() as i32;
+        let min_cz = ((center.z - radius) / eb).floor() as i32;
+        let max_cz = ((center.z + radius) / eb).floor() as i32;
 
         // Track dirty chunks with their local dirty bounds for incremental hermite patching
         let mut dirty_chunks: Vec<((i32, i32, i32), usize, usize, usize, usize, usize, usize)> = Vec::new();
@@ -184,23 +239,24 @@ impl GeneratedRegion {
             for cy in min_cy..=max_cy {
                 for cx in min_cx..=max_cx {
                     if let Some(density) = self.density_fields.get_mut(&(cx, cy, cz)) {
-                        let origin = Vec3::new(cx as f32 * cs, cy as f32 * cs, cz as f32 * cs);
+                        let origin = Vec3::new(cx as f32 * eb, cy as f32 * eb, cz as f32 * eb);
+                        let vs = eb / (density.size - 1) as f32;
                         let mut changed = false;
 
                         // Bounded iteration: only check voxels within the mine radius
                         let local_center = center - origin;
-                        let lo_x = ((local_center.x - radius).floor() as i32).max(0) as usize;
-                        let hi_x = ((local_center.x + radius).ceil() as usize + 1).min(density.size);
-                        let lo_y = ((local_center.y - radius).floor() as i32).max(0) as usize;
-                        let hi_y = ((local_center.y + radius).ceil() as usize + 1).min(density.size);
-                        let lo_z = ((local_center.z - radius).floor() as i32).max(0) as usize;
-                        let hi_z = ((local_center.z + radius).ceil() as usize + 1).min(density.size);
+                        let lo_x = ((local_center.x / vs - radius / vs).floor() as i32).max(0) as usize;
+                        let hi_x = (((local_center.x + radius) / vs).ceil() as usize + 1).min(density.size);
+                        let lo_y = ((local_center.y / vs - radius / vs).floor() as i32).max(0) as usize;
+                        let hi_y = (((local_center.y + radius) / vs).ceil() as usize + 1).min(density.size);
+                        let lo_z = ((local_center.z / vs - radius / vs).floor() as i32).max(0) as usize;
+                        let hi_z = (((local_center.z + radius) / vs).ceil() as usize + 1).min(density.size);
 
                         for z in lo_z..hi_z {
                             for y in lo_y..hi_y {
                                 for x in lo_x..hi_x {
                                     let world_pos = origin
-                                        + Vec3::new(x as f32, y as f32, z as f32);
+                                        + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
                                     let dist2 = (world_pos - center).length_squared();
                                     if dist2 <= r2 {
                                         let sample = density.get_mut(x, y, z);
@@ -242,17 +298,17 @@ impl GeneratedRegion {
     /// Mine by peeling: only remove voxels near the surface (within small radius, near air).
     pub fn mine_peel(&mut self, center: Vec3, normal: Vec3, radius: f32) -> MineResult {
         let mut mined = HashMap::new();
-        let cs = self.config.chunk_size as f32;
+        let eb = self.config.effective_bounds();
         let r2 = radius * radius;
         // Offset the center slightly along the normal into the surface
         let adjusted_center = center - normal * 0.5;
 
-        let min_cx = ((adjusted_center.x - radius) / cs).floor() as i32;
-        let max_cx = ((adjusted_center.x + radius) / cs).floor() as i32;
-        let min_cy = ((adjusted_center.y - radius) / cs).floor() as i32;
-        let max_cy = ((adjusted_center.y + radius) / cs).floor() as i32;
-        let min_cz = ((adjusted_center.z - radius) / cs).floor() as i32;
-        let max_cz = ((adjusted_center.z + radius) / cs).floor() as i32;
+        let min_cx = ((adjusted_center.x - radius) / eb).floor() as i32;
+        let max_cx = ((adjusted_center.x + radius) / eb).floor() as i32;
+        let min_cy = ((adjusted_center.y - radius) / eb).floor() as i32;
+        let max_cy = ((adjusted_center.y + radius) / eb).floor() as i32;
+        let min_cz = ((adjusted_center.z - radius) / eb).floor() as i32;
+        let max_cz = ((adjusted_center.z + radius) / eb).floor() as i32;
 
         let mut dirty_chunks: Vec<((i32, i32, i32), usize, usize, usize, usize, usize, usize)> = Vec::new();
 
@@ -260,17 +316,18 @@ impl GeneratedRegion {
             for cy in min_cy..=max_cy {
                 for cx in min_cx..=max_cx {
                     if let Some(density) = self.density_fields.get_mut(&(cx, cy, cz)) {
-                        let origin = Vec3::new(cx as f32 * cs, cy as f32 * cs, cz as f32 * cs);
+                        let origin = Vec3::new(cx as f32 * eb, cy as f32 * eb, cz as f32 * eb);
+                        let vs = eb / (density.size - 1) as f32;
                         let mut changed = false;
 
                         // Bounded iteration for peel
                         let local_center = adjusted_center - origin;
-                        let lo_x = ((local_center.x - radius).floor() as i32).max(0) as usize;
-                        let hi_x = ((local_center.x + radius).ceil() as usize + 1).min(density.size);
-                        let lo_y = ((local_center.y - radius).floor() as i32).max(0) as usize;
-                        let hi_y = ((local_center.y + radius).ceil() as usize + 1).min(density.size);
-                        let lo_z = ((local_center.z - radius).floor() as i32).max(0) as usize;
-                        let hi_z = ((local_center.z + radius).ceil() as usize + 1).min(density.size);
+                        let lo_x = (((local_center.x - radius) / vs).floor() as i32).max(0) as usize;
+                        let hi_x = (((local_center.x + radius) / vs).ceil() as usize + 1).min(density.size);
+                        let lo_y = (((local_center.y - radius) / vs).floor() as i32).max(0) as usize;
+                        let hi_y = (((local_center.y + radius) / vs).ceil() as usize + 1).min(density.size);
+                        let lo_z = (((local_center.z - radius) / vs).floor() as i32).max(0) as usize;
+                        let hi_z = (((local_center.z + radius) / vs).ceil() as usize + 1).min(density.size);
 
                         // First pass: collect voxels to peel
                         let mut to_peel: Vec<(usize, usize, usize)> = Vec::new();
@@ -278,7 +335,7 @@ impl GeneratedRegion {
                             for y in lo_y..hi_y {
                                 for x in lo_x..hi_x {
                                     let world_pos = origin
-                                        + Vec3::new(x as f32, y as f32, z as f32);
+                                        + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
                                     let dist2 =
                                         (world_pos - adjusted_center).length_squared();
                                     if dist2 > r2 {
@@ -301,7 +358,7 @@ impl GeneratedRegion {
 
                         // Second pass: apply peeling with SDF gradient
                         for (x, y, z) in to_peel {
-                            let world_pos = origin + Vec3::new(x as f32, y as f32, z as f32);
+                            let world_pos = origin + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
                             let dist = (world_pos - adjusted_center).length();
                             let sdf = dist - radius;
                             let sample = density.get_mut(x, y, z);
@@ -336,25 +393,40 @@ impl GeneratedRegion {
     fn remesh_chunk(&mut self, cx: i32, cy: i32, cz: i32) {
         if let Some(density) = self.density_fields.get(&(cx, cy, cz)) {
             let gs = self.config.chunk_size;
+            let eb = self.config.effective_bounds();
             let coord = ChunkCoord::new(cx, cy, cz);
             let hermite = extract_hermite_data(density);
             let cell_size = density.size - 1;
             let dc_vertices = solve_dc_vertices(&hermite, cell_size);
             let mut mesh = generate_mesh(&hermite, &dc_vertices, cell_size);
 
-            let boundary_edges = region_gen::extract_boundary_edges(&hermite, gs);
+            let is_hires = density.size > gs + 1;
 
-            let world_origin = coord.world_origin_sized(gs);
+            let world_origin = coord.world_origin_bounds(eb);
+            let voxel_scale = eb / cell_size as f32;
             for v in &mut mesh.vertices {
-                v.position += world_origin;
+                v.position = v.position * voxel_scale + world_origin;
             }
+
+            // Seam data always at base resolution
+            let (seam_dc, seam_boundary) = if is_hires {
+                let factor = cell_size / gs;
+                let base_density = density.downsample(factor);
+                let base_hermite = extract_hermite_data(&base_density);
+                let base_dc = solve_dc_vertices(&base_hermite, gs);
+                let base_boundary = region_gen::extract_boundary_edges(&base_hermite, gs);
+                (base_dc, base_boundary)
+            } else {
+                let boundary_edges = region_gen::extract_boundary_edges(&hermite, gs);
+                (dc_vertices, boundary_edges)
+            };
 
             self.chunk_meshes.insert((cx, cy, cz), mesh);
             self.hermite_data.insert((cx, cy, cz), hermite);
             self.chunk_seam_data.insert((cx, cy, cz), ChunkSeamData {
-                dc_vertices,
+                dc_vertices: seam_dc,
                 world_origin,
-                boundary_edges,
+                boundary_edges: seam_boundary,
             });
         }
     }
@@ -400,6 +472,7 @@ impl GeneratedRegion {
         }
 
         // Process all dirty chunks in parallel
+        let eb = self.config.effective_bounds();
         let results: Vec<_> = work
             .into_par_iter()
             .map(|(key, density, mut hermite, min_x, min_y, min_z, max_x, max_y, max_z)| {
@@ -409,20 +482,33 @@ impl GeneratedRegion {
                 patch_hermite_data(&mut hermite, &density, min_x, min_y, min_z, max_x, max_y, max_z);
 
                 let cell_size = density.size - 1;
+                let is_hires = density.size > gs + 1;
                 let dc_vertices = solve_dc_vertices(&hermite, cell_size);
                 let mut mesh = generate_mesh(&hermite, &dc_vertices, cell_size);
 
-                let boundary_edges = region_gen::extract_boundary_edges(&hermite, gs);
-
-                let world_origin = coord.world_origin_sized(gs);
+                let world_origin = coord.world_origin_bounds(eb);
+                let voxel_scale = eb / cell_size as f32;
                 for v in &mut mesh.vertices {
-                    v.position += world_origin;
+                    v.position = v.position * voxel_scale + world_origin;
                 }
 
+                // Seam data always at base resolution
+                let (seam_dc, seam_boundary) = if is_hires {
+                    let factor = cell_size / gs;
+                    let base_density = density.downsample(factor);
+                    let base_hermite = extract_hermite_data(&base_density);
+                    let base_dc = solve_dc_vertices(&base_hermite, gs);
+                    let base_boundary = region_gen::extract_boundary_edges(&base_hermite, gs);
+                    (base_dc, base_boundary)
+                } else {
+                    let boundary_edges = region_gen::extract_boundary_edges(&hermite, gs);
+                    (dc_vertices, boundary_edges)
+                };
+
                 let seam_data = ChunkSeamData {
-                    dc_vertices,
+                    dc_vertices: seam_dc,
                     world_origin,
-                    boundary_edges,
+                    boundary_edges: seam_boundary,
                 };
 
                 (key, density, hermite, mesh, seam_data)
@@ -458,14 +544,14 @@ impl GeneratedRegion {
     /// Check pool containment after mining — remove drained pools.
     /// A pool is drained if any of its rim voxels have been mined to air.
     pub fn check_pool_containment(&mut self) {
-        let cs = self.config.chunk_size as f32;
+        let eb = self.config.effective_bounds();
         self.pool_descriptors.retain(|pool| {
             // Find which chunk this pool belongs to
-            let cx = (pool.world_x / cs).floor() as i32;
-            let cy = (pool.world_y / cs).floor() as i32;
-            let cz = (pool.world_z / cs).floor() as i32;
+            let cx = (pool.world_x / eb).floor() as i32;
+            let cy = (pool.world_y / eb).floor() as i32;
+            let cz = (pool.world_z / eb).floor() as i32;
             if let Some(density) = self.density_fields.get(&(cx, cy, cz)) {
-                let world_origin = Vec3::new(cx as f32 * cs, cy as f32 * cs, cz as f32 * cs);
+                let world_origin = Vec3::new(cx as f32 * eb, cy as f32 * eb, cz as f32 * eb);
                 pools::is_pool_contained(density, pool, world_origin)
             } else {
                 false // chunk not found, pool can't exist

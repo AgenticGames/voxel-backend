@@ -46,6 +46,12 @@ pub struct GenerationConfig {
     pub mesh_boundary_smooth: f32,
     /// Recalculate area-weighted normals. 0=off, 1=on
     pub mesh_recalc_normals: u32,
+    /// Grid resolution multiplier for chunks containing exposed ore (1-4).
+    /// 1 = base resolution, 2 = 4x triangles, 3 = 9x, 4 = 16x.
+    pub ore_detail_multiplier: u32,
+    /// Density offset pushing ore surfaces outward (0.0-0.5).
+    /// Makes ore deposits physically bulge from cave walls.
+    pub ore_protrusion: f32,
 }
 
 impl GenerationConfig {
@@ -102,6 +108,8 @@ impl Default for GenerationConfig {
             mesh_smooth_strength: 0.3,
             mesh_boundary_smooth: 0.3,
             mesh_recalc_normals: 1,
+            ore_detail_multiplier: 1,
+            ore_protrusion: 0.0,
         }
     }
 }

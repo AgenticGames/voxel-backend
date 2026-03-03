@@ -236,6 +236,13 @@ pub fn generate_region_densities(
     }
     timings.formations = t5.elapsed();
 
+    // Phase 6b: Apply ore protrusion (push ore surfaces outward with smooth falloff)
+    if config.ore_protrusion > 0.0 {
+        for density in density_fields.values_mut() {
+            crate::density::apply_ore_protrusion(density, config.ore_protrusion);
+        }
+    }
+
     // Phase 7: Compute cached metadata for all density fields (search optimization)
     let t6 = Instant::now();
     for density in density_fields.values_mut() {

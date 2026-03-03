@@ -69,6 +69,24 @@ impl DensityField {
         self.air_cell_count = air_count;
     }
 
+    /// Downsample this density field by taking every `factor`-th sample.
+    /// Produces a field with `size = (self.size - 1) / factor + 1`.
+    /// Used to extract base-resolution seam data from high-res ore chunks.
+    pub fn downsample(&self, factor: usize) -> DensityField {
+        let new_size = (self.size - 1) / factor + 1;
+        let mut out = DensityField::new(new_size);
+        for z in 0..new_size {
+            for y in 0..new_size {
+                for x in 0..new_size {
+                    let src = self.get(x * factor, y * factor, z * factor);
+                    let dst = out.get_mut(x, y, z);
+                    *dst = *src;
+                }
+            }
+        }
+        out
+    }
+
     /// Force boundary faces to solid, sealing the chunk on specified faces.
     ///
     /// Used with closed-boundary generation to make outer region faces watertight.
@@ -188,6 +206,33 @@ mod tests {
                             "({x},{y},{z}) should be air"
                         );
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_downsample() {
+        // 33-size field (32-cell grid, i.e. 2x supersampled from 16)
+        let mut field = DensityField::new(33);
+        // Set known values at factor-2 positions
+        for z in 0..17 {
+            for y in 0..17 {
+                for x in 0..17 {
+                    let s = field.get_mut(x * 2, y * 2, z * 2);
+                    s.density = (x + y * 17 + z * 17 * 17) as f32;
+                    s.material = Material::Iron;
+                }
+            }
+        }
+        let down = field.downsample(2);
+        assert_eq!(down.size, 17);
+        for z in 0..17 {
+            for y in 0..17 {
+                for x in 0..17 {
+                    let s = down.get(x, y, z);
+                    assert_eq!(s.density, (x + y * 17 + z * 17 * 17) as f32);
+                    assert_eq!(s.material, Material::Iron);
                 }
             }
         }

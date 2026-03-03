@@ -1405,6 +1405,9 @@ mod tests {
             ore_coal_sedimentary_host: 0,
             ore_coal_shallow_ceiling: 0,
             ore_coal_depth_enrichment: 0,
+            // Ore Detail
+            ore_detail_multiplier: 1,
+            ore_protrusion: 0.0,
             // Sleep Config
             sleep_time_budget_ms: 8000,
             sleep_chunk_radius: 1,
