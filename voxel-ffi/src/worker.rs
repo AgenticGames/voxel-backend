@@ -722,7 +722,24 @@ fn handle_request(
 
             // Send each dirty chunk mesh individually so UE can update existing actors
             for (key, mesh) in meshes {
-                let crystal_data = retrieve_crystal_data(store, key, cfg.voxel_scale(), world_scale);
+                // Recompute crystal placements from post-mine density so newly
+                // exposed ore surfaces get crystals and mined-away surfaces lose them.
+                let crystal_data = {
+                    let s = store.read().unwrap();
+                    if let Some(density) = s.density_fields.get(&key) {
+                        let coord = voxel_core::chunk::ChunkCoord::new(key.0, key.1, key.2);
+                        let placements = voxel_gen::compute_crystals(coord, density, &cfg);
+                        let ue_crystals = crate::convert::convert_crystals_to_ue(
+                            &placements, cfg.voxel_scale(), world_scale,
+                        );
+                        drop(s);
+                        store.write().unwrap().crystal_placements.insert(key, placements);
+                        ue_crystals
+                    } else {
+                        drop(s);
+                        Vec::new()
+                    }
+                };
                 let _ = result_tx.send(WorkerResult::ChunkMesh {
                     chunk: key,
                     mesh,

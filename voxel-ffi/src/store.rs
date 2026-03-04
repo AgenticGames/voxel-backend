@@ -19,7 +19,6 @@ use crate::convert::convert_mesh_to_ue_scaled;
 use crate::stress::{CollapseEvent, post_change_stress_update};
 use crate::types::{ConvertedMesh, FfiMinedMaterials};
 
-
 /// Result from combined cavern location search.
 pub struct CavernLocations {
     pub spring: Vec3,
