@@ -9,6 +9,8 @@ use rand::SeedableRng;
 
 use voxel_core::density::DensityField;
 use voxel_core::material::Material;
+use voxel_noise::domain_warp::DomainWarp;
+use voxel_noise::ridged::RidgedMulti;
 use voxel_noise::simplex::Simplex3D;
 use voxel_noise::NoiseSource;
 
@@ -81,8 +83,8 @@ pub fn compute_crystal_placements(
             .then(a.x.cmp(&b.x))
     });
 
-    // Step 2: Create noise and RNG
-    let noise = Simplex3D::new(world_seed.wrapping_add(300));
+    // Step 2: Create scatter noise and RNG
+    let scatter_noise = Simplex3D::new(world_seed.wrapping_add(300));
     let mut rng = ChaCha8Rng::seed_from_u64(chunk_seed.wrapping_add(0xCE75A100));
 
     let mut placements = Vec::new();
@@ -101,74 +103,48 @@ pub fn compute_crystal_placements(
         let wy = world_origin.y + surface.y as f32;
         let wz = world_origin.z + surface.z as f32;
 
-        // Noise gate: world-coherent density threshold
-        let noise_val = noise.sample(wx as f64 * 0.1, wy as f64 * 0.1, wz as f64 * 0.1);
-        let noise_normalized = (noise_val + 1.0) * 0.5; // Map [-1,1] to [0,1]
-        if noise_normalized < ore_config.density_threshold as f64 {
-            continue;
-        }
+        let pass_gate = if ore_config.vein_enabled {
+            // Vein mode: domain-warped ridged multifractal
+            let mat_idx = surface.material as u64;
+            let vein_seed = world_seed.wrapping_add(0xBE10_0000 + mat_idx * 100);
+            let ridged = RidgedMulti::new(
+                Simplex3D::new(vein_seed),
+                ore_config.vein_octaves,
+                ore_config.vein_lacunarity as f64,
+                2.0, // gain
+            );
+            let vein_noise = DomainWarp::new(
+                ridged,
+                Simplex3D::new(vein_seed.wrapping_add(1)),
+                Simplex3D::new(vein_seed.wrapping_add(2)),
+                Simplex3D::new(vein_seed.wrapping_add(3)),
+                ore_config.vein_warp_strength as f64,
+            );
+            let freq = ore_config.vein_frequency as f64;
+            let v = vein_noise.sample(wx as f64 * freq, wy as f64 * freq, wz as f64 * freq);
+            let v_norm = (v + 1.0) * 0.5; // Map [-1,1] to [0,1]
+            if v_norm < (1.0 - ore_config.vein_thickness as f64) {
+                false
+            } else {
+                rng.gen::<f32>() <= ore_config.vein_density
+            }
+        } else {
+            // Scatter mode: original noise gate + chance gate
+            let noise_val = scatter_noise.sample(wx as f64 * 0.1, wy as f64 * 0.1, wz as f64 * 0.1);
+            let noise_normalized = (noise_val + 1.0) * 0.5;
+            if noise_normalized < ore_config.density_threshold as f64 {
+                false
+            } else {
+                rng.gen::<f32>() <= ore_config.chance
+            }
+        };
 
-        // Chance gate
-        if rng.gen::<f32>() > ore_config.chance {
+        if !pass_gate {
             continue;
         }
 
         // This is a seed point — generate a cluster
-        let cluster_count = rng.gen_range(1..=ore_config.cluster_size.max(1));
-
-        for c in 0..cluster_count {
-            // Cluster offset (first crystal at exact position)
-            let (ox, oy, oz) = if c == 0 {
-                (0.0f32, 0.0f32, 0.0f32)
-            } else {
-                let r = ore_config.cluster_radius;
-                (
-                    rng.gen_range(-r..=r),
-                    rng.gen_range(-r..=r),
-                    rng.gen_range(-r..=r),
-                )
-            };
-
-            // Size class selection (weighted random)
-            let size_class = select_size_class(
-                &mut rng,
-                ore_config.small_weight,
-                ore_config.medium_weight,
-                ore_config.large_weight,
-            );
-
-            // Scale
-            let scale = rng.gen_range(ore_config.scale_min..=ore_config.scale_max);
-
-            // Normal alignment: lerp between random direction and surface normal
-            let random_dir = random_unit_vec(&mut rng);
-            let alignment = ore_config.normal_alignment;
-            let nx = lerp(random_dir.0, surface.normal_x, alignment);
-            let ny = lerp(random_dir.1, surface.normal_y, alignment);
-            let nz = lerp(random_dir.2, surface.normal_z, alignment);
-            // Normalize
-            let len = (nx * nx + ny * ny + nz * nz).sqrt().max(0.001);
-            let nx = nx / len;
-            let ny = ny / len;
-            let nz = nz / len;
-
-            // Position: at voxel center + configurable offset along blended normal
-            let px = surface.x as f32 + 0.5 + ox + nx * ore_config.surface_offset;
-            let py = surface.y as f32 + 0.5 + oy + ny * ore_config.surface_offset;
-            let pz = surface.z as f32 + 0.5 + oz + nz * ore_config.surface_offset;
-
-            placements.push(CrystalPlacement {
-                x: px,
-                y: py,
-                z: pz,
-                normal_x: nx,
-                normal_y: ny,
-                normal_z: nz,
-                ore_type: surface.material as u8,
-                size_class,
-                scale,
-            });
-        }
+        generate_cluster(surface, ore_config, &mut rng, &mut placements);
     }
 
     placements
@@ -215,6 +191,70 @@ fn detect_ore_surfaces(density: &DensityField, size: usize) -> Vec<OreSurface> {
         }
     }
     surfaces
+}
+
+/// Generate a cluster of crystal placements from a seed surface point.
+fn generate_cluster(
+    surface: &OreSurface,
+    ore_config: &crate::config::OreCrystalConfig,
+    rng: &mut ChaCha8Rng,
+    placements: &mut Vec<CrystalPlacement>,
+) {
+    let cluster_count = rng.gen_range(1..=ore_config.cluster_size.max(1));
+
+    for c in 0..cluster_count {
+        // Cluster offset (first crystal at exact position)
+        let (ox, oy, oz) = if c == 0 {
+            (0.0f32, 0.0f32, 0.0f32)
+        } else {
+            let r = ore_config.cluster_radius;
+            (
+                rng.gen_range(-r..=r),
+                rng.gen_range(-r..=r),
+                rng.gen_range(-r..=r),
+            )
+        };
+
+        // Size class selection (weighted random)
+        let size_class = select_size_class(
+            rng,
+            ore_config.small_weight,
+            ore_config.medium_weight,
+            ore_config.large_weight,
+        );
+
+        // Scale
+        let scale = rng.gen_range(ore_config.scale_min..=ore_config.scale_max);
+
+        // Normal alignment: lerp between random direction and surface normal
+        let random_dir = random_unit_vec(rng);
+        let alignment = ore_config.normal_alignment;
+        let nx = lerp(random_dir.0, surface.normal_x, alignment);
+        let ny = lerp(random_dir.1, surface.normal_y, alignment);
+        let nz = lerp(random_dir.2, surface.normal_z, alignment);
+        // Normalize
+        let len = (nx * nx + ny * ny + nz * nz).sqrt().max(0.001);
+        let nx = nx / len;
+        let ny = ny / len;
+        let nz = nz / len;
+
+        // Position: at voxel center + configurable offset along blended normal
+        let px = surface.x as f32 + 0.5 + ox + nx * ore_config.surface_offset;
+        let py = surface.y as f32 + 0.5 + oy + ny * ore_config.surface_offset;
+        let pz = surface.z as f32 + 0.5 + oz + nz * ore_config.surface_offset;
+
+        placements.push(CrystalPlacement {
+            x: px,
+            y: py,
+            z: pz,
+            normal_x: nx,
+            normal_y: ny,
+            normal_z: nz,
+            ore_type: surface.material as u8,
+            size_class,
+            scale,
+        });
+    }
 }
 
 fn is_crystal_eligible(mat: Material) -> bool {

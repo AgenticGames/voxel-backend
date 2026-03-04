@@ -51,6 +51,21 @@ pub struct OreCrystalConfig {
     pub cluster_radius: f32,
     /// Offset along surface normal (voxels); 0 = flush with surface
     pub surface_offset: f32,
+    // ── Vein mode fields ──
+    /// Toggle: vein mode replaces scatter mode
+    pub vein_enabled: bool,
+    /// Noise coordinate scale (lower = larger/sparser veins)
+    pub vein_frequency: f32,
+    /// Vein width threshold 0-1 (higher = fatter veins)
+    pub vein_thickness: f32,
+    /// Detail layers (more = finer branches)
+    pub vein_octaves: u32,
+    /// Frequency multiplier per octave (controls branch spacing)
+    pub vein_lacunarity: f32,
+    /// Domain warp amplitude (0=straight, higher=curvy/organic)
+    pub vein_warp_strength: f32,
+    /// Crystal spawn chance along veins (0-1)
+    pub vein_density: f32,
 }
 
 impl Default for OreCrystalConfig {
@@ -68,6 +83,13 @@ impl Default for OreCrystalConfig {
             cluster_size: 3,
             cluster_radius: 0.5,
             surface_offset: 0.1,
+            vein_enabled: false,
+            vein_frequency: 0.15,
+            vein_thickness: 0.3,
+            vein_octaves: 3,
+            vein_lacunarity: 2.0,
+            vein_warp_strength: 0.4,
+            vein_density: 0.8,
         }
     }
 }
@@ -116,6 +138,18 @@ impl OreCrystalConfig {
         self.small_weight = small;
         self.medium_weight = medium;
         self.large_weight = large;
+        self
+    }
+
+    /// Builder: enable vein mode with parameters
+    pub fn with_vein(mut self, freq: f32, thickness: f32, octaves: u32, lacunarity: f32, warp: f32, density: f32) -> Self {
+        self.vein_enabled = true;
+        self.vein_frequency = freq;
+        self.vein_thickness = thickness;
+        self.vein_octaves = octaves;
+        self.vein_lacunarity = lacunarity;
+        self.vein_warp_strength = warp;
+        self.vein_density = density;
         self
     }
 }
