@@ -22,7 +22,24 @@ use crate::convert::{convert_mesh_to_ue_scaled, from_ue_normal, from_ue_world_po
 use crate::engine::{terrace_size_for_scale, building_terrace_size_for_scale};
 use crate::profiler::{ChunkTimings, StreamingProfiler};
 use crate::store::{extract_solid_mask, ChunkStore};
-use crate::types::{FfiCollapseEvent, WorkerRequest, WorkerResult};
+use crate::types::{FfiCollapseEvent, FfiCrystalPlacement, WorkerRequest, WorkerResult};
+
+/// Retrieve existing crystal data from ChunkStore for a chunk, converted to UE coords.
+/// Used by remesh/seam/mining paths that don't recompute crystals from density.
+fn retrieve_crystal_data(
+    store: &Arc<RwLock<ChunkStore>>,
+    key: (i32, i32, i32),
+    voxel_scale: f32,
+    world_scale: f32,
+) -> Vec<FfiCrystalPlacement> {
+    let s = store.read().unwrap();
+    match s.crystal_placements.get(&key) {
+        Some(placements) if !placements.is_empty() => {
+            crate::convert::convert_crystals_to_ue(placements, voxel_scale, world_scale)
+        }
+        _ => Vec::new(),
+    }
+}
 
 /// Worker thread main loop. Each worker pulls from shared channels.
 pub fn worker_loop(
@@ -328,8 +345,9 @@ fn handle_request(
                             let mut converted = convert_mesh_to_ue_scaled(&mesh, cfg.voxel_scale(), world_scale);
                             crate::convert::bucket_mesh_by_material(&mut converted);
                             if !converted.indices.is_empty() {
+                                let crystal_data = retrieve_crystal_data(store, key, cfg.voxel_scale(), world_scale);
                                 let _ = result_tx.send(WorkerResult::ChunkMesh {
-                                    chunk: key, mesh: converted, generation: 0, crystal_data: Vec::new(),
+                                    chunk: key, mesh: converted, generation: 0, crystal_data,
                                 });
                             }
                         }
@@ -395,8 +413,9 @@ fn handle_request(
                                 let mut converted = convert_mesh_to_ue_scaled(&mesh, cfg.voxel_scale(), world_scale);
                                 crate::convert::bucket_mesh_by_material(&mut converted);
                                 if !converted.indices.is_empty() {
+                                    let crystal_data = retrieve_crystal_data(store, key, cfg.voxel_scale(), world_scale);
                                     let _ = result_tx.send(WorkerResult::ChunkMesh {
-                                        chunk: key, mesh: converted, generation: 0, crystal_data: Vec::new(),
+                                        chunk: key, mesh: converted, generation: 0, crystal_data,
                                     });
                                 }
                             }
@@ -635,7 +654,8 @@ fn handle_request(
 
             drop(s);
             for (key, mesh) in meshes {
-                let _ = result_tx.send(WorkerResult::ChunkMesh { chunk: key, mesh, generation: 0, crystal_data: Vec::new() });
+                let crystal_data = retrieve_crystal_data(store, key, cfg.voxel_scale(), world_scale);
+                let _ = result_tx.send(WorkerResult::ChunkMesh { chunk: key, mesh, generation: 0, crystal_data });
             }
 
             // Regenerate seams for dirty chunks and their neighbors (matches mining path)
@@ -651,7 +671,8 @@ fn handle_request(
             let dirty_keys: Vec<_> = meshes.iter().map(|(k, _)| *k).collect();
             drop(s);
             for (key, mesh) in meshes {
-                let _ = result_tx.send(WorkerResult::ChunkMesh { chunk: key, mesh, generation: 0, crystal_data: Vec::new() });
+                let crystal_data = retrieve_crystal_data(store, key, cfg.voxel_scale(), world_scale);
+                let _ = result_tx.send(WorkerResult::ChunkMesh { chunk: key, mesh, generation: 0, crystal_data });
             }
             for key in dirty_keys {
                 let _ = incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
@@ -668,7 +689,8 @@ fn handle_request(
 
             drop(s);
             for (key, mesh) in meshes {
-                let _ = result_tx.send(WorkerResult::ChunkMesh { chunk: key, mesh, generation: 0, crystal_data: Vec::new() });
+                let crystal_data = retrieve_crystal_data(store, key, cfg.voxel_scale(), world_scale);
+                let _ = result_tx.send(WorkerResult::ChunkMesh { chunk: key, mesh, generation: 0, crystal_data });
             }
 
             for key in dirty_keys {
@@ -700,11 +722,12 @@ fn handle_request(
 
             // Send each dirty chunk mesh individually so UE can update existing actors
             for (key, mesh) in meshes {
+                let crystal_data = retrieve_crystal_data(store, key, cfg.voxel_scale(), world_scale);
                 let _ = result_tx.send(WorkerResult::ChunkMesh {
                     chunk: key,
                     mesh,
                     generation: 0,
-                    crystal_data: Vec::new(),
+                    crystal_data,
                 });
             }
 
@@ -879,11 +902,12 @@ fn handle_request(
             // Send each dirty chunk mesh through the normal ChunkMesh pipeline
             // so UE auto-remeshes existing chunk actors
             for (chunk, mesh) in meshes {
+                let crystal_data = retrieve_crystal_data(store, chunk, cfg.voxel_scale(), world_scale);
                 let _ = result_tx.send(WorkerResult::ChunkMesh {
                     chunk,
                     mesh,
                     generation: 0, // Sleep remesh
-                    crystal_data: Vec::new(),
+                    crystal_data,
                 });
             }
 
@@ -1078,11 +1102,12 @@ fn incremental_seam_pass(
             continue;  // Don't overwrite base mesh with empty seam update
         }
 
+        let crystal_data = retrieve_crystal_data(store, target, cfg.voxel_scale(), world_scale);
         let _ = result_tx.send(WorkerResult::ChunkMesh {
             chunk: target,
             mesh: converted,
             generation: 0,
-            crystal_data: Vec::new(),
+            crystal_data,
         });
         candidates_sent += 1;
     }

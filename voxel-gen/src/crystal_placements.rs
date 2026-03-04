@@ -152,10 +152,10 @@ pub fn compute_crystal_placements(
             let ny = ny / len;
             let nz = nz / len;
 
-            // Position: at voxel center, offset slightly along normal into air
-            let px = surface.x as f32 + 0.5 + ox + nx * 0.1;
-            let py = surface.y as f32 + 0.5 + oy + ny * 0.1;
-            let pz = surface.z as f32 + 0.5 + oz + nz * 0.1;
+            // Position: at voxel center + configurable offset along blended normal
+            let px = surface.x as f32 + 0.5 + ox + nx * ore_config.surface_offset;
+            let py = surface.y as f32 + 0.5 + oy + ny * ore_config.surface_offset;
+            let pz = surface.z as f32 + 0.5 + oz + nz * ore_config.surface_offset;
 
             placements.push(CrystalPlacement {
                 x: px,

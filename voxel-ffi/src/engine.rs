@@ -1093,6 +1093,7 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
                 normal_alignment: c.crystal_iron_normal_alignment,
                 cluster_size: if c.crystal_iron_cluster_size > 0 { c.crystal_iron_cluster_size } else { OreCrystalConfig::default().cluster_size },
                 cluster_radius: if c.crystal_iron_cluster_radius > 0.0 { c.crystal_iron_cluster_radius } else { OreCrystalConfig::default().cluster_radius },
+                surface_offset: if c.crystal_iron_surface_offset > 0.0 { c.crystal_iron_surface_offset } else { OreCrystalConfig::default().surface_offset },
             },
             copper: OreCrystalConfig {
                 enabled: c.crystal_copper_enabled != 0,
@@ -1106,6 +1107,7 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
                 normal_alignment: c.crystal_copper_normal_alignment,
                 cluster_size: if c.crystal_copper_cluster_size > 0 { c.crystal_copper_cluster_size } else { OreCrystalConfig::default().cluster_size },
                 cluster_radius: if c.crystal_copper_cluster_radius > 0.0 { c.crystal_copper_cluster_radius } else { OreCrystalConfig::default().cluster_radius },
+                surface_offset: if c.crystal_copper_surface_offset > 0.0 { c.crystal_copper_surface_offset } else { OreCrystalConfig::default().surface_offset },
             },
             malachite: OreCrystalConfig {
                 enabled: c.crystal_malachite_enabled != 0,
@@ -1119,6 +1121,7 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
                 normal_alignment: c.crystal_malachite_normal_alignment,
                 cluster_size: if c.crystal_malachite_cluster_size > 0 { c.crystal_malachite_cluster_size } else { OreCrystalConfig::default().cluster_size },
                 cluster_radius: if c.crystal_malachite_cluster_radius > 0.0 { c.crystal_malachite_cluster_radius } else { OreCrystalConfig::default().cluster_radius },
+                surface_offset: if c.crystal_malachite_surface_offset > 0.0 { c.crystal_malachite_surface_offset } else { OreCrystalConfig::default().surface_offset },
             },
             tin: OreCrystalConfig {
                 enabled: c.crystal_tin_enabled != 0,
@@ -1132,6 +1135,7 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
                 normal_alignment: c.crystal_tin_normal_alignment,
                 cluster_size: if c.crystal_tin_cluster_size > 0 { c.crystal_tin_cluster_size } else { OreCrystalConfig::default().cluster_size },
                 cluster_radius: if c.crystal_tin_cluster_radius > 0.0 { c.crystal_tin_cluster_radius } else { OreCrystalConfig::default().cluster_radius },
+                surface_offset: if c.crystal_tin_surface_offset > 0.0 { c.crystal_tin_surface_offset } else { OreCrystalConfig::default().surface_offset },
             },
             gold: OreCrystalConfig {
                 enabled: c.crystal_gold_enabled != 0,
@@ -1145,6 +1149,7 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
                 normal_alignment: c.crystal_gold_normal_alignment,
                 cluster_size: if c.crystal_gold_cluster_size > 0 { c.crystal_gold_cluster_size } else { OreCrystalConfig::default().cluster_size },
                 cluster_radius: if c.crystal_gold_cluster_radius > 0.0 { c.crystal_gold_cluster_radius } else { OreCrystalConfig::default().cluster_radius },
+                surface_offset: if c.crystal_gold_surface_offset > 0.0 { c.crystal_gold_surface_offset } else { OreCrystalConfig::default().surface_offset },
             },
             diamond: OreCrystalConfig {
                 enabled: c.crystal_diamond_enabled != 0,
@@ -1158,6 +1163,7 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
                 normal_alignment: c.crystal_diamond_normal_alignment,
                 cluster_size: if c.crystal_diamond_cluster_size > 0 { c.crystal_diamond_cluster_size } else { OreCrystalConfig::default().cluster_size },
                 cluster_radius: if c.crystal_diamond_cluster_radius > 0.0 { c.crystal_diamond_cluster_radius } else { OreCrystalConfig::default().cluster_radius },
+                surface_offset: if c.crystal_diamond_surface_offset > 0.0 { c.crystal_diamond_surface_offset } else { OreCrystalConfig::default().surface_offset },
             },
             kimberlite: OreCrystalConfig {
                 enabled: c.crystal_kimberlite_enabled != 0,
@@ -1171,6 +1177,7 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
                 normal_alignment: c.crystal_kimberlite_normal_alignment,
                 cluster_size: if c.crystal_kimberlite_cluster_size > 0 { c.crystal_kimberlite_cluster_size } else { OreCrystalConfig::default().cluster_size },
                 cluster_radius: if c.crystal_kimberlite_cluster_radius > 0.0 { c.crystal_kimberlite_cluster_radius } else { OreCrystalConfig::default().cluster_radius },
+                surface_offset: if c.crystal_kimberlite_surface_offset > 0.0 { c.crystal_kimberlite_surface_offset } else { OreCrystalConfig::default().surface_offset },
             },
             sulfide: OreCrystalConfig {
                 enabled: c.crystal_sulfide_enabled != 0,
@@ -1184,6 +1191,7 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
                 normal_alignment: c.crystal_sulfide_normal_alignment,
                 cluster_size: if c.crystal_sulfide_cluster_size > 0 { c.crystal_sulfide_cluster_size } else { OreCrystalConfig::default().cluster_size },
                 cluster_radius: if c.crystal_sulfide_cluster_radius > 0.0 { c.crystal_sulfide_cluster_radius } else { OreCrystalConfig::default().cluster_radius },
+                surface_offset: if c.crystal_sulfide_surface_offset > 0.0 { c.crystal_sulfide_surface_offset } else { OreCrystalConfig::default().surface_offset },
             },
             quartz: OreCrystalConfig {
                 enabled: c.crystal_quartz_enabled != 0,
@@ -1197,6 +1205,7 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
                 normal_alignment: c.crystal_quartz_normal_alignment,
                 cluster_size: if c.crystal_quartz_cluster_size > 0 { c.crystal_quartz_cluster_size } else { OreCrystalConfig::default().cluster_size },
                 cluster_radius: if c.crystal_quartz_cluster_radius > 0.0 { c.crystal_quartz_cluster_radius } else { OreCrystalConfig::default().cluster_radius },
+                surface_offset: if c.crystal_quartz_surface_offset > 0.0 { c.crystal_quartz_surface_offset } else { OreCrystalConfig::default().surface_offset },
             },
             pyrite: OreCrystalConfig {
                 enabled: c.crystal_pyrite_enabled != 0,
@@ -1210,6 +1219,7 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
                 normal_alignment: c.crystal_pyrite_normal_alignment,
                 cluster_size: if c.crystal_pyrite_cluster_size > 0 { c.crystal_pyrite_cluster_size } else { OreCrystalConfig::default().cluster_size },
                 cluster_radius: if c.crystal_pyrite_cluster_radius > 0.0 { c.crystal_pyrite_cluster_radius } else { OreCrystalConfig::default().cluster_radius },
+                surface_offset: if c.crystal_pyrite_surface_offset > 0.0 { c.crystal_pyrite_surface_offset } else { OreCrystalConfig::default().surface_offset },
             },
             amethyst: OreCrystalConfig {
                 enabled: c.crystal_amethyst_enabled != 0,
@@ -1223,6 +1233,7 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
                 normal_alignment: c.crystal_amethyst_normal_alignment,
                 cluster_size: if c.crystal_amethyst_cluster_size > 0 { c.crystal_amethyst_cluster_size } else { OreCrystalConfig::default().cluster_size },
                 cluster_radius: if c.crystal_amethyst_cluster_radius > 0.0 { c.crystal_amethyst_cluster_radius } else { OreCrystalConfig::default().cluster_radius },
+                surface_offset: if c.crystal_amethyst_surface_offset > 0.0 { c.crystal_amethyst_surface_offset } else { OreCrystalConfig::default().surface_offset },
             },
             coal: OreCrystalConfig {
                 enabled: c.crystal_coal_enabled != 0,
@@ -1236,6 +1247,7 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
                 normal_alignment: c.crystal_coal_normal_alignment,
                 cluster_size: if c.crystal_coal_cluster_size > 0 { c.crystal_coal_cluster_size } else { OreCrystalConfig::default().cluster_size },
                 cluster_radius: if c.crystal_coal_cluster_radius > 0.0 { c.crystal_coal_cluster_radius } else { OreCrystalConfig::default().cluster_radius },
+                surface_offset: if c.crystal_coal_surface_offset > 0.0 { c.crystal_coal_surface_offset } else { OreCrystalConfig::default().surface_offset },
             },
         },
         octree_max_depth: 4,

@@ -1497,6 +1497,7 @@ mod tests {
             crystal_iron_normal_alignment: 0.7,
             crystal_iron_cluster_size: 4,
             crystal_iron_cluster_radius: 1.0,
+            crystal_iron_surface_offset: 0.1,
             // Copper crystals
             crystal_copper_enabled: 1,
             crystal_copper_chance: 0.3,
@@ -1509,6 +1510,7 @@ mod tests {
             crystal_copper_normal_alignment: 0.7,
             crystal_copper_cluster_size: 3,
             crystal_copper_cluster_radius: 0.8,
+            crystal_copper_surface_offset: 0.1,
             // Malachite crystals
             crystal_malachite_enabled: 1,
             crystal_malachite_chance: 0.35,
@@ -1521,6 +1523,7 @@ mod tests {
             crystal_malachite_normal_alignment: 0.7,
             crystal_malachite_cluster_size: 3,
             crystal_malachite_cluster_radius: 0.8,
+            crystal_malachite_surface_offset: 0.1,
             // Tin crystals
             crystal_tin_enabled: 1,
             crystal_tin_chance: 0.2,
@@ -1533,6 +1536,7 @@ mod tests {
             crystal_tin_normal_alignment: 0.7,
             crystal_tin_cluster_size: 3,
             crystal_tin_cluster_radius: 0.8,
+            crystal_tin_surface_offset: 0.1,
             // Gold crystals
             crystal_gold_enabled: 1,
             crystal_gold_chance: 0.4,
@@ -1545,6 +1549,7 @@ mod tests {
             crystal_gold_normal_alignment: 0.7,
             crystal_gold_cluster_size: 5,
             crystal_gold_cluster_radius: 0.6,
+            crystal_gold_surface_offset: 0.1,
             // Diamond crystals
             crystal_diamond_enabled: 1,
             crystal_diamond_chance: 0.5,
@@ -1557,6 +1562,7 @@ mod tests {
             crystal_diamond_normal_alignment: 0.7,
             crystal_diamond_cluster_size: 3,
             crystal_diamond_cluster_radius: 0.5,
+            crystal_diamond_surface_offset: 0.1,
             // Kimberlite crystals
             crystal_kimberlite_enabled: 1,
             crystal_kimberlite_chance: 0.15,
@@ -1569,6 +1575,7 @@ mod tests {
             crystal_kimberlite_normal_alignment: 0.7,
             crystal_kimberlite_cluster_size: 2,
             crystal_kimberlite_cluster_radius: 1.2,
+            crystal_kimberlite_surface_offset: 0.1,
             // Sulfide crystals
             crystal_sulfide_enabled: 1,
             crystal_sulfide_chance: 0.2,
@@ -1581,6 +1588,7 @@ mod tests {
             crystal_sulfide_normal_alignment: 0.7,
             crystal_sulfide_cluster_size: 3,
             crystal_sulfide_cluster_radius: 0.8,
+            crystal_sulfide_surface_offset: 0.1,
             // Quartz crystals
             crystal_quartz_enabled: 1,
             crystal_quartz_chance: 0.4,
@@ -1593,6 +1601,7 @@ mod tests {
             crystal_quartz_normal_alignment: 0.7,
             crystal_quartz_cluster_size: 4,
             crystal_quartz_cluster_radius: 0.7,
+            crystal_quartz_surface_offset: 0.1,
             // Pyrite crystals
             crystal_pyrite_enabled: 1,
             crystal_pyrite_chance: 0.3,
@@ -1605,6 +1614,7 @@ mod tests {
             crystal_pyrite_normal_alignment: 0.7,
             crystal_pyrite_cluster_size: 5,
             crystal_pyrite_cluster_radius: 0.5,
+            crystal_pyrite_surface_offset: 0.1,
             // Amethyst crystals
             crystal_amethyst_enabled: 1,
             crystal_amethyst_chance: 0.45,
@@ -1617,6 +1627,7 @@ mod tests {
             crystal_amethyst_normal_alignment: 0.7,
             crystal_amethyst_cluster_size: 4,
             crystal_amethyst_cluster_radius: 0.8,
+            crystal_amethyst_surface_offset: 0.1,
             // Coal crystals
             crystal_coal_enabled: 1,
             crystal_coal_chance: 0.1,
@@ -1629,6 +1640,7 @@ mod tests {
             crystal_coal_normal_alignment: 0.7,
             crystal_coal_cluster_size: 2,
             crystal_coal_cluster_radius: 0.5,
+            crystal_coal_surface_offset: 0.1,
             // Sleep Config
             sleep_time_budget_ms: 8000,
             sleep_chunk_radius: 1,

@@ -49,6 +49,8 @@ pub struct OreCrystalConfig {
     pub cluster_size: u32,
     /// Cluster scatter radius (voxels)
     pub cluster_radius: f32,
+    /// Offset along surface normal (voxels); 0 = flush with surface
+    pub surface_offset: f32,
 }
 
 impl Default for OreCrystalConfig {
@@ -65,6 +67,7 @@ impl Default for OreCrystalConfig {
             normal_alignment: 0.7,
             cluster_size: 3,
             cluster_radius: 0.5,
+            surface_offset: 0.1,
         }
     }
 }

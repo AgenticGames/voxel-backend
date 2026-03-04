@@ -305,7 +305,7 @@ pub struct FfiEngineConfig {
     // ── Ore Detail ──
     pub ore_detail_multiplier: u32,
     pub ore_protrusion: f32,
-    // ── Crystal Config (133 fields: 1 master + 12 ores × 11 fields) ──
+    // ── Crystal Config (145 fields: 1 master + 12 ores × 12 fields) ──
     pub crystal_enabled: u8,
     // Iron crystals
     pub crystal_iron_enabled: u8,
@@ -319,6 +319,7 @@ pub struct FfiEngineConfig {
     pub crystal_iron_normal_alignment: f32,
     pub crystal_iron_cluster_size: u32,
     pub crystal_iron_cluster_radius: f32,
+    pub crystal_iron_surface_offset: f32,
     // Copper crystals
     pub crystal_copper_enabled: u8,
     pub crystal_copper_chance: f32,
@@ -331,6 +332,7 @@ pub struct FfiEngineConfig {
     pub crystal_copper_normal_alignment: f32,
     pub crystal_copper_cluster_size: u32,
     pub crystal_copper_cluster_radius: f32,
+    pub crystal_copper_surface_offset: f32,
     // Malachite crystals
     pub crystal_malachite_enabled: u8,
     pub crystal_malachite_chance: f32,
@@ -343,6 +345,7 @@ pub struct FfiEngineConfig {
     pub crystal_malachite_normal_alignment: f32,
     pub crystal_malachite_cluster_size: u32,
     pub crystal_malachite_cluster_radius: f32,
+    pub crystal_malachite_surface_offset: f32,
     // Tin crystals
     pub crystal_tin_enabled: u8,
     pub crystal_tin_chance: f32,
@@ -355,6 +358,7 @@ pub struct FfiEngineConfig {
     pub crystal_tin_normal_alignment: f32,
     pub crystal_tin_cluster_size: u32,
     pub crystal_tin_cluster_radius: f32,
+    pub crystal_tin_surface_offset: f32,
     // Gold crystals
     pub crystal_gold_enabled: u8,
     pub crystal_gold_chance: f32,
@@ -367,6 +371,7 @@ pub struct FfiEngineConfig {
     pub crystal_gold_normal_alignment: f32,
     pub crystal_gold_cluster_size: u32,
     pub crystal_gold_cluster_radius: f32,
+    pub crystal_gold_surface_offset: f32,
     // Diamond crystals
     pub crystal_diamond_enabled: u8,
     pub crystal_diamond_chance: f32,
@@ -379,6 +384,7 @@ pub struct FfiEngineConfig {
     pub crystal_diamond_normal_alignment: f32,
     pub crystal_diamond_cluster_size: u32,
     pub crystal_diamond_cluster_radius: f32,
+    pub crystal_diamond_surface_offset: f32,
     // Kimberlite crystals
     pub crystal_kimberlite_enabled: u8,
     pub crystal_kimberlite_chance: f32,
@@ -391,6 +397,7 @@ pub struct FfiEngineConfig {
     pub crystal_kimberlite_normal_alignment: f32,
     pub crystal_kimberlite_cluster_size: u32,
     pub crystal_kimberlite_cluster_radius: f32,
+    pub crystal_kimberlite_surface_offset: f32,
     // Sulfide crystals
     pub crystal_sulfide_enabled: u8,
     pub crystal_sulfide_chance: f32,
@@ -403,6 +410,7 @@ pub struct FfiEngineConfig {
     pub crystal_sulfide_normal_alignment: f32,
     pub crystal_sulfide_cluster_size: u32,
     pub crystal_sulfide_cluster_radius: f32,
+    pub crystal_sulfide_surface_offset: f32,
     // Quartz crystals
     pub crystal_quartz_enabled: u8,
     pub crystal_quartz_chance: f32,
@@ -415,6 +423,7 @@ pub struct FfiEngineConfig {
     pub crystal_quartz_normal_alignment: f32,
     pub crystal_quartz_cluster_size: u32,
     pub crystal_quartz_cluster_radius: f32,
+    pub crystal_quartz_surface_offset: f32,
     // Pyrite crystals
     pub crystal_pyrite_enabled: u8,
     pub crystal_pyrite_chance: f32,
@@ -427,6 +436,7 @@ pub struct FfiEngineConfig {
     pub crystal_pyrite_normal_alignment: f32,
     pub crystal_pyrite_cluster_size: u32,
     pub crystal_pyrite_cluster_radius: f32,
+    pub crystal_pyrite_surface_offset: f32,
     // Amethyst crystals
     pub crystal_amethyst_enabled: u8,
     pub crystal_amethyst_chance: f32,
@@ -439,6 +449,7 @@ pub struct FfiEngineConfig {
     pub crystal_amethyst_normal_alignment: f32,
     pub crystal_amethyst_cluster_size: u32,
     pub crystal_amethyst_cluster_radius: f32,
+    pub crystal_amethyst_surface_offset: f32,
     // Coal crystals
     pub crystal_coal_enabled: u8,
     pub crystal_coal_chance: f32,
@@ -451,6 +462,7 @@ pub struct FfiEngineConfig {
     pub crystal_coal_normal_alignment: f32,
     pub crystal_coal_cluster_size: u32,
     pub crystal_coal_cluster_radius: f32,
+    pub crystal_coal_surface_offset: f32,
     // ── Sleep Config ──
     // Top-level sleep
     pub sleep_time_budget_ms: u32,
