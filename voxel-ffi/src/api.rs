@@ -1414,6 +1414,8 @@ mod tests {
             pool_lava_pct: 0.25,
             pool_empty_pct: 0.0,
             pool_min_air_above: 3,
+            pool_max_cave_height: 20,
+            pool_min_floor_thickness: 2,
             // Formation Config
             formation_enabled: 1,
             formation_placement_frequency: 0.15,

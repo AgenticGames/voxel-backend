@@ -621,6 +621,10 @@ pub struct PoolConfig {
     pub empty_pct: f32,
     /// Minimum air voxels above pool surface
     pub min_air_above: usize,
+    /// Max distance upward to find a solid ceiling; if none found, site is open sky (not a cave)
+    pub max_cave_height: usize,
+    /// Minimum solid voxels required below basin bottom for structural support
+    pub min_floor_thickness: usize,
 }
 
 impl Default for PoolConfig {
@@ -638,6 +642,8 @@ impl Default for PoolConfig {
             lava_pct: 0.25,
             empty_pct: 0.0,
             min_air_above: 3,
+            max_cave_height: 20,
+            min_floor_thickness: 2,
         }
     }
 }

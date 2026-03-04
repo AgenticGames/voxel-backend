@@ -232,6 +232,39 @@ pub fn place_pools(
             continue;
         }
 
+        // Cave ceiling check: scan upward to find a solid ceiling within max_cave_height.
+        // If no ceiling is found, this is open terrain (not inside a cave) → skip.
+        if config.max_cave_height > 0 {
+            let mut has_ceiling = false;
+            let ceiling_offsets: [(i32, i32); 5] = [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)];
+            for &(cdx, cdz) in &ceiling_offsets {
+                let cx_check = center_x as i32 + cdx;
+                let cz_check = center_z as i32 + cdz;
+                if cx_check < 0 || cx_check >= size as i32 || cz_check < 0 || cz_check >= size as i32 {
+                    continue;
+                }
+                let start_y = surface_y + config.min_air_above + 1;
+                for dy in 0..config.max_cave_height {
+                    let check_y = start_y + dy;
+                    if check_y >= size {
+                        break;
+                    }
+                    if density.get(cx_check as usize, check_y, cz_check as usize).material.is_solid() {
+                        has_ceiling = true;
+                        break;
+                    }
+                }
+                if has_ceiling {
+                    break;
+                }
+            }
+            if !has_ceiling {
+                eprintln!("[POOL]   cluster cells={} no ceiling within {} at center ({},{},{}) → skip",
+                    cluster.cells.len(), config.max_cave_height, center_x, surface_y, center_z);
+                continue;
+            }
+        }
+
         // Validate: floor_y should be solid and surface_y should be air at center.
         // This catches cases where the chosen Y doesn't have a valid floor/air interface.
         if floor_y < size && surface_y < size {
@@ -241,6 +274,41 @@ pub fn place_pools(
                 eprintln!("[POOL]   cluster cells={} invalid floor/air at center ({},{},{}) floor_solid={} surface_air={} → skip",
                     cluster.cells.len(), center_x, floor_y, center_z,
                     floor_sample.material.is_solid(), !surface_sample.material.is_solid());
+                continue;
+            }
+        }
+
+        // Floor thickness check: ensure enough solid below basin bottom to support the pool.
+        if config.min_floor_thickness > 0 && config.basin_depth > 0 {
+            let thickness_offsets: [(i32, i32); 5] = [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)];
+            let mut thin_count = 0u32;
+            let mut checked = 0u32;
+            for &(tdx, tdz) in &thickness_offsets {
+                let tx = center_x as i32 + tdx;
+                let tz = center_z as i32 + tdz;
+                if tx < 0 || tx >= size as i32 || tz < 0 || tz >= size as i32 {
+                    continue;
+                }
+                checked += 1;
+                let basin_bottom = floor_y.saturating_sub(config.basin_depth);
+                let mut solid_below = 0usize;
+                for d in 1..=config.min_floor_thickness {
+                    let check_y = basin_bottom.wrapping_sub(d);
+                    if check_y >= size || check_y == 0 {
+                        break;
+                    }
+                    if density.get(tx as usize, check_y, tz as usize).material.is_solid() {
+                        solid_below += 1;
+                    }
+                }
+                if solid_below < config.min_floor_thickness {
+                    thin_count += 1;
+                }
+            }
+            // Skip if majority of sample points have insufficient floor thickness
+            if checked > 0 && thin_count * 2 > checked {
+                eprintln!("[POOL]   cluster cells={} thin floor at center ({},{},{}) thin={}/{} → skip",
+                    cluster.cells.len(), center_x, floor_y, center_z, thin_count, checked);
                 continue;
             }
         }
@@ -591,6 +659,8 @@ mod tests {
             pool_chance: 1.0,
             placement_threshold: -1.0, // accept everything
             min_area: 2,
+            max_cave_height: 0,       // disable ceiling check (flat terrain has no ceiling)
+            min_floor_thickness: 0,   // disable floor thickness check
             ..Default::default()
         };
 
@@ -642,6 +712,8 @@ mod tests {
             water_pct: 0.0,
             lava_pct: 0.0,
             empty_pct: 1.0,
+            max_cave_height: 0,
+            min_floor_thickness: 0,
             ..Default::default()
         };
 
@@ -676,6 +748,8 @@ mod tests {
             water_pct: 1.0,
             lava_pct: 0.0,
             empty_pct: 0.0,
+            max_cave_height: 0,
+            min_floor_thickness: 0,
             ..Default::default()
         };
 
@@ -745,6 +819,7 @@ mod tests {
             lava_pct: 0.0,
             empty_pct: 0.0,
             min_air_above: 1, // reduced headroom requirement
+            ..Default::default()
         };
         // Disable formations so they don't interfere
         config.formations.enabled = false;
