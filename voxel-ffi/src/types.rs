@@ -689,6 +689,8 @@ pub struct FfiSleepResult {
     pub dirty_chunk_count: u32,
     pub collapse_events: *mut FfiCollapseEvent,
     pub collapse_event_count: u32,
+    pub profile_report: *mut std::ffi::c_char,
+    pub profile_report_length: u32,
 }
 
 // ── Internal (non-FFI) types ──
@@ -799,6 +801,7 @@ pub enum WorkerResult {
         minerals_grown: u32,
         supports_degraded: u32,
         collapses_triggered: u32,
+        profile_report: String,
     },
     ScanComplete {
         json_report: String,

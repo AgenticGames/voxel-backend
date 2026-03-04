@@ -891,6 +891,7 @@ fn handle_request(
         WorkerRequest::Sleep { player_chunk, sleep_count, sleep_config: sc } => {
             let cfg = config.read().unwrap().clone();
             let sleep_config = sc;
+            let t_worker_start = Instant::now();
 
             let mut s = store.write().unwrap();
 
@@ -910,14 +911,18 @@ fn handle_request(
             );
 
             // Remesh all dirty chunks (full chunk bounds)
+            let t_remesh = Instant::now();
+            let dirty_count = sleep_result.dirty_chunks.len();
             let dirty_bounds: Vec<_> = sleep_result.dirty_chunks.iter().map(|&key| {
                 (key, 0usize, 0usize, 0usize, cfg.chunk_size, cfg.chunk_size, cfg.chunk_size)
             }).collect();
             let meshes = s.remesh_dirty(&dirty_bounds, &cfg, world_scale);
             drop(s);
+            let t_remesh_elapsed = t_remesh.elapsed();
 
             // Send each dirty chunk mesh through the normal ChunkMesh pipeline
             // so UE auto-remeshes existing chunk actors
+            let t_mesh_send = Instant::now();
             for (chunk, mesh) in meshes {
                 let crystal_data = retrieve_crystal_data(store, chunk, cfg.voxel_scale(), world_scale);
                 let _ = result_tx.send(WorkerResult::ChunkMesh {
@@ -927,8 +932,10 @@ fn handle_request(
                     crystal_data,
                 });
             }
+            let t_mesh_send_elapsed = t_mesh_send.elapsed();
 
             // Send collapse events through the normal CollapseResult pipeline
+            let t_collapse_send = Instant::now();
             if !sleep_result.collapse_events.is_empty() {
                 let ffi_events: Vec<FfiCollapseEvent> = sleep_result.collapse_events.iter().map(|e| {
                     FfiCollapseEvent {
@@ -943,6 +950,33 @@ fn handle_request(
                     meshes: Vec::new(), // Meshes already sent above
                 });
             }
+            let t_collapse_send_elapsed = t_collapse_send.elapsed();
+
+            // Regenerate seams for dirty chunks
+            let t_seam = Instant::now();
+            let seam_count = sleep_result.dirty_chunks.len();
+            for &key in &sleep_result.dirty_chunks {
+                let _ = incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
+            }
+            let t_seam_elapsed = t_seam.elapsed();
+
+            // Build combined profile report with worker timings appended
+            let t_worker_total = t_worker_start.elapsed();
+            let worker_post_total = t_remesh_elapsed + t_mesh_send_elapsed + t_collapse_send_elapsed + t_seam_elapsed;
+            let dur_ms = |d: Duration| d.as_secs_f64() * 1000.0;
+            let mut report = sleep_result.profile_report.clone();
+            use std::fmt::Write as FmtWrite;
+            let _ = writeln!(report);
+            let _ = writeln!(report, "─── Worker Post-Processing ─────────────────────────");
+            let _ = writeln!(report, "  Remesh ({} chunks):  {:.2} ms", dirty_count, dur_ms(t_remesh_elapsed));
+            let _ = writeln!(report, "  Mesh send:           {:.2} ms", dur_ms(t_mesh_send_elapsed));
+            let _ = writeln!(report, "  Collapse events:     {:.2} ms", dur_ms(t_collapse_send_elapsed));
+            let _ = writeln!(report, "  Seam regen ({}):     {:.2} ms", seam_count, dur_ms(t_seam_elapsed));
+            let _ = writeln!(report, "  Worker post total:   {:.2} ms", dur_ms(worker_post_total));
+            let _ = writeln!(report);
+            let _ = writeln!(report, "═══════════════════════════════════════════════════════");
+            let _ = writeln!(report, "  GRAND TOTAL (worker): {:.2} ms", dur_ms(t_worker_total));
+            let _ = writeln!(report, "═══════════════════════════════════════════════════════");
 
             // Send sleep completion stats (intercepted by engine.poll_result)
             let _ = result_tx.send(WorkerResult::SleepComplete {
@@ -951,12 +985,8 @@ fn handle_request(
                 minerals_grown: sleep_result.minerals_grown,
                 supports_degraded: sleep_result.supports_degraded,
                 collapses_triggered: sleep_result.collapses_triggered,
+                profile_report: report,
             });
-
-            // Regenerate seams for dirty chunks
-            for &key in &sleep_result.dirty_chunks {
-                let _ = incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
-            }
         }
         WorkerRequest::WorldScan => {
             let cfg = config.read().unwrap().clone();

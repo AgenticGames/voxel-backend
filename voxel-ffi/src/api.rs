@@ -641,23 +641,36 @@ pub unsafe extern "C" fn voxel_poll_sleep_result(engine: *mut c_void) -> FfiSlee
         dirty_chunk_count: 0,
         collapse_events: ptr::null_mut(),
         collapse_event_count: 0,
+        profile_report: ptr::null_mut(),
+        profile_report_length: 0,
     };
     if engine.is_null() {
         return empty;
     }
     let engine = &*(engine as *const VoxelEngine);
     match engine.poll_sleep_complete() {
-        Some(data) => FfiSleepResult {
-            success: 1,
-            chunks_changed: data.chunks_changed,
-            voxels_metamorphosed: data.voxels_metamorphosed,
-            minerals_grown: data.minerals_grown,
-            supports_degraded: data.supports_degraded,
-            collapses_triggered: data.collapses_triggered,
-            dirty_chunks: ptr::null_mut(),
-            dirty_chunk_count: 0,
-            collapse_events: ptr::null_mut(),
-            collapse_event_count: 0,
+        Some(data) => {
+            let (report_ptr, report_len) = match CString::new(data.profile_report) {
+                Ok(cstr) => {
+                    let len = cstr.as_bytes().len() as u32;
+                    (cstr.into_raw(), len)
+                }
+                Err(_) => (ptr::null_mut(), 0u32),
+            };
+            FfiSleepResult {
+                success: 1,
+                chunks_changed: data.chunks_changed,
+                voxels_metamorphosed: data.voxels_metamorphosed,
+                minerals_grown: data.minerals_grown,
+                supports_degraded: data.supports_degraded,
+                collapses_triggered: data.collapses_triggered,
+                dirty_chunks: ptr::null_mut(),
+                dirty_chunk_count: 0,
+                collapse_events: ptr::null_mut(),
+                collapse_event_count: 0,
+                profile_report: report_ptr,
+                profile_report_length: report_len,
+            }
         },
         None => empty,
     }
@@ -782,6 +795,9 @@ pub unsafe extern "C" fn voxel_free_sleep_result(result: *mut FfiSleepResult) {
             r.collapse_event_count as usize,
             r.collapse_event_count as usize,
         );
+    }
+    if !r.profile_report.is_null() {
+        drop(CString::from_raw(r.profile_report));
     }
 }
 

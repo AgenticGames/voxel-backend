@@ -6,6 +6,8 @@ pub mod collapse;
 pub mod priority;
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as FmtWrite;
+use std::time::{Duration, Instant};
 use crossbeam_channel::Sender;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -17,6 +19,7 @@ use crate::metamorphism::apply_metamorphism;
 use crate::minerals::apply_mineral_growth;
 use crate::priority::{classify_chunks, ChunkTier};
 
+pub use collapse::CollapseTimings;
 pub use config::SleepConfig;
 pub use manifest::ChangeManifest;
 
@@ -35,6 +38,23 @@ pub struct SleepProgress {
     pub glimpse_type: u8,
 }
 
+/// Per-phase timing data from the sleep pipeline.
+#[derive(Debug, Clone)]
+pub struct SleepTimings {
+    pub total: Duration,
+    pub chunk_filter: Duration,
+    pub chunk_classify: Duration,
+    pub metamorphism: Duration,
+    pub minerals: Duration,
+    pub collapse_total: Duration,
+    pub collapse_sub: Option<CollapseTimings>,
+    pub aggregation: Duration,
+    pub loaded_chunks: u32,
+    pub critical_chunks: u32,
+    pub important_chunks: u32,
+    pub cosmetic_chunks: u32,
+}
+
 /// Results of a deep sleep cycle.
 #[derive(Debug, Clone)]
 pub struct SleepResult {
@@ -50,6 +70,10 @@ pub struct SleepResult {
     pub transform_log: Vec<TransformEntry>,
     /// Change manifest recording all modifications for persistence
     pub manifest: ChangeManifest,
+    /// Formatted profiling report text
+    pub profile_report: String,
+    /// Structured timing data
+    pub timings: SleepTimings,
 }
 
 /// A single transformation entry for the log.
@@ -78,6 +102,7 @@ pub fn execute_sleep(
     progress_tx: Option<&Sender<SleepProgress>>,
 ) -> SleepResult {
     let chunk_size: usize = 16;
+    let t_total = Instant::now();
 
     // Deterministic RNG seeded from sleep_count (each sleep cycle is reproducible)
     let mut rng = ChaCha8Rng::seed_from_u64(sleep_count as u64 * 7919 + 42);
@@ -92,6 +117,7 @@ pub fn execute_sleep(
         .collect();
 
     // Filter chunks by Chebyshev distance from player chunk
+    let t_filter = Instant::now();
     let radius = config.chunk_radius as i32;
     let mut loaded_chunks: Vec<(i32, i32, i32)> = density_fields.keys()
         .copied()
@@ -103,9 +129,12 @@ pub fn execute_sleep(
         })
         .collect();
     loaded_chunks.sort();
+    let t_filter_elapsed = t_filter.elapsed();
 
     // Classify filtered chunks into priority tiers
+    let t_classify = Instant::now();
     let classified = classify_chunks(player_chunk, &loaded_chunks, &chunks_with_supports);
+    let t_classify_elapsed = t_classify.elapsed();
 
     let critical_chunks: Vec<(i32, i32, i32)> = classified.iter()
         .filter(|(_, t)| *t == ChunkTier::Critical)
@@ -115,7 +144,7 @@ pub fn execute_sleep(
         .filter(|(_, t)| *t == ChunkTier::Important)
         .map(|(c, _)| *c)
         .collect();
-    let _cosmetic_chunks: Vec<(i32, i32, i32)> = classified.iter()
+    let cosmetic_chunks: Vec<(i32, i32, i32)> = classified.iter()
         .filter(|(_, t)| *t == ChunkTier::Cosmetic)
         .map(|(c, _)| *c)
         .collect();
@@ -141,6 +170,7 @@ pub fn execute_sleep(
     let all_collapse_events;
 
     // --- Phase 0: Metamorphism (all chunks) ---
+    let t_meta = Instant::now();
     send_progress(progress_tx, 0, 0.0, 0, total_chunks, None, 0);
 
     if config.metamorphism_enabled {
@@ -170,7 +200,10 @@ pub fn execute_sleep(
         send_progress(progress_tx, 0, 1.0, total_chunks, total_chunks, None, 0);
     }
 
+    let t_meta_elapsed = t_meta.elapsed();
+
     // --- Phase 1: Mineral growth (critical + important chunks) ---
+    let t_minerals = Instant::now();
     send_progress(progress_tx, 1, 0.0, 0, mineral_chunks.len() as u32, None, 0);
 
     if config.minerals_enabled {
@@ -199,9 +232,13 @@ pub fn execute_sleep(
         send_progress(progress_tx, 1, 1.0, mineral_chunks.len() as u32, mineral_chunks.len() as u32, None, 0);
     }
 
+    let t_minerals_elapsed = t_minerals.elapsed();
+
     // --- Phase 2: Structural collapse (critical + important chunks) ---
+    let t_collapse = Instant::now();
     send_progress(progress_tx, 2, 0.0, 0, collapse_chunks.len() as u32, None, 0);
 
+    let collapse_sub_timings;
     if config.collapse_enabled {
         let stress_config = &config.stress;
         let collapse_result = apply_collapse(
@@ -216,6 +253,7 @@ pub fn execute_sleep(
         );
         total_supports_degraded = collapse_result.supports_degraded;
         total_collapses = collapse_result.collapses_triggered;
+        collapse_sub_timings = Some(collapse_result.timings.clone());
         all_collapse_events = collapse_result.collapse_events;
         result_manifest.merge_sleep_changes(&collapse_result.manifest);
         transform_log.extend(collapse_result.transform_log);
@@ -233,9 +271,14 @@ pub fn execute_sleep(
     } else {
         total_supports_degraded = 0;
         total_collapses = 0;
+        collapse_sub_timings = None;
         all_collapse_events = Vec::new();
         send_progress(progress_tx, 2, 1.0, collapse_chunks.len() as u32, collapse_chunks.len() as u32, None, 0);
     }
+    let t_collapse_elapsed = t_collapse.elapsed();
+
+    // --- Aggregation ---
+    let t_agg = Instant::now();
 
     // --- Done ---
     send_progress(progress_tx, 3, 1.0, total_chunks, total_chunks, None, 0);
@@ -246,6 +289,37 @@ pub fn execute_sleep(
     result_manifest.sleep_count = sleep_count;
 
     let dirty_chunks: Vec<(i32, i32, i32)> = all_dirty.into_iter().collect();
+    let t_agg_elapsed = t_agg.elapsed();
+    let t_total_elapsed = t_total.elapsed();
+
+    let timings = SleepTimings {
+        total: t_total_elapsed,
+        chunk_filter: t_filter_elapsed,
+        chunk_classify: t_classify_elapsed,
+        metamorphism: t_meta_elapsed,
+        minerals: t_minerals_elapsed,
+        collapse_total: t_collapse_elapsed,
+        collapse_sub: collapse_sub_timings,
+        aggregation: t_agg_elapsed,
+        loaded_chunks: loaded_chunks.len() as u32,
+        critical_chunks: critical_chunks.len() as u32,
+        important_chunks: important_chunks.len() as u32,
+        cosmetic_chunks: cosmetic_chunks.len() as u32,
+    };
+
+    let profile_report = build_sleep_profile_report(
+        &timings,
+        sleep_count,
+        config.chunk_radius,
+        total_metamorphosed,
+        total_minerals,
+        total_supports_degraded,
+        total_collapses,
+        all_chunks.len() as u32,
+        mineral_chunks.len() as u32,
+        collapse_chunks.len() as u32,
+        dirty_chunks.len() as u32,
+    );
 
     SleepResult {
         success: true,
@@ -258,7 +332,76 @@ pub fn execute_sleep(
         collapse_events: all_collapse_events,
         transform_log,
         manifest: result_manifest,
+        profile_report,
+        timings,
     }
+}
+
+fn dur_ms(d: Duration) -> f64 {
+    d.as_secs_f64() * 1000.0
+}
+
+fn build_sleep_profile_report(
+    timings: &SleepTimings,
+    sleep_count: u32,
+    chunk_radius: u32,
+    voxels_metamorphosed: u32,
+    minerals_grown: u32,
+    supports_degraded: u32,
+    collapses_triggered: u32,
+    meta_chunk_count: u32,
+    mineral_chunk_count: u32,
+    collapse_chunk_count: u32,
+    dirty_chunk_count: u32,
+) -> String {
+    let mut s = String::with_capacity(2048);
+
+    let _ = writeln!(s);
+    let _ = writeln!(s, "═══════════════════════════════════════════════════════");
+    let _ = writeln!(s, "  DEEP SLEEP PROFILING REPORT");
+    let _ = writeln!(s, "  Sleep Count: {} | Chunk Radius: {}", sleep_count, chunk_radius);
+    let _ = writeln!(s, "═══════════════════════════════════════════════════════");
+
+    let _ = writeln!(s);
+    let _ = writeln!(s, "─── Chunk Setup ────────────────────────────────────");
+    let _ = writeln!(s, "  Loaded chunks:       {}", timings.loaded_chunks);
+    let _ = writeln!(s, "  Critical:            {}", timings.critical_chunks);
+    let _ = writeln!(s, "  Important:           {}", timings.important_chunks);
+    let _ = writeln!(s, "  Cosmetic:            {}", timings.cosmetic_chunks);
+    let _ = writeln!(s, "  Filter + sort:       {:.2} ms", dur_ms(timings.chunk_filter));
+    let _ = writeln!(s, "  Classification:      {:.2} ms", dur_ms(timings.chunk_classify));
+
+    let _ = writeln!(s);
+    let _ = writeln!(s, "─── Phase 0: Metamorphism ──────────────────────────");
+    let _ = writeln!(s, "  Chunks processed:    {}", meta_chunk_count);
+    let _ = writeln!(s, "  Voxels transformed:  {}", voxels_metamorphosed);
+    let _ = writeln!(s, "  Duration:            {:.2} ms", dur_ms(timings.metamorphism));
+
+    let _ = writeln!(s);
+    let _ = writeln!(s, "─── Phase 1: Mineral Growth ────────────────────────");
+    let _ = writeln!(s, "  Chunks processed:    {}", mineral_chunk_count);
+    let _ = writeln!(s, "  Minerals grown:      {}", minerals_grown);
+    let _ = writeln!(s, "  Duration:            {:.2} ms", dur_ms(timings.minerals));
+
+    let _ = writeln!(s);
+    let _ = writeln!(s, "─── Phase 2: Structural Collapse ───────────────────");
+    let _ = writeln!(s, "  Chunks processed:    {}", collapse_chunk_count);
+    if let Some(ref ct) = timings.collapse_sub {
+        let _ = writeln!(s, "  Support degradation: {:.2} ms  ({} degraded)", dur_ms(ct.support_degradation), supports_degraded);
+        let _ = writeln!(s, "  Stress amplification: {:.2} ms", dur_ms(ct.stress_amplification));
+        let _ = writeln!(s, "  Collapse cascade:    {:.2} ms  ({} collapses)", dur_ms(ct.collapse_cascade), collapses_triggered);
+    }
+    let _ = writeln!(s, "  Phase total:         {:.2} ms", dur_ms(timings.collapse_total));
+
+    let _ = writeln!(s);
+    let _ = writeln!(s, "─── Aggregation ────────────────────────────────────");
+    let _ = writeln!(s, "  Duration:            {:.2} ms", dur_ms(timings.aggregation));
+    let _ = writeln!(s, "  Dirty chunks:        {}", dirty_chunk_count);
+
+    let _ = writeln!(s);
+    let _ = writeln!(s, "═══ execute_sleep() total: {:.2} ms ════════════════", dur_ms(timings.total));
+
+    s
 }
 
 /// Send a progress update if a channel is provided.

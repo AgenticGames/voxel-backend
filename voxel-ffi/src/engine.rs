@@ -37,6 +37,7 @@ pub struct SleepCompleteData {
     pub minerals_grown: u32,
     pub supports_degraded: u32,
     pub collapses_triggered: u32,
+    pub profile_report: String,
 }
 
 pub struct VoxelEngine {
@@ -246,6 +247,7 @@ impl VoxelEngine {
                 minerals_grown,
                 supports_degraded,
                 collapses_triggered,
+                profile_report,
             }) => {
                 if let Ok(mut sc) = self.sleep_complete.lock() {
                     *sc = Some(SleepCompleteData {
@@ -254,6 +256,7 @@ impl VoxelEngine {
                         minerals_grown,
                         supports_degraded,
                         collapses_triggered,
+                        profile_report,
                     });
                 }
                 // Don't expose to the FfiResult pipeline; UE polls via voxel_poll_sleep_result

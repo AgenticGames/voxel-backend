@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
 use voxel_core::density::DensityField;
@@ -12,6 +13,14 @@ use crate::config::CollapseConfig;
 use crate::manifest::ChangeManifest;
 use crate::TransformEntry;
 
+/// Per-sub-step timing data from the collapse pass.
+#[derive(Debug, Clone)]
+pub struct CollapseTimings {
+    pub support_degradation: Duration,
+    pub stress_amplification: Duration,
+    pub collapse_cascade: Duration,
+}
+
 /// Result of the structural collapse pass.
 #[derive(Debug)]
 pub struct CollapseResult {
@@ -22,6 +31,7 @@ pub struct CollapseResult {
     pub dirty_chunks: Vec<(i32, i32, i32)>,
     pub glimpse_chunk: Option<(i32, i32, i32)>,
     pub transform_log: Vec<TransformEntry>,
+    pub timings: CollapseTimings,
 }
 
 impl Default for CollapseResult {
@@ -34,6 +44,11 @@ impl Default for CollapseResult {
             dirty_chunks: Vec::new(),
             glimpse_chunk: None,
             transform_log: Vec::new(),
+            timings: CollapseTimings {
+                support_degradation: Duration::ZERO,
+                stress_amplification: Duration::ZERO,
+                collapse_cascade: Duration::ZERO,
+            },
         }
     }
 }
@@ -56,6 +71,7 @@ pub fn apply_collapse(
     local_stress_config.rubble_fill_ratio = config.rubble_fill_ratio;
 
     // ── Step 1: Support Degradation ──
+    let t_step1 = Instant::now();
     for &chunk_key in chunks {
         if let Some(support_field) = support_fields.get_mut(&chunk_key) {
             // Also need the stress field for this chunk to read current stress
@@ -94,7 +110,10 @@ pub fn apply_collapse(
         }
     }
 
+    result.timings.support_degradation = t_step1.elapsed();
+
     // ── Step 2: Stress Amplification ──
+    let t_step2 = Instant::now();
     for &chunk_key in chunks {
         let (cx, cy, cz) = chunk_key;
         for z in 0..chunk_size {
@@ -136,7 +155,10 @@ pub fn apply_collapse(
         }
     }
 
+    result.timings.stress_amplification = t_step2.elapsed();
+
     // ── Step 3: Collapse Cascade ──
+    let t_step3 = Instant::now();
     let mut total_collapsed_voxels: u32 = 0;
     let mut all_dirty = std::collections::HashSet::new();
 
@@ -199,6 +221,8 @@ pub fn apply_collapse(
         result.collapses_triggered += events.len() as u32;
         result.collapse_events.extend(events);
     }
+
+    result.timings.collapse_cascade = t_step3.elapsed();
 
     result.dirty_chunks = all_dirty.into_iter().collect();
 
