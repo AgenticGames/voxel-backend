@@ -4,6 +4,7 @@ pub mod worm;
 pub mod blend;
 pub mod formations;
 pub mod pools;
+pub mod crystal_placements;
 pub mod hermite_extract;
 pub mod pipeline;
 pub mod chunk_manager;
@@ -14,6 +15,7 @@ use voxel_core::chunk::{Chunk, ChunkCoord};
 use config::GenerationConfig;
 use density::DensityField;
 pub use pools::{FluidSeed, PoolDescriptor};
+pub use crystal_placements::CrystalPlacement;
 
 /// Top-level function to generate a single chunk
 pub fn generate_chunk(coord: ChunkCoord, config: &GenerationConfig) -> Chunk {
@@ -93,4 +95,22 @@ pub fn generate_density(coord: ChunkCoord, config: &GenerationConfig) -> (Densit
     density.compute_metadata();
 
     (density, pool_descriptors, fluid_seeds)
+}
+
+/// Compute crystal placements for a chunk after density generation.
+/// Pure read-only scan — does NOT modify the density field.
+pub fn compute_crystals(
+    coord: ChunkCoord,
+    density: &voxel_core::density::DensityField,
+    config: &GenerationConfig,
+) -> Vec<CrystalPlacement> {
+    let world_origin = coord.world_origin_sized(config.chunk_size);
+    let c_seed = seed::chunk_seed(config.seed, coord);
+    crystal_placements::compute_crystal_placements(
+        density,
+        &config.crystals,
+        world_origin,
+        config.seed,
+        c_seed,
+    )
 }

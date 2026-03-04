@@ -47,6 +47,8 @@ pub struct ChunkStore {
     pub terraced_columns: HashMap<(i32, i32), i32>,
     /// Worm paths per region key, for cross-region worm sharing.
     pub region_worm_paths: HashMap<(i32, i32, i32), Vec<Vec<WormSegment>>>,
+    /// Per-chunk crystal placement data (computed during generation).
+    pub crystal_placements: HashMap<(i32, i32, i32), Vec<voxel_gen::CrystalPlacement>>,
     /// Region size for computing region keys (needed by unload).
     region_size: i32,
 }
@@ -64,6 +66,7 @@ impl ChunkStore {
             terraced_cells: HashSet::new(),
             terraced_columns: HashMap::new(),
             region_worm_paths: HashMap::new(),
+            crystal_placements: HashMap::new(),
             region_size,
         }
     }
@@ -110,6 +113,7 @@ impl ChunkStore {
         self.base_meshes.remove(&key);
         self.stress_fields.remove(&key);
         self.support_fields.remove(&key);
+        self.crystal_placements.remove(&key);
 
         // Clear region flag immediately — region is no longer intact.
         // Next generate will re-run region gen; has_density() guard

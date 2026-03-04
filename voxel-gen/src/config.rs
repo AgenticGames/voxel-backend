@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 // Re-export StressConfig from voxel-core for backward compatibility
 pub use voxel_core::stress::StressConfig;
+use voxel_core::material::Material;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MineConfig {
@@ -23,6 +24,155 @@ impl Default for MineConfig {
     }
 }
 
+/// Per-ore crystal placement tuning.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OreCrystalConfig {
+    /// Enable crystals for this ore type
+    pub enabled: bool,
+    /// Per-surface-point spawn probability (0-1)
+    pub chance: f32,
+    /// Noise value must exceed this to allow placement (0-1)
+    pub density_threshold: f32,
+    /// Minimum instance scale
+    pub scale_min: f32,
+    /// Maximum instance scale
+    pub scale_max: f32,
+    /// Weight for small size class
+    pub small_weight: f32,
+    /// Weight for medium size class
+    pub medium_weight: f32,
+    /// Weight for large size class
+    pub large_weight: f32,
+    /// Lerp factor: 0=random direction, 1=surface normal
+    pub normal_alignment: f32,
+    /// Max crystals per seed point
+    pub cluster_size: u32,
+    /// Cluster scatter radius (voxels)
+    pub cluster_radius: f32,
+}
+
+impl Default for OreCrystalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            chance: 0.3,
+            density_threshold: 0.4,
+            scale_min: 0.3,
+            scale_max: 1.0,
+            small_weight: 0.6,
+            medium_weight: 0.3,
+            large_weight: 0.1,
+            normal_alignment: 0.7,
+            cluster_size: 3,
+            cluster_radius: 0.5,
+        }
+    }
+}
+
+impl OreCrystalConfig {
+    /// Builder: set spawn chance
+    pub fn with_chance(mut self, chance: f32) -> Self {
+        self.chance = chance;
+        self
+    }
+
+    /// Builder: set scale range
+    pub fn with_scale(mut self, min: f32, max: f32) -> Self {
+        self.scale_min = min;
+        self.scale_max = max;
+        self
+    }
+
+    /// Builder: set cluster parameters
+    pub fn with_cluster(mut self, size: u32, radius: f32) -> Self {
+        self.cluster_size = size;
+        self.cluster_radius = radius;
+        self
+    }
+
+    /// Builder: set density threshold
+    pub fn with_threshold(mut self, threshold: f32) -> Self {
+        self.density_threshold = threshold;
+        self
+    }
+}
+
+/// Crystal placement configuration for all ore types.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrystalConfig {
+    /// Master switch for crystal placement
+    pub enabled: bool,
+    pub iron: OreCrystalConfig,
+    pub copper: OreCrystalConfig,
+    pub malachite: OreCrystalConfig,
+    pub tin: OreCrystalConfig,
+    pub gold: OreCrystalConfig,
+    pub diamond: OreCrystalConfig,
+    pub kimberlite: OreCrystalConfig,
+    pub sulfide: OreCrystalConfig,
+    pub quartz: OreCrystalConfig,
+    pub pyrite: OreCrystalConfig,
+    pub amethyst: OreCrystalConfig,
+    pub coal: OreCrystalConfig,
+}
+
+impl Default for CrystalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            iron: OreCrystalConfig::default().with_chance(0.2),
+            copper: OreCrystalConfig::default().with_chance(0.25),
+            malachite: OreCrystalConfig::default().with_chance(0.3),
+            tin: OreCrystalConfig::default().with_chance(0.15),
+            gold: OreCrystalConfig::default()
+                .with_chance(0.4)
+                .with_scale(0.2, 0.6),
+            diamond: OreCrystalConfig::default()
+                .with_chance(0.5)
+                .with_scale(0.3, 0.8)
+                .with_cluster(5, 0.4),
+            kimberlite: OreCrystalConfig::default().with_chance(0.1),
+            sulfide: OreCrystalConfig::default().with_chance(0.15),
+            quartz: OreCrystalConfig::default()
+                .with_chance(0.35)
+                .with_scale(0.4, 1.2)
+                .with_cluster(4, 0.6),
+            pyrite: OreCrystalConfig::default()
+                .with_chance(0.25)
+                .with_scale(0.2, 0.7),
+            amethyst: OreCrystalConfig::default()
+                .with_chance(0.45)
+                .with_scale(0.3, 1.0)
+                .with_cluster(5, 0.5),
+            coal: OreCrystalConfig::default()
+                .with_chance(0.05)
+                .with_scale(0.2, 0.4),
+        }
+    }
+}
+
+impl CrystalConfig {
+    /// Look up the per-ore config for a given material.
+    /// Returns a default (disabled) config for non-ore materials.
+    pub fn ore_config(&self, mat: Material) -> &OreCrystalConfig {
+        match mat {
+            Material::Iron => &self.iron,
+            Material::Copper => &self.copper,
+            Material::Malachite => &self.malachite,
+            Material::Tin => &self.tin,
+            Material::Gold => &self.gold,
+            Material::Diamond => &self.diamond,
+            Material::Kimberlite => &self.kimberlite,
+            Material::Sulfide => &self.sulfide,
+            Material::Quartz => &self.quartz,
+            Material::Pyrite => &self.pyrite,
+            Material::Amethyst => &self.amethyst,
+            Material::Coal => &self.coal,
+            _ => &self.iron, // fallback; caller should pre-filter
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenerationConfig {
     pub seed: u64,
@@ -33,6 +183,7 @@ pub struct GenerationConfig {
     pub formations: FormationConfig,
     pub pools: PoolConfig,
     pub mine: MineConfig,
+    pub crystals: CrystalConfig,
     pub octree_max_depth: u32,
     /// Region size in chunks per axis for global worm planning (default 3).
     pub region_size: i32,
@@ -101,6 +252,7 @@ impl Default for GenerationConfig {
             formations: FormationConfig::default(),
             pools: PoolConfig::default(),
             mine: MineConfig::default(),
+            crystals: CrystalConfig::default(),
             octree_max_depth: 4,
             region_size: 3,
             bounds_size: 0.0,

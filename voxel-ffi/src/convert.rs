@@ -1,5 +1,6 @@
-use crate::types::{ConvertedMesh, FfiSubmesh, FfiVec3};
+use crate::types::{ConvertedMesh, FfiCrystalPlacement, FfiSubmesh, FfiVec3};
 use voxel_core::mesh::Mesh;
+use voxel_gen::CrystalPlacement;
 
 /// Convert a Rust-space mesh (Y-up, right-hand) to UE space (Z-up, left-hand).
 ///
@@ -166,6 +167,30 @@ pub fn bucket_mesh_by_material(mesh: &mut ConvertedMesh) {
     mesh.material_ids = new_material_ids;
     mesh.indices = new_indices;
     mesh.submeshes = submeshes;
+}
+
+/// Convert crystal placements from Rust Y-up to UE Z-up coordinates.
+/// Position transform: (x, y, z) -> (x * scale, -z * scale, y * scale)
+/// Normal transform: (nx, ny, nz) -> (nx, -nz, ny)
+pub fn convert_crystals_to_ue(
+    placements: &[CrystalPlacement],
+    voxel_scale: f32,
+    world_scale: f32,
+) -> Vec<FfiCrystalPlacement> {
+    let combined_scale = voxel_scale * world_scale;
+    placements.iter().map(|p| {
+        FfiCrystalPlacement {
+            x: p.x * combined_scale,
+            y: -p.z * combined_scale,
+            z: p.y * combined_scale,
+            normal_x: p.normal_x,
+            normal_y: -p.normal_z,
+            normal_z: p.normal_y,
+            ore_type: p.ore_type,
+            size_class: p.size_class,
+            scale: p.scale,
+        }
+    }).collect()
 }
 
 /// Gate 1 diagnostic: hardcoded 8-vertex cube (12 triangles, single material).

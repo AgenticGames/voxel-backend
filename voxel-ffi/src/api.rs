@@ -109,8 +109,9 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                 chunk,
                 mesh,
                 generation,
+                crystal_data,
             } => {
-                let result = convert_mesh_to_ffi_result(chunk, mesh, generation);
+                let result = convert_mesh_to_ffi_result(chunk, mesh, generation, crystal_data);
                 Box::into_raw(Box::new(result))
             }
             WorkerResult::MinedMaterials { mined } => {
@@ -121,6 +122,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     mined,
                     generation: 0,
                     fluid_mesh: empty_fluid_mesh_data(),
+                    crystal_data: empty_crystal_data(),
                 };
                 Box::into_raw(Box::new(result))
             }
@@ -133,6 +135,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     mined: FfiMinedMaterials { counts: [0; 20] },
                     generation: 0,
                     fluid_mesh: converted_fluid_mesh_to_ffi(mesh),
+                    crystal_data: empty_crystal_data(),
                 };
                 Box::into_raw(Box::new(result))
             }
@@ -145,6 +148,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     mined: FfiMinedMaterials { counts: [0; 20] },
                     generation,
                     fluid_mesh: empty_fluid_mesh_data(),
+                    crystal_data: empty_crystal_data(),
                 };
                 Box::into_raw(Box::new(result))
             }
@@ -155,7 +159,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
             WorkerResult::CollapseResult { events, meshes } => {
                 // Send each collapse-remeshed chunk as a ChunkMesh result first
                 for (chunk, mesh) in meshes {
-                    let r = convert_mesh_to_ffi_result(chunk, mesh, 0);
+                    let r = convert_mesh_to_ffi_result(chunk, mesh, 0, Vec::new());
                     let _ = Box::into_raw(Box::new(r));
                     // Note: in practice these go through the result channel,
                     // but for the poll API we emit the collapse event.
@@ -178,13 +182,14 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     mined: FfiMinedMaterials { counts: [0; 20] },
                     generation: ev.volume as u64,
                     fluid_mesh: empty_fluid_mesh_data(),
+                    crystal_data: empty_crystal_data(),
                 };
                 Box::into_raw(Box::new(result))
             }
             WorkerResult::SupportResult { success, meshes } => {
                 // Send each remeshed chunk as a ChunkMesh
                 for (chunk, mesh) in meshes {
-                    let r = convert_mesh_to_ffi_result(chunk, mesh, 0);
+                    let r = convert_mesh_to_ffi_result(chunk, mesh, 0, Vec::new());
                     let _ = Box::into_raw(Box::new(r));
                 }
                 // Return as a mine result with success indicator
@@ -195,6 +200,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     mined: FfiMinedMaterials { counts: [if success { 1 } else { 0 }; 20] },
                     generation: 0,
                     fluid_mesh: empty_fluid_mesh_data(),
+                    crystal_data: empty_crystal_data(),
                 };
                 Box::into_raw(Box::new(result))
             }
@@ -290,6 +296,16 @@ pub unsafe extern "C" fn voxel_free_result(result: *mut FfiResult) {
             fluid.indices,
             fluid.index_count as usize,
             fluid.index_count as usize,
+        ));
+    }
+
+    // Free crystal data if present
+    let crystals = &result.crystal_data;
+    if crystals.count > 0 && !crystals.placements.is_null() {
+        drop(Vec::from_raw_parts(
+            crystals.placements,
+            crystals.count as usize,
+            crystals.count as usize,
         ));
     }
 
@@ -1100,6 +1116,7 @@ fn convert_mesh_to_ffi_result(
     chunk: (i32, i32, i32),
     mesh: ConvertedMesh,
     generation: u64,
+    crystal_data: Vec<FfiCrystalPlacement>,
 ) -> FfiResult {
     // Convert Rust chunk coords back to UE space for the caller
     let ue = rust_chunk_to_ue(chunk.0, chunk.1, chunk.2);
@@ -1114,7 +1131,23 @@ fn convert_mesh_to_ffi_result(
         mined: FfiMinedMaterials { counts: [0; 20] },
         generation,
         fluid_mesh: empty_fluid_mesh_data(),
+        crystal_data: convert_crystal_vec_to_ffi(crystal_data),
     }
+}
+
+fn convert_crystal_vec_to_ffi(data: Vec<FfiCrystalPlacement>) -> FfiCrystalData {
+    if data.is_empty() {
+        return FfiCrystalData { placements: std::ptr::null_mut(), count: 0 };
+    }
+    let count = data.len() as u32;
+    let mut boxed = data.into_boxed_slice();
+    let ptr = boxed.as_mut_ptr();
+    std::mem::forget(boxed);
+    FfiCrystalData { placements: ptr, count }
+}
+
+fn empty_crystal_data() -> FfiCrystalData {
+    FfiCrystalData { placements: std::ptr::null_mut(), count: 0 }
 }
 
 fn converted_mesh_to_ffi(mesh: ConvertedMesh) -> FfiMeshData {
@@ -1408,6 +1441,152 @@ mod tests {
             // Ore Detail
             ore_detail_multiplier: 1,
             ore_protrusion: 0.0,
+            // Crystal Config
+            crystal_enabled: 1,
+            // Iron crystals
+            crystal_iron_enabled: 1,
+            crystal_iron_chance: 0.25,
+            crystal_iron_density_threshold: 0.3,
+            crystal_iron_scale_min: 0.6,
+            crystal_iron_scale_max: 1.4,
+            crystal_iron_small_weight: 0.5,
+            crystal_iron_medium_weight: 0.35,
+            crystal_iron_large_weight: 0.15,
+            crystal_iron_normal_alignment: 0.7,
+            crystal_iron_cluster_size: 4,
+            crystal_iron_cluster_radius: 1.0,
+            // Copper crystals
+            crystal_copper_enabled: 1,
+            crystal_copper_chance: 0.3,
+            crystal_copper_density_threshold: 0.3,
+            crystal_copper_scale_min: 0.4,
+            crystal_copper_scale_max: 1.2,
+            crystal_copper_small_weight: 0.5,
+            crystal_copper_medium_weight: 0.35,
+            crystal_copper_large_weight: 0.15,
+            crystal_copper_normal_alignment: 0.7,
+            crystal_copper_cluster_size: 3,
+            crystal_copper_cluster_radius: 0.8,
+            // Malachite crystals
+            crystal_malachite_enabled: 1,
+            crystal_malachite_chance: 0.35,
+            crystal_malachite_density_threshold: 0.25,
+            crystal_malachite_scale_min: 0.5,
+            crystal_malachite_scale_max: 1.3,
+            crystal_malachite_small_weight: 0.5,
+            crystal_malachite_medium_weight: 0.35,
+            crystal_malachite_large_weight: 0.15,
+            crystal_malachite_normal_alignment: 0.7,
+            crystal_malachite_cluster_size: 3,
+            crystal_malachite_cluster_radius: 0.8,
+            // Tin crystals
+            crystal_tin_enabled: 1,
+            crystal_tin_chance: 0.2,
+            crystal_tin_density_threshold: 0.3,
+            crystal_tin_scale_min: 0.5,
+            crystal_tin_scale_max: 1.0,
+            crystal_tin_small_weight: 0.5,
+            crystal_tin_medium_weight: 0.35,
+            crystal_tin_large_weight: 0.15,
+            crystal_tin_normal_alignment: 0.7,
+            crystal_tin_cluster_size: 3,
+            crystal_tin_cluster_radius: 0.8,
+            // Gold crystals
+            crystal_gold_enabled: 1,
+            crystal_gold_chance: 0.4,
+            crystal_gold_density_threshold: 0.3,
+            crystal_gold_scale_min: 0.3,
+            crystal_gold_scale_max: 0.8,
+            crystal_gold_small_weight: 0.5,
+            crystal_gold_medium_weight: 0.35,
+            crystal_gold_large_weight: 0.15,
+            crystal_gold_normal_alignment: 0.7,
+            crystal_gold_cluster_size: 5,
+            crystal_gold_cluster_radius: 0.6,
+            // Diamond crystals
+            crystal_diamond_enabled: 1,
+            crystal_diamond_chance: 0.5,
+            crystal_diamond_density_threshold: 0.2,
+            crystal_diamond_scale_min: 0.3,
+            crystal_diamond_scale_max: 1.0,
+            crystal_diamond_small_weight: 0.5,
+            crystal_diamond_medium_weight: 0.35,
+            crystal_diamond_large_weight: 0.15,
+            crystal_diamond_normal_alignment: 0.7,
+            crystal_diamond_cluster_size: 3,
+            crystal_diamond_cluster_radius: 0.5,
+            // Kimberlite crystals
+            crystal_kimberlite_enabled: 1,
+            crystal_kimberlite_chance: 0.15,
+            crystal_kimberlite_density_threshold: 0.3,
+            crystal_kimberlite_scale_min: 0.8,
+            crystal_kimberlite_scale_max: 2.0,
+            crystal_kimberlite_small_weight: 0.5,
+            crystal_kimberlite_medium_weight: 0.35,
+            crystal_kimberlite_large_weight: 0.15,
+            crystal_kimberlite_normal_alignment: 0.7,
+            crystal_kimberlite_cluster_size: 2,
+            crystal_kimberlite_cluster_radius: 1.2,
+            // Sulfide crystals
+            crystal_sulfide_enabled: 1,
+            crystal_sulfide_chance: 0.2,
+            crystal_sulfide_density_threshold: 0.3,
+            crystal_sulfide_scale_min: 0.5,
+            crystal_sulfide_scale_max: 1.2,
+            crystal_sulfide_small_weight: 0.5,
+            crystal_sulfide_medium_weight: 0.35,
+            crystal_sulfide_large_weight: 0.15,
+            crystal_sulfide_normal_alignment: 0.7,
+            crystal_sulfide_cluster_size: 3,
+            crystal_sulfide_cluster_radius: 0.8,
+            // Quartz crystals
+            crystal_quartz_enabled: 1,
+            crystal_quartz_chance: 0.4,
+            crystal_quartz_density_threshold: 0.3,
+            crystal_quartz_scale_min: 0.4,
+            crystal_quartz_scale_max: 1.5,
+            crystal_quartz_small_weight: 0.5,
+            crystal_quartz_medium_weight: 0.35,
+            crystal_quartz_large_weight: 0.15,
+            crystal_quartz_normal_alignment: 0.7,
+            crystal_quartz_cluster_size: 4,
+            crystal_quartz_cluster_radius: 0.7,
+            // Pyrite crystals
+            crystal_pyrite_enabled: 1,
+            crystal_pyrite_chance: 0.3,
+            crystal_pyrite_density_threshold: 0.3,
+            crystal_pyrite_scale_min: 0.3,
+            crystal_pyrite_scale_max: 0.9,
+            crystal_pyrite_small_weight: 0.5,
+            crystal_pyrite_medium_weight: 0.35,
+            crystal_pyrite_large_weight: 0.15,
+            crystal_pyrite_normal_alignment: 0.7,
+            crystal_pyrite_cluster_size: 5,
+            crystal_pyrite_cluster_radius: 0.5,
+            // Amethyst crystals
+            crystal_amethyst_enabled: 1,
+            crystal_amethyst_chance: 0.45,
+            crystal_amethyst_density_threshold: 0.2,
+            crystal_amethyst_scale_min: 0.4,
+            crystal_amethyst_scale_max: 1.4,
+            crystal_amethyst_small_weight: 0.5,
+            crystal_amethyst_medium_weight: 0.35,
+            crystal_amethyst_large_weight: 0.15,
+            crystal_amethyst_normal_alignment: 0.7,
+            crystal_amethyst_cluster_size: 4,
+            crystal_amethyst_cluster_radius: 0.8,
+            // Coal crystals
+            crystal_coal_enabled: 1,
+            crystal_coal_chance: 0.1,
+            crystal_coal_density_threshold: 0.3,
+            crystal_coal_scale_min: 0.3,
+            crystal_coal_scale_max: 0.7,
+            crystal_coal_small_weight: 0.5,
+            crystal_coal_medium_weight: 0.35,
+            crystal_coal_large_weight: 0.15,
+            crystal_coal_normal_alignment: 0.7,
+            crystal_coal_cluster_size: 2,
+            crystal_coal_cluster_radius: 0.5,
             // Sleep Config
             sleep_time_budget_ms: 8000,
             sleep_chunk_radius: 1,

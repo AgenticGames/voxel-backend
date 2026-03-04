@@ -314,7 +314,7 @@ fn handle_request(
                             crate::convert::bucket_mesh_by_material(&mut converted);
                             if !converted.indices.is_empty() {
                                 let _ = result_tx.send(WorkerResult::ChunkMesh {
-                                    chunk: key, mesh: converted, generation: 0,
+                                    chunk: key, mesh: converted, generation: 0, crystal_data: Vec::new(),
                                 });
                             }
                         }
@@ -381,7 +381,7 @@ fn handle_request(
                                 crate::convert::bucket_mesh_by_material(&mut converted);
                                 if !converted.indices.is_empty() {
                                     let _ = result_tx.send(WorkerResult::ChunkMesh {
-                                        chunk: key, mesh: converted, generation: 0,
+                                        chunk: key, mesh: converted, generation: 0, crystal_data: Vec::new(),
                                     });
                                 }
                             }
@@ -474,6 +474,25 @@ fn handle_request(
                 }
             }
 
+            // Compute crystal placements and store them
+            let crystal_data = {
+                let placements_opt = {
+                    let s = store.read().unwrap();
+                    s.density_fields.get(&chunk).map(|density| {
+                        let coord = voxel_core::chunk::ChunkCoord::new(chunk.0, chunk.1, chunk.2);
+                        voxel_gen::compute_crystals(coord, density, &cfg)
+                    })
+                };
+                if let Some(placements) = placements_opt {
+                    let ue_crystals = crate::convert::convert_crystals_to_ue(&placements, cfg.voxel_scale(), world_scale);
+                    let mut sw = store.write().unwrap();
+                    sw.crystal_placements.insert(chunk, placements);
+                    ue_crystals
+                } else {
+                    Vec::new()
+                }
+            };
+
             // Gate 1: replace mesh with hardcoded test cube
             #[cfg(feature = "diag-gate-1")]
             let mesh = crate::convert::diagnostic_test_cube();
@@ -516,6 +535,7 @@ fn handle_request(
                 chunk,
                 mesh: converted,
                 generation,
+                crystal_data,
             });
             let t_send_block = if profiling { t_send_start.elapsed() } else { Duration::ZERO };
 
@@ -595,7 +615,7 @@ fn handle_request(
 
             drop(s);
             for (key, mesh) in meshes {
-                let _ = result_tx.send(WorkerResult::ChunkMesh { chunk: key, mesh, generation: 0 });
+                let _ = result_tx.send(WorkerResult::ChunkMesh { chunk: key, mesh, generation: 0, crystal_data: Vec::new() });
             }
 
             // Regenerate seams for dirty chunks and their neighbors (matches mining path)
@@ -611,7 +631,7 @@ fn handle_request(
             let dirty_keys: Vec<_> = meshes.iter().map(|(k, _)| *k).collect();
             drop(s);
             for (key, mesh) in meshes {
-                let _ = result_tx.send(WorkerResult::ChunkMesh { chunk: key, mesh, generation: 0 });
+                let _ = result_tx.send(WorkerResult::ChunkMesh { chunk: key, mesh, generation: 0, crystal_data: Vec::new() });
             }
             for key in dirty_keys {
                 let _ = incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
@@ -646,6 +666,7 @@ fn handle_request(
                     chunk: key,
                     mesh,
                     generation: 0,
+                    crystal_data: Vec::new(),
                 });
             }
 
@@ -824,6 +845,7 @@ fn handle_request(
                     chunk,
                     mesh,
                     generation: 0, // Sleep remesh
+                    crystal_data: Vec::new(),
                 });
             }
 
@@ -1022,6 +1044,7 @@ fn incremental_seam_pass(
             chunk: target,
             mesh: converted,
             generation: 0,
+            crystal_data: Vec::new(),
         });
         candidates_sent += 1;
     }

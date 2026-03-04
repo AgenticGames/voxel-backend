@@ -69,6 +69,28 @@ pub struct FfiFluidMeshData {
     pub index_count: u32,
 }
 
+/// Single crystal placement in UE coordinate space.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiCrystalPlacement {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub normal_x: f32,
+    pub normal_y: f32,
+    pub normal_z: f32,
+    pub ore_type: u8,
+    pub size_class: u8,
+    pub scale: f32,
+}
+
+/// Crystal placement data for a chunk. Pointer owned by Rust, freed via voxel_free_result.
+#[repr(C)]
+pub struct FfiCrystalData {
+    pub placements: *mut FfiCrystalPlacement,
+    pub count: u32,
+}
+
 #[repr(C)]
 pub struct FfiResult {
     pub result_type: FfiResultType,
@@ -77,6 +99,7 @@ pub struct FfiResult {
     pub mined: FfiMinedMaterials,
     pub generation: u64,
     pub fluid_mesh: FfiFluidMeshData,
+    pub crystal_data: FfiCrystalData,
 }
 
 #[repr(C)]
@@ -282,6 +305,152 @@ pub struct FfiEngineConfig {
     // ── Ore Detail ──
     pub ore_detail_multiplier: u32,
     pub ore_protrusion: f32,
+    // ── Crystal Config (133 fields: 1 master + 12 ores × 11 fields) ──
+    pub crystal_enabled: u8,
+    // Iron crystals
+    pub crystal_iron_enabled: u8,
+    pub crystal_iron_chance: f32,
+    pub crystal_iron_density_threshold: f32,
+    pub crystal_iron_scale_min: f32,
+    pub crystal_iron_scale_max: f32,
+    pub crystal_iron_small_weight: f32,
+    pub crystal_iron_medium_weight: f32,
+    pub crystal_iron_large_weight: f32,
+    pub crystal_iron_normal_alignment: f32,
+    pub crystal_iron_cluster_size: u32,
+    pub crystal_iron_cluster_radius: f32,
+    // Copper crystals
+    pub crystal_copper_enabled: u8,
+    pub crystal_copper_chance: f32,
+    pub crystal_copper_density_threshold: f32,
+    pub crystal_copper_scale_min: f32,
+    pub crystal_copper_scale_max: f32,
+    pub crystal_copper_small_weight: f32,
+    pub crystal_copper_medium_weight: f32,
+    pub crystal_copper_large_weight: f32,
+    pub crystal_copper_normal_alignment: f32,
+    pub crystal_copper_cluster_size: u32,
+    pub crystal_copper_cluster_radius: f32,
+    // Malachite crystals
+    pub crystal_malachite_enabled: u8,
+    pub crystal_malachite_chance: f32,
+    pub crystal_malachite_density_threshold: f32,
+    pub crystal_malachite_scale_min: f32,
+    pub crystal_malachite_scale_max: f32,
+    pub crystal_malachite_small_weight: f32,
+    pub crystal_malachite_medium_weight: f32,
+    pub crystal_malachite_large_weight: f32,
+    pub crystal_malachite_normal_alignment: f32,
+    pub crystal_malachite_cluster_size: u32,
+    pub crystal_malachite_cluster_radius: f32,
+    // Tin crystals
+    pub crystal_tin_enabled: u8,
+    pub crystal_tin_chance: f32,
+    pub crystal_tin_density_threshold: f32,
+    pub crystal_tin_scale_min: f32,
+    pub crystal_tin_scale_max: f32,
+    pub crystal_tin_small_weight: f32,
+    pub crystal_tin_medium_weight: f32,
+    pub crystal_tin_large_weight: f32,
+    pub crystal_tin_normal_alignment: f32,
+    pub crystal_tin_cluster_size: u32,
+    pub crystal_tin_cluster_radius: f32,
+    // Gold crystals
+    pub crystal_gold_enabled: u8,
+    pub crystal_gold_chance: f32,
+    pub crystal_gold_density_threshold: f32,
+    pub crystal_gold_scale_min: f32,
+    pub crystal_gold_scale_max: f32,
+    pub crystal_gold_small_weight: f32,
+    pub crystal_gold_medium_weight: f32,
+    pub crystal_gold_large_weight: f32,
+    pub crystal_gold_normal_alignment: f32,
+    pub crystal_gold_cluster_size: u32,
+    pub crystal_gold_cluster_radius: f32,
+    // Diamond crystals
+    pub crystal_diamond_enabled: u8,
+    pub crystal_diamond_chance: f32,
+    pub crystal_diamond_density_threshold: f32,
+    pub crystal_diamond_scale_min: f32,
+    pub crystal_diamond_scale_max: f32,
+    pub crystal_diamond_small_weight: f32,
+    pub crystal_diamond_medium_weight: f32,
+    pub crystal_diamond_large_weight: f32,
+    pub crystal_diamond_normal_alignment: f32,
+    pub crystal_diamond_cluster_size: u32,
+    pub crystal_diamond_cluster_radius: f32,
+    // Kimberlite crystals
+    pub crystal_kimberlite_enabled: u8,
+    pub crystal_kimberlite_chance: f32,
+    pub crystal_kimberlite_density_threshold: f32,
+    pub crystal_kimberlite_scale_min: f32,
+    pub crystal_kimberlite_scale_max: f32,
+    pub crystal_kimberlite_small_weight: f32,
+    pub crystal_kimberlite_medium_weight: f32,
+    pub crystal_kimberlite_large_weight: f32,
+    pub crystal_kimberlite_normal_alignment: f32,
+    pub crystal_kimberlite_cluster_size: u32,
+    pub crystal_kimberlite_cluster_radius: f32,
+    // Sulfide crystals
+    pub crystal_sulfide_enabled: u8,
+    pub crystal_sulfide_chance: f32,
+    pub crystal_sulfide_density_threshold: f32,
+    pub crystal_sulfide_scale_min: f32,
+    pub crystal_sulfide_scale_max: f32,
+    pub crystal_sulfide_small_weight: f32,
+    pub crystal_sulfide_medium_weight: f32,
+    pub crystal_sulfide_large_weight: f32,
+    pub crystal_sulfide_normal_alignment: f32,
+    pub crystal_sulfide_cluster_size: u32,
+    pub crystal_sulfide_cluster_radius: f32,
+    // Quartz crystals
+    pub crystal_quartz_enabled: u8,
+    pub crystal_quartz_chance: f32,
+    pub crystal_quartz_density_threshold: f32,
+    pub crystal_quartz_scale_min: f32,
+    pub crystal_quartz_scale_max: f32,
+    pub crystal_quartz_small_weight: f32,
+    pub crystal_quartz_medium_weight: f32,
+    pub crystal_quartz_large_weight: f32,
+    pub crystal_quartz_normal_alignment: f32,
+    pub crystal_quartz_cluster_size: u32,
+    pub crystal_quartz_cluster_radius: f32,
+    // Pyrite crystals
+    pub crystal_pyrite_enabled: u8,
+    pub crystal_pyrite_chance: f32,
+    pub crystal_pyrite_density_threshold: f32,
+    pub crystal_pyrite_scale_min: f32,
+    pub crystal_pyrite_scale_max: f32,
+    pub crystal_pyrite_small_weight: f32,
+    pub crystal_pyrite_medium_weight: f32,
+    pub crystal_pyrite_large_weight: f32,
+    pub crystal_pyrite_normal_alignment: f32,
+    pub crystal_pyrite_cluster_size: u32,
+    pub crystal_pyrite_cluster_radius: f32,
+    // Amethyst crystals
+    pub crystal_amethyst_enabled: u8,
+    pub crystal_amethyst_chance: f32,
+    pub crystal_amethyst_density_threshold: f32,
+    pub crystal_amethyst_scale_min: f32,
+    pub crystal_amethyst_scale_max: f32,
+    pub crystal_amethyst_small_weight: f32,
+    pub crystal_amethyst_medium_weight: f32,
+    pub crystal_amethyst_large_weight: f32,
+    pub crystal_amethyst_normal_alignment: f32,
+    pub crystal_amethyst_cluster_size: u32,
+    pub crystal_amethyst_cluster_radius: f32,
+    // Coal crystals
+    pub crystal_coal_enabled: u8,
+    pub crystal_coal_chance: f32,
+    pub crystal_coal_density_threshold: f32,
+    pub crystal_coal_scale_min: f32,
+    pub crystal_coal_scale_max: f32,
+    pub crystal_coal_small_weight: f32,
+    pub crystal_coal_medium_weight: f32,
+    pub crystal_coal_large_weight: f32,
+    pub crystal_coal_normal_alignment: f32,
+    pub crystal_coal_cluster_size: u32,
+    pub crystal_coal_cluster_radius: f32,
     // ── Sleep Config ──
     // Top-level sleep
     pub sleep_time_budget_ms: u32,
@@ -495,6 +664,7 @@ pub enum WorkerResult {
         chunk: (i32, i32, i32),
         mesh: ConvertedMesh,
         generation: u64,
+        crystal_data: Vec<FfiCrystalPlacement>,
     },
     Error {
         chunk: (i32, i32, i32),
