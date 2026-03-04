@@ -98,6 +98,26 @@ impl OreCrystalConfig {
         self.density_threshold = threshold;
         self
     }
+
+    /// Builder: set normal alignment (0=random, 1=surface normal)
+    pub fn with_alignment(mut self, alignment: f32) -> Self {
+        self.normal_alignment = alignment;
+        self
+    }
+
+    /// Builder: set surface offset (negative = embedded)
+    pub fn with_offset(mut self, offset: f32) -> Self {
+        self.surface_offset = offset;
+        self
+    }
+
+    /// Builder: set size class weights
+    pub fn with_weights(mut self, small: f32, medium: f32, large: f32) -> Self {
+        self.small_weight = small;
+        self.medium_weight = medium;
+        self.large_weight = large;
+        self
+    }
 }
 
 /// Crystal placement configuration for all ore types.
@@ -123,33 +143,113 @@ impl Default for CrystalConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            iron: OreCrystalConfig::default().with_chance(0.2),
-            copper: OreCrystalConfig::default().with_chance(0.25),
-            malachite: OreCrystalConfig::default().with_chance(0.3),
-            tin: OreCrystalConfig::default().with_chance(0.15),
+            // Hematite blades — flat fan rosettes, grow perpendicular to surface
+            iron: OreCrystalConfig::default()
+                .with_chance(0.35)
+                .with_threshold(0.3)
+                .with_scale(0.08, 0.18)
+                .with_weights(0.50, 0.35, 0.15)
+                .with_alignment(0.85)
+                .with_cluster(4, 0.4)
+                .with_offset(0.05),
+            // Native copper nuggets — chunky irregular lumps, loosely aligned
+            copper: OreCrystalConfig::default()
+                .with_chance(0.30)
+                .with_threshold(0.35)
+                .with_scale(0.10, 0.22)
+                .with_weights(0.50, 0.35, 0.15)
+                .with_alignment(0.5)
+                .with_cluster(3, 0.4)
+                .with_offset(0.15),
+            // Botryoidal domes — bubbly green clusters, flush with surface
+            malachite: OreCrystalConfig::default()
+                .with_chance(0.30)
+                .with_threshold(0.4)
+                .with_scale(0.10, 0.20)
+                .with_weights(0.45, 0.35, 0.20)
+                .with_alignment(0.9)
+                .with_cluster(2, 0.3)
+                .with_offset(0.0),
+            // Cassiterite prisms — short stubby elbow-twins
+            tin: OreCrystalConfig::default()
+                .with_chance(0.25)
+                .with_threshold(0.4)
+                .with_scale(0.10, 0.20)
+                .with_weights(0.50, 0.35, 0.15)
+                .with_alignment(0.75)
+                .with_cluster(3, 0.35)
+                .with_offset(0.05),
+            // Gold octahedrons — rare precious double-pyramids
             gold: OreCrystalConfig::default()
-                .with_chance(0.4)
-                .with_scale(0.2, 0.6),
+                .with_chance(0.25)
+                .with_threshold(0.45)
+                .with_scale(0.08, 0.18)
+                .with_weights(0.55, 0.30, 0.15)
+                .with_alignment(0.6)
+                .with_cluster(3, 0.4)
+                .with_offset(0.1),
+            // Diamond octahedrons — very rare, sparse, translucent
             diamond: OreCrystalConfig::default()
-                .with_chance(0.5)
-                .with_scale(0.3, 0.8)
-                .with_cluster(5, 0.4),
-            kimberlite: OreCrystalConfig::default().with_chance(0.1),
-            sulfide: OreCrystalConfig::default().with_chance(0.15),
+                .with_chance(0.20)
+                .with_threshold(0.5)
+                .with_scale(0.08, 0.16)
+                .with_weights(0.50, 0.35, 0.15)
+                .with_alignment(0.5)
+                .with_cluster(2, 0.35)
+                .with_offset(0.1),
+            // Garnet dodecahedrons — half-buried indicator crystals
+            kimberlite: OreCrystalConfig::default()
+                .with_chance(0.20)
+                .with_threshold(0.4)
+                .with_scale(0.06, 0.14)
+                .with_weights(0.60, 0.30, 0.10)
+                .with_alignment(0.4)
+                .with_cluster(2, 0.5)
+                .with_offset(-0.05),
+            // Chalcopyrite wedges — jagged aggressive sphenoids
+            sulfide: OreCrystalConfig::default()
+                .with_chance(0.25)
+                .with_threshold(0.35)
+                .with_scale(0.08, 0.18)
+                .with_weights(0.45, 0.35, 0.20)
+                .with_alignment(0.65)
+                .with_cluster(4, 0.4)
+                .with_offset(0.05),
+            // Hexagonal pillars — classic crystal columns, druzy clusters
             quartz: OreCrystalConfig::default()
                 .with_chance(0.35)
-                .with_scale(0.4, 1.2)
-                .with_cluster(4, 0.6),
+                .with_threshold(0.3)
+                .with_scale(0.06, 0.16)
+                .with_weights(0.40, 0.35, 0.25)
+                .with_alignment(0.85)
+                .with_cluster(5, 0.5)
+                .with_offset(0.05),
+            // Cubic clusters — already tuned in live JSON
             pyrite: OreCrystalConfig::default()
-                .with_chance(0.25)
-                .with_scale(0.2, 0.7),
+                .with_chance(1.0)
+                .with_threshold(0.0)
+                .with_scale(0.06, 0.16)
+                .with_alignment(0.6)
+                .with_cluster(13, 0.25)
+                .with_offset(0.1),
+            // Geode sprays — dense radiating crystal fans
             amethyst: OreCrystalConfig::default()
-                .with_chance(0.45)
-                .with_scale(0.3, 1.0)
-                .with_cluster(5, 0.5),
+                .with_chance(0.40)
+                .with_threshold(0.35)
+                .with_scale(0.06, 0.14)
+                .with_weights(0.35, 0.35, 0.30)
+                .with_alignment(0.8)
+                .with_cluster(6, 0.4)
+                .with_offset(0.05),
+            // Vitreous shards — low-profile glassy fragments, flush
             coal: OreCrystalConfig::default()
-                .with_chance(0.05)
-                .with_scale(0.2, 0.4),
+                .with_chance(0.15)
+                .with_threshold(0.45)
+                .with_scale(0.10, 0.20)
+                .with_weights(0.60, 0.30, 0.10)
+                .with_alignment(0.6)
+                .with_cluster(2, 0.3)
+                .with_offset(0.0),
         }
     }
 }
