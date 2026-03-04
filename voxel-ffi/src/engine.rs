@@ -25,6 +25,11 @@ pub(crate) fn terrace_size_for_scale(scale: f32) -> i32 {
     (80.0f32 / scale).round().max(1.0) as i32
 }
 
+/// Compute building terrace size in voxels from world scale, targeting ~160 UU (4 voxels).
+pub(crate) fn building_terrace_size_for_scale(scale: f32) -> i32 {
+    (160.0f32 / scale).round().max(1.0) as i32
+}
+
 /// Data returned when a sleep cycle completes.
 pub struct SleepCompleteData {
     pub chunks_changed: u32,
@@ -690,6 +695,54 @@ impl VoxelEngine {
         let snapped_ue_z = base_y as f32 * scale;
 
         (count, clearance, snapped_ue_x, snapped_ue_y, snapped_ue_z)
+    }
+
+    /// Query floor support for a building placement (4x4 footprint).
+    /// Returns (solid_count, total_columns, host_mat_u8).
+    pub fn query_building_support(&self, ue_x: f32, ue_y: f32, ue_z: f32, scale: f32) -> (u8, u8, u8) {
+        let rust_x = ue_x / scale;
+        let rust_y = ue_z / scale;
+        let rust_z = -ue_y / scale;
+
+        let bts = building_terrace_size_for_scale(scale);
+        let ts = terrace_size_for_scale(scale);
+        let base_x = (rust_x as i32).div_euclid(bts) * bts;
+        let base_y = (rust_y as i32).div_euclid(ts) * ts;
+        let base_z = (rust_z as i32).div_euclid(bts) * bts;
+
+        let cs = { self.config.read().unwrap().chunk_size as i32 };
+        let store = self.store.read().unwrap();
+        let (solid, total, mat) = store.query_building_support(glam::IVec3::new(base_x, base_y, base_z), cs, bts);
+        (solid, total, mat as u8)
+    }
+
+    /// Request auto-terrace for a building placement (4x4 footprint).
+    /// Returns 1 on success, 0 if queue full.
+    pub fn request_building_flatten(&self, ue_x: f32, ue_y: f32, ue_z: f32, scale: f32) -> u32 {
+        let rust_x = ue_x / scale;
+        let rust_y = ue_z / scale;
+        let rust_z = -ue_y / scale;
+
+        let bts = building_terrace_size_for_scale(scale);
+        let ts = terrace_size_for_scale(scale);
+        let base_x = (rust_x as i32).div_euclid(bts) * bts;
+        let base_y = (rust_y as i32).div_euclid(ts) * ts;
+        let base_z = (rust_z as i32).div_euclid(bts) * bts;
+
+        let host_material = {
+            let cfg = self.config.read().unwrap();
+            voxel_gen::density::host_rock_for_depth(rust_y as f64, &cfg.ore.host_rock) as u8
+        };
+
+        match self.mine_tx.try_send(WorkerRequest::BuildingFlatten {
+            base_x,
+            base_y,
+            base_z,
+            host_material,
+        }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
     }
 
     /// Query nearby existing terrace to snap Z for extending terraces on the same plane.

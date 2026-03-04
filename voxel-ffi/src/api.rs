@@ -853,6 +853,48 @@ pub unsafe extern "C" fn voxel_query_terrace(
     }
 }
 
+/// Query floor support for a building placement (4x4 footprint).
+/// Writes solid_count, total_columns, and host material to out pointers.
+/// Returns 1 on success, 0 if engine null.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_query_building_support(
+    engine: *mut c_void,
+    x: f32,
+    y: f32,
+    z: f32,
+    scale: f32,
+    out_solid: *mut u8,
+    out_total: *mut u8,
+    out_mat: *mut u8,
+) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let (solid, total, mat) = engine.query_building_support(x, y, z, scale);
+    if !out_solid.is_null() { *out_solid = solid; }
+    if !out_total.is_null() { *out_total = total; }
+    if !out_mat.is_null() { *out_mat = mat; }
+    1
+}
+
+/// Request auto-terrace for a building placement (4x4 footprint).
+/// Returns 1 on success, 0 if queue full.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_request_building_flatten(
+    engine: *mut c_void,
+    x: f32,
+    y: f32,
+    z: f32,
+    scale: f32,
+) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.request_building_flatten(x, y, z, scale)
+}
+
 /// Query floor support for a flatten ghost preview.
 /// Returns solid count. Writes snapped UE position to out pointers.
 /// out_clearance_solids receives count of solid voxels in the 2-voxel clearance zone above.

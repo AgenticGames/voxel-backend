@@ -18,7 +18,7 @@ use voxel_gen::region_gen::{
 };
 
 use crate::convert::{convert_mesh_to_ue_scaled, from_ue_normal, from_ue_world_pos};
-use crate::engine::terrace_size_for_scale;
+use crate::engine::{terrace_size_for_scale, building_terrace_size_for_scale};
 use crate::profiler::{ChunkTimings, StreamingProfiler};
 use crate::store::{extract_solid_mask, ChunkStore};
 use crate::types::{FfiCollapseEvent, WorkerRequest, WorkerResult};
@@ -633,6 +633,24 @@ fn handle_request(
             for (key, mesh) in meshes {
                 let _ = result_tx.send(WorkerResult::ChunkMesh { chunk: key, mesh, generation: 0, crystal_data: Vec::new() });
             }
+            for key in dirty_keys {
+                let _ = incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
+            }
+        }
+        WorkerRequest::BuildingFlatten { base_x, base_y, base_z, host_material } => {
+            let cfg = config.read().unwrap().clone();
+            let mat = voxel_core::material::Material::from_u8(host_material);
+            let mut s = store.write().unwrap();
+            let bts = building_terrace_size_for_scale(world_scale);
+            let meshes = s.flatten_terrace(glam::IVec3::new(base_x, base_y, base_z), mat, &cfg, world_scale, bts);
+
+            let dirty_keys: Vec<(i32, i32, i32)> = meshes.iter().map(|(k, _)| *k).collect();
+
+            drop(s);
+            for (key, mesh) in meshes {
+                let _ = result_tx.send(WorkerResult::ChunkMesh { chunk: key, mesh, generation: 0, crystal_data: Vec::new() });
+            }
+
             for key in dirty_keys {
                 let _ = incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
             }

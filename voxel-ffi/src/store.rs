@@ -1247,6 +1247,42 @@ impl ChunkStore {
         (solid_count, clearance_count)
     }
 
+    /// Query floor support for a building placement footprint.
+    /// Returns (solid_count, total_columns, first_floor_material).
+    pub fn query_building_support(&self, base: glam::IVec3, chunk_size: i32, terrace_size: i32) -> (u8, u8, Material) {
+        let total_columns = (terrace_size * terrace_size) as u8;
+        let mut solid_count = 0u8;
+        let mut first_mat = Material::Air;
+        for dx in 0..terrace_size {
+            for dz in 0..terrace_size {
+                let wx = base.x + dx;
+                let wz = base.z + dz;
+
+                // Check 2-voxel column below: any solid = supported
+                for dy in 1..=2i32 {
+                    let check_y = base.y - dy;
+                    let cx = wx.div_euclid(chunk_size);
+                    let cy = check_y.div_euclid(chunk_size);
+                    let cz = wz.div_euclid(chunk_size);
+                    let lx = wx.rem_euclid(chunk_size) as usize;
+                    let ly = check_y.rem_euclid(chunk_size) as usize;
+                    let lz = wz.rem_euclid(chunk_size) as usize;
+                    if let Some(df) = self.density_fields.get(&(cx, cy, cz)) {
+                        let sample = df.get(lx, ly, lz);
+                        if sample.density > 0.0 {
+                            solid_count += 1;
+                            if first_mat == Material::Air {
+                                first_mat = sample.material;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        (solid_count, total_columns, first_mat)
+    }
+
     /// Query whether a terrace exists at the given base position.
     /// Returns Some(material) of the floor if all cells are terraced, None otherwise.
     /// Checks both `base.y` and `base.y - 1` because the mesh surface sits ~0.5

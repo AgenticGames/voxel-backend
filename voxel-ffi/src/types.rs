@@ -633,6 +633,12 @@ pub enum WorkerRequest {
     FlattenBatch {
         tiles: Vec<(glam::IVec3, voxel_core::material::Material)>,
     },
+    BuildingFlatten {
+        base_x: i32,
+        base_y: i32,
+        base_z: i32,
+        host_material: u8,
+    },
     Unload {
         chunk: (i32, i32, i32),
     },
