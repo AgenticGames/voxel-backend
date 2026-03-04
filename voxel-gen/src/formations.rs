@@ -260,9 +260,9 @@ pub fn place_formations(
                     });
                     used_ceiling.insert((ceil_pt.x, ceil_pt.y, ceil_pt.z), true);
                     used_floor.insert((floor_pt.x, floor_pt.y, floor_pt.z), true);
-                } else if gap <= config.column_max_gap
-                    && rng.gen::<f32>() < config.column_chance
-                {
+                } else if rng.gen::<f32>() < config.column_chance {
+                    // Normal column — any gap >= min_air_gap qualifies.
+                    // No max-gap cap: write_column fills floor_y+1..ceil_y-1 at any height.
                     let radius = rng.gen_range(config.column_radius_min..=config.column_radius_max)
                         .min(config.max_radius);
                     formations.push(Formation::Column {
@@ -1963,6 +1963,88 @@ mod tests {
         assert_eq!(
             d1, d2,
             "Same seeds should produce identical formations with all types enabled"
+        );
+    }
+
+    #[test]
+    fn test_column_medium_gap() {
+        // Cave with gap of 8 voxels (floor_y=3, ceil_y=12, gap=8)
+        // Well within normal column range, should produce columns.
+        let mut field = make_cave_field(17, 3, 12);
+        let config = FormationConfig {
+            enabled: true,
+            placement_threshold: 0.0,
+            column_chance: 1.0,
+            mega_column_chance: 0.0,
+            stalactite_chance: 0.0,
+            stalagmite_chance: 0.0,
+            flowstone_chance: 0.0,
+            drapery_chance: 0.0,
+            rimstone_chance: 0.0,
+            shield_chance: 0.0,
+            ..FormationConfig::default()
+        };
+
+        let air_before: usize = field
+            .samples
+            .iter()
+            .filter(|s| s.density <= 0.0)
+            .count();
+
+        place_formations(&mut field, &config, Vec3::ZERO, 42, 11111);
+
+        let air_after: usize = field
+            .samples
+            .iter()
+            .filter(|s| s.density <= 0.0)
+            .count();
+
+        assert!(
+            air_after < air_before,
+            "Normal column should fill air in medium-gap cave: before={air_before}, after={air_after}"
+        );
+    }
+
+    #[test]
+    fn test_column_fallback_large_gap() {
+        // Cave with gap of 15 voxels (floor_y=3, ceil_y=19, gap=15)
+        // This gap exceeds the old column_max_gap (10) and qualifies for
+        // mega-columns, but mega_column_chance=0 so the mega roll always fails.
+        // Before the fix, this would fall to `else if gap <= 10` which is false,
+        // producing zero formations. After the fix, it falls through to a normal column.
+        let size = 24;
+        let mut field = make_cave_field(size, 3, 19);
+        let config = FormationConfig {
+            enabled: true,
+            placement_threshold: 0.0,
+            column_chance: 1.0,
+            mega_column_chance: 0.0, // mega roll always fails
+            stalactite_chance: 0.0,
+            stalagmite_chance: 0.0,
+            flowstone_chance: 0.0,
+            drapery_chance: 0.0,
+            rimstone_chance: 0.0,
+            shield_chance: 0.0,
+            ..FormationConfig::default()
+        };
+
+        let air_before: usize = field
+            .samples
+            .iter()
+            .filter(|s| s.density <= 0.0)
+            .count();
+
+        place_formations(&mut field, &config, Vec3::ZERO, 42, 22222);
+
+        let air_after: usize = field
+            .samples
+            .iter()
+            .filter(|s| s.density <= 0.0)
+            .count();
+
+        assert!(
+            air_after < air_before,
+            "Normal column should spawn in large-gap cave when mega-column fails: before={air_before}, after={air_after}"
         );
     }
 }
