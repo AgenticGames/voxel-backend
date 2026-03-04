@@ -65,7 +65,6 @@ struct FloorCluster {
     centroid_x: f32,
     centroid_y: f32,
     centroid_z: f32,
-    min_y: usize,
 }
 
 /// Place cave pools in a density field. Returns descriptors and fluid seeds for placed pools.
@@ -86,7 +85,8 @@ pub fn place_pools(
         return (Vec::new(), Vec::new());
     }
 
-    // Step 1: Detect floor surfaces — solid voxels with air above
+    // Step 1: Detect floor surfaces — solid voxels with air above,
+    // filtered by ground depth to reject pillar tops and formation surfaces.
     let mut floor_cells: Vec<(usize, usize, usize)> = Vec::new();
     for z in 1..size - 1 {
         for y in 1..size - 2 {
@@ -94,6 +94,26 @@ pub fn place_pools(
                 let sample = density.get(x, y, z);
                 let above = density.get(x, y + 1, z);
                 if sample.material.is_solid() && !above.material.is_solid() {
+                    // Ground depth check: require min_ground_depth contiguous solid below
+                    if config.min_ground_depth > 0 {
+                        let mut solid_below = 0usize;
+                        for d in 1..=config.min_ground_depth {
+                            let check_y = y.wrapping_sub(d);
+                            if check_y == 0 || check_y >= size {
+                                // Hit grid bottom — counts as passing
+                                solid_below = config.min_ground_depth;
+                                break;
+                            }
+                            if density.get(x, check_y, z).material.is_solid() {
+                                solid_below += 1;
+                            } else {
+                                break; // air gap — not deep ground
+                            }
+                        }
+                        if solid_below < config.min_ground_depth {
+                            continue; // pillar top or formation surface
+                        }
+                    }
                     floor_cells.push((x, y, z));
                 }
             }
@@ -172,31 +192,50 @@ pub fn place_pools(
         };
 
         // Step 5: Carve basin
-        // Compute cluster extent on XZ to determine effective radius.
-        // Use area-based radius (sqrt(cells/PI)) instead of min-extent,
-        // because worm tunnels produce elongated clusters where min-extent
-        // would give radius=1 even for large clusters.
-        let mut min_x = usize::MAX;
-        let mut max_x = 0usize;
-        let mut min_z = usize::MAX;
-        let mut max_z = 0usize;
-        for &(cx, _cy, cz) in &cluster.cells {
-            min_x = min_x.min(cx);
-            max_x = max_x.max(cx);
-            min_z = min_z.min(cz);
-            max_z = max_z.max(cz);
-        }
+        // Compute effective radius from cluster area.
         let area_radius = ((cluster.cells.len() as f32) / std::f32::consts::PI).sqrt() as usize;
         let effective_radius = area_radius.min(config.max_radius).max(1);
 
-        let center_x = (min_x + max_x) / 2;
-        let center_z = (min_z + max_z) / 2;
-        // Use the actual floor Y at the center position, not the cluster minimum.
-        // This prevents pools from being carved at the wrong Y level when a
-        // sloped tunnel produces a cluster spanning several Y levels.
-        let floor_y = find_floor_y_at_center(&cluster.cells, center_x, center_z)
-            .unwrap_or(cluster.min_y);
+        // Pick center as the cluster cell closest to the XZ centroid.
+        // This guarantees center is an actual floor cell (no misalignment).
+        let (center_x, floor_y, center_z) = find_nearest_to_centroid(
+            &cluster.cells, cluster.centroid_x, cluster.centroid_z,
+        );
         let surface_y = floor_y + 1; // pool surface is at the air layer above floor
+
+        let r2 = (effective_radius * effective_radius) as i32;
+
+        // Pool footprint validation: check that enough of the disc has floor at center_y.
+        // Rejects pools whose radius extends beyond available floor (e.g. pillar tops).
+        {
+            let mut floor_count = 0u32;
+            let mut total_count = 0u32;
+            for dz in -(effective_radius as i32)..=(effective_radius as i32) {
+                for dx in -(effective_radius as i32)..=(effective_radius as i32) {
+                    if dx * dx + dz * dz > r2 {
+                        continue;
+                    }
+                    let gx = center_x as i32 + dx;
+                    let gz = center_z as i32 + dz;
+                    if gx < 0 || gx >= size as i32 || gz < 0 || gz >= size as i32 {
+                        continue;
+                    }
+                    total_count += 1;
+                    if floor_y < size && surface_y < size {
+                        let f = density.get(gx as usize, floor_y, gz as usize);
+                        let a = density.get(gx as usize, surface_y, gz as usize);
+                        if f.material.is_solid() && !a.material.is_solid() {
+                            floor_count += 1;
+                        }
+                    }
+                }
+            }
+            if total_count > 0 && (floor_count * 2) < total_count {
+                eprintln!("[POOL]   insufficient footprint floor={}/{} at center ({},{},{}) → skip",
+                    floor_count, total_count, center_x, floor_y, center_z);
+                continue;
+            }
+        }
 
         // Verify headroom: sample multiple points around the center and accept
         // if ANY point has sufficient air above. In curved worm tunnels, the
@@ -315,8 +354,6 @@ pub fn place_pools(
 
         eprintln!("[POOL]   CARVING pool: center=({},{},{}) radius={} basin_depth={} fluid={:?}",
             center_x, floor_y, center_z, effective_radius, config.basin_depth, fluid_type);
-
-        let r2 = (effective_radius * effective_radius) as i32;
 
         // Carve basin: set voxels below floor to air within radius circle
         for dz in -(effective_radius as i32)..=(effective_radius as i32) {
@@ -540,16 +577,14 @@ fn cluster_floors(
             continue;
         }
 
-        // Compute centroid and min_y
+        // Compute centroid
         let mut sum_x = 0.0f32;
         let mut sum_y = 0.0f32;
         let mut sum_z = 0.0f32;
-        let mut min_y = usize::MAX;
         for &(cx, cy, cz) in &cells {
             sum_x += cx as f32;
             sum_y += cy as f32;
             sum_z += cz as f32;
-            min_y = min_y.min(cy);
         }
         let n = cells.len() as f32;
 
@@ -558,51 +593,31 @@ fn cluster_floors(
             centroid_x: sum_x / n,
             centroid_y: sum_y / n,
             centroid_z: sum_z / n,
-            min_y,
         });
     }
 
     clusters
 }
 
-/// Find the floor Y at the pool center position, or nearest floor cell.
-/// Falls back to modal Y (most common Y level) if no nearby cell exists.
-fn find_floor_y_at_center(
+/// Find the cluster cell nearest to the XZ centroid.
+/// Returns (x, y, z) of the closest cell — guaranteed to be an actual floor cell.
+fn find_nearest_to_centroid(
     cells: &[(usize, usize, usize)],
-    cx: usize,
-    cz: usize,
-) -> Option<usize> {
-    // 1. Exact match at (cx, cz)
+    centroid_x: f32,
+    centroid_z: f32,
+) -> (usize, usize, usize) {
+    let mut best = cells[0];
+    let mut best_dist = f32::MAX;
     for &(x, y, z) in cells {
-        if x == cx && z == cz {
-            return Some(y);
+        let dx = x as f32 - centroid_x;
+        let dz = z as f32 - centroid_z;
+        let dist = dx * dx + dz * dz;
+        if dist < best_dist {
+            best_dist = dist;
+            best = (x, y, z);
         }
     }
-
-    // 2. Nearest cell within radius 2 on XZ plane
-    let mut best_dist = u32::MAX;
-    let mut best_y = None;
-    for &(x, y, z) in cells {
-        let dx = (x as i32 - cx as i32).unsigned_abs();
-        let dz = (z as i32 - cz as i32).unsigned_abs();
-        if dx <= 2 && dz <= 2 {
-            let dist = dx * dx + dz * dz;
-            if dist < best_dist {
-                best_dist = dist;
-                best_y = Some(y);
-            }
-        }
-    }
-    if best_y.is_some() {
-        return best_y;
-    }
-
-    // 3. Modal Y (most common Y level in the cluster)
-    let mut y_counts: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
-    for &(_, y, _) in cells {
-        *y_counts.entry(y).or_insert(0) += 1;
-    }
-    y_counts.into_iter().max_by_key(|&(_, count)| count).map(|(y, _)| y)
+    best
 }
 
 /// Find the material of a nearby solid voxel (for rim reinforcement).
@@ -826,7 +841,6 @@ mod tests {
 
         let mut total_pools = 0;
         let mut total_floors = 0;
-        let mut total_clusters = 0;
         let mut chunks_with_caves = 0;
 
         // Try a 4x4x4 grid of chunks to find ones with caves
@@ -970,25 +984,78 @@ mod tests {
     }
 
     #[test]
-    fn test_find_floor_y_at_center_exact() {
+    fn test_find_nearest_to_centroid_exact() {
         let cells = vec![(5, 10, 5), (6, 10, 5), (7, 8, 5)];
-        // Exact match at (5, 5)
-        assert_eq!(find_floor_y_at_center(&cells, 5, 5), Some(10));
-        // Exact match at (7, 5) — different Y
-        assert_eq!(find_floor_y_at_center(&cells, 7, 5), Some(8));
+        // Centroid at (6.0, 5.0) — cell (6,10,5) is closest
+        let result = find_nearest_to_centroid(&cells, 6.0, 5.0);
+        assert_eq!(result, (6, 10, 5));
     }
 
     #[test]
-    fn test_find_floor_y_at_center_nearest() {
-        let cells = vec![(5, 10, 5), (6, 10, 5)];
-        // No exact match at (5, 6), but (5, 5) is within radius 2
-        assert_eq!(find_floor_y_at_center(&cells, 5, 6), Some(10));
+    fn test_find_nearest_to_centroid_offset() {
+        let cells = vec![(2, 5, 2), (8, 7, 8), (10, 3, 10)];
+        // Centroid closer to (10,3,10)
+        let result = find_nearest_to_centroid(&cells, 9.5, 9.5);
+        assert_eq!(result, (10, 3, 10));
     }
 
     #[test]
-    fn test_find_floor_y_at_center_modal() {
-        // No cells near (0, 0), should return modal Y (10 appears twice)
-        let cells = vec![(10, 10, 10), (11, 10, 10), (12, 8, 10)];
-        assert_eq!(find_floor_y_at_center(&cells, 0, 0), Some(10));
+    fn test_find_nearest_to_centroid_single() {
+        let cells = vec![(4, 6, 4)];
+        let result = find_nearest_to_centroid(&cells, 0.0, 0.0);
+        assert_eq!(result, (4, 6, 4));
+    }
+
+    #[test]
+    fn test_ground_depth_rejects_pillar_tops() {
+        // Create a pillar 3 voxels tall with air below — should be rejected
+        // when min_ground_depth=4
+        let config = PoolConfig {
+            pool_chance: 1.0,
+            placement_threshold: -1.0,
+            min_area: 2,
+            water_pct: 1.0,
+            lava_pct: 0.0,
+            empty_pct: 0.0,
+            max_cave_height: 0,
+            min_floor_thickness: 0,
+            min_ground_depth: 4, // require 4 solid below
+            ..Default::default()
+        };
+
+        let size = 17;
+        let mut density = DensityField::new(size);
+
+        // Fill everything as air
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..size {
+                    let sample = density.get_mut(x, y, z);
+                    sample.density = -1.0;
+                    sample.material = Material::Air;
+                }
+            }
+        }
+
+        // Create a thin pillar: solid at y=5,6,7 (3 voxels tall), air below at y=4
+        // Top of pillar at y=7, air at y=8 — this is a "floor cell" at y=7
+        // But only 2 solid below (y=6, y=5) before hitting air at y=4
+        for z in 5..12 {
+            for x in 5..12 {
+                for y in 5..8 {
+                    let sample = density.get_mut(x, y, z);
+                    sample.density = 1.0;
+                    sample.material = Material::Limestone;
+                }
+            }
+        }
+
+        let (descriptors, _seeds) = place_pools(&mut density, &config, Vec3::ZERO, 42, 100);
+        assert!(
+            descriptors.is_empty(),
+            "Pools should NOT spawn on pillar tops with min_ground_depth=4 \
+             (pillar only 3 voxels tall). Got {} pools.",
+            descriptors.len()
+        );
     }
 }

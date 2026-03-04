@@ -1071,6 +1071,7 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
             min_air_above: if c.pool_min_air_above > 0 { c.pool_min_air_above as usize } else { 3 },
             max_cave_height: if c.pool_max_cave_height > 0 { c.pool_max_cave_height as usize } else { 20 },
             min_floor_thickness: if c.pool_min_floor_thickness > 0 { c.pool_min_floor_thickness as usize } else { 2 },
+            min_ground_depth: if c.pool_min_ground_depth > 0 { c.pool_min_ground_depth as usize } else { 4 },
         },
         mine: MineConfig {
             smooth_iterations: if c.mine_smooth_iterations == 0 && c.mine_smooth_strength == 0.0 {
@@ -1268,12 +1269,12 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
 fn debug_log_pool_config(c: &FfiEngineConfig) {
     eprintln!("[FFI-POOL] enabled={} freq={} thresh={} chance={} min_area={} max_radius={} \
               basin_depth={} rim_height={} water={} lava={} empty={} air_above={} \
-              max_cave_height={} min_floor_thickness={}",
+              max_cave_height={} min_floor_thickness={} min_ground_depth={}",
         c.pool_enabled, c.pool_placement_freq, c.pool_placement_thresh,
         c.pool_chance, c.pool_min_area, c.pool_max_radius,
         c.pool_basin_depth, c.pool_rim_height,
         c.pool_water_pct, c.pool_lava_pct, c.pool_empty_pct, c.pool_min_air_above,
-        c.pool_max_cave_height, c.pool_min_floor_thickness);
+        c.pool_max_cave_height, c.pool_min_floor_thickness, c.pool_min_ground_depth);
 }
 
 /// Convert FFI config to FluidConfig.

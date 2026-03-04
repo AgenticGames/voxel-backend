@@ -725,6 +725,9 @@ pub struct PoolConfig {
     pub max_cave_height: usize,
     /// Minimum solid voxels required below basin bottom for structural support
     pub min_floor_thickness: usize,
+    /// Minimum contiguous solid voxels below a floor cell to qualify as ground.
+    /// Rejects pillar tops and formation surfaces. 0 disables the check.
+    pub min_ground_depth: usize,
 }
 
 impl Default for PoolConfig {
@@ -744,6 +747,7 @@ impl Default for PoolConfig {
             min_air_above: 3,
             max_cave_height: 20,
             min_floor_thickness: 2,
+            min_ground_depth: 4,
         }
     }
 }
