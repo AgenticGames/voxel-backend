@@ -408,15 +408,19 @@ pub fn generate_seam_mesh(
                 _ => continue,
             };
 
+            // Skip if any cell has negative coordinates
+            if cells.iter().any(|&(x, y, z)| x < 0 || y < 0 || z < 0) {
+                continue;
+            }
+
             // Look up DC vertex for each cell from the appropriate chunk
             let mut positions = [Vec3::ZERO; 4];
-            let mut valid_mask = [false; 4];
-            let mut valid_count = 0u32;
+            let mut valid = true;
 
             for (i, &(cell_x, cell_y, cell_z)) in cells.iter().enumerate() {
-                let chunk_dx = if cell_x >= gs_i { 1 } else if cell_x < 0 { -1 } else { 0 };
-                let chunk_dy = if cell_y >= gs_i { 1 } else if cell_y < 0 { -1 } else { 0 };
-                let chunk_dz = if cell_z >= gs_i { 1 } else if cell_z < 0 { -1 } else { 0 };
+                let chunk_dx = if cell_x >= gs_i { 1 } else { 0 };
+                let chunk_dy = if cell_y >= gs_i { 1 } else { 0 };
+                let chunk_dz = if cell_z >= gs_i { 1 } else { 0 };
 
                 let neighbor_key = (cx + chunk_dx, cy + chunk_dy, cz + chunk_dz);
 
@@ -426,75 +430,54 @@ pub fn generate_seam_mesh(
 
                 if let Some(neighbor) = chunks.get(&neighbor_key) {
                     let cell_idx = lz * gs * gs + ly * gs + lx;
-                    if cell_idx < neighbor.dc_vertices.len() {
-                        let pos = neighbor.dc_vertices[cell_idx];
-                        if !pos.x.is_nan() {
-                            positions[i] = pos + neighbor.world_origin;
-                            valid_mask[i] = true;
-                            valid_count += 1;
-                        }
+                    if cell_idx >= neighbor.dc_vertices.len() {
+                        valid = false;
+                        break;
                     }
+                    let pos = neighbor.dc_vertices[cell_idx];
+                    if pos.x.is_nan() {
+                        valid = false;
+                        break;
+                    }
+                    positions[i] = pos + neighbor.world_origin;
+                } else {
+                    valid = false;
+                    break;
                 }
             }
 
-            if valid_count == 4 {
-                // Full quad: emit 2 triangles
-                let base = mesh.vertices.len() as u32;
-                for pos in &positions {
-                    mesh.vertices.push(Vertex {
-                        position: *pos,
-                        normal: intersection.normal,
-                        material: intersection.material,
-                    });
-                }
+            if !valid {
+                continue;
+            }
 
-                let axis_dir = match axis {
-                    0 => Vec3::X,
-                    1 => Vec3::Y,
-                    _ => Vec3::Z,
-                };
-                let normal_dot = intersection.normal.dot(axis_dir);
+            // Emit the quad as 2 triangles
+            let base = mesh.vertices.len() as u32;
+            for pos in &positions {
+                mesh.vertices.push(Vertex {
+                    position: *pos,
+                    normal: intersection.normal,
+                    material: intersection.material,
+                });
+            }
 
-                let (tri_a, tri_b) = if normal_dot > 0.0 {
-                    ([base, base + 1, base + 2], [base, base + 2, base + 3])
-                } else {
-                    ([base + 2, base + 1, base], [base + 3, base + 2, base])
-                };
+            let axis_dir = match axis {
+                0 => Vec3::X,
+                1 => Vec3::Y,
+                _ => Vec3::Z,
+            };
+            let normal_dot = intersection.normal.dot(axis_dir);
 
-                if !is_degenerate(&mesh.vertices, tri_a) {
-                    mesh.triangles.push(Triangle { indices: tri_a });
-                }
-                if !is_degenerate(&mesh.vertices, tri_b) {
-                    mesh.triangles.push(Triangle { indices: tri_b });
-                }
-            } else if valid_count == 3 {
-                // Partial quad: emit 1 triangle from 3 valid vertices
-                let base = mesh.vertices.len() as u32;
-                let mut tri = [0u32; 3];
-                let mut j = 0;
-                for i in 0..4 {
-                    if valid_mask[i] {
-                        mesh.vertices.push(Vertex {
-                            position: positions[i],
-                            normal: intersection.normal,
-                            material: intersection.material,
-                        });
-                        tri[j] = base + j as u32;
-                        j += 1;
-                    }
-                }
+            let (tri_a, tri_b) = if normal_dot > 0.0 {
+                ([base, base + 1, base + 2], [base, base + 2, base + 3])
+            } else {
+                ([base + 2, base + 1, base], [base + 3, base + 2, base])
+            };
 
-                let v0 = mesh.vertices[tri[0] as usize].position;
-                let v1 = mesh.vertices[tri[1] as usize].position;
-                let v2 = mesh.vertices[tri[2] as usize].position;
-                let face_normal = (v1 - v0).cross(v2 - v0);
-                if face_normal.dot(intersection.normal) < 0.0 {
-                    tri.swap(1, 2);
-                }
-
-                if !is_degenerate(&mesh.vertices, tri) {
-                    mesh.triangles.push(Triangle { indices: tri });
-                }
+            if !is_degenerate(&mesh.vertices, tri_a) {
+                mesh.triangles.push(Triangle { indices: tri_a });
+            }
+            if !is_degenerate(&mesh.vertices, tri_b) {
+                mesh.triangles.push(Triangle { indices: tri_b });
             }
         }
     }
@@ -550,14 +533,17 @@ pub fn generate_chunk_seam_quads(
             _ => continue,
         };
 
+        if cells.iter().any(|&(x, y, z)| x < 0 || y < 0 || z < 0) {
+            continue;
+        }
+
         let mut positions = [Vec3::ZERO; 4];
-        let mut valid_mask = [false; 4];
-        let mut valid_count = 0u32;
+        let mut valid = true;
 
         for (i, &(cell_x, cell_y, cell_z)) in cells.iter().enumerate() {
-            let chunk_dx = if cell_x >= gs_i { 1 } else if cell_x < 0 { -1 } else { 0 };
-            let chunk_dy = if cell_y >= gs_i { 1 } else if cell_y < 0 { -1 } else { 0 };
-            let chunk_dz = if cell_z >= gs_i { 1 } else if cell_z < 0 { -1 } else { 0 };
+            let chunk_dx = if cell_x >= gs_i { 1 } else { 0 };
+            let chunk_dy = if cell_y >= gs_i { 1 } else { 0 };
+            let chunk_dz = if cell_z >= gs_i { 1 } else { 0 };
 
             let neighbor_key = (
                 chunk_key.0 + chunk_dx,
@@ -571,81 +557,59 @@ pub fn generate_chunk_seam_quads(
 
             if let Some(neighbor) = all_seam_data.get(&neighbor_key) {
                 let cell_idx = lz * gs * gs + ly * gs + lx;
-                if cell_idx < neighbor.dc_vertices.len() {
-                    let pos = neighbor.dc_vertices[cell_idx];
-                    if !pos.x.is_nan() {
-                        // Offset neighbor DC vertex into THIS chunk's local space
-                        let offset = Vec3::new(
-                            chunk_dx as f32 * gs_f,
-                            chunk_dy as f32 * gs_f,
-                            chunk_dz as f32 * gs_f,
-                        );
-                        positions[i] = pos + offset;
-                        valid_mask[i] = true;
-                        valid_count += 1;
-                    }
+                if cell_idx >= neighbor.dc_vertices.len() {
+                    valid = false;
+                    break;
                 }
+                let pos = neighbor.dc_vertices[cell_idx];
+                if pos.x.is_nan() {
+                    valid = false;
+                    break;
+                }
+                // Offset neighbor DC vertex into THIS chunk's local space
+                let offset = Vec3::new(
+                    chunk_dx as f32 * gs_f,
+                    chunk_dy as f32 * gs_f,
+                    chunk_dz as f32 * gs_f,
+                );
+                positions[i] = pos + offset;
+            } else {
+                valid = false;
+                break;
             }
         }
 
-        if valid_count == 4 {
-            // Full quad: emit 2 triangles
-            let base = mesh.vertices.len() as u32;
-            for pos in &positions {
-                mesh.vertices.push(Vertex {
-                    position: *pos,
-                    normal: intersection.normal,
-                    material: intersection.material,
-                });
-            }
+        if !valid {
+            continue;
+        }
 
-            let axis_dir = match axis {
-                0 => Vec3::X,
-                1 => Vec3::Y,
-                _ => Vec3::Z,
-            };
-            let normal_dot = intersection.normal.dot(axis_dir);
+        let base = mesh.vertices.len() as u32;
+        for pos in &positions {
+            mesh.vertices.push(Vertex {
+                position: *pos,
+                normal: intersection.normal,
+                material: intersection.material,
+            });
+        }
 
-            let (tri_a, tri_b) = if normal_dot > 0.0 {
-                ([base, base + 1, base + 2], [base, base + 2, base + 3])
-            } else {
-                ([base + 2, base + 1, base], [base + 3, base + 2, base])
-            };
+        let axis_dir = match axis {
+            0 => Vec3::X,
+            1 => Vec3::Y,
+            _ => Vec3::Z,
+        };
+        let normal_dot = intersection.normal.dot(axis_dir);
 
-            if !is_degenerate(&mesh.vertices, tri_a) {
-                mesh.triangles.push(Triangle { indices: tri_a });
-            }
-            if !is_degenerate(&mesh.vertices, tri_b) {
-                mesh.triangles.push(Triangle { indices: tri_b });
-            }
-        } else if valid_count == 3 {
-            // Partial quad: emit 1 triangle from 3 valid vertices
-            let base = mesh.vertices.len() as u32;
-            let mut tri = [0u32; 3];
-            let mut j = 0;
-            for i in 0..4 {
-                if valid_mask[i] {
-                    mesh.vertices.push(Vertex {
-                        position: positions[i],
-                        normal: intersection.normal,
-                        material: intersection.material,
-                    });
-                    tri[j] = base + j as u32;
-                    j += 1;
-                }
-            }
+        let (tri_a, tri_b) = if normal_dot > 0.0 {
+            ([base, base + 1, base + 2], [base, base + 2, base + 3])
+        } else {
+            ([base + 2, base + 1, base], [base + 3, base + 2, base])
+        };
 
-            let v0 = mesh.vertices[tri[0] as usize].position;
-            let v1 = mesh.vertices[tri[1] as usize].position;
-            let v2 = mesh.vertices[tri[2] as usize].position;
-            let face_normal = (v1 - v0).cross(v2 - v0);
-            if face_normal.dot(intersection.normal) < 0.0 {
-                tri.swap(1, 2);
-            }
-
-            if !is_degenerate(&mesh.vertices, tri) {
-                mesh.triangles.push(Triangle { indices: tri });
-            }
+        if !is_degenerate(&mesh.vertices, tri_a) {
+            mesh.triangles.push(Triangle { indices: tri_a });
+        }
+        if !is_degenerate(&mesh.vertices, tri_b) {
+            mesh.triangles.push(Triangle { indices: tri_b });
         }
     }
 
@@ -664,7 +628,7 @@ fn is_degenerate(vertices: &[Vertex], indices: [u32; 3]) -> bool {
 /// Sync boundary densities between adjacent chunks within a region.
 /// Ensures overlapping boundary voxels have identical density/material,
 /// preventing seam gaps from chunk-local modifications (formations, pools, ore protrusion).
-fn sync_region_boundary_densities(
+pub fn sync_region_boundary_densities(
     density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
     chunk_size: usize,
 ) {

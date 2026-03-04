@@ -60,6 +60,7 @@ pub fn compute_crystal_placements(
     chunk_seed: u64,
 ) -> Vec<CrystalPlacement> {
     if !config.enabled {
+        eprintln!("[CRYSTAL] Crystals disabled in config");
         return Vec::new();
     }
 
@@ -67,6 +68,11 @@ pub fn compute_crystal_placements(
 
     // Step 1: Detect ore surfaces (solid ore voxels adjacent to air)
     let mut surfaces = detect_ore_surfaces(density, size);
+
+    eprintln!("[CRYSTAL-DBG] origin=({:.0},{:.0},{:.0}) surfaces={} seed={} config.pyrite: enabled={} chance={} threshold={}",
+        world_origin.x, world_origin.y, world_origin.z,
+        surfaces.len(), world_seed,
+        config.pyrite.enabled, config.pyrite.chance, config.pyrite.density_threshold);
 
     // Sort for deterministic RNG processing (HashMap iteration order is nondeterministic)
     surfaces.sort_by(|a, b| {

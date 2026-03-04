@@ -14,7 +14,8 @@ use voxel_fluid::FluidEvent;
 use voxel_gen::config::{GenerationConfig, StressConfig};
 use voxel_gen::hermite_extract::extract_hermite_data;
 use voxel_gen::region_gen::{
-    self, generate_region_densities, region_chunks, region_key, ChunkSeamData, RegionTimings,
+    self, generate_region_densities, region_chunks, region_key, sync_region_boundary_densities,
+    ChunkSeamData, RegionTimings,
 };
 
 use crate::convert::{convert_mesh_to_ue_scaled, from_ue_normal, from_ue_world_pos};
@@ -180,6 +181,8 @@ fn handle_request(
                         for density in densities.values_mut() {
                             density.compute_metadata();
                         }
+                        // Re-sync intra-region boundaries broken by external worm carving
+                        sync_region_boundary_densities(&mut densities, cfg.chunk_size);
                     }
                 }
                 if profiling { t_worm_forward_sharing = t_fwd.elapsed(); }
@@ -258,6 +261,18 @@ fn handle_request(
                                         }
                                     }
                                 }
+                            }
+                        }
+                    }
+                    // Sync backward-carved chunks with their loaded neighbors
+                    if !backward_dirty.is_empty() {
+                        let extra_dirty = {
+                            let mut s = store.write().unwrap();
+                            s.sync_cross_region_densities(&backward_dirty, cfg.chunk_size)
+                        };
+                        for key in extra_dirty {
+                            if !backward_dirty.contains(&key) {
+                                backward_dirty.push(key);
                             }
                         }
                     }
@@ -484,6 +499,11 @@ fn handle_request(
                     })
                 };
                 if let Some(placements) = placements_opt {
+                    if !placements.is_empty() {
+                        eprintln!("[CRYSTAL] Chunk {:?}: {} placements (first ore_type={}, scale={:.2})",
+                            chunk, placements.len(),
+                            placements[0].ore_type, placements[0].scale);
+                    }
                     let ue_crystals = crate::convert::convert_crystals_to_ue(&placements, cfg.voxel_scale(), world_scale);
                     let mut sw = store.write().unwrap();
                     sw.crystal_placements.insert(chunk, placements);
