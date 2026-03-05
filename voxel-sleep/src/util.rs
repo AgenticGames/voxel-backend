@@ -49,6 +49,20 @@ pub fn count_neighbors(
     count
 }
 
+/// Vein deposition probability multiplier based on tunnel aperture (air neighbor count).
+/// Wider tunnels = more fluid flow = richer veins; narrow cracks = less deposition.
+pub fn aperture_multiplier(air_neighbors: u32) -> f32 {
+    match air_neighbors {
+        0 => 0.0,
+        1 => 1.40,
+        2 => 1.15,
+        3 => 1.00,
+        4 => 0.65,
+        5 => 0.40,
+        _ => 0.20,
+    }
+}
+
 /// Check if any voxel within Manhattan distance <= radius has the given material.
 pub fn has_material_within_radius(
     density_fields: &HashMap<(i32, i32, i32), DensityField>,

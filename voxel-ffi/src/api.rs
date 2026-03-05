@@ -132,7 +132,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     result_type: FfiResultType::FluidMesh,
                     chunk: FfiChunkCoord { x: ue.0, y: ue.1, z: ue.2 },
                     mesh: empty_mesh_data(),
-                    mined: FfiMinedMaterials { counts: [0; 20] },
+                    mined: FfiMinedMaterials { counts: [0; 22] },
                     generation: 0,
                     fluid_mesh: converted_fluid_mesh_to_ffi(mesh),
                     crystal_data: empty_crystal_data(),
@@ -145,7 +145,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     result_type: FfiResultType::Error,
                     chunk: FfiChunkCoord { x: ue.0, y: ue.1, z: ue.2 },
                     mesh: empty_mesh_data(),
-                    mined: FfiMinedMaterials { counts: [0; 20] },
+                    mined: FfiMinedMaterials { counts: [0; 22] },
                     generation,
                     fluid_mesh: empty_fluid_mesh_data(),
                     crystal_data: empty_crystal_data(),
@@ -179,7 +179,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                         z: ev.center_z as i32,
                     },
                     mesh: empty_mesh_data(),
-                    mined: FfiMinedMaterials { counts: [0; 20] },
+                    mined: FfiMinedMaterials { counts: [0; 22] },
                     generation: ev.volume as u64,
                     fluid_mesh: empty_fluid_mesh_data(),
                     crystal_data: empty_crystal_data(),
@@ -197,7 +197,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     result_type: FfiResultType::MineResult,
                     chunk: FfiChunkCoord { x: 0, y: 0, z: 0 },
                     mesh: empty_mesh_data(),
-                    mined: FfiMinedMaterials { counts: [if success { 1 } else { 0 }; 20] },
+                    mined: FfiMinedMaterials { counts: [if success { 1 } else { 0 }; 22] },
                     generation: 0,
                     fluid_mesh: empty_fluid_mesh_data(),
                     crystal_data: empty_crystal_data(),
@@ -606,6 +606,33 @@ pub unsafe extern "C" fn voxel_set_sleep_config(
     engine.update_sleep_config(sleep_config);
 }
 
+/// Set spider nest positions for sleep fossilization. UE calls this before voxel_start_sleep().
+/// Coordinates are in UE world space (will be converted to Rust space).
+/// Returns 1 on success, 0 on error.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_set_sleep_nests(
+    engine: *mut c_void,
+    world_xs: *const i32,
+    world_ys: *const i32,
+    world_zs: *const i32,
+    count: u32,
+) -> u32 {
+    if engine.is_null() || (count > 0 && (world_xs.is_null() || world_ys.is_null() || world_zs.is_null())) {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let positions: Vec<(i32, i32, i32)> = (0..count as usize)
+        .map(|i| {
+            let ux = *world_xs.add(i);
+            let uy = *world_ys.add(i);
+            let uz = *world_zs.add(i);
+            crate::convert::ue_chunk_to_rust(ux, uy, uz)
+        })
+        .collect();
+    engine.set_sleep_nests(positions);
+    1
+}
+
 /// Start a deep sleep cycle. player_chunk coordinates are in UE space.
 /// Returns 1 on success, 0 if queue full.
 #[no_mangle]
@@ -641,6 +668,11 @@ pub unsafe extern "C" fn voxel_poll_sleep_result(engine: *mut c_void) -> FfiSlee
         veins_deposited: 0,
         voxels_enriched: 0,
         formations_grown: 0,
+        sulfide_dissolved: 0,
+        coal_matured: 0,
+        diamonds_formed: 0,
+        voxels_silicified: 0,
+        nests_fossilized: 0,
         dirty_chunks: ptr::null_mut(),
         dirty_chunk_count: 0,
         collapse_events: ptr::null_mut(),
@@ -672,6 +704,11 @@ pub unsafe extern "C" fn voxel_poll_sleep_result(engine: *mut c_void) -> FfiSlee
                 veins_deposited: data.veins_deposited,
                 voxels_enriched: data.voxels_enriched,
                 formations_grown: data.formations_grown,
+                sulfide_dissolved: data.sulfide_dissolved,
+                coal_matured: data.coal_matured,
+                diamonds_formed: data.diamonds_formed,
+                voxels_silicified: data.voxels_silicified,
+                nests_fossilized: data.nests_fossilized,
                 dirty_chunks: ptr::null_mut(),
                 dirty_chunk_count: 0,
                 collapse_events: ptr::null_mut(),
@@ -1194,7 +1231,7 @@ fn convert_mesh_to_ffi_result(
             z: ue.2,
         },
         mesh: converted_mesh_to_ffi(mesh),
-        mined: FfiMinedMaterials { counts: [0; 20] },
+        mined: FfiMinedMaterials { counts: [0; 22] },
         generation,
         fluid_mesh: empty_fluid_mesh_data(),
         crystal_data: convert_crystal_vec_to_ffi(crystal_data),

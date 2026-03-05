@@ -75,6 +75,10 @@ pub struct SleepTimings {
     pub deeptime_thickening: Duration,
     pub deeptime_formations: Duration,
     pub deeptime_collapse: Duration,
+    pub deeptime_fossilization: Duration,
+    pub reaction_sulfide_acid: Duration,
+    pub aureole_coal_maturation: Duration,
+    pub aureole_silicification: Duration,
     pub collapse_sub: Option<CollapseTimings>,
     pub aggregation: Duration,
     pub loaded_chunks: u32,
@@ -97,6 +101,11 @@ pub struct SleepResult {
     pub voxels_enriched: u32,
     pub supports_degraded: u32,
     pub collapses_triggered: u32,
+    pub sulfide_dissolved: u32,
+    pub coal_matured: u32,
+    pub diamonds_formed: u32,
+    pub voxels_silicified: u32,
+    pub nests_fossilized: u32,
     pub dirty_chunks: Vec<(i32, i32, i32)>,
     pub collapse_events: Vec<voxel_core::stress::CollapseEvent>,
     /// Detailed log of transformations for UI display
@@ -200,6 +209,11 @@ pub fn execute_sleep(
     let mut total_enriched = 0u32;
     let mut total_supports_degraded = 0u32;
     let mut total_collapses = 0u32;
+    let mut total_sulfide_dissolved = 0u32;
+    let mut total_coal_matured = 0u32;
+    let mut total_diamonds_formed = 0u32;
+    let mut total_silicified = 0u32;
+    let mut total_nests_fossilized = 0u32;
     let mut all_collapse_events: Vec<voxel_core::stress::CollapseEvent> = Vec::new();
     let mut collapse_sub_timings: Option<CollapseTimings> = None;
 
@@ -214,6 +228,7 @@ pub fn execute_sleep(
         );
         total_acid_dissolved = reaction_result.acid_dissolved;
         total_oxidized = reaction_result.voxels_oxidized;
+        total_sulfide_dissolved = reaction_result.sulfide_dissolved;
         result_manifest.merge_sleep_changes(&reaction_result.manifest);
         transform_log.extend(reaction_result.transform_log);
         for key in reaction_result.manifest.chunk_deltas.keys() {
@@ -237,6 +252,9 @@ pub fn execute_sleep(
             &heat_map, &all_chunks, chunk_size, &mut rng,
         );
         total_metamorphosed = aureole_result.voxels_metamorphosed;
+        total_coal_matured = aureole_result.coal_matured;
+        total_diamonds_formed = aureole_result.diamonds_formed;
+        total_silicified = aureole_result.voxels_silicified;
         result_manifest.merge_sleep_changes(&aureole_result.manifest);
         transform_log.extend(aureole_result.transform_log);
         for key in aureole_result.manifest.chunk_deltas.keys() {
@@ -284,9 +302,10 @@ pub fn execute_sleep(
         let dt_result = apply_deeptime(
             &config.deeptime, &config.groundwater, density_fields, stress_fields, support_fields,
             fluid_snapshot, &heat_map, &collapse_chunks, chunk_size,
-            &config.stress, &mut rng,
+            &config.stress, &config.nest_positions, &mut rng,
         );
         total_enriched = dt_result.voxels_enriched;
+        total_nests_fossilized = dt_result.nests_fossilized;
         total_formations += dt_result.formations_grown;
         total_supports_degraded = dt_result.supports_degraded;
         total_collapses = dt_result.collapses_triggered;
@@ -343,6 +362,10 @@ pub fn execute_sleep(
         deeptime_thickening: Duration::ZERO,
         deeptime_formations: Duration::ZERO,
         deeptime_collapse: Duration::ZERO,
+        deeptime_fossilization: Duration::ZERO,
+        reaction_sulfide_acid: Duration::ZERO,
+        aureole_coal_maturation: Duration::ZERO,
+        aureole_silicification: Duration::ZERO,
         collapse_sub: collapse_sub_timings,
         aggregation: t_agg_elapsed,
         loaded_chunks: loaded_chunks.len() as u32,
@@ -359,6 +382,8 @@ pub fn execute_sleep(
         all_chunks.len() as u32, mineral_chunks.len() as u32,
         collapse_chunks.len() as u32, dirty_chunks.len() as u32,
         heat_map.len() as u32,
+        total_sulfide_dissolved, total_coal_matured, total_diamonds_formed,
+        total_silicified, total_nests_fossilized,
     );
 
     SleepResult {
@@ -372,6 +397,11 @@ pub fn execute_sleep(
         voxels_enriched: total_enriched,
         supports_degraded: total_supports_degraded,
         collapses_triggered: total_collapses,
+        sulfide_dissolved: total_sulfide_dissolved,
+        coal_matured: total_coal_matured,
+        diamonds_formed: total_diamonds_formed,
+        voxels_silicified: total_silicified,
+        nests_fossilized: total_nests_fossilized,
         dirty_chunks,
         collapse_events: all_collapse_events,
         transform_log,
@@ -404,6 +434,11 @@ fn build_sleep_profile_report(
     _collapse_chunk_count: u32,
     dirty_chunk_count: u32,
     heat_source_count: u32,
+    sulfide_dissolved: u32,
+    coal_matured: u32,
+    diamonds_formed: u32,
+    voxels_silicified: u32,
+    nests_fossilized: u32,
 ) -> String {
     let mut s = String::with_capacity(4096);
 
@@ -418,11 +453,14 @@ fn build_sleep_profile_report(
     let _ = writeln!(s, "\u{2500}\u{2500}\u{2500} Phase 1: The Reaction (10,000 years) \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
     let _ = writeln!(s, "  Acid dissolution:    {:.2} ms  ({} voxels dissolved)", dur_ms(timings.reaction_acid), acid_dissolved);
     let _ = writeln!(s, "  Surface oxidation:   {:.2} ms  ({} voxels oxidized)", dur_ms(timings.reaction_oxidation), voxels_oxidized);
+    let _ = writeln!(s, "  Sulfide acid:        {:.2} ms  ({} voxels dissolved)", dur_ms(timings.reaction_sulfide_acid), sulfide_dissolved);
     let _ = writeln!(s, "  Phase 1 total:       {:.2} ms", dur_ms(timings.reaction));
 
     let _ = writeln!(s);
     let _ = writeln!(s, "\u{2500}\u{2500}\u{2500} Phase 2: The Aureole (100,000 years) \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
     let _ = writeln!(s, "  Contact metamorphism: {:.2} ms  ({} voxels transformed)", dur_ms(timings.aureole_metamorphism), voxels_metamorphosed);
+    let _ = writeln!(s, "  Coal maturation:      {:.2} ms  ({} coal \u{2192} graphite, {} \u{2192} diamond)", dur_ms(timings.aureole_coal_maturation), coal_matured, diamonds_formed);
+    let _ = writeln!(s, "  Silicification:       {:.2} ms  ({} voxels silicified)", dur_ms(timings.aureole_silicification), voxels_silicified);
     let _ = writeln!(s, "  Water erosion:        {:.2} ms", dur_ms(timings.aureole_erosion));
     let _ = writeln!(s, "  Phase 2 total:       {:.2} ms", dur_ms(timings.aureole));
 
@@ -437,6 +475,7 @@ fn build_sleep_profile_report(
     let _ = writeln!(s, "  Supergene enrichment: {:.2} ms  ({} voxels enriched)", dur_ms(timings.deeptime_enrichment), voxels_enriched);
     let _ = writeln!(s, "  Vein thickening:      {:.2} ms", dur_ms(timings.deeptime_thickening));
     let _ = writeln!(s, "  Formations:           {:.2} ms", dur_ms(timings.deeptime_formations));
+    let _ = writeln!(s, "  Nest fossilization:   {:.2} ms  ({} nests fossilized)", dur_ms(timings.deeptime_fossilization), nests_fossilized);
     if let Some(ref ct) = timings.collapse_sub {
         let _ = writeln!(s, "  Collapse:            {:.2} ms", dur_ms(timings.deeptime_collapse));
         let _ = writeln!(s, "    Support degradation: {:.2} ms  ({} degraded)", dur_ms(ct.support_degradation), supports_degraded);

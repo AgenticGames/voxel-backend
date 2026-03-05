@@ -27,6 +27,9 @@ pub struct SleepConfig {
     pub time_budget_ms: u32,
     /// Sleep cycle number (for deterministic RNG seeding)
     pub sleep_count: u32,
+    /// Spider nest world positions (set by FFI before sleep starts)
+    #[serde(skip)]
+    pub nest_positions: Vec<(i32, i32, i32)>,
 
     // --- Legacy fields (kept for FFI backward compat during transition) ---
     #[serde(skip)]
@@ -59,6 +62,7 @@ impl Default for SleepConfig {
             phase4_enabled: true,
             time_budget_ms: 8000,
             sleep_count: 1,
+            nest_positions: Vec::new(),
             // Legacy defaults
             metamorphism: MetamorphismConfig::default(),
             minerals: MineralConfig::default(),
@@ -130,6 +134,11 @@ pub struct ReactionConfig {
     // Basalt crust (solid adjacent to lava → basalt)
     pub basalt_crust_prob: f32,
     pub basalt_crust_enabled: bool,
+    // Sulfide acid dissolution (BFS through limestone from exposed sulfide)
+    pub sulfide_acid_enabled: bool,
+    pub sulfide_acid_prob: f32,
+    pub sulfide_acid_radius: u32,
+    pub sulfide_water_amplification: f32,
 }
 
 impl Default for ReactionConfig {
@@ -142,6 +151,10 @@ impl Default for ReactionConfig {
             copper_oxidation_enabled: true,
             basalt_crust_prob: 0.70,
             basalt_crust_enabled: true,
+            sulfide_acid_enabled: true,
+            sulfide_acid_prob: 0.45,
+            sulfide_acid_radius: 2,
+            sulfide_water_amplification: 2.0,
         }
     }
 }
@@ -167,6 +180,15 @@ pub struct AureoleConfig {
     pub water_erosion_prob: f32,
     pub water_erosion_enabled: bool,
     pub metamorphism_enabled: bool,
+    // Coal maturation (coal → graphite → diamond)
+    pub coal_maturation_enabled: bool,
+    pub coal_to_graphite_prob: f32,
+    pub coal_to_graphite_mid_prob: f32,
+    pub graphite_to_diamond_prob: f32,
+    // Quartz silicification (hydrothermal silica replacement)
+    pub silicification_enabled: bool,
+    pub silicification_limestone_prob: f32,
+    pub silicification_sandstone_prob: f32,
 }
 
 impl Default for AureoleConfig {
@@ -182,6 +204,13 @@ impl Default for AureoleConfig {
             water_erosion_prob: 0.05,
             water_erosion_enabled: true,
             metamorphism_enabled: true,
+            coal_maturation_enabled: true,
+            coal_to_graphite_prob: 0.70,
+            coal_to_graphite_mid_prob: 0.35,
+            graphite_to_diamond_prob: 0.15,
+            silicification_enabled: true,
+            silicification_limestone_prob: 0.30,
+            silicification_sandstone_prob: 0.15,
         }
     }
 }
@@ -215,6 +244,8 @@ pub struct VeinConfig {
     /// Density range for new growths
     pub growth_density_min: f32,
     pub growth_density_max: f32,
+    /// Aperture scaling: wider tunnels = richer vein deposition
+    pub aperture_scaling_enabled: bool,
 }
 
 impl Default for VeinConfig {
@@ -237,6 +268,7 @@ impl Default for VeinConfig {
             flowstone_max_per_chunk: 3,
             growth_density_min: 0.3,
             growth_density_max: 0.6,
+            aperture_scaling_enabled: true,
         }
     }
 }
@@ -263,6 +295,8 @@ pub struct DeepTimeConfig {
     pub column_formation_prob: f32,
     // Collapse (embedded)
     pub collapse: CollapseConfig,
+    // Nest fossilization
+    pub nest_fossilization: NestFossilizationConfig,
 }
 
 impl Default for DeepTimeConfig {
@@ -279,6 +313,33 @@ impl Default for DeepTimeConfig {
             stalactite_growth_prob: 0.10,
             column_formation_prob: 0.05,
             collapse: CollapseConfig::default(),
+            nest_fossilization: NestFossilizationConfig::default(),
+        }
+    }
+}
+
+/// Config for spider nest fossilization (Phase 4 sub-stage).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NestFossilizationConfig {
+    pub enabled: bool,
+    pub nest_radius: u32,
+    pub pyrite_prob: f32,
+    pub opal_prob: f32,
+    pub buried_required: bool,
+    pub water_required_for_pyrite: bool,
+    pub water_required_for_opal: bool,
+}
+
+impl Default for NestFossilizationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            nest_radius: 2,
+            pyrite_prob: 0.60,
+            opal_prob: 0.40,
+            buried_required: true,
+            water_required_for_pyrite: true,
+            water_required_for_opal: true,
         }
     }
 }

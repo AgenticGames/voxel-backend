@@ -967,6 +967,11 @@ fn handle_request(
                 veins_deposited: sleep_result.veins_deposited,
                 voxels_enriched: sleep_result.voxels_enriched,
                 formations_grown: sleep_result.formations_grown,
+                sulfide_dissolved: sleep_result.sulfide_dissolved,
+                coal_matured: sleep_result.coal_matured,
+                diamonds_formed: sleep_result.diamonds_formed,
+                voxels_silicified: sleep_result.voxels_silicified,
+                nests_fossilized: sleep_result.nests_fossilized,
                 profile_report: report,
             });
         }

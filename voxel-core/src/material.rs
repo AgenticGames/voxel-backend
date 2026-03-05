@@ -34,6 +34,12 @@ pub enum Material {
 
     // Sedimentary fuel
     Coal = 19,
+
+    // Carbon metamorphic
+    Graphite = 20,
+
+    // Hydrated silica
+    Opal = 21,
 }
 
 impl Material {
@@ -58,6 +64,8 @@ impl Material {
             17 => Material::Amethyst,
             18 => Material::Crystal,
             19 => Material::Coal,
+            20 => Material::Graphite,
+            21 => Material::Opal,
             _ => Material::Air,
         }
     }
@@ -77,6 +85,8 @@ impl Material {
                 | Material::Diamond
                 | Material::Sulfide
                 | Material::Coal
+                | Material::Graphite
+                | Material::Opal
         )
     }
 
@@ -128,6 +138,8 @@ impl Material {
             Material::Amethyst => "Amethyst",
             Material::Crystal => "Crystal",
             Material::Coal => "Coal",
+            Material::Graphite => "Graphite",
+            Material::Opal => "Opal",
         }
     }
 
@@ -153,6 +165,8 @@ impl Material {
             Material::Amethyst => 0x9B59B6,
             Material::Crystal => 0x85C1E9,
             Material::Coal => 0x2C2C2C,
+            Material::Graphite => 0x474747,
+            Material::Opal => 0xE0F0FF,
         }
     }
 
@@ -178,6 +192,8 @@ impl Material {
             Material::Amethyst,
             Material::Crystal,
             Material::Coal,
+            Material::Graphite,
+            Material::Opal,
         ]
     }
 }

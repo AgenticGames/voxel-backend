@@ -18,14 +18,31 @@ use crate::manifest::ChangeManifest;
 use crate::util::{FACE_OFFSETS, sample_material};
 use crate::TransformEntry;
 
+/// Type of heat source for coal maturation decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeatSourceType {
+    Lava,
+    Kimberlite,
+}
+
+/// A heat source with position and type.
+#[derive(Debug, Clone)]
+pub struct HeatSource {
+    pub pos: (i32, i32, i32),
+    pub source_type: HeatSourceType,
+}
+
 /// Heat source positions in world coordinates.
-pub type HeatMap = Vec<(i32, i32, i32)>;
+pub type HeatMap = Vec<HeatSource>;
 
 /// Result of the aureole phase.
 #[derive(Debug, Default)]
 pub struct AureoleResult {
     pub voxels_metamorphosed: u32,
     pub channels_eroded: u32,
+    pub coal_matured: u32,
+    pub diamonds_formed: u32,
+    pub voxels_silicified: u32,
     pub manifest: ChangeManifest,
     pub glimpse_chunk: Option<(i32, i32, i32)>,
     pub transform_log: Vec<TransformEntry>,
@@ -39,7 +56,7 @@ pub fn build_heat_map(
     chunks: &[(i32, i32, i32)],
     chunk_size: usize,
 ) -> HeatMap {
-    let mut heat_sources: Vec<(i32, i32, i32)> = Vec::new();
+    let mut heat_sources: Vec<HeatSource> = Vec::new();
     let field_size = chunk_size + 1;
 
     // Lava cells from fluid snapshot
@@ -55,7 +72,7 @@ pub fn build_heat_map(
                         let wx = cx * (cs as i32) + x as i32;
                         let wy = cy * (cs as i32) + y as i32;
                         let wz = cz * (cs as i32) + z as i32;
-                        heat_sources.push((wx, wy, wz));
+                        heat_sources.push(HeatSource { pos: (wx, wy, wz), source_type: HeatSourceType::Lava });
                     }
                 }
             }
@@ -77,7 +94,7 @@ pub fn build_heat_map(
                         let wx = cx * (chunk_size as i32) + lx as i32;
                         let wy = cy * (chunk_size as i32) + ly as i32;
                         let wz = cz * (chunk_size as i32) + lz as i32;
-                        heat_sources.push((wx, wy, wz));
+                        heat_sources.push(HeatSource { pos: (wx, wy, wz), source_type: HeatSourceType::Kimberlite });
                     }
                 }
             }
@@ -111,13 +128,23 @@ pub fn apply_aureole(
     let mut candidates: Vec<Candidate> = Vec::new();
     let radius = config.aureole_radius as i32;
 
-    // --- Contact Metamorphism ---
+    // --- Contact Metamorphism + Coal Maturation + Silicification ---
+    let mut coal_matured = 0u32;
+    let mut diamonds_formed = 0u32;
+    let mut voxels_silicified = 0u32;
+
+    // Check if water exists anywhere in the fluid snapshot (for silicification)
+    let has_water_in_snapshot = fluid_snapshot.chunks.values().any(|cells| {
+        cells.iter().any(|cell| cell.level > 0.001 && cell.fluid_type == FluidType::Water)
+    });
+
     if config.metamorphism_enabled && !heat_map.is_empty() {
         // For each heat source, scan within aureole_radius using Chebyshev distance
         // Use a set to avoid duplicate transformations
         let mut transformed: std::collections::HashSet<(i32, i32, i32)> = std::collections::HashSet::new();
 
-        for &(hx, hy, hz) in heat_map {
+        for heat in heat_map {
+            let (hx, hy, hz) = heat.pos;
             for dx in -radius..=radius {
                 for dy in -radius..=radius {
                     for dz in -radius..=radius {
@@ -141,22 +168,84 @@ pub fn apply_aureole(
 
                         let new_mat = match dist {
                             // Contact zone (0-2)
-                            d if d <= 2 => match mat {
-                                Material::Limestone if rng.gen::<f32>() < config.contact_limestone_to_marble_prob => Some(Material::Marble),
-                                Material::Sandstone if rng.gen::<f32>() < config.contact_sandstone_to_granite_prob => Some(Material::Granite),
-                                _ => None,
+                            d if d <= 2 => {
+                                // Coal maturation: Coal → Diamond (kimberlite contact, dist <=1) or Coal → Graphite
+                                if config.coal_maturation_enabled && mat == Material::Coal {
+                                    if heat.source_type == HeatSourceType::Kimberlite && d <= 1 && rng.gen::<f32>() < config.graphite_to_diamond_prob {
+                                        diamonds_formed += 1;
+                                        Some(Material::Diamond)
+                                    } else if rng.gen::<f32>() < config.coal_to_graphite_prob {
+                                        coal_matured += 1;
+                                        Some(Material::Graphite)
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    match mat {
+                                        Material::Limestone if rng.gen::<f32>() < config.contact_limestone_to_marble_prob => Some(Material::Marble),
+                                        Material::Sandstone if rng.gen::<f32>() < config.contact_sandstone_to_granite_prob => Some(Material::Granite),
+                                        _ => None,
+                                    }
+                                }
                             },
                             // Mid aureole (3-5)
-                            d if d <= 5 => match mat {
-                                Material::Limestone if rng.gen::<f32>() < config.mid_limestone_to_marble_prob => Some(Material::Marble),
-                                Material::Sandstone if rng.gen::<f32>() < config.mid_sandstone_to_granite_prob => Some(Material::Granite),
-                                _ => None,
+                            d if d <= 5 => {
+                                // Coal maturation in mid aureole
+                                if config.coal_maturation_enabled && mat == Material::Coal && rng.gen::<f32>() < config.coal_to_graphite_mid_prob {
+                                    coal_matured += 1;
+                                    Some(Material::Graphite)
+                                }
+                                // Silicification (requires water)
+                                else if config.silicification_enabled && has_water_in_snapshot {
+                                    match mat {
+                                        Material::Limestone if rng.gen::<f32>() < config.silicification_limestone_prob => {
+                                            voxels_silicified += 1;
+                                            Some(Material::Quartz)
+                                        },
+                                        Material::Sandstone if rng.gen::<f32>() < config.silicification_sandstone_prob => {
+                                            voxels_silicified += 1;
+                                            Some(Material::Quartz)
+                                        },
+                                        _ => match mat {
+                                            Material::Limestone if rng.gen::<f32>() < config.mid_limestone_to_marble_prob => Some(Material::Marble),
+                                            Material::Sandstone if rng.gen::<f32>() < config.mid_sandstone_to_granite_prob => Some(Material::Granite),
+                                            _ => None,
+                                        },
+                                    }
+                                } else {
+                                    match mat {
+                                        Material::Limestone if rng.gen::<f32>() < config.mid_limestone_to_marble_prob => Some(Material::Marble),
+                                        Material::Sandstone if rng.gen::<f32>() < config.mid_sandstone_to_granite_prob => Some(Material::Granite),
+                                        _ => None,
+                                    }
+                                }
                             },
-                            // Outer aureole (6-8)
-                            _ => match mat {
-                                Material::Limestone if rng.gen::<f32>() < config.outer_limestone_to_marble_prob => Some(Material::Marble),
-                                Material::Slate if rng.gen::<f32>() < config.outer_slate_to_marble_prob => Some(Material::Marble),
-                                _ => None,
+                            // Outer aureole (6+)
+                            _ => {
+                                // Silicification in outer aureole (weaker, requires water)
+                                if config.silicification_enabled && has_water_in_snapshot {
+                                    match mat {
+                                        Material::Limestone if rng.gen::<f32>() < config.silicification_limestone_prob * 0.5 => {
+                                            voxels_silicified += 1;
+                                            Some(Material::Quartz)
+                                        },
+                                        Material::Sandstone if rng.gen::<f32>() < config.silicification_sandstone_prob * 0.5 => {
+                                            voxels_silicified += 1;
+                                            Some(Material::Quartz)
+                                        },
+                                        _ => match mat {
+                                            Material::Limestone if rng.gen::<f32>() < config.outer_limestone_to_marble_prob => Some(Material::Marble),
+                                            Material::Slate if rng.gen::<f32>() < config.outer_slate_to_marble_prob => Some(Material::Marble),
+                                            _ => None,
+                                        },
+                                    }
+                                } else {
+                                    match mat {
+                                        Material::Limestone if rng.gen::<f32>() < config.outer_limestone_to_marble_prob => Some(Material::Marble),
+                                        Material::Slate if rng.gen::<f32>() < config.outer_slate_to_marble_prob => Some(Material::Marble),
+                                        _ => None,
+                                    }
+                                }
                             },
                         };
 
@@ -311,6 +400,9 @@ pub fn apply_aureole(
 
     result.voxels_metamorphosed = metamorphism_count;
     result.channels_eroded = erosion_count + ambient_erosion_count;
+    result.coal_matured = coal_matured;
+    result.diamonds_formed = diamonds_formed;
+    result.voxels_silicified = voxels_silicified;
 
     // Build transform log
     if metamorphism_count > 0 {
@@ -320,6 +412,24 @@ pub fn apply_aureole(
                 metamorphism_count, heat_map.len(), config.aureole_radius
             ),
             count: metamorphism_count,
+        });
+    }
+    if coal_matured > 0 || diamonds_formed > 0 {
+        result.transform_log.push(TransformEntry {
+            description: format!(
+                "The Aureole \u{2014} 100,000 years: {} coal \u{2192} graphite, {} \u{2192} diamond",
+                coal_matured, diamonds_formed
+            ),
+            count: coal_matured + diamonds_formed,
+        });
+    }
+    if voxels_silicified > 0 {
+        result.transform_log.push(TransformEntry {
+            description: format!(
+                "The Aureole \u{2014} 100,000 years: {} voxels silicified (water-enabled)",
+                voxels_silicified
+            ),
+            count: voxels_silicified,
         });
     }
     if erosion_count > 0 {

@@ -90,6 +90,18 @@ pub fn run(args: &[String]) {
             result.supports_degraded,
             result.collapses_triggered,
         );
+        if result.sulfide_dissolved > 0 {
+            println!("    Sulfide acid: {} limestone dissolved", result.sulfide_dissolved);
+        }
+        if result.coal_matured > 0 || result.diamonds_formed > 0 {
+            println!("    Coal maturation: {} \u{2192} graphite, {} \u{2192} diamond", result.coal_matured, result.diamonds_formed);
+        }
+        if result.voxels_silicified > 0 {
+            println!("    Silicification: {} voxels", result.voxels_silicified);
+        }
+        if result.nests_fossilized > 0 {
+            println!("    Nest fossilization: {} nests", result.nests_fossilized);
+        }
 
         if verbose && !result.transform_log.is_empty() {
             println!("    Transforms:");

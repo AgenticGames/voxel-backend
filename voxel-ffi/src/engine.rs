@@ -41,6 +41,11 @@ pub struct SleepCompleteData {
     pub veins_deposited: u32,
     pub voxels_enriched: u32,
     pub formations_grown: u32,
+    pub sulfide_dissolved: u32,
+    pub coal_matured: u32,
+    pub diamonds_formed: u32,
+    pub voxels_silicified: u32,
+    pub nests_fossilized: u32,
     pub profile_report: String,
 }
 
@@ -257,6 +262,11 @@ impl VoxelEngine {
                 veins_deposited,
                 voxels_enriched,
                 formations_grown,
+                sulfide_dissolved,
+                coal_matured,
+                diamonds_formed,
+                voxels_silicified,
+                nests_fossilized,
                 profile_report,
             }) => {
                 if let Ok(mut sc) = self.sleep_complete.lock() {
@@ -270,6 +280,11 @@ impl VoxelEngine {
                         veins_deposited,
                         voxels_enriched,
                         formations_grown,
+                        sulfide_dissolved,
+                        coal_matured,
+                        diamonds_formed,
+                        voxels_silicified,
+                        nests_fossilized,
                         profile_report,
                     });
                 }
@@ -285,6 +300,13 @@ impl VoxelEngine {
             }
             Ok(other) => Some(other),
             Err(_) => None,
+        }
+    }
+
+    /// Set spider nest positions for fossilization during sleep.
+    pub fn set_sleep_nests(&self, positions: Vec<(i32, i32, i32)>) {
+        if let Ok(mut sc) = self.sleep_config.write() {
+            sc.nest_positions = positions;
         }
     }
 
@@ -1477,6 +1499,7 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
         time_budget_ms: if c.sleep_time_budget_ms > 0 { c.sleep_time_budget_ms } else { 8000 },
         chunk_radius: c.sleep_chunk_radius.min(10),
         sleep_count: if c.sleep_count > 0 { c.sleep_count } else { 1 },
+        nest_positions: Vec::new(),
         // New 4-phase system — now mapped from FFI fields
         phase1_enabled: c.sleep_phase1_enabled != 0,
         phase2_enabled: c.sleep_phase2_enabled != 0,

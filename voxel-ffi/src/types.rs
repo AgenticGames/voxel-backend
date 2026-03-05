@@ -43,7 +43,7 @@ pub struct FfiMeshData {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct FfiMinedMaterials {
-    pub counts: [u32; 20],
+    pub counts: [u32; 22],
 }
 
 #[repr(u8)]
@@ -723,6 +723,11 @@ pub struct FfiSleepResult {
     pub veins_deposited: u32,
     pub voxels_enriched: u32,
     pub formations_grown: u32,
+    pub sulfide_dissolved: u32,
+    pub coal_matured: u32,
+    pub diamonds_formed: u32,
+    pub voxels_silicified: u32,
+    pub nests_fossilized: u32,
     pub dirty_chunks: *mut FfiChunkCoord,
     pub dirty_chunk_count: u32,
     pub collapse_events: *mut FfiCollapseEvent,
@@ -843,6 +848,11 @@ pub enum WorkerResult {
         veins_deposited: u32,
         voxels_enriched: u32,
         formations_grown: u32,
+        sulfide_dissolved: u32,
+        coal_matured: u32,
+        diamonds_formed: u32,
+        voxels_silicified: u32,
+        nests_fossilized: u32,
         profile_report: String,
     },
     ScanComplete {

@@ -21,6 +21,7 @@ use crate::TransformEntry;
 #[derive(Debug, Default)]
 pub struct ReactionResult {
     pub acid_dissolved: u32,
+    pub sulfide_dissolved: u32,
     pub voxels_oxidized: u32,
     pub manifest: ChangeManifest,
     pub glimpse_chunk: Option<(i32, i32, i32)>,
@@ -255,10 +256,146 @@ pub fn apply_reaction(
         }
     }
 
+    // --- Sulfide Acid Dissolution: BFS through limestone from exposed sulfide ---
+    if config.sulfide_acid_enabled {
+        // Step 1: Find all exposed sulfide sites (sulfide with >= 1 air neighbor)
+        let mut sulfide_sites: Vec<(i32, i32, i32, bool)> = Vec::new(); // (x, y, z, has_water)
+
+        for &chunk_key in chunks {
+            let (cx, cy, cz) = chunk_key;
+            let df = match density_fields.get(&chunk_key) {
+                Some(df) => df,
+                None => continue,
+            };
+
+            for lz in 0..field_size {
+                for ly in 0..field_size {
+                    for lx in 0..field_size {
+                        let sample = df.get(lx, ly, lz);
+                        if sample.material != Material::Sulfide {
+                            continue;
+                        }
+
+                        let wx = cx * (chunk_size as i32) + lx as i32;
+                        let wy = cy * (chunk_size as i32) + ly as i32;
+                        let wz = cz * (chunk_size as i32) + lz as i32;
+
+                        let air_count = count_neighbors(
+                            density_fields, wx, wy, wz, chunk_size,
+                            |m| !m.is_solid(),
+                        );
+                        if air_count >= 1 {
+                            // Check for adjacent water
+                            let has_water = {
+                                let cs = fluid_snapshot.chunk_size;
+                                let mut found = false;
+                                for &(dx, dy, dz) in &FACE_OFFSETS {
+                                    let nwx = wx + dx;
+                                    let nwy = wy + dy;
+                                    let nwz = wz + dz;
+                                    let fck = (
+                                        nwx.div_euclid(cs as i32),
+                                        nwy.div_euclid(cs as i32),
+                                        nwz.div_euclid(cs as i32),
+                                    );
+                                    if let Some(cells) = fluid_snapshot.chunks.get(&fck) {
+                                        let flx = nwx.rem_euclid(cs as i32) as usize;
+                                        let fly = nwy.rem_euclid(cs as i32) as usize;
+                                        let flz = nwz.rem_euclid(cs as i32) as usize;
+                                        let idx = flz * cs * cs + fly * cs + flx;
+                                        if idx < cells.len() {
+                                            let cell = &cells[idx];
+                                            if cell.level > 0.001 && cell.fluid_type == FluidType::Water {
+                                                found = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                found
+                            };
+                            sulfide_sites.push((wx, wy, wz, has_water));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Step 2: BFS from each sulfide site through connected limestone
+        let base_radius = config.sulfide_acid_radius;
+        let mut sulfide_dissolved_set: HashSet<(i32, i32, i32)> = HashSet::new();
+
+        for &(sx, sy, sz, has_water) in &sulfide_sites {
+            let effective_radius = if has_water {
+                (base_radius as f32 * config.sulfide_water_amplification) as i32
+            } else {
+                base_radius as i32
+            };
+
+            let mut queue: VecDeque<((i32, i32, i32), i32)> = VecDeque::new();
+            let mut visited: HashSet<(i32, i32, i32)> = HashSet::new();
+
+            for &(dx, dy, dz) in &FACE_OFFSETS {
+                let nx = sx + dx;
+                let ny = sy + dy;
+                let nz = sz + dz;
+                if let Some(mat) = sample_material(density_fields, nx, ny, nz, chunk_size) {
+                    if mat == Material::Limestone && !visited.contains(&(nx, ny, nz)) {
+                        visited.insert((nx, ny, nz));
+                        queue.push_back(((nx, ny, nz), 1));
+                    }
+                }
+            }
+
+            while let Some(((wx, wy, wz), depth)) = queue.pop_front() {
+                if depth > effective_radius {
+                    continue;
+                }
+
+                if rng.gen::<f32>() < config.sulfide_acid_prob {
+                    sulfide_dissolved_set.insert((wx, wy, wz));
+                }
+
+                if depth < effective_radius {
+                    for &(dx, dy, dz) in &FACE_OFFSETS {
+                        let nx = wx + dx;
+                        let ny = wy + dy;
+                        let nz = wz + dz;
+                        if !visited.contains(&(nx, ny, nz)) {
+                            if let Some(mat) = sample_material(density_fields, nx, ny, nz, chunk_size) {
+                                if mat == Material::Limestone {
+                                    visited.insert((nx, ny, nz));
+                                    queue.push_back(((nx, ny, nz), depth + 1));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Convert sulfide dissolved positions to candidates
+        for &(wx, wy, wz) in &sulfide_dissolved_set {
+            let (chunk_key, lx, ly, lz) = world_to_chunk_local(wx, wy, wz, chunk_size);
+            if let Some(df) = density_fields.get(&chunk_key) {
+                let sample = df.get(lx, ly, lz);
+                candidates.push(Candidate {
+                    chunk_key, lx, ly, lz,
+                    old_material: sample.material,
+                    old_density: sample.density,
+                    new_material: Material::Air,
+                    new_density: -1.0,
+                    change_type: 3, // sulfide acid
+                });
+            }
+        }
+    }
+
     // --- Apply all candidates ---
     let mut acid_count = 0u32;
     let mut oxidation_count = 0u32;
     let mut basalt_count = 0u32;
+    let mut sulfide_acid_count = 0u32;
 
     for c in &candidates {
         if let Some(df) = density_fields.get_mut(&c.chunk_key) {
@@ -281,11 +418,13 @@ pub fn apply_reaction(
             0 => acid_count += 1,
             1 => oxidation_count += 1,
             2 => basalt_count += 1,
+            3 => sulfide_acid_count += 1,
             _ => {}
         }
     }
 
     result.acid_dissolved = acid_count;
+    result.sulfide_dissolved = sulfide_acid_count;
     result.voxels_oxidized = oxidation_count + basalt_count;
 
     // Build transform log
@@ -305,6 +444,12 @@ pub fn apply_reaction(
         result.transform_log.push(TransformEntry {
             description: format!("The Reaction \u{2014} 10,000 years: {} basalt crust formed around lava", basalt_count),
             count: basalt_count,
+        });
+    }
+    if sulfide_acid_count > 0 {
+        result.transform_log.push(TransformEntry {
+            description: format!("The Reaction \u{2014} 10,000 years: Sulfide acid dissolved {} limestone voxels", sulfide_acid_count),
+            count: sulfide_acid_count,
         });
     }
 

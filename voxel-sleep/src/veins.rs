@@ -18,7 +18,7 @@ use crate::aureole::HeatMap;
 use crate::config::{VeinConfig, GroundwaterConfig};
 use crate::groundwater::ambient_moisture;
 use crate::manifest::ChangeManifest;
-use crate::util::{FACE_OFFSETS, sample_material, count_neighbors};
+use crate::util::{FACE_OFFSETS, sample_material, count_neighbors, aperture_multiplier};
 use crate::TransformEntry;
 
 /// Result of the veins phase.
@@ -87,7 +87,8 @@ pub fn apply_veins(
         let max_per_source = config.max_vein_voxels_per_source;
         let mut global_deposited: HashSet<(i32, i32, i32)> = HashSet::new();
 
-        for &(hx, hy, hz) in heat_map {
+        for heat in heat_map {
+            let (hx, hy, hz) = heat.pos;
             // BFS through air voxels from heat source
             let mut queue: VecDeque<((i32, i32, i32), u32)> = VecDeque::new();
             let mut visited: HashSet<(i32, i32, i32)> = HashSet::new();
@@ -122,7 +123,11 @@ pub fn apply_veins(
                     }
 
                     if let Some(mat) = sample_material(density_fields, nx, ny, nz, chunk_size) {
-                        if is_host_rock(mat) && rng.gen::<f32>() < config.vein_deposition_prob {
+                        let air_n = count_neighbors(density_fields, ax, ay, az, chunk_size, |m| !m.is_solid());
+                        let eff_prob = config.vein_deposition_prob * if config.aperture_scaling_enabled {
+                            aperture_multiplier(air_n)
+                        } else { 1.0 };
+                        if is_host_rock(mat) && rng.gen::<f32>() < eff_prob {
                             let ore = select_ore_by_distance(config, dist, rng);
                             let (ck, lx, ly, lz) = world_to_chunk_local(nx, ny, nz, chunk_size);
                             if let Some(df) = density_fields.get(&ck) {

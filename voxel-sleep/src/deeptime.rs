@@ -17,7 +17,7 @@ use crate::collapse::{apply_collapse, CollapseResult};
 use crate::config::{DeepTimeConfig, GroundwaterConfig};
 use crate::groundwater::ambient_moisture;
 use crate::manifest::ChangeManifest;
-use crate::util::{FACE_OFFSETS, sample_material};
+use crate::util::{FACE_OFFSETS, sample_material, count_neighbors, has_material_within_radius};
 use crate::TransformEntry;
 
 /// Result of the deep time phase.
@@ -28,6 +28,7 @@ pub struct DeepTimeResult {
     pub formations_grown: u32,
     pub supports_degraded: u32,
     pub collapses_triggered: u32,
+    pub nests_fossilized: u32,
     pub collapse_result: Option<CollapseResult>,
     pub manifest: ChangeManifest,
     pub glimpse_chunk: Option<(i32, i32, i32)>,
@@ -42,6 +43,7 @@ impl Default for DeepTimeResult {
             formations_grown: 0,
             supports_degraded: 0,
             collapses_triggered: 0,
+            nests_fossilized: 0,
             collapse_result: None,
             manifest: ChangeManifest::default(),
             glimpse_chunk: None,
@@ -79,6 +81,7 @@ pub fn apply_deeptime(
     chunks: &[(i32, i32, i32)],
     chunk_size: usize,
     stress_config: &voxel_core::stress::StressConfig,
+    nest_positions: &[(i32, i32, i32)],
     rng: &mut ChaCha8Rng,
 ) -> DeepTimeResult {
     let mut result = DeepTimeResult::default();
@@ -388,10 +391,155 @@ pub fn apply_deeptime(
         }
     }
 
+    // --- Nest Fossilization ---
+    let mut nests_fossilized = 0u32;
+    if config.nest_fossilization.enabled && !nest_positions.is_empty() {
+        let nf = &config.nest_fossilization;
+        let nest_radius = nf.nest_radius as i32;
+
+        for &(nx, ny, nz) in nest_positions {
+            // Check if nest position is in a loaded chunk
+            let host_mat = match sample_material(density_fields, nx, ny, nz, chunk_size) {
+                Some(m) => m,
+                None => continue,
+            };
+
+            // Check if buried (0 air neighbors)
+            let air_count = count_neighbors(density_fields, nx, ny, nz, chunk_size, |m| !m.is_solid());
+            let is_buried = air_count == 0;
+            if nf.buried_required && !is_buried {
+                continue;
+            }
+
+            // Check for adjacent water
+            let has_water = {
+                let cs = fluid_snapshot.chunk_size;
+                let mut found = false;
+                if cs > 0 {
+                    for &(dx, dy, dz) in &FACE_OFFSETS {
+                        let nwx = nx + dx;
+                        let nwy = ny + dy;
+                        let nwz = nz + dz;
+                        let fck = (
+                            nwx.div_euclid(cs as i32),
+                            nwy.div_euclid(cs as i32),
+                            nwz.div_euclid(cs as i32),
+                        );
+                        if let Some(cells) = fluid_snapshot.chunks.get(&fck) {
+                            let flx = nwx.rem_euclid(cs as i32) as usize;
+                            let fly = nwy.rem_euclid(cs as i32) as usize;
+                            let flz = nwz.rem_euclid(cs as i32) as usize;
+                            let idx = flz * cs * cs + fly * cs + flx;
+                            if idx < cells.len() {
+                                let cell = &cells[idx];
+                                if cell.level > 0.001 && cell.fluid_type == FluidType::Water {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                found
+            };
+
+            // Check for nearby lava
+            let has_lava = {
+                let cs = fluid_snapshot.chunk_size;
+                let mut found = false;
+                if cs > 0 {
+                    for &(dx, dy, dz) in &FACE_OFFSETS {
+                        let nwx = nx + dx;
+                        let nwy = ny + dy;
+                        let nwz = nz + dz;
+                        let fck = (
+                            nwx.div_euclid(cs as i32),
+                            nwy.div_euclid(cs as i32),
+                            nwz.div_euclid(cs as i32),
+                        );
+                        if let Some(cells) = fluid_snapshot.chunks.get(&fck) {
+                            let flx = nwx.rem_euclid(cs as i32) as usize;
+                            let fly = nwy.rem_euclid(cs as i32) as usize;
+                            let flz = nwz.rem_euclid(cs as i32) as usize;
+                            let idx = flz * cs * cs + fly * cs + flx;
+                            if idx < cells.len() {
+                                let cell = &cells[idx];
+                                if cell.level > 0.001 && cell.fluid_type == FluidType::Lava {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                found
+            };
+
+            // Near lava → nothing
+            if has_lava {
+                continue;
+            }
+
+            // Decision tree for fossilization material
+            let iron_rich = matches!(host_mat, Material::Basalt)
+                || has_material_within_radius(density_fields, nx, ny, nz, chunk_size, 3, Material::Iron)
+                || has_material_within_radius(density_fields, nx, ny, nz, chunk_size, 3, Material::Sulfide)
+                || has_material_within_radius(density_fields, nx, ny, nz, chunk_size, 3, Material::Pyrite);
+            let silica_rich = matches!(host_mat, Material::Granite | Material::Sandstone);
+
+            let target_mat = if is_buried || !nf.buried_required {
+                if (has_water || !nf.water_required_for_pyrite) && iron_rich && rng.gen::<f32>() < nf.pyrite_prob {
+                    Some(Material::Pyrite)
+                } else if (has_water || !nf.water_required_for_opal) && silica_rich && rng.gen::<f32>() < nf.opal_prob {
+                    Some(Material::Opal)
+                } else if (has_water || !nf.water_required_for_opal) && host_mat == Material::Limestone && !iron_rich && rng.gen::<f32>() < 0.25 {
+                    Some(Material::Opal)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            if let Some(target) = target_mat {
+                // Replace voxels within nest_radius
+                for rdx in -nest_radius..=nest_radius {
+                    for rdy in -nest_radius..=nest_radius {
+                        for rdz in -nest_radius..=nest_radius {
+                            if rdx.abs() + rdy.abs() + rdz.abs() > nest_radius {
+                                continue;
+                            }
+                            let wx = nx + rdx;
+                            let wy = ny + rdy;
+                            let wz = nz + rdz;
+                            if let Some(mat) = sample_material(density_fields, wx, wy, wz, chunk_size) {
+                                if mat.is_solid() {
+                                    let (ck, lx, ly, lz) = world_to_chunk_local(wx, wy, wz, chunk_size);
+                                    if let Some(df) = density_fields.get(&ck) {
+                                        let sample = df.get(lx, ly, lz);
+                                        candidates.push(Candidate {
+                                            chunk_key: ck, lx, ly, lz,
+                                            old_material: mat,
+                                            old_density: sample.density,
+                                            new_material: target,
+                                            change_type: 3, // fossilization
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                nests_fossilized += 1;
+            }
+        }
+    }
+
     // --- Apply all candidates ---
     let mut enrichment_count = 0u32;
     let mut thickening_count = 0u32;
     let mut formation_count = 0u32;
+    let mut fossilization_count = 0u32;
 
     for c in &candidates {
         if let Some(df) = density_fields.get_mut(&c.chunk_key) {
@@ -418,6 +566,7 @@ pub fn apply_deeptime(
             0 => enrichment_count += 1,
             1 => thickening_count += 1,
             2 => formation_count += 1,
+            3 => fossilization_count += 1,
             _ => {}
         }
     }
@@ -425,6 +574,7 @@ pub fn apply_deeptime(
     result.voxels_enriched = enrichment_count;
     result.veins_thickened = thickening_count;
     result.formations_grown = formation_count;
+    result.nests_fossilized = nests_fossilized;
 
     // --- Structural Collapse (delegated to existing collapse.rs) ---
     if config.collapse.collapse_enabled {
@@ -454,6 +604,15 @@ pub fn apply_deeptime(
     }
 
     // Build transform log for non-collapse changes
+    if nests_fossilized > 0 {
+        result.transform_log.insert(0, TransformEntry {
+            description: format!(
+                "The Deep Time \u{2014} 1,250,000 years: {} spider nests fossilized ({} voxels replaced)",
+                nests_fossilized, fossilization_count
+            ),
+            count: nests_fossilized,
+        });
+    }
     if enrichment_count > 0 {
         result.transform_log.insert(0, TransformEntry {
             description: format!(
