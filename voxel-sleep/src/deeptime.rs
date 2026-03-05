@@ -180,6 +180,14 @@ pub fn apply_deeptime(
     }
 
     // --- Ambient Groundwater Enrichment ---
+    // Groundwater dissolves trace minerals from host rock over geological time
+    // and re-deposits them at drip zones (ceiling voxels with air below).
+    // If nearby ore exists, concentrate that. Otherwise, deposit trace minerals
+    // naturally present in the host rock:
+    //   Granite/Basalt → Iron/Copper (mafic mineral traces)
+    //   Limestone      → Iron/Malachite (calcite dissolution byproducts)
+    //   Sandstone      → Iron (iron oxide cements)
+    //   Slate/Marble   → Copper/Quartz (metamorphic traces)
     let mut ambient_enrichment_count = 0u32;
     if config.enrichment_enabled && groundwater.enabled {
         let search_radius = config.enrichment_search_radius;
@@ -216,7 +224,7 @@ pub fn apply_deeptime(
                             continue;
                         }
 
-                        // Search radius for nearby ore
+                        // Search radius for nearby ore — concentrate if found
                         let mut found_ore: Option<Material> = None;
                         'asearch: for sdx in -search_radius..=search_radius {
                             for sdy in -search_radius..=search_radius {
@@ -237,21 +245,44 @@ pub fn apply_deeptime(
                             }
                         }
 
-                        if let Some(ore) = found_ore {
-                            let count = enrichment_per_chunk.entry(chunk_key).or_insert(0);
-                            if *count < config.max_enrichment_per_chunk
-                                && rng.gen::<f32>() < config.enrichment_prob * moisture
-                            {
-                                candidates.push(Candidate {
-                                    chunk_key, lx, ly, lz,
-                                    old_material: sample.material,
-                                    old_density: sample.density,
-                                    new_material: ore,
-                                    change_type: 0,
-                                });
-                                *count += 1;
-                                ambient_enrichment_count += 1;
+                        // If no nearby ore, derive trace mineral from host rock geochemistry
+                        let ore = found_ore.unwrap_or_else(|| {
+                            match sample.material {
+                                Material::Granite | Material::Basalt => {
+                                    if rng.gen::<f32>() < 0.6 { Material::Iron } else { Material::Copper }
+                                }
+                                Material::Limestone => {
+                                    if rng.gen::<f32>() < 0.5 { Material::Iron } else { Material::Malachite }
+                                }
+                                Material::Sandstone => Material::Iron,
+                                Material::Slate | Material::Marble => {
+                                    if rng.gen::<f32>() < 0.5 { Material::Copper } else { Material::Quartz }
+                                }
+                                _ => Material::Iron,
                             }
+                        });
+
+                        // Trace-mineral enrichment uses a lower probability than ore concentration
+                        let eff_prob = if found_ore.is_some() {
+                            config.enrichment_prob * moisture
+                        } else {
+                            // Trace enrichment: weaker (halved) since there's no ore source
+                            config.enrichment_prob * moisture * 0.5
+                        };
+
+                        let count = enrichment_per_chunk.entry(chunk_key).or_insert(0);
+                        if *count < config.max_enrichment_per_chunk
+                            && rng.gen::<f32>() < eff_prob
+                        {
+                            candidates.push(Candidate {
+                                chunk_key, lx, ly, lz,
+                                old_material: sample.material,
+                                old_density: sample.density,
+                                new_material: ore,
+                                change_type: 0,
+                            });
+                            *count += 1;
+                            ambient_enrichment_count += 1;
                         }
                     }
                 }
@@ -355,33 +386,51 @@ pub fn apply_deeptime(
                         let wy = cy * (chunk_size as i32) + ly as i32;
                         let wz = cz * (chunk_size as i32) + lz as i32;
 
-                        // Stalactite growth: air below limestone ceiling
+                        // Stalactite growth: air below any host rock ceiling
+                        // Deposit material matches ceiling rock type
                         if let Some(above_mat) = sample_material(density_fields, wx, wy + 1, wz, chunk_size) {
-                            if above_mat == Material::Limestone
-                                && rng.gen::<f32>() < config.stalactite_growth_prob
-                            {
-                                candidates.push(Candidate {
-                                    chunk_key, lx, ly, lz,
-                                    old_material: Material::Air,
-                                    old_density: sample.density,
-                                    new_material: Material::Limestone,
-                                    change_type: 2,
-                                });
-                                continue;
+                            let stalactite_mat = match above_mat {
+                                Material::Limestone | Material::Sandstone | Material::Basalt => Some(Material::Limestone),
+                                Material::Granite | Material::Slate | Material::Marble => Some(Material::Quartz),
+                                _ => None,
+                            };
+                            if let Some(deposit) = stalactite_mat {
+                                if rng.gen::<f32>() < config.stalactite_growth_prob {
+                                    candidates.push(Candidate {
+                                        chunk_key, lx, ly, lz,
+                                        old_material: Material::Air,
+                                        old_density: sample.density,
+                                        new_material: deposit,
+                                        change_type: 2,
+                                    });
+                                    continue;
+                                }
                             }
                         }
 
-                        // Column formation: stalactite meets stalagmite (limestone above AND below)
+                        // Column formation: stalactite meets stalagmite (host rock above AND below)
                         let above = sample_material(density_fields, wx, wy + 1, wz, chunk_size);
                         let below = sample_material(density_fields, wx, wy - 1, wz, chunk_size);
-                        if above == Some(Material::Limestone) && below == Some(Material::Limestone)
+                        let above_host = matches!(above, Some(m) if matches!(m,
+                            Material::Limestone | Material::Sandstone | Material::Granite |
+                            Material::Basalt | Material::Slate | Material::Marble
+                        ));
+                        let below_host = matches!(below, Some(m) if matches!(m,
+                            Material::Limestone | Material::Sandstone | Material::Granite |
+                            Material::Basalt | Material::Slate | Material::Marble
+                        ));
+                        if above_host && below_host
                             && rng.gen::<f32>() < config.column_formation_prob
                         {
+                            let deposit = match above {
+                                Some(Material::Granite | Material::Slate | Material::Marble) => Material::Quartz,
+                                _ => Material::Limestone,
+                            };
                             candidates.push(Candidate {
                                 chunk_key, lx, ly, lz,
                                 old_material: Material::Air,
                                 old_density: sample.density,
-                                new_material: Material::Limestone,
+                                new_material: deposit,
                                 change_type: 2,
                             });
                         }

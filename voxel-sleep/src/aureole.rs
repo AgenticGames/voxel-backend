@@ -320,6 +320,8 @@ pub fn apply_aureole(
     }
 
     // --- Ambient Groundwater Erosion ---
+    // Erodes any host rock that's air-adjacent; porosity_of() naturally
+    // reduces the rate for hard rocks (granite 0.2, basalt 0.1).
     let mut ambient_erosion_count = 0u32;
     if config.water_erosion_enabled && groundwater.enabled {
         let field_size = chunk_size + 1;
@@ -336,7 +338,12 @@ pub fn apply_aureole(
                     for lx in 0..field_size {
                         let sample = df.get(lx, ly, lz);
                         let mat = sample.material;
-                        if mat != Material::Limestone && mat != Material::Sandstone {
+                        // Any host rock is eligible — porosity handles the rate
+                        if !matches!(mat,
+                            Material::Limestone | Material::Sandstone |
+                            Material::Granite | Material::Basalt |
+                            Material::Slate | Material::Marble
+                        ) {
                             continue;
                         }
 
