@@ -737,14 +737,17 @@ impl VoxelEngine {
             voxel_gen::density::host_rock_for_depth(rust_y as f64, &cfg.ore.host_rock) as u8
         };
 
-        match self.mine_tx.try_send(WorkerRequest::BuildingFlatten {
+        match self.mine_tx.send_timeout(WorkerRequest::BuildingFlatten {
             base_x,
             base_y,
             base_z,
             host_material,
-        }) {
+        }, std::time::Duration::from_millis(100)) {
             Ok(()) => 1,
-            Err(_) => 0,
+            Err(e) => {
+                eprintln!("[voxel] request_building_flatten: send failed: {}", e);
+                0
+            }
         }
     }
 

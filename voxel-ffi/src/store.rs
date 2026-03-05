@@ -1007,6 +1007,7 @@ impl ChunkStore {
         let cs = config.chunk_size as i32;
 
         let mut dirty_set: HashSet<(i32, i32, i32)> = HashSet::new();
+        let mut changed_count = 0u32;
 
         for dx in 0..terrace_size {
             for dz in 0..terrace_size {
@@ -1029,12 +1030,20 @@ impl ChunkStore {
                         let sample = density.get_mut(lx, ly, lz);
                         if dy == 0 {
                             // Floor: make solid with host material
-                            sample.density = 1.0;
-                            sample.material = host_material;
+                            let (new_d, new_m) = (1.0, host_material);
+                            if (sample.density - new_d).abs() > 0.01 || sample.material != new_m {
+                                changed_count += 1;
+                            }
+                            sample.density = new_d;
+                            sample.material = new_m;
                         } else {
                             // Clearance: make air
-                            sample.density = -1.0;
-                            sample.material = Material::Air;
+                            let (new_d, new_m) = (-1.0, Material::Air);
+                            if (sample.density - new_d).abs() > 0.01 || sample.material != new_m {
+                                changed_count += 1;
+                            }
+                            sample.density = new_d;
+                            sample.material = new_m;
                         }
                         dirty_set.insert(key);
                     }
@@ -1055,6 +1064,7 @@ impl ChunkStore {
                         let sample = density.get_mut(lx, ly, lz);
                         if sample.density < 0.0 {
                             // Air gap: fill with host material
+                            changed_count += 1;
                             sample.density = 1.0;
                             sample.material = host_material;
                             dirty_set.insert(key);
@@ -1070,6 +1080,9 @@ impl ChunkStore {
                 self.terraced_columns.insert((wx, wz), wy);
             }
         }
+
+        eprintln!("[voxel] flatten_terrace: base=({},{},{}), size={}, changed={} voxels, dirty={} chunks",
+            base.x, base.y, base.z, terrace_size, changed_count, dirty_set.len());
 
         // Build dirty chunks with full-chunk bounds for remeshing
         let chunk_size = config.chunk_size;
