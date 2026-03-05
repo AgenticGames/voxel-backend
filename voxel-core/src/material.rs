@@ -106,6 +106,14 @@ impl Material {
         )
     }
 
+    pub fn is_soft_rock(self) -> bool {
+        matches!(self, Material::Limestone | Material::Sandstone)
+    }
+
+    pub fn is_hard_rock(self) -> bool {
+        matches!(self, Material::Granite | Material::Basalt | Material::Slate | Material::Marble)
+    }
+
     pub fn is_geode_shell(self) -> bool {
         matches!(self, Material::Crystal | Material::Amethyst)
     }

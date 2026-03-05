@@ -20,6 +20,12 @@ pub fn porosity_of(config: &GroundwaterConfig, mat: Material) -> f32 {
     }
 }
 
+/// Fracture site: 1-2 air neighbors (narrow crack, not wide cave).
+/// In hard rock, groundwater only flows through fractures.
+pub fn is_fracture_site(air_count: u32) -> bool {
+    air_count >= 1 && air_count <= 2
+}
+
 /// Compute ambient moisture at a world position.
 ///
 /// - `wy`: world Y coordinate of the voxel

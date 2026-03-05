@@ -640,6 +640,12 @@ pub struct FfiEngineConfig {
     pub sleep_new_stress_multiplier: f32,
     pub sleep_new_min_stress_cascade: f32,
     pub sleep_new_rubble_fill_ratio: f32,
+    // Groundwater power controls (5)
+    pub sleep_gw_erosion_power: f32,
+    pub sleep_gw_flowstone_power: f32,
+    pub sleep_gw_enrichment_power: f32,
+    pub sleep_gw_soft_rock_mult: f32,
+    pub sleep_gw_hard_rock_mult: f32,
 }
 
 #[repr(C)]

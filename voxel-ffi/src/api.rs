@@ -1871,6 +1871,12 @@ mod tests {
             sleep_new_stress_multiplier: 1.5,
             sleep_new_min_stress_cascade: 0.7,
             sleep_new_rubble_fill_ratio: 0.40,
+            // Groundwater power controls
+            sleep_gw_erosion_power: 1.0,
+            sleep_gw_flowstone_power: 1.0,
+            sleep_gw_enrichment_power: 1.0,
+            sleep_gw_soft_rock_mult: 1.0,
+            sleep_gw_hard_rock_mult: 0.15,
         }
     }
 

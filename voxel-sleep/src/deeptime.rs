@@ -15,7 +15,7 @@ use voxel_fluid::cell::FluidType;
 use crate::aureole::HeatMap;
 use crate::collapse::{apply_collapse, CollapseResult};
 use crate::config::{DeepTimeConfig, GroundwaterConfig};
-use crate::groundwater::ambient_moisture;
+use crate::groundwater::{ambient_moisture, is_fracture_site};
 use crate::manifest::ChangeManifest;
 use crate::util::{FACE_OFFSETS, sample_material, count_neighbors, has_material_within_radius};
 use crate::TransformEntry;
@@ -182,12 +182,10 @@ pub fn apply_deeptime(
     // --- Ambient Groundwater Enrichment ---
     // Groundwater dissolves trace minerals from host rock over geological time
     // and re-deposits them at drip zones (ceiling voxels with air below).
+    // Soft rock (limestone/sandstone): full drip-zone enrichment.
+    // Hard rock (granite/basalt/slate/marble): ONLY at fracture sites (1-2 air neighbors).
     // If nearby ore exists, concentrate that. Otherwise, deposit trace minerals
-    // naturally present in the host rock:
-    //   Granite/Basalt → Iron/Copper (mafic mineral traces)
-    //   Limestone      → Iron/Malachite (calcite dissolution byproducts)
-    //   Sandstone      → Iron (iron oxide cements)
-    //   Slate/Marble   → Copper/Quartz (metamorphic traces)
+    // naturally present in the host rock geochemistry.
     let mut ambient_enrichment_count = 0u32;
     if config.enrichment_enabled && groundwater.enabled {
         let search_radius = config.enrichment_search_radius;
@@ -204,7 +202,8 @@ pub fn apply_deeptime(
                 for ly in 0..field_size {
                     for lx in 0..field_size {
                         let sample = df.get(lx, ly, lz);
-                        if !is_host_rock(sample.material) {
+                        let mat = sample.material;
+                        if !is_host_rock(mat) {
                             continue;
                         }
 
@@ -219,7 +218,18 @@ pub fn apply_deeptime(
                             continue;
                         }
 
-                        let moisture = ambient_moisture(groundwater, wy, sample.material, true);
+                        let is_soft = mat.is_soft_rock();
+                        let is_hard = mat.is_hard_rock();
+
+                        // Hard rock: enrichment ONLY at fracture sites (1-2 air neighbors)
+                        if is_hard {
+                            let air_count = count_neighbors(density_fields, wx, wy, wz, chunk_size, |m| !m.is_solid());
+                            if !is_fracture_site(air_count) {
+                                continue;
+                            }
+                        }
+
+                        let moisture = ambient_moisture(groundwater, wy, mat, true);
                         if moisture <= 0.0 {
                             continue;
                         }
@@ -247,7 +257,7 @@ pub fn apply_deeptime(
 
                         // If no nearby ore, derive trace mineral from host rock geochemistry
                         let ore = found_ore.unwrap_or_else(|| {
-                            match sample.material {
+                            match mat {
                                 Material::Granite | Material::Basalt => {
                                     if rng.gen::<f32>() < 0.6 { Material::Iron } else { Material::Copper }
                                 }
@@ -262,12 +272,13 @@ pub fn apply_deeptime(
                             }
                         });
 
-                        // Trace-mineral enrichment uses a lower probability than ore concentration
+                        // Power multiplier based on rock type
+                        let rock_mult = if is_soft { groundwater.soft_rock_mult } else if is_hard { groundwater.hard_rock_mult } else { 1.0 };
                         let eff_prob = if found_ore.is_some() {
-                            config.enrichment_prob * moisture
+                            config.enrichment_prob * moisture * groundwater.enrichment_power * rock_mult
                         } else {
                             // Trace enrichment: weaker (halved) since there's no ore source
-                            config.enrichment_prob * moisture * 0.5
+                            config.enrichment_prob * moisture * groundwater.enrichment_power * rock_mult * 0.5
                         };
 
                         let count = enrichment_per_chunk.entry(chunk_key).or_insert(0);
@@ -276,7 +287,7 @@ pub fn apply_deeptime(
                         {
                             candidates.push(Candidate {
                                 chunk_key, lx, ly, lz,
-                                old_material: sample.material,
+                                old_material: mat,
                                 old_density: sample.density,
                                 new_material: ore,
                                 change_type: 0,
@@ -366,6 +377,7 @@ pub fn apply_deeptime(
     }
 
     // --- Mature Formations (stalactite growth, column formation) ---
+    // Stalactites and columns are calcite speleothems — only form under limestone ceilings.
     if config.mature_formations_enabled {
         for &chunk_key in chunks {
             let (cx, cy, cz) = chunk_key;
@@ -386,51 +398,33 @@ pub fn apply_deeptime(
                         let wy = cy * (chunk_size as i32) + ly as i32;
                         let wz = cz * (chunk_size as i32) + lz as i32;
 
-                        // Stalactite growth: air below any host rock ceiling
-                        // Deposit material matches ceiling rock type
+                        // Stalactite growth: only under limestone ceiling (calcite precipitation)
                         if let Some(above_mat) = sample_material(density_fields, wx, wy + 1, wz, chunk_size) {
-                            let stalactite_mat = match above_mat {
-                                Material::Limestone | Material::Sandstone | Material::Basalt => Some(Material::Limestone),
-                                Material::Granite | Material::Slate | Material::Marble => Some(Material::Quartz),
-                                _ => None,
-                            };
-                            if let Some(deposit) = stalactite_mat {
-                                if rng.gen::<f32>() < config.stalactite_growth_prob {
-                                    candidates.push(Candidate {
-                                        chunk_key, lx, ly, lz,
-                                        old_material: Material::Air,
-                                        old_density: sample.density,
-                                        new_material: deposit,
-                                        change_type: 2,
-                                    });
-                                    continue;
-                                }
+                            if above_mat == Material::Limestone
+                                && rng.gen::<f32>() < config.stalactite_growth_prob * groundwater.flowstone_power * groundwater.soft_rock_mult
+                            {
+                                candidates.push(Candidate {
+                                    chunk_key, lx, ly, lz,
+                                    old_material: Material::Air,
+                                    old_density: sample.density,
+                                    new_material: Material::Limestone,
+                                    change_type: 2,
+                                });
+                                continue;
                             }
                         }
 
-                        // Column formation: stalactite meets stalagmite (host rock above AND below)
+                        // Column formation: limestone above AND limestone below
                         let above = sample_material(density_fields, wx, wy + 1, wz, chunk_size);
                         let below = sample_material(density_fields, wx, wy - 1, wz, chunk_size);
-                        let above_host = matches!(above, Some(m) if matches!(m,
-                            Material::Limestone | Material::Sandstone | Material::Granite |
-                            Material::Basalt | Material::Slate | Material::Marble
-                        ));
-                        let below_host = matches!(below, Some(m) if matches!(m,
-                            Material::Limestone | Material::Sandstone | Material::Granite |
-                            Material::Basalt | Material::Slate | Material::Marble
-                        ));
-                        if above_host && below_host
-                            && rng.gen::<f32>() < config.column_formation_prob
+                        if above == Some(Material::Limestone) && below == Some(Material::Limestone)
+                            && rng.gen::<f32>() < config.column_formation_prob * groundwater.flowstone_power * groundwater.soft_rock_mult
                         {
-                            let deposit = match above {
-                                Some(Material::Granite | Material::Slate | Material::Marble) => Material::Quartz,
-                                _ => Material::Limestone,
-                            };
                             candidates.push(Candidate {
                                 chunk_key, lx, ly, lz,
                                 old_material: Material::Air,
                                 old_density: sample.density,
-                                new_material: deposit,
+                                new_material: Material::Limestone,
                                 change_type: 2,
                             });
                         }

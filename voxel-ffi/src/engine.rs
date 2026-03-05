@@ -1511,6 +1511,11 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
             depth_baseline: 0.0,
             depth_scale: if c.sleep_groundwater_depth_scale > 0.0 { c.sleep_groundwater_depth_scale } else { 0.02 },
             drip_zone_multiplier: if c.sleep_groundwater_drip_multiplier > 0.0 { c.sleep_groundwater_drip_multiplier } else { 2.0 },
+            erosion_power: if c.sleep_gw_erosion_power > 0.0 { c.sleep_gw_erosion_power } else { 1.0 },
+            flowstone_power: if c.sleep_gw_flowstone_power > 0.0 { c.sleep_gw_flowstone_power } else { 1.0 },
+            enrichment_power: if c.sleep_gw_enrichment_power > 0.0 { c.sleep_gw_enrichment_power } else { 1.0 },
+            soft_rock_mult: if c.sleep_gw_soft_rock_mult > 0.0 { c.sleep_gw_soft_rock_mult } else { 1.0 },
+            hard_rock_mult: if c.sleep_gw_hard_rock_mult > 0.0 { c.sleep_gw_hard_rock_mult } else { 0.15 },
             ..Default::default()
         },
         reaction: ReactionConfig {

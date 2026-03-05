@@ -97,6 +97,12 @@ pub struct GroundwaterConfig {
     pub porosity_marble: f32,
     pub porosity_granite: f32,
     pub porosity_basalt: f32,
+    // Power controls for per-effect tuning
+    pub erosion_power: f32,
+    pub flowstone_power: f32,
+    pub enrichment_power: f32,
+    pub soft_rock_mult: f32,
+    pub hard_rock_mult: f32,
 }
 
 impl Default for GroundwaterConfig {
@@ -113,6 +119,11 @@ impl Default for GroundwaterConfig {
             porosity_marble: 0.3,
             porosity_granite: 0.2,
             porosity_basalt: 0.1,
+            erosion_power: 1.0,
+            flowstone_power: 1.0,
+            enrichment_power: 1.0,
+            soft_rock_mult: 1.0,
+            hard_rock_mult: 0.15,
         }
     }
 }

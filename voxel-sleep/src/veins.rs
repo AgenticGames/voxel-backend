@@ -306,11 +306,8 @@ pub fn apply_veins(
     }
 
     // --- Ambient Groundwater Flowstone ---
-    // Drip-site deposition under ANY host rock ceiling.
-    // Deposited material depends on ceiling rock:
-    //   Limestone/Sandstone → Limestone (calcite flowstone)
-    //   Granite/Slate/Marble → Quartz (silica mineralization)
-    //   Basalt → Limestone (carbonate from basalt weathering)
+    // Only limestone/sandstone ceilings produce calcite flowstone.
+    // Flowstone = calcite precipitation from carbonate-saturated water.
     let mut ambient_flowstone_count = 0u32;
     if config.flowstone_enabled && groundwater.enabled {
         let mut flowstone_per_chunk: HashMap<(i32, i32, i32), u32> = HashMap::new();
@@ -331,29 +328,20 @@ pub fn apply_veins(
                         let wy = cy * (chunk_size as i32) + ly as i32;
                         let wz = cz * (chunk_size as i32) + lz as i32;
 
-                        // Check for any host rock ceiling (drip site)
+                        // Only limestone/sandstone ceilings (calcite source)
                         let ceiling_mat = sample_material(density_fields, wx, wy + 1, wz, chunk_size);
                         let ceiling = match ceiling_mat {
-                            Some(m) if matches!(m,
-                                Material::Limestone | Material::Sandstone |
-                                Material::Granite | Material::Basalt |
-                                Material::Slate | Material::Marble
-                            ) => m,
+                            Some(m) if matches!(m, Material::Limestone | Material::Sandstone) => m,
                             _ => continue,
                         };
 
                         let moisture = ambient_moisture(groundwater, wy + 1, ceiling, true);
-                        if moisture > 0.0 && rng.gen::<f32>() < config.flowstone_prob * moisture {
+                        if moisture > 0.0 && rng.gen::<f32>() < config.flowstone_prob * moisture * groundwater.flowstone_power * groundwater.soft_rock_mult {
                             let count = flowstone_per_chunk.entry(chunk_key).or_insert(0);
                             if *count < config.flowstone_max_per_chunk {
-                                // Deposit type based on ceiling rock geochemistry
-                                let deposit = match ceiling {
-                                    Material::Granite | Material::Slate | Material::Marble => Material::Quartz,
-                                    _ => Material::Limestone, // calcite flowstone
-                                };
                                 growth_candidates.push(GrowthCandidate {
                                     chunk_key, lx, ly, lz,
-                                    new_material: deposit,
+                                    new_material: Material::Limestone, // calcite flowstone
                                     growth_type: 2,
                                 });
                                 *count += 1;
