@@ -15,7 +15,8 @@ use voxel_fluid::FluidSnapshot;
 use voxel_fluid::cell::FluidType;
 
 use crate::aureole::HeatMap;
-use crate::config::VeinConfig;
+use crate::config::{VeinConfig, GroundwaterConfig};
+use crate::groundwater::ambient_moisture;
 use crate::manifest::ChangeManifest;
 use crate::util::{FACE_OFFSETS, sample_material, count_neighbors};
 use crate::TransformEntry;
@@ -59,6 +60,7 @@ fn is_host_rock(mat: Material) -> bool {
 /// Execute Phase 3: hydrothermal vein injection + formation growth.
 pub fn apply_veins(
     config: &VeinConfig,
+    groundwater: &GroundwaterConfig,
     density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
     fluid_snapshot: &FluidSnapshot,
     heat_map: &HeatMap,
@@ -298,6 +300,54 @@ pub fn apply_veins(
         }
     }
 
+    // --- Ambient Groundwater Flowstone ---
+    let mut ambient_flowstone_count = 0u32;
+    if config.flowstone_enabled && groundwater.enabled {
+        let mut flowstone_per_chunk: HashMap<(i32, i32, i32), u32> = HashMap::new();
+        for &chunk_key in chunks {
+            let (cx, cy, cz) = chunk_key;
+            let df = match density_fields.get(&chunk_key) {
+                Some(df) => df,
+                None => continue,
+            };
+            for lz in 0..field_size {
+                for ly in 0..field_size {
+                    for lx in 0..field_size {
+                        let sample = df.get(lx, ly, lz);
+                        if sample.material != Material::Air {
+                            continue;
+                        }
+                        let wx = cx * (chunk_size as i32) + lx as i32;
+                        let wy = cy * (chunk_size as i32) + ly as i32;
+                        let wz = cz * (chunk_size as i32) + lz as i32;
+
+                        // Check for limestone/sandstone ceiling (drip site)
+                        let ceiling_mat = sample_material(density_fields, wx, wy + 1, wz, chunk_size);
+                        let is_drip_site = matches!(ceiling_mat, Some(Material::Limestone) | Some(Material::Sandstone));
+                        if !is_drip_site {
+                            continue;
+                        }
+
+                        let ceiling = ceiling_mat.unwrap();
+                        let moisture = ambient_moisture(groundwater, wy + 1, ceiling, true);
+                        if moisture > 0.0 && rng.gen::<f32>() < config.flowstone_prob * moisture {
+                            let count = flowstone_per_chunk.entry(chunk_key).or_insert(0);
+                            if *count < config.flowstone_max_per_chunk {
+                                growth_candidates.push(GrowthCandidate {
+                                    chunk_key, lx, ly, lz,
+                                    new_material: Material::Limestone,
+                                    growth_type: 2,
+                                });
+                                *count += 1;
+                                ambient_flowstone_count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Apply growth candidates
     let mut formation_total = 0u32;
     let mut crystal_total = 0u32;
@@ -356,6 +406,15 @@ pub fn apply_veins(
                 formation_total, parts.join(", ")
             ),
             count: formation_total,
+        });
+    }
+    if ambient_flowstone_count > 0 {
+        result.transform_log.push(TransformEntry {
+            description: format!(
+                "The Veins \u{2014} 500,000 years: {} flowstone deposited by ambient groundwater",
+                ambient_flowstone_count
+            ),
+            count: ambient_flowstone_count,
         });
     }
 

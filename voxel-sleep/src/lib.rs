@@ -9,6 +9,7 @@ pub mod reaction;
 pub mod aureole;
 pub mod veins;
 pub mod deeptime;
+pub mod groundwater;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as FmtWrite;
@@ -232,7 +233,7 @@ pub fn execute_sleep(
 
     if config.phase2_enabled {
         let aureole_result = apply_aureole(
-            &config.aureole, density_fields, fluid_snapshot,
+            &config.aureole, &config.groundwater, density_fields, fluid_snapshot,
             &heat_map, &all_chunks, chunk_size, &mut rng,
         );
         total_metamorphosed = aureole_result.voxels_metamorphosed;
@@ -255,7 +256,7 @@ pub fn execute_sleep(
 
     if config.phase3_enabled {
         let vein_result = apply_veins(
-            &config.veins, density_fields, fluid_snapshot,
+            &config.veins, &config.groundwater, density_fields, fluid_snapshot,
             &heat_map, &mineral_chunks, chunk_size, &mut rng,
         );
         total_veins = vein_result.veins_deposited;
@@ -281,7 +282,7 @@ pub fn execute_sleep(
 
     if config.phase4_enabled {
         let dt_result = apply_deeptime(
-            &config.deeptime, density_fields, stress_fields, support_fields,
+            &config.deeptime, &config.groundwater, density_fields, stress_fields, support_fields,
             fluid_snapshot, &heat_map, &collapse_chunks, chunk_size,
             &config.stress, &mut rng,
         );

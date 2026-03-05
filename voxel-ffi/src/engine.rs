@@ -88,10 +88,12 @@ impl VoxelEngine {
         #[cfg(feature = "diag-gate-4")]
         let num_workers = 1;
         #[cfg(not(feature = "diag-gate-4"))]
-        let num_workers = if ffi_config.worker_threads == 0 {
-            num_cpus()
-        } else {
-            ffi_config.worker_threads as usize
+        let num_workers = {
+            if ffi_config.worker_threads == 0 {
+                num_cpus()
+            } else {
+                ffi_config.worker_threads as usize
+            }
         };
 
         let (generate_tx, generate_rx) = bounded::<WorkerRequest>(256);
@@ -333,7 +335,7 @@ impl VoxelEngine {
 
     /// Get current engine statistics.
     pub fn get_stats(&self) -> FfiEngineStats {
-        let chunks_loaded = self.store.read().map(|s| s.chunks_loaded()).unwrap_or(0);
+        let chunks_loaded = self.store.try_read().map(|s| s.chunks_loaded()).unwrap_or(0);
         FfiEngineStats {
             chunks_loaded: chunks_loaded as u32,
             pending_requests: self.generate_tx.len() as u32,
@@ -393,7 +395,7 @@ impl VoxelEngine {
         drop(cfg);
         let rust_pos = from_ue_world_pos(ue_x, ue_y, ue_z, world_scale);
 
-        let store = self.store.read().ok()?;
+        let store = self.store.try_read().ok()?;
         let best = store.find_spring_location(rust_pos, chunk_size, eb)?;
 
         // Convert Rust pos back to UE: (x * scale, -z * scale, y * scale)
@@ -424,7 +426,7 @@ impl VoxelEngine {
         // Convert UE-unit radius to voxel-unit radius
         let voxel_radius = exclude_radius / world_scale;
 
-        let store = self.store.read().ok()?;
+        let store = self.store.try_read().ok()?;
         let best = store.find_wall_location_near(target, exclude, voxel_radius, chunk_size, eb)?;
 
         // Convert Rust pos back to UE: (x * scale, -z * scale, y * scale)
@@ -457,7 +459,7 @@ impl VoxelEngine {
         let exclude = from_ue_world_pos(exclude_ue_x, exclude_ue_y, exclude_ue_z, world_scale);
         let voxel_radius = exclude_radius / world_scale;
 
-        let store = self.store.read().ok()?;
+        let store = self.store.try_read().ok()?;
         let best = store.find_spawn_location(target, exclude, voxel_radius, chunk_size, eb, height, radius)?;
 
         Some((
@@ -488,7 +490,7 @@ impl VoxelEngine {
         let exclude = from_ue_world_pos(exclude_ue_x, exclude_ue_y, exclude_ue_z, world_scale);
         let voxel_radius = exclude_radius / world_scale;
 
-        let store = self.store.read().ok()?;
+        let store = self.store.try_read().ok()?;
         let best = store.find_chrysalis_location(target, exclude, voxel_radius, chunk_size, eb, height, radius)?;
 
         Some((
@@ -514,7 +516,7 @@ impl VoxelEngine {
         drop(cfg);
         let player_pos = from_ue_world_pos(ue_x, ue_y, ue_z, world_scale);
 
-        let store = self.store.read().ok()?;
+        let store = self.store.try_read().ok()?;
         let locations = store.find_cavern_locations(player_pos, chunk_size, eb)?;
 
         // Convert all three positions from Rust to UE coords: (x * scale, -z * scale, y * scale)
@@ -561,7 +563,7 @@ impl VoxelEngine {
 
     /// Query the stress field for a chunk. Returns a cloned StressField if loaded.
     pub fn query_stress(&self, chunk: (i32, i32, i32)) -> Option<StressField> {
-        let store = self.store.read().ok()?;
+        let store = self.store.try_read().ok()?;
         store.stress_fields.get(&chunk).cloned()
     }
 
@@ -575,7 +577,7 @@ impl VoxelEngine {
         let ly = wy.rem_euclid(cs) as usize;
         let lz = wz.rem_euclid(cs) as usize;
 
-        let store = match self.store.read() {
+        let store = match self.store.try_read() {
             Ok(s) => s,
             Err(_) => return 0.0,
         };
@@ -682,7 +684,7 @@ impl VoxelEngine {
         let base_y = (rust_y as i32).div_euclid(ts) * ts;
         let base_z = (rust_z as i32).div_euclid(ts) * ts;
 
-        let store = self.store.read().unwrap();
+        let store = self.store.try_read().ok()?;
         store
             .query_terrace(glam::IVec3::new(base_x, base_y, base_z), ts)
             .map(|m| m as u8)
@@ -701,7 +703,10 @@ impl VoxelEngine {
         let base_z = (rust_z as i32).div_euclid(ts) * ts;
 
         let cs = { self.config.read().unwrap().chunk_size as i32 };
-        let store = self.store.read().unwrap();
+        let store = match self.store.try_read() {
+            Ok(s) => s,
+            Err(_) => return (0, 0, 0.0, 0.0, 0.0),
+        };
         let (count, clearance) = store.query_flatten_support(glam::IVec3::new(base_x, base_y, base_z), cs, ts);
 
         // Convert snapped position back to UE coords
@@ -726,7 +731,10 @@ impl VoxelEngine {
         let base_z = (rust_z as i32).div_euclid(bts) * bts;
 
         let cs = { self.config.read().unwrap().chunk_size as i32 };
-        let store = self.store.read().unwrap();
+        let store = match self.store.try_read() {
+            Ok(s) => s,
+            Err(_) => return (0, 0, 0),
+        };
         let (solid, total, mat) = store.query_building_support(glam::IVec3::new(base_x, base_y, base_z), cs, bts);
         (solid, total, mat as u8)
     }
@@ -781,7 +789,7 @@ impl VoxelEngine {
         let base_z = (rust_z as i32).div_euclid(ts) * ts;
         let approx_y = (rust_y as i32).div_euclid(ts) * ts;
 
-        let store = self.store.read().unwrap();
+        let store = self.store.try_read().ok()?;
         let search_radius = 10;
         let max_y_diff = 3;
         store
@@ -1431,9 +1439,27 @@ pub fn ffi_scan_config_to_scan_config(c: &FfiScanConfig) -> ScanConfig {
 
 /// Convert FFI config to SleepConfig.
 pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
-    use voxel_sleep::config::{CollapseConfig, DeepTimeConfig, MetamorphismConfig, MineralConfig};
-    // Build collapse config from FFI fields (shared between legacy and new deeptime phase)
-    let collapse = CollapseConfig {
+    use voxel_sleep::config::{CollapseConfig, DeepTimeConfig, GroundwaterConfig, MetamorphismConfig, MineralConfig, ReactionConfig, AureoleConfig, VeinConfig};
+    // Build collapse config from new FFI fields (fall back to legacy fields if new are zero)
+    let new_collapse = CollapseConfig {
+        strut_survival: if c.sleep_strut_survival[1..].iter().any(|&v| v > 0.0) {
+            c.sleep_strut_survival
+        } else {
+            CollapseConfig::default().strut_survival
+        },
+        stress_multiplier: if c.sleep_new_stress_multiplier > 0.0 { c.sleep_new_stress_multiplier }
+            else if c.sleep_stress_multiplier > 0.0 { c.sleep_stress_multiplier } else { 1.5 },
+        max_cascade_iterations: 8, // not exposed in new UI
+        rubble_fill_ratio: if c.sleep_new_rubble_fill_ratio > 0.0 { c.sleep_new_rubble_fill_ratio }
+            else if c.sleep_rubble_fill_ratio > 0.0 { c.sleep_rubble_fill_ratio } else { 0.40 },
+        min_stress_for_cascade: if c.sleep_new_min_stress_cascade > 0.0 { c.sleep_new_min_stress_cascade }
+            else if c.sleep_min_stress_for_cascade > 0.0 { c.sleep_min_stress_for_cascade } else { 0.7 },
+        rubble_material_match: true,
+        support_stress_penalty: if c.sleep_support_stress_penalty > 0.0 { c.sleep_support_stress_penalty } else { 1.0 },
+        collapse_enabled: c.sleep_new_collapse_enabled != 0,
+    };
+    // Also build legacy collapse for backward compat
+    let legacy_collapse = CollapseConfig {
         strut_survival: if c.sleep_strut_survival[1..].iter().any(|&v| v > 0.0) {
             c.sleep_strut_survival
         } else {
@@ -1451,16 +1477,44 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
         time_budget_ms: if c.sleep_time_budget_ms > 0 { c.sleep_time_budget_ms } else { 8000 },
         chunk_radius: c.sleep_chunk_radius.min(10),
         sleep_count: if c.sleep_count > 0 { c.sleep_count } else { 1 },
-        // New 4-phase system (all defaults for now — no FFI fields yet)
-        phase1_enabled: true,
-        phase2_enabled: true,
-        phase3_enabled: true,
-        phase4_enabled: true,
-        reaction: Default::default(),
-        aureole: Default::default(),
-        veins: Default::default(),
+        // New 4-phase system — now mapped from FFI fields
+        phase1_enabled: c.sleep_phase1_enabled != 0,
+        phase2_enabled: c.sleep_phase2_enabled != 0,
+        phase3_enabled: c.sleep_phase3_enabled != 0,
+        phase4_enabled: c.sleep_phase4_enabled != 0,
+        groundwater: GroundwaterConfig {
+            enabled: c.sleep_groundwater_enabled != 0,
+            strength: if c.sleep_groundwater_strength > 0.0 { c.sleep_groundwater_strength } else { 0.3 },
+            depth_baseline: 0.0,
+            depth_scale: if c.sleep_groundwater_depth_scale > 0.0 { c.sleep_groundwater_depth_scale } else { 0.02 },
+            drip_zone_multiplier: if c.sleep_groundwater_drip_multiplier > 0.0 { c.sleep_groundwater_drip_multiplier } else { 2.0 },
+            ..Default::default()
+        },
+        reaction: ReactionConfig {
+            acid_dissolution_prob: if c.sleep_acid_dissolution_prob > 0.0 { c.sleep_acid_dissolution_prob } else { 0.60 },
+            copper_oxidation_prob: if c.sleep_copper_oxidation_prob > 0.0 { c.sleep_copper_oxidation_prob } else { 0.50 },
+            basalt_crust_prob: if c.sleep_basalt_crust_prob > 0.0 { c.sleep_basalt_crust_prob } else { 0.70 },
+            ..Default::default()
+        },
+        aureole: AureoleConfig {
+            aureole_radius: if c.sleep_aureole_radius > 0 { c.sleep_aureole_radius } else { 8 },
+            contact_limestone_to_marble_prob: if c.sleep_contact_marble_prob > 0.0 { c.sleep_contact_marble_prob } else { 0.80 },
+            water_erosion_prob: if c.sleep_water_erosion_prob > 0.0 { c.sleep_water_erosion_prob } else { 0.05 },
+            water_erosion_enabled: c.sleep_water_erosion_enabled != 0,
+            ..Default::default()
+        },
+        veins: VeinConfig {
+            vein_deposition_prob: if c.sleep_vein_deposition_prob > 0.0 { c.sleep_vein_deposition_prob } else { 0.25 },
+            vein_max_distance: if c.sleep_vein_max_distance > 0 { c.sleep_vein_max_distance } else { 16 },
+            max_vein_voxels_per_source: if c.sleep_vein_max_per_source > 0 { c.sleep_vein_max_per_source } else { 12 },
+            flowstone_prob: if c.sleep_flowstone_prob > 0.0 { c.sleep_flowstone_prob } else { 0.10 },
+            ..Default::default()
+        },
         deeptime: DeepTimeConfig {
-            collapse: collapse.clone(),
+            enrichment_prob: if c.sleep_enrichment_prob > 0.0 { c.sleep_enrichment_prob } else { 0.15 },
+            vein_thickening_prob: if c.sleep_vein_thickening_prob > 0.0 { c.sleep_vein_thickening_prob } else { 0.10 },
+            stalactite_growth_prob: if c.sleep_stalactite_growth_prob > 0.0 { c.sleep_stalactite_growth_prob } else { 0.10 },
+            collapse: new_collapse,
             ..Default::default()
         },
         // Legacy fields (kept for backward compat, old FFI fields still map here)
@@ -1508,7 +1562,7 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
             growth_density_min: if c.sleep_growth_density_min > 0.0 { c.sleep_growth_density_min } else { 0.3 },
             growth_density_max: if c.sleep_growth_density_max > 0.0 { c.sleep_growth_density_max } else { 0.6 },
         },
-        collapse,
+        collapse: legacy_collapse,
         stress: voxel_core::stress::StressConfig::default(),
     }
 }

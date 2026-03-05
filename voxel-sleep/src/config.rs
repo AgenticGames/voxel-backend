@@ -12,6 +12,8 @@ pub struct SleepConfig {
     pub veins: VeinConfig,
     /// Phase 4: The Deep Time (enrichment, thickening, formations, collapse)
     pub deeptime: DeepTimeConfig,
+    /// Ambient groundwater model (depth + porosity + drip zones)
+    pub groundwater: GroundwaterConfig,
     /// Shared stress config
     pub stress: StressConfig,
     /// Chunk radius from player to process
@@ -48,6 +50,7 @@ impl Default for SleepConfig {
             aureole: AureoleConfig::default(),
             veins: VeinConfig::default(),
             deeptime: DeepTimeConfig::default(),
+            groundwater: GroundwaterConfig::default(),
             stress: StressConfig::default(),
             chunk_radius: 1,
             phase1_enabled: true,
@@ -63,6 +66,49 @@ impl Default for SleepConfig {
             metamorphism_enabled: true,
             minerals_enabled: true,
             collapse_enabled: true,
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────
+// Ambient Groundwater Model
+// ──────────────────────────────────────────────────────────────
+
+/// Ambient groundwater config — depth-based moisture for passive geological effects.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroundwaterConfig {
+    pub enabled: bool,
+    /// Overall passive/active strength slider (0.0 = off, 1.0 = full)
+    pub strength: f32,
+    /// Y-level where groundwater starts (moisture increases below this)
+    pub depth_baseline: f32,
+    /// Moisture gain per unit depth below baseline
+    pub depth_scale: f32,
+    /// Multiplier for drip zones (ceilings with air below)
+    pub drip_zone_multiplier: f32,
+    // Porosity per host rock type (NOT exposed in UI)
+    pub porosity_limestone: f32,
+    pub porosity_sandstone: f32,
+    pub porosity_slate: f32,
+    pub porosity_marble: f32,
+    pub porosity_granite: f32,
+    pub porosity_basalt: f32,
+}
+
+impl Default for GroundwaterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            strength: 0.3,
+            depth_baseline: 0.0,
+            depth_scale: 0.02,
+            drip_zone_multiplier: 2.0,
+            porosity_limestone: 1.0,
+            porosity_sandstone: 0.8,
+            porosity_slate: 0.5,
+            porosity_marble: 0.3,
+            porosity_granite: 0.2,
+            porosity_basalt: 0.1,
         }
     }
 }

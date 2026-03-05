@@ -14,7 +14,8 @@ use voxel_fluid::cell::FluidType;
 
 use crate::aureole::HeatMap;
 use crate::collapse::{apply_collapse, CollapseResult};
-use crate::config::DeepTimeConfig;
+use crate::config::{DeepTimeConfig, GroundwaterConfig};
+use crate::groundwater::ambient_moisture;
 use crate::manifest::ChangeManifest;
 use crate::util::{FACE_OFFSETS, sample_material};
 use crate::TransformEntry;
@@ -69,6 +70,7 @@ fn is_host_rock(mat: Material) -> bool {
 /// Execute Phase 4: enrichment, thickening, formations, collapse.
 pub fn apply_deeptime(
     config: &DeepTimeConfig,
+    groundwater: &GroundwaterConfig,
     density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
     stress_fields: &mut HashMap<(i32, i32, i32), StressField>,
     support_fields: &mut HashMap<(i32, i32, i32), SupportField>,
@@ -166,6 +168,86 @@ pub fn apply_deeptime(
                                         *count += 1;
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Ambient Groundwater Enrichment ---
+    let mut ambient_enrichment_count = 0u32;
+    if config.enrichment_enabled && groundwater.enabled {
+        let search_radius = config.enrichment_search_radius;
+        let mut enrichment_per_chunk: HashMap<(i32, i32, i32), u32> = HashMap::new();
+
+        for &chunk_key in chunks {
+            let (cx, cy, cz) = chunk_key;
+            let df = match density_fields.get(&chunk_key) {
+                Some(df) => df,
+                None => continue,
+            };
+
+            for lz in 0..field_size {
+                for ly in 0..field_size {
+                    for lx in 0..field_size {
+                        let sample = df.get(lx, ly, lz);
+                        if !is_host_rock(sample.material) {
+                            continue;
+                        }
+
+                        let wx = cx * (chunk_size as i32) + lx as i32;
+                        let wy = cy * (chunk_size as i32) + ly as i32;
+                        let wz = cz * (chunk_size as i32) + lz as i32;
+
+                        // Drip zone: must have air below
+                        let below = sample_material(density_fields, wx, wy - 1, wz, chunk_size);
+                        let has_air_below = matches!(below, Some(m) if !m.is_solid());
+                        if !has_air_below {
+                            continue;
+                        }
+
+                        let moisture = ambient_moisture(groundwater, wy, sample.material, true);
+                        if moisture <= 0.0 {
+                            continue;
+                        }
+
+                        // Search radius for nearby ore
+                        let mut found_ore: Option<Material> = None;
+                        'asearch: for sdx in -search_radius..=search_radius {
+                            for sdy in -search_radius..=search_radius {
+                                for sdz in -search_radius..=search_radius {
+                                    if sdx.abs() + sdy.abs() + sdz.abs() > search_radius {
+                                        continue;
+                                    }
+                                    let sx = wx + sdx;
+                                    let sy = wy + sdy;
+                                    let sz = wz + sdz;
+                                    if let Some(m) = sample_material(density_fields, sx, sy, sz, chunk_size) {
+                                        if matches!(m, Material::Copper | Material::Iron | Material::Gold) {
+                                            found_ore = Some(m);
+                                            break 'asearch;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Some(ore) = found_ore {
+                            let count = enrichment_per_chunk.entry(chunk_key).or_insert(0);
+                            if *count < config.max_enrichment_per_chunk
+                                && rng.gen::<f32>() < config.enrichment_prob * moisture
+                            {
+                                candidates.push(Candidate {
+                                    chunk_key, lx, ly, lz,
+                                    old_material: sample.material,
+                                    old_density: sample.density,
+                                    new_material: ore,
+                                    change_type: 0,
+                                });
+                                *count += 1;
+                                ambient_enrichment_count += 1;
                             }
                         }
                     }
@@ -379,6 +461,15 @@ pub fn apply_deeptime(
                 enrichment_count
             ),
             count: enrichment_count,
+        });
+    }
+    if ambient_enrichment_count > 0 {
+        result.transform_log.insert(if enrichment_count > 0 { 1 } else { 0 }, TransformEntry {
+            description: format!(
+                "The Deep Time \u{2014} 1,250,000 years: {} ore voxels enriched by ambient groundwater",
+                ambient_enrichment_count
+            ),
+            count: ambient_enrichment_count,
         });
     }
     if thickening_count > 0 {

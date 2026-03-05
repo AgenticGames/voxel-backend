@@ -176,7 +176,6 @@ fn handle_request(
                     t_region_density += t0.elapsed();
                     region_timings = rt;
                 }
-
                 // Forward sharing: apply worm paths from already-generated regions
                 // into our new density fields (before hermite extraction)
                 let t_fwd = Instant::now();
@@ -231,7 +230,6 @@ fn handle_request(
                     }
                     s.store_region_worms(rk, worm_paths.clone());
                 }
-
                 // Backward sharing: carve new worms into already-loaded chunks
                 // from other regions, then re-extract hermite and re-mesh
                 if !worm_paths.is_empty() {

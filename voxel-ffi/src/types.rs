@@ -308,7 +308,7 @@ pub struct FfiEngineConfig {
     // ── Ore Detail ──
     pub ore_detail_multiplier: u32,
     pub ore_protrusion: f32,
-    // ── Crystal Config (145 fields: 1 master + 12 ores × 12 fields) ──
+    // ── Crystal Config (229 fields: 1 master + 12 ores × 19 fields) ──
     pub crystal_enabled: u8,
     // Iron crystals
     pub crystal_iron_enabled: u8,
@@ -606,6 +606,40 @@ pub struct FfiEngineConfig {
     pub sleep_rubble_material_match: u8,
     pub sleep_support_stress_penalty: f32,
     pub sleep_collapse_sub_enabled: u8,
+    // ── New 4-phase + Groundwater fields (appended) ──
+    // Groundwater (4)
+    pub sleep_groundwater_enabled: u8,
+    pub sleep_groundwater_strength: f32,
+    pub sleep_groundwater_depth_scale: f32,
+    pub sleep_groundwater_drip_multiplier: f32,
+    // Phase enables (4)
+    pub sleep_phase1_enabled: u8,
+    pub sleep_phase2_enabled: u8,
+    pub sleep_phase3_enabled: u8,
+    pub sleep_phase4_enabled: u8,
+    // Phase 1: Reaction (3)
+    pub sleep_acid_dissolution_prob: f32,
+    pub sleep_copper_oxidation_prob: f32,
+    pub sleep_basalt_crust_prob: f32,
+    // Phase 2: Aureole (4)
+    pub sleep_aureole_radius: u32,
+    pub sleep_contact_marble_prob: f32,
+    pub sleep_water_erosion_prob: f32,
+    pub sleep_water_erosion_enabled: u8,
+    // Phase 3: Veins (4)
+    pub sleep_vein_deposition_prob: f32,
+    pub sleep_vein_max_distance: u32,
+    pub sleep_vein_max_per_source: u32,
+    pub sleep_flowstone_prob: f32,
+    // Phase 4: Deep Time (3)
+    pub sleep_enrichment_prob: f32,
+    pub sleep_vein_thickening_prob: f32,
+    pub sleep_stalactite_growth_prob: f32,
+    // Collapse (new, separate from legacy collapse fields above)
+    pub sleep_new_collapse_enabled: u8,
+    pub sleep_new_stress_multiplier: f32,
+    pub sleep_new_min_stress_cascade: f32,
+    pub sleep_new_rubble_fill_ratio: f32,
 }
 
 #[repr(C)]

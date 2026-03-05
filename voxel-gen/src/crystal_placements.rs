@@ -71,11 +71,6 @@ pub fn compute_crystal_placements(
     // Step 1: Detect ore surfaces (solid ore voxels adjacent to air)
     let mut surfaces = detect_ore_surfaces(density, size);
 
-    eprintln!("[CRYSTAL-DBG] origin=({:.0},{:.0},{:.0}) surfaces={} seed={} config.pyrite: enabled={} chance={} threshold={}",
-        world_origin.x, world_origin.y, world_origin.z,
-        surfaces.len(), world_seed,
-        config.pyrite.enabled, config.pyrite.chance, config.pyrite.density_threshold);
-
     // Sort for deterministic RNG processing (HashMap iteration order is nondeterministic)
     surfaces.sort_by(|a, b| {
         a.z.cmp(&b.z)
@@ -107,9 +102,10 @@ pub fn compute_crystal_placements(
             // Vein mode: domain-warped ridged multifractal
             let mat_idx = surface.material as u64;
             let vein_seed = world_seed.wrapping_add(0xBE10_0000 + mat_idx * 100);
+            let octaves = ore_config.vein_octaves.min(8); // Safety clamp
             let ridged = RidgedMulti::new(
                 Simplex3D::new(vein_seed),
-                ore_config.vein_octaves,
+                octaves,
                 ore_config.vein_lacunarity as f64,
                 2.0, // gain
             );

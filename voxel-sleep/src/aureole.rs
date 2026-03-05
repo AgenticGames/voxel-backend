@@ -12,7 +12,8 @@ use voxel_core::stress::world_to_chunk_local;
 use voxel_fluid::FluidSnapshot;
 use voxel_fluid::cell::FluidType;
 
-use crate::config::AureoleConfig;
+use crate::config::{AureoleConfig, GroundwaterConfig};
+use crate::groundwater::ambient_moisture;
 use crate::manifest::ChangeManifest;
 use crate::util::{FACE_OFFSETS, sample_material};
 use crate::TransformEntry;
@@ -89,6 +90,7 @@ pub fn build_heat_map(
 /// Execute Phase 2: contact metamorphism aureoles + water erosion.
 pub fn apply_aureole(
     config: &AureoleConfig,
+    groundwater: &GroundwaterConfig,
     density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
     fluid_snapshot: &FluidSnapshot,
     heat_map: &HeatMap,
@@ -228,6 +230,63 @@ pub fn apply_aureole(
         }
     }
 
+    // --- Ambient Groundwater Erosion ---
+    let mut ambient_erosion_count = 0u32;
+    if config.water_erosion_enabled && groundwater.enabled {
+        let field_size = chunk_size + 1;
+        let chunk_keys: Vec<(i32, i32, i32)> = density_fields.keys().copied().collect();
+        for chunk_key in chunk_keys {
+            let (cx, cy, cz) = chunk_key;
+            let df = match density_fields.get(&chunk_key) {
+                Some(df) => df,
+                None => continue,
+            };
+
+            for lz in 0..field_size {
+                for ly in 0..field_size {
+                    for lx in 0..field_size {
+                        let sample = df.get(lx, ly, lz);
+                        let mat = sample.material;
+                        if mat != Material::Limestone && mat != Material::Sandstone {
+                            continue;
+                        }
+
+                        let wx = cx * (chunk_size as i32) + lx as i32;
+                        let wy = cy * (chunk_size as i32) + ly as i32;
+                        let wz = cz * (chunk_size as i32) + lz as i32;
+
+                        // Must be air-adjacent
+                        let mut has_air = false;
+                        let mut has_air_below = false;
+                        for &(dx, dy, dz) in &FACE_OFFSETS {
+                            if let Some(neighbor) = sample_material(density_fields, wx + dx, wy + dy, wz + dz, chunk_size) {
+                                if !neighbor.is_solid() {
+                                    has_air = true;
+                                    if dy == -1 { has_air_below = true; }
+                                }
+                            }
+                        }
+                        if !has_air {
+                            continue;
+                        }
+
+                        let moisture = ambient_moisture(groundwater, wy, mat, has_air_below);
+                        if moisture > 0.0 && rng.gen::<f32>() < config.water_erosion_prob * moisture {
+                            candidates.push(Candidate {
+                                chunk_key,
+                                lx, ly, lz,
+                                old_material: mat,
+                                density: sample.density,
+                                new_material: Material::Air,
+                            });
+                            ambient_erosion_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // --- Apply all candidates ---
     for c in &candidates {
         if let Some(df) = density_fields.get_mut(&c.chunk_key) {
@@ -251,7 +310,7 @@ pub fn apply_aureole(
     }
 
     result.voxels_metamorphosed = metamorphism_count;
-    result.channels_eroded = erosion_count;
+    result.channels_eroded = erosion_count + ambient_erosion_count;
 
     // Build transform log
     if metamorphism_count > 0 {
@@ -267,6 +326,12 @@ pub fn apply_aureole(
         result.transform_log.push(TransformEntry {
             description: format!("The Aureole \u{2014} 100,000 years: {} channels widened by water erosion", erosion_count),
             count: erosion_count,
+        });
+    }
+    if ambient_erosion_count > 0 {
+        result.transform_log.push(TransformEntry {
+            description: format!("The Aureole \u{2014} 100,000 years: {} voxels eroded by ambient groundwater", ambient_erosion_count),
+            count: ambient_erosion_count,
         });
     }
 
