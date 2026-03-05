@@ -455,6 +455,8 @@ impl ChunkStore {
 
     /// Run stress recalculation after mining, with collapse cascade.
     /// Returns collapse events and dirty chunks that need remeshing due to collapses.
+    /// NOTE: No longer called from live operations (deferred to sleep-only).
+    #[allow(dead_code)]
     pub fn post_mine_stress_update(
         &mut self,
         center: Vec3,
@@ -480,7 +482,7 @@ impl ChunkStore {
         &mut self,
         world_pos: (i32, i32, i32),
         support_type: SupportType,
-        stress_config: &StressConfig,
+        _stress_config: &StressConfig,
         chunk_size: usize,
     ) -> (bool, Vec<CollapseEvent>, Vec<((i32, i32, i32), (usize, usize, usize, usize, usize, usize))>) {
         let cs = chunk_size as i32;
@@ -507,23 +509,12 @@ impl ChunkStore {
             self.support_fields.insert(key, sf);
         }
 
-        // Recalculate stress (support reduces stress, may prevent collapses)
-        let (events, dirty_chunks) = post_change_stress_update(
-            &mut self.density_fields,
-            &mut self.stress_fields,
-            &self.support_fields,
-            stress_config,
-            world_pos,
-            chunk_size,
-        );
+        // Stress deferred to sleep-only — just remesh the affected chunk
+        let dirty_with_bounds = vec![
+            (key, (0usize, 0usize, 0usize, chunk_size, chunk_size, chunk_size))
+        ];
 
-        // Build dirty bounds for remeshing (full chunk for simplicity)
-        let dirty_with_bounds: Vec<_> = dirty_chunks
-            .into_iter()
-            .map(|ck| (ck, (0usize, 0usize, 0usize, chunk_size, chunk_size, chunk_size)))
-            .collect();
-
-        (true, events, dirty_with_bounds)
+        (true, Vec::new(), dirty_with_bounds)
     }
 
     /// Remove a support structure at a world position.
@@ -531,7 +522,7 @@ impl ChunkStore {
     pub fn remove_support(
         &mut self,
         world_pos: (i32, i32, i32),
-        stress_config: &StressConfig,
+        _stress_config: &StressConfig,
         chunk_size: usize,
     ) -> (Option<SupportType>, Vec<CollapseEvent>, Vec<((i32, i32, i32), (usize, usize, usize, usize, usize, usize))>) {
         let cs = chunk_size as i32;
@@ -558,22 +549,12 @@ impl ChunkStore {
             sf.set(lx, ly, lz, SupportType::None);
         }
 
-        // Recalculate stress (removing support increases stress, may trigger collapses!)
-        let (events, dirty_chunks) = post_change_stress_update(
-            &mut self.density_fields,
-            &mut self.stress_fields,
-            &self.support_fields,
-            stress_config,
-            world_pos,
-            chunk_size,
-        );
+        // Stress deferred to sleep-only — just remesh the affected chunk
+        let dirty_with_bounds = vec![
+            (key, (0usize, 0usize, 0usize, chunk_size, chunk_size, chunk_size))
+        ];
 
-        let dirty_with_bounds: Vec<_> = dirty_chunks
-            .into_iter()
-            .map(|ck| (ck, (0usize, 0usize, 0usize, chunk_size, chunk_size, chunk_size)))
-            .collect();
-
-        (Some(old_type), events, dirty_with_bounds)
+        (Some(old_type), Vec::new(), dirty_with_bounds)
     }
 
     /// Find the best spring location (wall seep / ceiling drip) near the player.

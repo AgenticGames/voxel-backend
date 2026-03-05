@@ -633,6 +633,9 @@ fn handle_request(
                     worm_count: region_timings.worm_count,
                     worm_segment_count: region_timings.worm_segment_count,
                     backward_dirty_count,
+                    stress_update: Duration::ZERO,
+                    collapse_detect: Duration::ZERO,
+                    collapse_remesh: Duration::ZERO,
                 };
                 profiler.record_chunk_with_coord(
                     worker_id, chunk, timings, gen_queue_len, result_queue_len,
@@ -751,38 +754,7 @@ fn handle_request(
             // Send mined material counts separately
             let _ = result_tx.send(WorkerResult::MinedMaterials { mined });
 
-            // Post-mine stress update: recalc stress + cascade collapses
-            let stress_cfg = stress_config.read().unwrap().clone();
-            {
-                let mut s = store.write().unwrap();
-                let (collapse_events, collapse_dirty) = s.post_mine_stress_update(
-                    center, &stress_cfg, cfg.chunk_size,
-                );
-
-                // If collapses happened, remesh affected chunks and send collapse events
-                if !collapse_events.is_empty() {
-                    let ffi_events: Vec<FfiCollapseEvent> = collapse_events.iter().map(|e| {
-                        // Convert center from Rust coords to UE coords for the FFI
-                        FfiCollapseEvent {
-                            center_x: e.center.0 * world_scale,
-                            center_y: -e.center.2 * world_scale,
-                            center_z: e.center.1 * world_scale,
-                            volume: e.volume,
-                        }
-                    }).collect();
-
-                    // Remesh collapse-dirty chunks
-                    let collapse_bounds: Vec<_> = collapse_dirty.iter().map(|&key| {
-                        (key, 0usize, 0usize, 0usize, cfg.chunk_size, cfg.chunk_size, cfg.chunk_size)
-                    }).collect();
-                    let collapse_meshes = s.remesh_dirty(&collapse_bounds, &cfg, world_scale);
-
-                    let _ = result_tx.send(WorkerResult::CollapseResult {
-                        events: ffi_events,
-                        meshes: collapse_meshes,
-                    });
-                }
-            }
+            // Stress/collapse deferred to sleep-only — no live stress update
 
             // Send terrain modifications to fluid thread
             {
@@ -815,7 +787,7 @@ fn handle_request(
             let st = SupportType::from_u8(support_type);
 
             let mut s = store.write().unwrap();
-            let (success, collapse_events, dirty_bounds) = s.place_support(
+            let (success, _collapse_events, dirty_bounds) = s.place_support(
                 (world_x, world_y, world_z), st, &stress_cfg, cfg.chunk_size,
             );
 
@@ -825,22 +797,6 @@ fn handle_request(
             }).collect();
             let meshes = s.remesh_dirty(&remesh_bounds, &cfg, world_scale);
             drop(s);
-
-            // Send collapse events if any
-            if !collapse_events.is_empty() {
-                let ffi_events: Vec<FfiCollapseEvent> = collapse_events.iter().map(|e| {
-                    FfiCollapseEvent {
-                        center_x: e.center.0 * world_scale,
-                        center_y: -e.center.2 * world_scale,
-                        center_z: e.center.1 * world_scale,
-                        volume: e.volume,
-                    }
-                }).collect();
-                let _ = result_tx.send(WorkerResult::CollapseResult {
-                    events: ffi_events,
-                    meshes: Vec::new(),
-                });
-            }
 
             // Send support result with remeshed chunks
             let mesh_pairs: Vec<_> = meshes.into_iter().collect();
@@ -854,7 +810,7 @@ fn handle_request(
             let stress_cfg = stress_config.read().unwrap().clone();
 
             let mut s = store.write().unwrap();
-            let (removed, collapse_events, dirty_bounds) = s.remove_support(
+            let (removed, _collapse_events, dirty_bounds) = s.remove_support(
                 (world_x, world_y, world_z), &stress_cfg, cfg.chunk_size,
             );
 
@@ -864,22 +820,6 @@ fn handle_request(
             }).collect();
             let meshes = s.remesh_dirty(&remesh_bounds, &cfg, world_scale);
             drop(s);
-
-            // Send collapse events if any
-            if !collapse_events.is_empty() {
-                let ffi_events: Vec<FfiCollapseEvent> = collapse_events.iter().map(|e| {
-                    FfiCollapseEvent {
-                        center_x: e.center.0 * world_scale,
-                        center_y: -e.center.2 * world_scale,
-                        center_z: e.center.1 * world_scale,
-                        volume: e.volume,
-                    }
-                }).collect();
-                let _ = result_tx.send(WorkerResult::CollapseResult {
-                    events: ffi_events,
-                    meshes: Vec::new(),
-                });
-            }
 
             // Send support result
             let mesh_pairs: Vec<_> = meshes.into_iter().collect();

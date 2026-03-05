@@ -85,6 +85,10 @@ pub struct ChunkTimings {
     pub worm_count: u32,
     pub worm_segment_count: u32,
     pub backward_dirty_count: u32,
+    // Stress/Collapse timing (deferred to sleep-only; reserved for re-enable)
+    pub stress_update: Duration,
+    pub collapse_detect: Duration,
+    pub collapse_remesh: Duration,
 }
 
 /// Per-worker utilization stats.
@@ -176,6 +180,11 @@ pub struct SessionMetrics {
     pub worm_segment_counts: Vec<u32>,
     pub backward_dirty_counts: Vec<u32>,
 
+    // Stress/Collapse timing (deferred to sleep-only; reserved for re-enable)
+    pub stress_update: PhaseStats,
+    pub collapse_detect: PhaseStats,
+    pub collapse_remesh: PhaseStats,
+
     // Path counts
     pub slow_path_count: u64,
     pub fast_path_count: u64,
@@ -235,6 +244,9 @@ impl SessionMetrics {
             worm_counts: Vec::new(),
             worm_segment_counts: Vec::new(),
             backward_dirty_counts: Vec::new(),
+            stress_update: PhaseStats::new(),
+            collapse_detect: PhaseStats::new(),
+            collapse_remesh: PhaseStats::new(),
             gen_queue_depths: Vec::new(),
             result_queue_depths: Vec::new(),
             worker_stats: (0..num_workers).map(|_| WorkerStats::new()).collect(),
@@ -285,6 +297,9 @@ impl SessionMetrics {
         self.worm_counts.clear();
         self.worm_segment_counts.clear();
         self.backward_dirty_counts.clear();
+        self.stress_update = PhaseStats::new();
+        self.collapse_detect = PhaseStats::new();
+        self.collapse_remesh = PhaseStats::new();
         self.gen_queue_depths.clear();
         self.result_queue_depths.clear();
         self.worker_stats = (0..num_workers).map(|_| WorkerStats::new()).collect();
@@ -414,6 +429,11 @@ impl StreamingProfiler {
             m.backward_dirty_counts.push(timings.backward_dirty_count);
         }
 
+        // Stress/Collapse timing
+        m.stress_update.record(timings.stress_update);
+        m.collapse_detect.record(timings.collapse_detect);
+        m.collapse_remesh.record(timings.collapse_remesh);
+
         // Queue depth samples
         m.gen_queue_depths.push(gen_queue_len);
         m.result_queue_depths.push(result_queue_len);
@@ -506,6 +526,11 @@ impl StreamingProfiler {
             m.worm_segment_counts.push(timings.worm_segment_count);
             m.backward_dirty_counts.push(timings.backward_dirty_count);
         }
+
+        // Stress/Collapse timing
+        m.stress_update.record(timings.stress_update);
+        m.collapse_detect.record(timings.collapse_detect);
+        m.collapse_remesh.record(timings.collapse_remesh);
 
         // Queue depth samples
         m.gen_queue_depths.push(gen_queue_len);
@@ -733,6 +758,32 @@ impl StreamingProfiler {
             let _ = writeln!(out, "  Worms: min={}  avg={:.0}  max={}    Segments: min={}  avg={:.0}  max={}",
                 wmin, wavg, wmax, smin, savg, smax);
             let _ = writeln!(out, "  Backward-dirty: min={}  avg={:.1}  max={}", dmin, davg, dmax);
+        }
+        let _ = writeln!(out);
+
+        // ── 3b3. Stress/Collapse Breakdown ──
+        let _ = writeln!(out, "── Stress/Collapse Breakdown (ms) ──────────────────────────");
+        let _ = writeln!(out, "  {:<20} {:>8} {:>8} {:>8} {:>10}", "Phase", "Min", "Avg", "Max", "Total");
+        let _ = writeln!(out, "  {:-<20} {:->8} {:->8} {:->8} {:->10}", "", "", "", "", "");
+        let stress_phases: &[(&str, &PhaseStats)] = &[
+            ("stress_update",    &m.stress_update),
+            ("collapse_detect",  &m.collapse_detect),
+            ("collapse_remesh",  &m.collapse_remesh),
+        ];
+        for (name, ps) in stress_phases {
+            if ps.count == 0 {
+                let _ = writeln!(out, "  {:<20} {:>8} {:>8} {:>8} {:>10}", name, "-", "-", "-", "-");
+            } else {
+                let _ = writeln!(
+                    out,
+                    "  {:<20} {:>8.2} {:>8.2} {:>8.2} {:>10.1}",
+                    name,
+                    dur_ms(ps.min),
+                    dur_ms(ps.avg()),
+                    dur_ms(ps.max),
+                    dur_ms(ps.total),
+                );
+            }
         }
         let _ = writeln!(out);
 
@@ -1031,6 +1082,9 @@ mod tests {
             worm_count: 0,
             worm_segment_count: 0,
             backward_dirty_count: 0,
+            stress_update: Duration::ZERO,
+            collapse_detect: Duration::ZERO,
+            collapse_remesh: Duration::ZERO,
         };
 
         p.record_chunk_with_coord(0, (0, 0, 0), timings, 5, 2);
@@ -1111,6 +1165,9 @@ mod tests {
             worm_count: 0,
             worm_segment_count: 0,
             backward_dirty_count: 0,
+            stress_update: Duration::ZERO,
+            collapse_detect: Duration::ZERO,
+            collapse_remesh: Duration::ZERO,
         };
 
         p.record_chunk(0, timings, 0, 0);
@@ -1166,6 +1223,9 @@ mod tests {
             worm_count: 0,
             worm_segment_count: 0,
             backward_dirty_count: 0,
+            stress_update: Duration::ZERO,
+            collapse_detect: Duration::ZERO,
+            collapse_remesh: Duration::ZERO,
         };
 
         p.record_chunk_with_coord(0, (0, 0, 0), timings, 0, 0);
