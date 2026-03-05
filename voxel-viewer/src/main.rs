@@ -883,11 +883,13 @@ fn serve_sleep(
     let (sleep_result, mesh_json) = region.apply_sleep(&sleep_config);
 
     let elapsed = start.elapsed();
-    println!("  Sleep completed in {:.2?}: {} chunks changed, {} metamorphosed, {} minerals grown, {} supports degraded, {} collapses",
+    println!("  Sleep completed in {:.2?}: {} chunks changed, {} acid dissolved, {} metamorphosed, {} veins deposited, {} enriched, {} supports degraded, {} collapses",
         elapsed,
         sleep_result.chunks_changed,
+        sleep_result.acid_dissolved,
         sleep_result.voxels_metamorphosed,
-        sleep_result.minerals_grown,
+        sleep_result.veins_deposited,
+        sleep_result.voxels_enriched,
         sleep_result.supports_degraded,
         sleep_result.collapses_triggered,
     );
@@ -928,10 +930,15 @@ fn serve_sleep(
         "mesh": mesh_json,
         "stats": {
             "chunks_changed": sleep_result.chunks_changed,
+            "acid_dissolved": sleep_result.acid_dissolved,
+            "voxels_oxidized": sleep_result.voxels_oxidized,
             "voxels_metamorphosed": sleep_result.voxels_metamorphosed,
-            "minerals_grown": sleep_result.minerals_grown,
+            "veins_deposited": sleep_result.veins_deposited,
+            "formations_grown": sleep_result.formations_grown,
+            "voxels_enriched": sleep_result.voxels_enriched,
             "supports_degraded": sleep_result.supports_degraded,
             "collapses_triggered": sleep_result.collapses_triggered,
+            "minerals_grown": sleep_result.minerals_grown,
         },
         "transform_log": transform_log,
         "material_diff": material_diff,

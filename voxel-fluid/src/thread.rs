@@ -9,7 +9,7 @@ use crate::cell::ChunkFluidGrid;
 use crate::mesh::mesh_fluid;
 use crate::sim::{detect_solidification, regen_sources, tick_fluid};
 use crate::sources::place_sources;
-use crate::{FluidConfig, FluidEvent, FluidResult};
+use crate::{FluidConfig, FluidEvent, FluidResult, FluidSnapshot};
 
 /// Main fluid simulation loop running on its own thread.
 ///
@@ -143,6 +143,13 @@ fn handle_event(
         }
         FluidEvent::ChunkUnloaded { chunk } => {
             chunks.remove(&chunk);
+        }
+        FluidEvent::SnapshotRequest { reply_tx } => {
+            let snapshot = FluidSnapshot {
+                chunks: chunks.iter().map(|(&k, g)| (k, g.cells.clone())).collect(),
+                chunk_size,
+            };
+            let _ = reply_tx.send(snapshot);
         }
         FluidEvent::AddFluid { chunk, x, y, z, fluid_type, level, is_source } => {
             let grid = chunks

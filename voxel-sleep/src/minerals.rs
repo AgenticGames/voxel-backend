@@ -3,9 +3,9 @@ use rand::Rng;
 use rand_chacha::ChaCha8Rng;
 use voxel_core::density::DensityField;
 use voxel_core::material::Material;
-use voxel_core::stress::world_to_chunk_local;
 use crate::config::MineralConfig;
 use crate::manifest::ChangeManifest;
+use crate::util::{FACE_OFFSETS, sample_material, count_neighbors, has_material_within_radius};
 use crate::TransformEntry;
 
 /// Result of mineral growth pass.
@@ -17,16 +17,6 @@ pub struct MineralResult {
     /// Log of growth formations grouped by type
     pub transform_log: Vec<TransformEntry>,
 }
-
-/// 6-connected face-neighbor offsets.
-const FACE_OFFSETS: [(i32, i32, i32); 6] = [
-    (1, 0, 0),
-    (-1, 0, 0),
-    (0, 1, 0),
-    (0, -1, 0),
-    (0, 0, 1),
-    (0, 0, -1),
-];
 
 /// A candidate mineral growth (collected in pass 1, applied in pass 2).
 struct GrowthCandidate {
@@ -71,72 +61,6 @@ impl GrowthType {
     }
 }
 
-/// Look up material at a world coordinate, returning None if the chunk is not loaded.
-fn sample_material(
-    density_fields: &HashMap<(i32, i32, i32), DensityField>,
-    wx: i32,
-    wy: i32,
-    wz: i32,
-    chunk_size: usize,
-) -> Option<Material> {
-    let (chunk_key, lx, ly, lz) = world_to_chunk_local(wx, wy, wz, chunk_size);
-    density_fields
-        .get(&chunk_key)
-        .map(|df| df.get(lx, ly, lz).material)
-}
-
-/// Count 6-connected neighbors matching a predicate.
-fn count_neighbors_matching(
-    density_fields: &HashMap<(i32, i32, i32), DensityField>,
-    wx: i32,
-    wy: i32,
-    wz: i32,
-    chunk_size: usize,
-    predicate: impl Fn(Material) -> bool,
-) -> u32 {
-    let mut count = 0u32;
-    for &(dx, dy, dz) in &FACE_OFFSETS {
-        if let Some(mat) = sample_material(density_fields, wx + dx, wy + dy, wz + dz, chunk_size) {
-            if predicate(mat) {
-                count += 1;
-            }
-        }
-    }
-    count
-}
-
-/// Check if any voxel within Manhattan distance <= radius has the given material.
-fn has_material_within_radius(
-    density_fields: &HashMap<(i32, i32, i32), DensityField>,
-    wx: i32,
-    wy: i32,
-    wz: i32,
-    chunk_size: usize,
-    radius: i32,
-    target: Material,
-) -> bool {
-    for dx in -radius..=radius {
-        for dy in -radius..=radius {
-            for dz in -radius..=radius {
-                if dx == 0 && dy == 0 && dz == 0 {
-                    continue;
-                }
-                if dx.abs() + dy.abs() + dz.abs() > radius {
-                    continue;
-                }
-                if let Some(mat) =
-                    sample_material(density_fields, wx + dx, wy + dy, wz + dz, chunk_size)
-                {
-                    if mat == target {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
-}
-
 /// Grow secondary minerals from solid into adjacent air.
 pub fn apply_mineral_growth(
     config: &MineralConfig,
@@ -178,7 +102,7 @@ pub fn apply_mineral_growth(
                     // --- Crystal growth ---
                     // Air voxel with 2+ Crystal/Amethyst neighbors
                     if config.crystal_growth_enabled {
-                        let crystal_neighbors = count_neighbors_matching(
+                        let crystal_neighbors = count_neighbors(
                             density_fields,
                             wx, wy, wz,
                             chunk_size,
@@ -225,7 +149,7 @@ pub fn apply_mineral_growth(
                     // --- Quartz extension ---
                     // Air voxel at quartz vein tip: exactly 1 Quartz neighbor, 5 non-Quartz
                     if config.quartz_extension_enabled {
-                        let quartz_neighbors = count_neighbors_matching(
+                        let quartz_neighbors = count_neighbors(
                             density_fields,
                             wx, wy, wz,
                             chunk_size,
@@ -253,7 +177,7 @@ pub fn apply_mineral_growth(
                         if (wy as f32) < config.calcite_infill_depth
                             && rng.gen::<f32>() < config.calcite_infill_prob
                         {
-                            let limestone_neighbors = count_neighbors_matching(
+                            let limestone_neighbors = count_neighbors(
                                 density_fields,
                                 wx, wy, wz,
                                 chunk_size,
@@ -286,7 +210,7 @@ pub fn apply_mineral_growth(
                             {
                                 if mat == Material::Pyrite {
                                     // Check that this Pyrite source has enough solid neighbors
-                                    let solid_count = count_neighbors_matching(
+                                    let solid_count = count_neighbors(
                                         density_fields,
                                         nx, ny, nz,
                                         chunk_size,

@@ -69,11 +69,13 @@ pub fn run(args: &[String]) {
     for cycle in 1..=num_sleeps {
         let cycle_start = Instant::now();
 
+        let fluid_snapshot = voxel_fluid::FluidSnapshot::default();
         let result = voxel_sleep::execute_sleep(
             &sleep_config,
             &mut density_fields,
             &mut stress_fields,
             &mut support_fields,
+            &fluid_snapshot,
             (0, 0, 0), // player chunk
             cycle,
             None,

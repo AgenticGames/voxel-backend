@@ -867,6 +867,11 @@ fn handle_request(
             let sleep_config = sc;
             let t_worker_start = Instant::now();
 
+            // Request fluid snapshot for geological processes
+            let (snap_tx, snap_rx) = crossbeam_channel::bounded(1);
+            let _ = fluid_event_tx.send(voxel_fluid::FluidEvent::SnapshotRequest { reply_tx: snap_tx });
+            let fluid_snapshot = snap_rx.recv().unwrap_or_else(|_| voxel_fluid::FluidSnapshot::default());
+
             let mut s = store.write().unwrap();
 
             // Use helper to get three simultaneous &mut borrows (borrow checker
@@ -879,6 +884,7 @@ fn handle_request(
                 density_fields,
                 stress_fields,
                 support_fields,
+                &fluid_snapshot,
                 player_chunk,
                 sleep_count,
                 None, // No progress channel for now
@@ -959,6 +965,10 @@ fn handle_request(
                 minerals_grown: sleep_result.minerals_grown,
                 supports_degraded: sleep_result.supports_degraded,
                 collapses_triggered: sleep_result.collapses_triggered,
+                acid_dissolved: sleep_result.acid_dissolved,
+                veins_deposited: sleep_result.veins_deposited,
+                voxels_enriched: sleep_result.voxels_enriched,
+                formations_grown: sleep_result.formations_grown,
                 profile_report: report,
             });
         }

@@ -37,6 +37,10 @@ pub struct SleepCompleteData {
     pub minerals_grown: u32,
     pub supports_degraded: u32,
     pub collapses_triggered: u32,
+    pub acid_dissolved: u32,
+    pub veins_deposited: u32,
+    pub voxels_enriched: u32,
+    pub formations_grown: u32,
     pub profile_report: String,
 }
 
@@ -247,6 +251,10 @@ impl VoxelEngine {
                 minerals_grown,
                 supports_degraded,
                 collapses_triggered,
+                acid_dissolved,
+                veins_deposited,
+                voxels_enriched,
+                formations_grown,
                 profile_report,
             }) => {
                 if let Ok(mut sc) = self.sleep_complete.lock() {
@@ -256,6 +264,10 @@ impl VoxelEngine {
                         minerals_grown,
                         supports_degraded,
                         collapses_triggered,
+                        acid_dissolved,
+                        veins_deposited,
+                        voxels_enriched,
+                        formations_grown,
                         profile_report,
                     });
                 }
@@ -1419,14 +1431,42 @@ pub fn ffi_scan_config_to_scan_config(c: &FfiScanConfig) -> ScanConfig {
 
 /// Convert FFI config to SleepConfig.
 pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
-    use voxel_sleep::config::{MetamorphismConfig, MineralConfig, CollapseConfig};
+    use voxel_sleep::config::{CollapseConfig, DeepTimeConfig, MetamorphismConfig, MineralConfig};
+    // Build collapse config from FFI fields (shared between legacy and new deeptime phase)
+    let collapse = CollapseConfig {
+        strut_survival: if c.sleep_strut_survival[1..].iter().any(|&v| v > 0.0) {
+            c.sleep_strut_survival
+        } else {
+            CollapseConfig::default().strut_survival
+        },
+        stress_multiplier: if c.sleep_stress_multiplier > 0.0 { c.sleep_stress_multiplier } else { 1.5 },
+        max_cascade_iterations: if c.sleep_max_cascade_iterations > 0 { c.sleep_max_cascade_iterations } else { 8 },
+        rubble_fill_ratio: if c.sleep_rubble_fill_ratio > 0.0 { c.sleep_rubble_fill_ratio } else { 0.40 },
+        min_stress_for_cascade: if c.sleep_min_stress_for_cascade > 0.0 { c.sleep_min_stress_for_cascade } else { 0.7 },
+        rubble_material_match: c.sleep_rubble_material_match != 0,
+        support_stress_penalty: if c.sleep_support_stress_penalty > 0.0 { c.sleep_support_stress_penalty } else { 1.0 },
+        collapse_enabled: c.sleep_collapse_sub_enabled != 0,
+    };
     voxel_sleep::SleepConfig {
         time_budget_ms: if c.sleep_time_budget_ms > 0 { c.sleep_time_budget_ms } else { 8000 },
         chunk_radius: c.sleep_chunk_radius.min(10),
+        sleep_count: if c.sleep_count > 0 { c.sleep_count } else { 1 },
+        // New 4-phase system (all defaults for now — no FFI fields yet)
+        phase1_enabled: true,
+        phase2_enabled: true,
+        phase3_enabled: true,
+        phase4_enabled: true,
+        reaction: Default::default(),
+        aureole: Default::default(),
+        veins: Default::default(),
+        deeptime: DeepTimeConfig {
+            collapse: collapse.clone(),
+            ..Default::default()
+        },
+        // Legacy fields (kept for backward compat, old FFI fields still map here)
         metamorphism_enabled: c.sleep_metamorphism_enabled != 0,
         minerals_enabled: c.sleep_minerals_enabled != 0,
         collapse_enabled: c.sleep_collapse_enabled != 0,
-        sleep_count: if c.sleep_count > 0 { c.sleep_count } else { 1 },
         metamorphism: MetamorphismConfig {
             limestone_to_marble_prob: if c.sleep_limestone_to_marble_prob > 0.0 { c.sleep_limestone_to_marble_prob } else { 0.40 },
             limestone_to_marble_depth: if c.sleep_limestone_to_marble_depth != 0.0 { c.sleep_limestone_to_marble_depth } else { -50.0 },
@@ -1468,20 +1508,7 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
             growth_density_min: if c.sleep_growth_density_min > 0.0 { c.sleep_growth_density_min } else { 0.3 },
             growth_density_max: if c.sleep_growth_density_max > 0.0 { c.sleep_growth_density_max } else { 0.6 },
         },
-        collapse: CollapseConfig {
-            strut_survival: if c.sleep_strut_survival[1..].iter().any(|&v| v > 0.0) {
-                c.sleep_strut_survival
-            } else {
-                CollapseConfig::default().strut_survival
-            },
-            stress_multiplier: if c.sleep_stress_multiplier > 0.0 { c.sleep_stress_multiplier } else { 1.5 },
-            max_cascade_iterations: if c.sleep_max_cascade_iterations > 0 { c.sleep_max_cascade_iterations } else { 8 },
-            rubble_fill_ratio: if c.sleep_rubble_fill_ratio > 0.0 { c.sleep_rubble_fill_ratio } else { 0.40 },
-            min_stress_for_cascade: if c.sleep_min_stress_for_cascade > 0.0 { c.sleep_min_stress_for_cascade } else { 0.7 },
-            rubble_material_match: c.sleep_rubble_material_match != 0,
-            support_stress_penalty: if c.sleep_support_stress_penalty > 0.0 { c.sleep_support_stress_penalty } else { 1.0 },
-            collapse_enabled: c.sleep_collapse_sub_enabled != 0,
-        },
+        collapse,
         stress: voxel_core::stress::StressConfig::default(),
     }
 }

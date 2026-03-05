@@ -668,12 +668,12 @@ pub struct FfiStressConfig {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct FfiSleepProgress {
-    pub phase: u8,            // 0=metamorphism, 1=minerals, 2=collapse, 3=done
+    pub phase: u8,            // 0=reaction, 1=aureole, 2=veins, 3=deeptime, 4=done
     pub progress_pct: f32,    // 0.0 - 1.0
     pub chunks_processed: u32,
     pub chunks_total: u32,
     pub glimpse_chunk: FfiChunkCoord,  // Chunk where interesting transform happened
-    pub glimpse_type: u8,     // 0=none, 1=metamorphism, 2=mineral, 3=collapse
+    pub glimpse_type: u8,     // 0=none, 1=acid_dissolution, 2=metamorphism, 3=vein_deposit, 4=enrichment, 5=collapse
 }
 
 #[repr(C)]
@@ -685,6 +685,10 @@ pub struct FfiSleepResult {
     pub minerals_grown: u32,
     pub supports_degraded: u32,
     pub collapses_triggered: u32,
+    pub acid_dissolved: u32,
+    pub veins_deposited: u32,
+    pub voxels_enriched: u32,
+    pub formations_grown: u32,
     pub dirty_chunks: *mut FfiChunkCoord,
     pub dirty_chunk_count: u32,
     pub collapse_events: *mut FfiCollapseEvent,
@@ -801,6 +805,10 @@ pub enum WorkerResult {
         minerals_grown: u32,
         supports_degraded: u32,
         collapses_triggered: u32,
+        acid_dissolved: u32,
+        veins_deposited: u32,
+        voxels_enriched: u32,
+        formations_grown: u32,
         profile_report: String,
     },
     ScanComplete {

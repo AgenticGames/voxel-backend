@@ -1,62 +1,264 @@
 use serde::{Deserialize, Serialize};
 use voxel_core::stress::StressConfig;
 
-/// Top-level sleep configuration.
+/// Top-level sleep configuration — 4-phase geological time simulation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SleepConfig {
-    pub metamorphism: MetamorphismConfig,
-    pub minerals: MineralConfig,
-    pub collapse: CollapseConfig,
+    /// Phase 1: The Reaction (acid dissolution, oxidation)
+    pub reaction: ReactionConfig,
+    /// Phase 2: The Aureole (contact metamorphism, water erosion)
+    pub aureole: AureoleConfig,
+    /// Phase 3: The Veins (hydrothermal ore deposition, formation growth)
+    pub veins: VeinConfig,
+    /// Phase 4: The Deep Time (enrichment, thickening, formations, collapse)
+    pub deeptime: DeepTimeConfig,
+    /// Shared stress config
     pub stress: StressConfig,
-    pub time_budget_ms: u32,
+    /// Chunk radius from player to process
     pub chunk_radius: u32,
-    pub metamorphism_enabled: bool,
-    pub minerals_enabled: bool,
-    pub collapse_enabled: bool,
+    /// Per-phase enables
+    pub phase1_enabled: bool,
+    pub phase2_enabled: bool,
+    pub phase3_enabled: bool,
+    pub phase4_enabled: bool,
+    /// Time budget (unused currently, reserved for future)
+    pub time_budget_ms: u32,
+    /// Sleep cycle number (for deterministic RNG seeding)
     pub sleep_count: u32,
+
+    // --- Legacy fields (kept for FFI backward compat during transition) ---
+    #[serde(skip)]
+    pub metamorphism: MetamorphismConfig,
+    #[serde(skip)]
+    pub minerals: MineralConfig,
+    #[serde(skip)]
+    pub collapse: CollapseConfig,
+    #[serde(skip)]
+    pub metamorphism_enabled: bool,
+    #[serde(skip)]
+    pub minerals_enabled: bool,
+    #[serde(skip)]
+    pub collapse_enabled: bool,
 }
 
 impl Default for SleepConfig {
     fn default() -> Self {
         Self {
+            reaction: ReactionConfig::default(),
+            aureole: AureoleConfig::default(),
+            veins: VeinConfig::default(),
+            deeptime: DeepTimeConfig::default(),
+            stress: StressConfig::default(),
+            chunk_radius: 1,
+            phase1_enabled: true,
+            phase2_enabled: true,
+            phase3_enabled: true,
+            phase4_enabled: true,
+            time_budget_ms: 8000,
+            sleep_count: 1,
+            // Legacy defaults
             metamorphism: MetamorphismConfig::default(),
             minerals: MineralConfig::default(),
             collapse: CollapseConfig::default(),
-            stress: StressConfig::default(),
-            time_budget_ms: 8000,
-            chunk_radius: 1,
             metamorphism_enabled: true,
             minerals_enabled: true,
             collapse_enabled: true,
-            sleep_count: 1,
         }
     }
 }
 
-/// Metamorphism transformation probabilities.
+// ──────────────────────────────────────────────────────────────
+// Phase 1: The Reaction (10,000 years)
+// ──────────────────────────────────────────────────────────────
+
+/// Config for Phase 1: acid dissolution, surface oxidation, basalt crust.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReactionConfig {
+    // Acid dissolution (BFS through limestone from exposed pyrite)
+    pub acid_dissolution_prob: f32,
+    pub acid_dissolution_radius: u32,
+    pub acid_dissolution_enabled: bool,
+    // Copper oxidation (copper + air → malachite)
+    pub copper_oxidation_prob: f32,
+    pub copper_oxidation_enabled: bool,
+    // Basalt crust (solid adjacent to lava → basalt)
+    pub basalt_crust_prob: f32,
+    pub basalt_crust_enabled: bool,
+}
+
+impl Default for ReactionConfig {
+    fn default() -> Self {
+        Self {
+            acid_dissolution_prob: 0.60,
+            acid_dissolution_radius: 3,
+            acid_dissolution_enabled: true,
+            copper_oxidation_prob: 0.50,
+            copper_oxidation_enabled: true,
+            basalt_crust_prob: 0.70,
+            basalt_crust_enabled: true,
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────
+// Phase 2: The Aureole (100,000 years)
+// ──────────────────────────────────────────────────────────────
+
+/// Config for Phase 2: contact metamorphism around heat sources + water erosion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AureoleConfig {
+    pub aureole_radius: u32,
+    // Contact zone (0-2 voxels from heat)
+    pub contact_limestone_to_marble_prob: f32,
+    pub contact_sandstone_to_granite_prob: f32,
+    // Mid aureole (3-5 voxels from heat)
+    pub mid_limestone_to_marble_prob: f32,
+    pub mid_sandstone_to_granite_prob: f32,
+    // Outer aureole (6-8 voxels from heat)
+    pub outer_limestone_to_marble_prob: f32,
+    pub outer_slate_to_marble_prob: f32,
+    // Water erosion
+    pub water_erosion_prob: f32,
+    pub water_erosion_enabled: bool,
+    pub metamorphism_enabled: bool,
+}
+
+impl Default for AureoleConfig {
+    fn default() -> Self {
+        Self {
+            aureole_radius: 8,
+            contact_limestone_to_marble_prob: 0.80,
+            contact_sandstone_to_granite_prob: 0.50,
+            mid_limestone_to_marble_prob: 0.50,
+            mid_sandstone_to_granite_prob: 0.25,
+            outer_limestone_to_marble_prob: 0.20,
+            outer_slate_to_marble_prob: 0.30,
+            water_erosion_prob: 0.05,
+            water_erosion_enabled: true,
+            metamorphism_enabled: true,
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────
+// Phase 3: The Veins (500,000 years)
+// ──────────────────────────────────────────────────────────────
+
+/// Config for Phase 3: hydrothermal BFS vein injection + formation growth.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VeinConfig {
+    // Hydrothermal vein deposition
+    pub vein_deposition_prob: f32,
+    pub max_vein_voxels_per_source: u32,
+    pub vein_max_distance: u32,
+    pub vein_enabled: bool,
+    // Temperature zone boundaries (BFS distance from heat)
+    pub hypothermal_max: u32,   // 0..hypothermal_max = high-temp zone
+    pub mesothermal_max: u32,   // hypothermal_max..mesothermal_max = mid-temp
+    // epithermal = mesothermal_max..vein_max_distance
+    // Formation growth
+    pub crystal_growth_enabled: bool,
+    pub crystal_growth_prob: f32,
+    pub crystal_growth_max_per_chunk: u32,
+    pub calcite_infill_enabled: bool,
+    pub calcite_infill_prob: f32,
+    pub calcite_infill_max_per_chunk: u32,
+    pub flowstone_enabled: bool,
+    pub flowstone_prob: f32,
+    pub flowstone_max_per_chunk: u32,
+    /// Density range for new growths
+    pub growth_density_min: f32,
+    pub growth_density_max: f32,
+}
+
+impl Default for VeinConfig {
+    fn default() -> Self {
+        Self {
+            vein_deposition_prob: 0.25,
+            max_vein_voxels_per_source: 12,
+            vein_max_distance: 16,
+            vein_enabled: true,
+            hypothermal_max: 4,
+            mesothermal_max: 10,
+            crystal_growth_enabled: true,
+            crystal_growth_prob: 0.30,
+            crystal_growth_max_per_chunk: 4,
+            calcite_infill_enabled: true,
+            calcite_infill_prob: 0.15,
+            calcite_infill_max_per_chunk: 4,
+            flowstone_enabled: true,
+            flowstone_prob: 0.10,
+            flowstone_max_per_chunk: 3,
+            growth_density_min: 0.3,
+            growth_density_max: 0.6,
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────
+// Phase 4: The Deep Time (1,250,000 years)
+// ──────────────────────────────────────────────────────────────
+
+/// Config for Phase 4: supergene enrichment, vein thickening, mature formations, collapse.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeepTimeConfig {
+    // Supergene enrichment
+    pub enrichment_prob: f32,
+    pub max_enrichment_per_chunk: u32,
+    pub enrichment_search_radius: i32,
+    pub enrichment_enabled: bool,
+    // Vein thickening
+    pub vein_thickening_prob: f32,
+    pub vein_thickening_max_per_chunk: u32,
+    pub vein_thickening_enabled: bool,
+    // Mature formations
+    pub mature_formations_enabled: bool,
+    pub stalactite_growth_prob: f32,
+    pub column_formation_prob: f32,
+    // Collapse (embedded)
+    pub collapse: CollapseConfig,
+}
+
+impl Default for DeepTimeConfig {
+    fn default() -> Self {
+        Self {
+            enrichment_prob: 0.15,
+            max_enrichment_per_chunk: 8,
+            enrichment_search_radius: 5,
+            enrichment_enabled: true,
+            vein_thickening_prob: 0.10,
+            vein_thickening_max_per_chunk: 4,
+            vein_thickening_enabled: true,
+            mature_formations_enabled: true,
+            stalactite_growth_prob: 0.10,
+            column_formation_prob: 0.05,
+            collapse: CollapseConfig::default(),
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────
+// Legacy configs (kept for backward compat with old FFI/metamorphism/minerals)
+// ──────────────────────────────────────────────────────────────
+
+/// Metamorphism transformation probabilities (legacy — used by old metamorphism.rs).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetamorphismConfig {
-    /// Limestone -> Marble when deep or adjacent to Basalt/Kimberlite
     pub limestone_to_marble_prob: f32,
     pub limestone_to_marble_depth: f32,
     pub limestone_to_marble_enabled: bool,
-    /// Sandstone -> Granite when very deep with 4+ solid neighbors
     pub sandstone_to_granite_prob: f32,
     pub sandstone_to_granite_depth: f32,
     pub sandstone_to_granite_min_neighbors: u32,
     pub sandstone_to_granite_enabled: bool,
-    /// Slate -> Marble when adjacent to Kimberlite pipe
     pub slate_to_marble_prob: f32,
     pub slate_to_marble_enabled: bool,
-    /// Granite -> Basalt when adjacent to 2+ air voxels (cooling)
     pub granite_to_basalt_prob: f32,
     pub granite_to_basalt_min_air: u32,
     pub granite_to_basalt_enabled: bool,
-    /// Iron -> Pyrite when adjacent to Sulfide within 2 voxels
     pub iron_to_pyrite_prob: f32,
     pub iron_to_pyrite_search_radius: u32,
     pub iron_to_pyrite_enabled: bool,
-    /// Copper -> Malachite when adjacent to 1+ air voxel (oxidation)
     pub copper_to_malachite_prob: f32,
     pub copper_to_malachite_enabled: bool,
 }
@@ -85,33 +287,27 @@ impl Default for MetamorphismConfig {
     }
 }
 
-/// Mineral growth configuration.
+/// Mineral growth configuration (legacy — used by old minerals.rs).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MineralConfig {
-    /// Crystal/Amethyst grows into air with 2+ crystal neighbors
     pub crystal_growth_max: u32,
     pub crystal_growth_enabled: bool,
     pub crystal_growth_prob: f32,
-    /// Malachite stalactite: copper above air, limestone nearby
     pub malachite_stalactite_max: u32,
     pub malachite_stalactite_enabled: bool,
     pub malachite_stalactite_prob: f32,
-    /// Quartz vein extension: 10% probability per quartz terminus
     pub quartz_extension_prob: f32,
     pub quartz_extension_max: u32,
     pub quartz_extension_enabled: bool,
-    /// Calcite infill: limestone surrounds air with 3+ faces, depth < -30
     pub calcite_infill_max: u32,
     pub calcite_infill_depth: f32,
     pub calcite_infill_min_faces: u32,
     pub calcite_infill_enabled: bool,
     pub calcite_infill_prob: f32,
-    /// Pyrite crust: grows outward from pyrite with 2+ solid behind
     pub pyrite_crust_max: u32,
     pub pyrite_crust_min_solid: u32,
     pub pyrite_crust_enabled: bool,
     pub pyrite_crust_prob: f32,
-    /// Density range for new mineral growths (for smooth DC meshes)
     pub growth_density_min: f32,
     pub growth_density_max: f32,
 }
@@ -146,23 +342,13 @@ impl Default for MineralConfig {
 /// Structural collapse configuration for sleep cycles.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollapseConfig {
-    /// Per-strut-type survival probabilities per sleep cycle (indexed by SupportType as u8, [0] unused).
-    /// [0]=None, [1]=SlateStrut, [2]=GraniteStrut, [3]=LimestoneStrut,
-    /// [4]=CopperStrut, [5]=IronStrut, [6]=SteelStrut, [7]=CrystalStrut
     pub strut_survival: [f32; 8],
-    /// Stress multiplier applied after support degradation (geological pressure)
     pub stress_multiplier: f32,
-    /// Max collapse cascade iterations (higher than real-time's 5)
     pub max_cascade_iterations: u32,
-    /// Rubble fill ratio for geological collapses
     pub rubble_fill_ratio: f32,
-    /// Minimum stress value to trigger a collapse cascade
     pub min_stress_for_cascade: f32,
-    /// Whether rubble material matches the collapsed material
     pub rubble_material_match: bool,
-    /// Stress penalty applied when a support is removed
     pub support_stress_penalty: f32,
-    /// Master enable for collapse phase
     pub collapse_enabled: bool,
 }
 
@@ -171,13 +357,13 @@ impl Default for CollapseConfig {
         Self {
             strut_survival: [
                 0.0,   // None (unused)
-                0.25,  // SlateStrut (Tier 1 - stone, weakest)
-                0.30,  // GraniteStrut (Tier 1)
-                0.25,  // LimestoneStrut (Tier 1)
-                0.55,  // CopperStrut (Tier 2)
-                0.70,  // IronStrut (Tier 3)
-                0.85,  // SteelStrut (Tier 4)
-                0.95,  // CrystalStrut (Tier 5 - most durable)
+                0.25,  // SlateStrut
+                0.30,  // GraniteStrut
+                0.25,  // LimestoneStrut
+                0.55,  // CopperStrut
+                0.70,  // IronStrut
+                0.85,  // SteelStrut
+                0.95,  // CrystalStrut
             ],
             stress_multiplier: 1.5,
             max_cascade_iterations: 8,

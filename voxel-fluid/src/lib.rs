@@ -5,7 +5,25 @@ pub mod sources;
 pub mod tables;
 pub mod thread;
 
+use std::collections::HashMap;
+use crate::cell::FluidCell;
 use crate::mesh::FluidMeshData;
+
+/// Lightweight snapshot of all fluid cells for sleep system queries.
+#[derive(Debug, Clone)]
+pub struct FluidSnapshot {
+    pub chunks: HashMap<(i32, i32, i32), Vec<FluidCell>>,
+    pub chunk_size: usize,
+}
+
+impl Default for FluidSnapshot {
+    fn default() -> Self {
+        Self {
+            chunks: HashMap::new(),
+            chunk_size: 16,
+        }
+    }
+}
 
 /// Configuration for the fluid simulation.
 #[derive(Debug, Clone)]
@@ -87,6 +105,11 @@ pub enum FluidEvent {
         fluid_type: cell::FluidType,
         level: f32,
         is_source: bool,
+    },
+    /// Request a snapshot of all fluid cells (used by sleep system).
+    /// Response sent via the dedicated reply channel.
+    SnapshotRequest {
+        reply_tx: crossbeam_channel::Sender<FluidSnapshot>,
     },
 }
 
