@@ -384,6 +384,7 @@ pub fn execute_sleep(
         heat_map.len() as u32,
         total_sulfide_dissolved, total_coal_matured, total_diamonds_formed,
         total_silicified, total_nests_fossilized,
+        &config.groundwater,
     );
 
     SleepResult {
@@ -439,6 +440,7 @@ fn build_sleep_profile_report(
     diamonds_formed: u32,
     voxels_silicified: u32,
     nests_fossilized: u32,
+    gw: &crate::config::GroundwaterConfig,
 ) -> String {
     let mut s = String::with_capacity(4096);
 
@@ -448,6 +450,8 @@ fn build_sleep_profile_report(
     let _ = writeln!(s, "  Loaded chunks: {} ({} critical, {} important, {} cosmetic)",
         timings.loaded_chunks, timings.critical_chunks, timings.important_chunks, timings.cosmetic_chunks);
     let _ = writeln!(s, "  Heat sources: {} | Chunk radius: {}", heat_source_count, chunk_radius);
+    let _ = writeln!(s, "  Groundwater:  erosion={:.2} flowstone={:.2} enrichment={:.2} soft_rock={:.2} hard_rock={:.2}",
+        gw.erosion_power, gw.flowstone_power, gw.enrichment_power, gw.soft_rock_mult, gw.hard_rock_mult);
 
     let _ = writeln!(s);
     let _ = writeln!(s, "\u{2500}\u{2500}\u{2500} Phase 1: The Reaction (10,000 years) \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
