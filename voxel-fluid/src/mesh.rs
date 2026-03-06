@@ -3,6 +3,10 @@ use crate::tables::{CORNER_OFFSETS, EDGE_TABLE, EDGE_VERTICES, TRI_TABLE};
 
 /// Isosurface threshold for fluid meshing.
 const ISO_LEVEL: f32 = 0.15;
+/// Tiny SDF value for out-of-bounds samples — places boundary faces near chunk edge.
+const BOUNDARY_SDF: f32 = 0.001;
+/// Field value for out-of-bounds samples — just below ISO_LEVEL so MC places face at edge.
+const BOUNDARY_FIELD: f32 = ISO_LEVEL - BOUNDARY_SDF;
 /// Y offset for MC mesh to avoid z-fighting with Surface Nets.
 const MC_Y_OFFSET: f32 = 0.05;
 /// Surface Nets fluid type: WaterBreach (yellow-green, highly visible for A/B).
@@ -100,21 +104,21 @@ fn has_fluid_above(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> bool 
 /// Sample the scalar field for MC meshing.
 /// Returns fluid level for air cells. Solid cells return 1.0 (treated as "inside")
 /// so no isosurface forms at rock/fluid boundaries — only at fluid/air boundaries.
-/// Floor extension: non-solid cells with low fluid sitting on solid rock with fluid
-/// above get boosted to 1.0 to close the visual gap at rock floors.
-/// Boundary-clamped to prevent chunk-edge holes.
+/// Floor extension: non-solid cells with low fluid sitting on solid rock (or at chunk
+/// bottom boundary) with fluid above get boosted to 1.0 to close the visual gap.
+/// Out-of-bounds coordinates return BOUNDARY_FIELD to close mesh at chunk edges.
 #[inline]
 fn sample_field(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> f32 {
     let size = grid.size;
-    let cx = x.min(size - 1);
-    let cy = y.min(size - 1);
-    let cz = z.min(size - 1);
-    if grid.is_solid(cx, cy, cz) {
+    if x >= size || y >= size || z >= size {
+        return BOUNDARY_FIELD; // just below ISO_LEVEL → MC face at chunk edge
+    }
+    if grid.is_solid(x, y, z) {
         1.0 // inside — prevents surface at rock/fluid boundary
     } else {
-        let level = grid.get(cx, cy, cz).level;
-        // Floor extension: low-fluid cell on solid rock with real fluid above
-        if level < ISO_LEVEL && cy > 0 && grid.is_solid(cx, cy - 1, cz) && has_fluid_above(grid, cx, cy, cz) {
+        let level = grid.get(x, y, z).level;
+        // Floor extension: low-fluid cell on solid rock (or chunk bottom) with fluid above
+        if level < ISO_LEVEL && (y == 0 || grid.is_solid(x, y - 1, z)) && has_fluid_above(grid, x, y, z) {
             1.0 // boost to close floor gap
         } else {
             level
@@ -125,20 +129,21 @@ fn sample_field(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> f32 {
 /// Sample the SDF for Surface Nets: ISO_LEVEL - fluid_level.
 /// Negative = fluid present, positive = air only.
 /// Solid cells return -1.0 (treated as "inside") so no isosurface at rock/fluid boundary.
-/// Floor extension: non-solid cells with low fluid on solid rock with fluid above
-/// get boosted to -1.0 to close the visual gap at rock floors.
+/// Floor extension: non-solid cells with low fluid on solid rock (or at chunk bottom)
+/// with fluid above get boosted to -1.0 to close the visual gap.
+/// Out-of-bounds coordinates return BOUNDARY_SDF to close mesh at chunk edges.
 #[inline]
 fn sample_sdf(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> f32 {
     let size = grid.size;
-    let cx = x.min(size - 1);
-    let cy = y.min(size - 1);
-    let cz = z.min(size - 1);
-    if grid.is_solid(cx, cy, cz) {
+    if x >= size || y >= size || z >= size {
+        return BOUNDARY_SDF; // tiny positive → SN places vertex near chunk edge
+    }
+    if grid.is_solid(x, y, z) {
         -1.0 // inside — prevents surface at rock/fluid boundary
     } else {
-        let level = grid.get(cx, cy, cz).level;
-        // Floor extension: low-fluid cell on solid rock with real fluid above
-        if level < ISO_LEVEL && cy > 0 && grid.is_solid(cx, cy - 1, cz) && has_fluid_above(grid, cx, cy, cz) {
+        let level = grid.get(x, y, z).level;
+        // Floor extension: low-fluid cell on solid rock (or chunk bottom) with fluid above
+        if level < ISO_LEVEL && (y == 0 || grid.is_solid(x, y - 1, z)) && has_fluid_above(grid, x, y, z) {
             -1.0 // boost to close floor gap
         } else {
             ISO_LEVEL - level
@@ -146,26 +151,31 @@ fn sample_sdf(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> f32 {
     }
 }
 
-/// Returns true if any corner of the unit cube at (x,y,z) has real fluid,
+/// Returns true if any in-bounds corner of the unit cube at (x,y,z) has real fluid,
 /// or if any corner is a floor extension cell (non-solid, low fluid, on solid rock
 /// with fluid above). Used to skip cubes in pure rock/air regions — without this,
 /// treating solid as "inside" would generate phantom water surfaces on every cave wall.
+/// Out-of-bounds corners are treated as having no fluid.
 #[inline]
 fn cube_has_fluid(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> bool {
     let size = grid.size;
     for dz in 0..=1usize {
         for dy in 0..=1usize {
             for dx in 0..=1usize {
-                let cx = (x + dx).min(size - 1);
-                let cy = (y + dy).min(size - 1);
-                let cz = (z + dz).min(size - 1);
+                let cx = x + dx;
+                let cy = y + dy;
+                let cz = z + dz;
+                // Out-of-bounds corners: no fluid (prevents phantom surfaces at boundary)
+                if cx >= size || cy >= size || cz >= size {
+                    continue;
+                }
                 if !grid.is_solid(cx, cy, cz) {
                     let level = grid.get(cx, cy, cz).level;
                     if level >= MIN_LEVEL {
                         return true;
                     }
-                    // Floor extension: low-fluid cell on solid rock with fluid above
-                    if level < ISO_LEVEL && cy > 0 && grid.is_solid(cx, cy - 1, cz) && has_fluid_above(grid, cx, cy, cz) {
+                    // Floor extension: low-fluid cell on solid rock (or chunk bottom) with fluid above
+                    if level < ISO_LEVEL && (cy == 0 || grid.is_solid(cx, cy - 1, cz)) && has_fluid_above(grid, cx, cy, cz) {
                         return true;
                     }
                 }
