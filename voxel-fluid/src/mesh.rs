@@ -10,14 +10,11 @@ pub struct FluidMeshData {
     pub flow_directions: Vec<[f32; 3]>, // (dx, dz, magnitude) for UV scroll
 }
 
-/// Build a face-based quad mesh from a fluid grid with shoreline clipping.
+/// Build a top-face-only quad mesh from a fluid grid with shoreline clipping.
 ///
-/// For each fluid cell, emits:
-/// - Top face: horizontal quad at fill height, clipped to density=0 shoreline
-/// - Side faces: vertical quads where neighbor is solid or has much less fluid
-///
-/// UVs use world-space XZ mapping for top faces, local UV for side faces.
-/// Flow directions encode the fluid gradient for animated UV panning.
+/// For each fluid cell, emits a top face: horizontal quad at fill height,
+/// clipped to density=0 shoreline. Side faces are omitted to prevent visual
+/// artifacts (seam walls through solid rock, staircase slivers at chunk boundaries).
 pub fn mesh_fluid(grid: &ChunkFluidGrid) -> FluidMeshData {
     let size = grid.size;
     let mut mesh = FluidMeshData {
@@ -67,42 +64,6 @@ pub fn mesh_fluid(grid: &ChunkFluidGrid) -> FluidMeshData {
                     emit_top_face(
                         &mut mesh, x, y, z, fill_height, fluid_type, &corners, flow,
                     );
-                }
-
-                // Side faces (4 horizontal neighbors)
-                let side_dirs: [(i32, i32, i32, [f32; 3]); 4] = [
-                    (1, 0, 0, [1.0, 0.0, 0.0]),
-                    (-1, 0, 0, [-1.0, 0.0, 0.0]),
-                    (0, 0, 1, [0.0, 0.0, 1.0]),
-                    (0, 0, -1, [0.0, 0.0, -1.0]),
-                ];
-
-                for (dx, _dy, dz, normal) in &side_dirs {
-                    let nx = x as i32 + dx;
-                    let nz = z as i32 + dz;
-
-                    let emit_side = if nx < 0 || nx >= size as i32 || nz < 0 || nz >= size as i32 {
-                        // Edge of chunk: emit side if there's fluid here
-                        true
-                    } else {
-                        let nxu = nx as usize;
-                        let nzu = nz as usize;
-                        if grid.is_solid(nxu, y, nzu) {
-                            false // solid neighbor — terrain mesh handles the wall
-                        } else {
-                            let n_cell = grid.get(nxu, y, nzu);
-                            let n_cap = grid.cell_capacity(nxu, y, nzu);
-                            // Emit side if neighbor has significantly less fluid
-                            n_cell.level < cell.level * 0.3 || n_cap < MIN_LEVEL
-                        }
-                    };
-
-                    if emit_side {
-                        emit_side_face(
-                            &mut mesh, x, y, z, fill_height, fluid_type, *dx, *dz,
-                            *normal, &corners, flow,
-                        );
-                    }
                 }
             }
         }
@@ -267,112 +228,6 @@ fn emit_top_face(
     }
 }
 
-/// Emit a side (vertical) face quad.
-#[allow(clippy::too_many_arguments)]
-fn emit_side_face(
-    mesh: &mut FluidMeshData,
-    x: usize, y: usize, z: usize,
-    fill_height: f32,
-    fluid_type: FluidType,
-    dx: i32, dz: i32,
-    normal: [f32; 3],
-    corners: &[f32; 8],
-    flow: [f32; 3],
-) {
-    let fy_top = y as f32 + fill_height;
-    let fy_bot = y as f32;
-    let ft = fluid_type as u8;
-
-    // Determine which 2 corners of the cell form this face edge
-    // Face +X: corners 1,2,5,6 (x+1 face)
-    // Face -X: corners 0,3,4,7 (x face)
-    // Face +Z: corners 3,2,7,6 (z+1 face)
-    // Face -Z: corners 0,1,4,5 (z face)
-    let (c_bl, c_br, c_tl, c_tr) = match (dx, dz) {
-        (1, 0) =>  (1, 2, 5, 6),  // +X face: bottom-left=c1, bottom-right=c2, top-left=c5, top-right=c6
-        (-1, 0) => (3, 0, 7, 4),  // -X face
-        (0, 1) =>  (2, 3, 6, 7),  // +Z face
-        (0, -1) => (0, 1, 4, 5),  // -Z face
-        _ => return,
-    };
-
-    // Check if any corner of this face is valid (not fully solid)
-    let d_bl = corners[c_bl];
-    let d_br = corners[c_br];
-    let d_tl = corners[c_tl];
-    let d_tr = corners[c_tr];
-
-    // If all corners are solid, skip
-    if d_bl > 0.0 && d_br > 0.0 && d_tl > 0.0 && d_tr > 0.0 {
-        return;
-    }
-
-    // Face position in world space
-    let (fx, fz) = match (dx, dz) {
-        (1, 0) =>  (x as f32 + 1.0, z as f32),
-        (-1, 0) => (x as f32, z as f32),
-        (0, 1) =>  (x as f32, z as f32 + 1.0),
-        (0, -1) => (x as f32, z as f32),
-        _ => return,
-    };
-
-    // Build 4 vertices: bottom-left, bottom-right, top-right, top-left
-    let (v0, v1, v2, v3) = match (dx, dz) {
-        (1, 0) => (
-            [fx, fy_bot, z as f32],
-            [fx, fy_bot, z as f32 + 1.0],
-            [fx, fy_top, z as f32 + 1.0],
-            [fx, fy_top, z as f32],
-        ),
-        (-1, 0) => (
-            [fx, fy_bot, z as f32 + 1.0],
-            [fx, fy_bot, z as f32],
-            [fx, fy_top, z as f32],
-            [fx, fy_top, z as f32 + 1.0],
-        ),
-        (0, 1) => (
-            [x as f32 + 1.0, fy_bot, fz],
-            [x as f32, fy_bot, fz],
-            [x as f32, fy_top, fz],
-            [x as f32 + 1.0, fy_top, fz],
-        ),
-        (0, -1) => (
-            [x as f32, fy_bot, fz],
-            [x as f32 + 1.0, fy_bot, fz],
-            [x as f32 + 1.0, fy_top, fz],
-            [x as f32, fy_top, fz],
-        ),
-        _ => return,
-    };
-
-    // Emit full quad if at least one corner is non-solid
-    let base = mesh.positions.len() as u32;
-
-    // UVs for side faces: local space (u=horizontal along face, v=vertical)
-    let uvs = [
-        [0.0, 0.0],
-        [1.0, 0.0],
-        [1.0, fill_height],
-        [0.0, fill_height],
-    ];
-
-    for (pos, uv) in [v0, v1, v2, v3].iter().zip(uvs.iter()) {
-        mesh.positions.push(*pos);
-        mesh.normals.push(normal);
-        mesh.fluid_types.push(ft);
-        mesh.uvs.push(*uv);
-        mesh.flow_directions.push(flow);
-    }
-
-    // Two triangles for the quad
-    mesh.indices.push(base);
-    mesh.indices.push(base + 1);
-    mesh.indices.push(base + 2);
-    mesh.indices.push(base);
-    mesh.indices.push(base + 2);
-    mesh.indices.push(base + 3);
-}
-
 /// Determine the dominant fluid type among non-empty neighboring cells.
 /// When water-family wins over lava, returns the most common water subtype.
 pub fn dominant_fluid_type(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> FluidType {
@@ -470,17 +325,16 @@ mod tests {
     }
 
     #[test]
-    fn solid_neighbor_produces_side_face() {
+    fn no_side_faces_emitted() {
         let mut grid = ChunkFluidGrid::new(16);
-        // Water cell next to solid
-        grid.get_mut(8, 4, 8).level = 0.8;
-        grid.get_mut(8, 4, 8).fluid_type = FluidType::Water;
-        // Make +X neighbor solid — but side face should NOT emit against solid
-        // (terrain handles the wall)
-        grid.set_density(9, 4, 8, 1.0);
+        // Water cell at chunk edge (used to emit side faces)
+        grid.get_mut(0, 4, 8).level = 0.8;
+        grid.get_mut(0, 4, 8).fluid_type = FluidType::Water;
 
         let mesh = mesh_fluid(&grid);
-        // Should still have a top face at minimum
-        assert!(!mesh.positions.is_empty(), "Should produce mesh");
+        // All normals should be (0,1,0) — top faces only
+        for normal in &mesh.normals {
+            assert_eq!(*normal, [0.0, 1.0, 0.0], "Only top-face normals expected");
+        }
     }
 }

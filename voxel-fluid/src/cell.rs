@@ -83,6 +83,52 @@ const CELL_CORNER_OFFSETS: [[usize; 3]; 8] = [
     [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1],
 ];
 
+/// Lightweight density-only cache for chunks that have no fluid yet.
+/// Avoids allocating 4096 FluidCells until fluid actually enters the chunk.
+pub struct ChunkDensityCache {
+    pub cell_density: Vec<f32>,   // 4096
+    pub cell_corners: Vec<f32>,   // 32768
+    pub size: usize,
+}
+
+impl ChunkDensityCache {
+    pub fn new(size: usize) -> Self {
+        let total = size * size * size;
+        Self {
+            cell_density: vec![-1.0; total],
+            cell_corners: vec![-1.0; total * 8],
+            size,
+        }
+    }
+
+    /// Update density data from a raw 17^3 DensityField (same logic as ChunkFluidGrid::update_density).
+    pub fn update_density(&mut self, densities: &[f32]) {
+        let size = self.size;
+        let stride = size + 1;
+        if densities.len() < stride * stride * stride {
+            return;
+        }
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..size {
+                    let cell_idx = z * size * size + y * size + x;
+                    let mut sum = 0.0f32;
+                    for (c, offsets) in CELL_CORNER_OFFSETS.iter().enumerate() {
+                        let gx = x + offsets[0];
+                        let gy = y + offsets[1];
+                        let gz = z + offsets[2];
+                        let grid_idx = gz * stride * stride + gy * stride + gx;
+                        let d = densities[grid_idx];
+                        self.cell_corners[cell_idx * 8 + c] = d;
+                        sum += d;
+                    }
+                    self.cell_density[cell_idx] = sum / 8.0;
+                }
+            }
+        }
+    }
+}
+
 /// Per-chunk fluid grid: 16^3 cells with continuous density data.
 ///
 /// Replaces the old binary solid_mask with density values from the terrain's
@@ -99,6 +145,8 @@ pub struct ChunkFluidGrid {
     pub cell_corners: Vec<f32>,
     pub size: usize,
     pub dirty: bool,
+    /// True if any cell has level > MIN_LEVEL. Used to skip empty chunks in sim.
+    pub has_fluid: bool,
 }
 
 impl ChunkFluidGrid {
@@ -110,6 +158,21 @@ impl ChunkFluidGrid {
             cell_corners: vec![-1.0; total * 8],
             size,
             dirty: false,
+            has_fluid: false,
+        }
+    }
+
+    /// Create a grid from a density cache, promoting it when fluid first enters.
+    pub fn from_density_cache(cache: &ChunkDensityCache) -> Self {
+        let size = cache.size;
+        let total = size * size * size;
+        Self {
+            cells: vec![FluidCell::default(); total],
+            cell_density: cache.cell_density.clone(),
+            cell_corners: cache.cell_corners.clone(),
+            size,
+            dirty: false,
+            has_fluid: false,
         }
     }
 

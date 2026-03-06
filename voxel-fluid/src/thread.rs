@@ -1,11 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
 
-use crate::cell::ChunkFluidGrid;
+use crate::cell::{ChunkDensityCache, ChunkFluidGrid};
 use crate::mesh::mesh_fluid;
 use crate::sim::{detect_solidification, regen_sources, squeeze_excess_fluid, tick_fluid};
 use crate::sources::place_sources;
@@ -22,6 +22,8 @@ pub fn fluid_sim_loop(
     config: FluidConfig,
 ) {
     let mut chunks: HashMap<(i32, i32, i32), ChunkFluidGrid> = HashMap::new();
+    // Lightweight density-only storage for chunks without fluid
+    let mut chunk_densities: HashMap<(i32, i32, i32), ChunkDensityCache> = HashMap::new();
     let chunk_size = config.chunk_size;
 
     let tick_interval = Duration::from_secs_f32(1.0 / config.tick_rate);
@@ -33,7 +35,7 @@ pub fn fluid_sim_loop(
         // Drain all pending events
         loop {
             match event_rx.try_recv() {
-                Ok(event) => handle_event(event, &mut chunks, chunk_size, &config),
+                Ok(event) => handle_event(event, &mut chunks, &mut chunk_densities, chunk_size, &config),
                 Err(_) => break,
             }
         }
@@ -56,11 +58,11 @@ pub fn fluid_sim_loop(
 
         // Tick water every tick, lava every N ticks
         let is_lava_tick = tick_count % lava_divisor == 0;
-        let dirty_water = tick_fluid(&mut chunks, chunk_size, false, &config);
+        let dirty_water = tick_fluid(&mut chunks, &chunk_densities, chunk_size, false, &config);
         let dirty_lava = if is_lava_tick {
-            tick_fluid(&mut chunks, chunk_size, true, &config)
+            tick_fluid(&mut chunks, &chunk_densities, chunk_size, true, &config)
         } else {
-            Vec::new()
+            HashSet::new()
         };
 
         // Detect solidification (lava+water contact)
@@ -80,21 +82,13 @@ pub fn fluid_sim_loop(
         }
 
         // Collect all dirty chunks
-        let mut all_dirty: Vec<(i32, i32, i32)> = Vec::new();
-        for k in dirty_water {
-            if !all_dirty.contains(&k) {
-                all_dirty.push(k);
-            }
-        }
-        for k in dirty_lava {
-            if !all_dirty.contains(&k) {
-                all_dirty.push(k);
-            }
-        }
+        let mut all_dirty: HashSet<(i32, i32, i32)> = HashSet::new();
+        all_dirty.extend(&dirty_water);
+        all_dirty.extend(&dirty_lava);
         // Also include chunks marked dirty by events
         for (&k, grid) in &mut chunks {
-            if grid.dirty && !all_dirty.contains(&k) {
-                all_dirty.push(k);
+            if grid.dirty {
+                all_dirty.insert(k);
             }
         }
 
@@ -118,24 +112,39 @@ pub fn fluid_sim_loop(
 fn handle_event(
     event: FluidEvent,
     chunks: &mut HashMap<(i32, i32, i32), ChunkFluidGrid>,
+    chunk_densities: &mut HashMap<(i32, i32, i32), ChunkDensityCache>,
     chunk_size: usize,
     config: &FluidConfig,
 ) {
     match event {
         FluidEvent::DensityUpdate { chunk, densities } => {
-            let grid = chunks
+            // Store density in lightweight cache only — do NOT create a full grid
+            let cache = chunk_densities
                 .entry(chunk)
-                .or_insert_with(|| ChunkFluidGrid::new(chunk_size));
-            grid.update_density(&densities);
-            grid.dirty = true;
+                .or_insert_with(|| ChunkDensityCache::new(chunk_size));
+            cache.update_density(&densities);
+
+            // If a grid already exists (fluid was placed before density arrived), update it too
+            if let Some(grid) = chunks.get_mut(&chunk) {
+                grid.update_density(&densities);
+                grid.dirty = true;
+            }
         }
         FluidEvent::PlaceSources { chunk } => {
-            let grid = chunks
-                .entry(chunk)
-                .or_insert_with(|| ChunkFluidGrid::new(chunk_size));
-            place_sources(grid, chunk, chunk_size, config);
+            // Only create grid if density exists and sources are actually placed
+            ensure_grid(chunks, chunk_densities, chunk, chunk_size);
+            if let Some(grid) = chunks.get_mut(&chunk) {
+                place_sources(grid, chunk, chunk_size, config);
+            }
         }
         FluidEvent::TerrainModified { chunk, densities } => {
+            // Update density cache
+            let cache = chunk_densities
+                .entry(chunk)
+                .or_insert_with(|| ChunkDensityCache::new(chunk_size));
+            cache.update_density(&densities);
+
+            // If grid exists, update its density and squeeze excess
             if let Some(grid) = chunks.get_mut(&chunk) {
                 grid.update_density(&densities);
                 squeeze_excess_fluid(grid);
@@ -144,6 +153,7 @@ fn handle_event(
         }
         FluidEvent::ChunkUnloaded { chunk } => {
             chunks.remove(&chunk);
+            chunk_densities.remove(&chunk);
         }
         FluidEvent::SnapshotRequest { reply_tx } => {
             let snapshot = FluidSnapshot {
@@ -153,42 +163,61 @@ fn handle_event(
             let _ = reply_tx.send(snapshot);
         }
         FluidEvent::PlaceGeologicalSprings { chunk, springs } => {
-            let grid = chunks
-                .entry(chunk)
-                .or_insert_with(|| ChunkFluidGrid::new(chunk_size));
-            for (lx, ly, lz, level, fluid_type_u8) in springs {
-                let xu = lx as usize;
-                let yu = ly as usize;
-                let zu = lz as usize;
-                if xu < chunk_size && yu < chunk_size && zu < chunk_size
-                    && grid.cell_capacity(xu, yu, zu) > crate::cell::MIN_LEVEL
-                {
-                    let cell = grid.get_mut(xu, yu, zu);
-                    cell.fluid_type = crate::cell::FluidType::from_u8(fluid_type_u8);
-                    cell.level = level.min(crate::cell::MAX_LEVEL);
-                    grid.dirty = true;
+            ensure_grid(chunks, chunk_densities, chunk, chunk_size);
+            if let Some(grid) = chunks.get_mut(&chunk) {
+                for (lx, ly, lz, level, fluid_type_u8) in springs {
+                    let xu = lx as usize;
+                    let yu = ly as usize;
+                    let zu = lz as usize;
+                    if xu < chunk_size && yu < chunk_size && zu < chunk_size
+                        && grid.cell_capacity(xu, yu, zu) > crate::cell::MIN_LEVEL
+                    {
+                        let cell = grid.get_mut(xu, yu, zu);
+                        cell.fluid_type = crate::cell::FluidType::from_u8(fluid_type_u8);
+                        cell.level = level.min(crate::cell::MAX_LEVEL);
+                        grid.dirty = true;
+                        grid.has_fluid = true;
+                    }
                 }
             }
         }
         FluidEvent::AddFluid { chunk, x, y, z, fluid_type, level, is_source } => {
-            let grid = chunks
-                .entry(chunk)
-                .or_insert_with(|| ChunkFluidGrid::new(chunk_size));
-            let xu = x as usize;
-            let yu = y as usize;
-            let zu = z as usize;
-            if xu < chunk_size && yu < chunk_size && zu < chunk_size
-                && grid.cell_capacity(xu, yu, zu) > crate::cell::MIN_LEVEL
-            {
-                let cell = grid.get_mut(xu, yu, zu);
-                cell.fluid_type = fluid_type;
-                cell.level = level;
-                if is_source {
-                    // Sources stay at MAX_LEVEL via regen_sources
-                    cell.level = crate::cell::MAX_LEVEL;
+            ensure_grid(chunks, chunk_densities, chunk, chunk_size);
+            if let Some(grid) = chunks.get_mut(&chunk) {
+                let xu = x as usize;
+                let yu = y as usize;
+                let zu = z as usize;
+                if xu < chunk_size && yu < chunk_size && zu < chunk_size
+                    && grid.cell_capacity(xu, yu, zu) > crate::cell::MIN_LEVEL
+                {
+                    let cell = grid.get_mut(xu, yu, zu);
+                    cell.fluid_type = fluid_type;
+                    cell.level = level;
+                    if is_source {
+                        cell.level = crate::cell::MAX_LEVEL;
+                    }
+                    grid.dirty = true;
+                    grid.has_fluid = true;
                 }
-                grid.dirty = true;
             }
         }
     }
+}
+
+/// Ensure a full fluid grid exists for a chunk, promoting from density cache if needed.
+fn ensure_grid(
+    chunks: &mut HashMap<(i32, i32, i32), ChunkFluidGrid>,
+    chunk_densities: &HashMap<(i32, i32, i32), ChunkDensityCache>,
+    chunk: (i32, i32, i32),
+    chunk_size: usize,
+) {
+    if chunks.contains_key(&chunk) {
+        return;
+    }
+    let grid = if let Some(cache) = chunk_densities.get(&chunk) {
+        ChunkFluidGrid::from_density_cache(cache)
+    } else {
+        ChunkFluidGrid::new(chunk_size)
+    };
+    chunks.insert(chunk, grid);
 }

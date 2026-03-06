@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use crate::cell::{ChunkFluidGrid, FluidType, MIN_LEVEL, SOURCE_LEVEL};
+use crate::cell::{ChunkDensityCache, ChunkFluidGrid, FluidType, MIN_LEVEL, SOURCE_LEVEL};
 use crate::FluidConfig;
 
 /// A pending fluid transfer across a chunk boundary.
@@ -22,26 +22,48 @@ struct CrossChunkTransfer {
 /// Returns the set of chunk keys that had any fluid changes (dirty).
 pub fn tick_fluid(
     chunks: &mut HashMap<(i32, i32, i32), ChunkFluidGrid>,
+    chunk_densities: &HashMap<(i32, i32, i32), ChunkDensityCache>,
     chunk_size: usize,
     is_lava_tick: bool,
     config: &FluidConfig,
-) -> Vec<(i32, i32, i32)> {
-    let mut dirty = Vec::new();
+) -> HashSet<(i32, i32, i32)> {
+    let mut dirty: HashSet<(i32, i32, i32)> = HashSet::new();
     let mut all_transfers: Vec<CrossChunkTransfer> = Vec::new();
 
     // Collect keys to iterate
     let keys: Vec<(i32, i32, i32)> = chunks.keys().copied().collect();
 
     for key in keys {
+        // Skip chunks with no fluid and not dirty (nothing to simulate)
+        {
+            let grid = match chunks.get(&key) {
+                Some(g) => g,
+                None => continue,
+            };
+            if !grid.has_fluid && !grid.dirty {
+                continue;
+            }
+        }
+
         let (changed, transfers) = tick_chunk(chunks, key, chunk_size, is_lava_tick, config);
         if changed {
-            dirty.push(key);
+            dirty.insert(key);
         }
         all_transfers.extend(transfers);
     }
 
     // Apply cross-chunk transfers (second pass — no borrow conflicts)
     for xfer in &all_transfers {
+        // If target chunk has no grid but density exists, create grid on demand
+        if !chunks.contains_key(&xfer.dest_key) {
+            if let Some(cache) = chunk_densities.get(&xfer.dest_key) {
+                let grid = ChunkFluidGrid::from_density_cache(cache);
+                chunks.insert(xfer.dest_key, grid);
+            } else {
+                continue; // no density data, can't create grid
+            }
+        }
+
         if let Some(grid) = chunks.get_mut(&xfer.dest_key) {
             let capacity = grid.cell_capacity(xfer.dest_x, xfer.dest_y, xfer.dest_z);
             if capacity < MIN_LEVEL {
@@ -54,9 +76,8 @@ pub fn tick_fluid(
                 cell.level += actual;
                 cell.fluid_type = xfer.fluid_type;
                 grid.dirty = true;
-                if !dirty.contains(&xfer.dest_key) {
-                    dirty.push(xfer.dest_key);
-                }
+                grid.has_fluid = true;
+                dirty.insert(xfer.dest_key);
             }
         }
     }
@@ -102,6 +123,11 @@ fn tick_chunk(
     };
 
     let size = grid.size;
+
+    // Early return: if no cell has fluid, nothing to simulate
+    if !grid.has_fluid {
+        return (false, Vec::new());
+    }
 
     // Create new buffer + snapshot density
     let mut new_cells = grid.cells.clone();
@@ -149,14 +175,14 @@ fn tick_chunk(
                 let flow_rate = if is_lava { config.lava_flow_rate } else { config.water_flow_rate };
                 let horizontal_spread = if is_lava { config.lava_spread_rate } else { config.water_spread_rate };
 
-                // Gravity: try to flow down
+                // Gravity: try to flow down (4x flow rate for fast pooling)
                 if y > 0 {
                     let below_idx = z * size * size + (y - 1) * size + x;
                     if cell_density[below_idx] <= config.solid_threshold {
                         let below_capacity = (-cell_density[below_idx]).clamp(0.0, 1.0);
                         let below_space = (below_capacity - new_cells[below_idx].level).max(0.0);
                         if below_space > MIN_LEVEL {
-                            let transfer = cell.level.min(below_space).min(flow_rate * 2.0);
+                            let transfer = cell.level.min(below_space).min(flow_rate * 4.0);
                             if transfer > MIN_LEVEL {
                                 if !is_source {
                                     new_cells[idx].level -= transfer;
@@ -178,7 +204,7 @@ fn tick_chunk(
                         if below_capacity > MIN_LEVEL {
                             let below_space = (below_capacity - below_grid.cells[below_idx].level).max(0.0);
                             if below_space > MIN_LEVEL {
-                                let transfer = new_cells[idx].level.min(below_space).min(flow_rate * 2.0);
+                                let transfer = new_cells[idx].level.min(below_space).min(flow_rate * 4.0);
                                 if transfer > MIN_LEVEL {
                                     if !is_source {
                                         new_cells[idx].level -= transfer;
@@ -244,10 +270,14 @@ fn tick_chunk(
         }
     }
 
-    // Clean up tiny residual amounts
+    // Clean up tiny residual amounts and track has_fluid
+    let mut any_fluid = false;
     for cell in &mut new_cells {
         if cell.level < MIN_LEVEL && cell.level > 0.0 {
             cell.level = 0.0;
+        }
+        if cell.level >= MIN_LEVEL {
+            any_fluid = true;
         }
     }
 
@@ -256,7 +286,11 @@ fn tick_chunk(
         if let Some(grid) = chunks.get_mut(&key) {
             grid.cells = new_cells;
             grid.dirty = true;
+            grid.has_fluid = any_fluid;
         }
+    } else if let Some(grid) = chunks.get_mut(&key) {
+        // Even without changes, update has_fluid status
+        grid.has_fluid = any_fluid;
     }
 
     (changed, cross_transfers)
@@ -333,6 +367,9 @@ pub fn detect_solidification(
     let mut solidify = Vec::new();
 
     for (&key, grid) in chunks {
+        if !grid.has_fluid {
+            continue;
+        }
         let size = grid.size;
         for z in 0..size {
             for y in 0..size {
@@ -395,6 +432,10 @@ mod tests {
         ChunkFluidGrid::new(size)
     }
 
+    fn empty_density_cache() -> HashMap<(i32, i32, i32), ChunkDensityCache> {
+        HashMap::new()
+    }
+
     #[test]
     fn gravity_flows_down() {
         let mut chunks = HashMap::new();
@@ -403,11 +444,13 @@ mod tests {
         // Place water at y=8 (non-source level so it can flow)
         grid.get_mut(8, 8, 8).level = 0.8;
         grid.get_mut(8, 8, 8).fluid_type = FluidType::Water;
+        grid.has_fluid = true;
         chunks.insert(key, grid);
 
         let config = crate::FluidConfig::default();
+        let density_cache = empty_density_cache();
         // Single tick should move water one step down
-        tick_fluid(&mut chunks, 16, false, &config);
+        tick_fluid(&mut chunks, &density_cache, 16, false, &config);
 
         // Check that water exists anywhere below y=8
         let grid = &chunks[&key];
@@ -428,11 +471,13 @@ mod tests {
         let mut grid = make_chunk(16);
         grid.get_mut(8, 8, 8).level = SOURCE_LEVEL;
         grid.get_mut(8, 8, 8).fluid_type = FluidType::Water;
+        grid.has_fluid = true;
         chunks.insert(key, grid);
 
         let config = crate::FluidConfig::default();
+        let density_cache = empty_density_cache();
         // Tick
-        tick_fluid(&mut chunks, 16, false, &config);
+        tick_fluid(&mut chunks, &density_cache, 16, false, &config);
 
         // Source should still be at SOURCE_LEVEL
         regen_sources(&mut chunks);
@@ -448,12 +493,14 @@ mod tests {
         // Place water at y=8
         grid.get_mut(8, 8, 8).level = 0.5;
         grid.get_mut(8, 8, 8).fluid_type = FluidType::Water;
+        grid.has_fluid = true;
         // Make y=7 solid
         grid.set_density(8, 7, 8, 1.0);
         chunks.insert(key, grid);
 
         let config = crate::FluidConfig::default();
-        tick_fluid(&mut chunks, 16, false, &config);
+        let density_cache = empty_density_cache();
+        tick_fluid(&mut chunks, &density_cache, 16, false, &config);
 
         let grid = &chunks[&key];
         assert_eq!(grid.get(8, 7, 8).level, 0.0, "Water should not enter solid cell");
@@ -473,6 +520,7 @@ mod tests {
         grid.get_mut(9, 8, 8).level = 0.5;
         grid.get_mut(9, 8, 8).fluid_type = FluidType::Water;
 
+        grid.has_fluid = true;
         chunks.insert(key, grid);
 
         let solidify = detect_solidification(&chunks);
@@ -493,6 +541,7 @@ mod tests {
         grid.get_mut(9, 8, 8).level = 0.5;
         grid.get_mut(9, 8, 8).fluid_type = FluidType::WaterSpringLine;
 
+        grid.has_fluid = true;
         chunks.insert(key, grid);
 
         let solidify = detect_solidification(&chunks);
@@ -510,13 +559,15 @@ mod tests {
         // Place water at y=0 (chunk boundary)
         upper_grid.get_mut(8, 0, 8).level = 0.8;
         upper_grid.get_mut(8, 0, 8).fluid_type = FluidType::Water;
+        upper_grid.has_fluid = true;
         chunks.insert(upper_key, upper_grid);
 
         let lower_grid = make_chunk(16);
         chunks.insert(lower_key, lower_grid);
 
         let config = crate::FluidConfig::default();
-        tick_fluid(&mut chunks, 16, false, &config);
+        let density_cache = empty_density_cache();
+        tick_fluid(&mut chunks, &density_cache, 16, false, &config);
 
         // Fluid should appear at y=15 of lower chunk
         let lower = &chunks[&lower_key];
@@ -541,6 +592,7 @@ mod tests {
         // Place water source at (8,8,8)
         grid.get_mut(8, 8, 8).level = SOURCE_LEVEL;
         grid.get_mut(8, 8, 8).fluid_type = FluidType::Water;
+        grid.has_fluid = true;
         // Surround with solid on all 6 faces
         grid.set_density(7, 8, 8, 1.0);
         grid.set_density(9, 8, 8, 1.0);
@@ -551,9 +603,10 @@ mod tests {
         chunks.insert(key, grid);
 
         let config = crate::FluidConfig::default();
+        let density_cache = empty_density_cache();
         // Tick several times
         for _ in 0..10 {
-            tick_fluid(&mut chunks, 16, false, &config);
+            tick_fluid(&mut chunks, &density_cache, 16, false, &config);
         }
 
         // No fluid should exist outside the source cell
@@ -579,12 +632,14 @@ mod tests {
         // Place water above
         grid.get_mut(8, 8, 8).level = 0.8;
         grid.get_mut(8, 8, 8).fluid_type = FluidType::Water;
+        grid.has_fluid = true;
         chunks.insert(key, grid);
 
         let config = crate::FluidConfig::default();
+        let density_cache = empty_density_cache();
         // Multiple ticks to let fluid settle
         for _ in 0..20 {
-            tick_fluid(&mut chunks, 16, false, &config);
+            tick_fluid(&mut chunks, &density_cache, 16, false, &config);
         }
 
         // Cell at y=7 should not exceed its capacity of 0.5
