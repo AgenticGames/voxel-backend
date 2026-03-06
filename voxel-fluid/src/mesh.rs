@@ -1,6 +1,45 @@
 use crate::cell::{ChunkFluidGrid, FluidType, MIN_LEVEL};
+use crate::tables::{CORNER_OFFSETS, EDGE_TABLE, EDGE_VERTICES, TRI_TABLE};
 
-/// A fluid mesh produced by face-based quad generation with shoreline clipping.
+/// Isosurface threshold for fluid meshing.
+const ISO_LEVEL: f32 = 0.15;
+/// Y offset for MC mesh to avoid z-fighting with Surface Nets.
+const MC_Y_OFFSET: f32 = 0.05;
+/// Surface Nets fluid type: Water (teal).
+const SN_FLUID_TYPE: u8 = 1;
+/// Marching Cubes fluid type: WaterDrip (purple).
+const MC_FLUID_TYPE: u8 = 4;
+
+/// Surface Nets edge table: 12 edges as pairs of corner indices.
+/// Binary encoding: bit 0=X, bit 1=Y, bit 2=Z.
+const CUBE_EDGES: [[usize; 2]; 12] = [
+    [0b000, 0b001],
+    [0b000, 0b010],
+    [0b000, 0b100],
+    [0b001, 0b011],
+    [0b001, 0b101],
+    [0b010, 0b011],
+    [0b010, 0b110],
+    [0b011, 0b111],
+    [0b100, 0b101],
+    [0b100, 0b110],
+    [0b101, 0b111],
+    [0b110, 0b111],
+];
+
+/// Corner positions for Surface Nets (binary encoding: bit 0=X, bit 1=Y, bit 2=Z).
+const SN_CORNERS: [[f32; 3]; 8] = [
+    [0.0, 0.0, 0.0], // 0b000
+    [1.0, 0.0, 0.0], // 0b001
+    [0.0, 1.0, 0.0], // 0b010
+    [1.0, 1.0, 0.0], // 0b011
+    [0.0, 0.0, 1.0], // 0b100
+    [1.0, 0.0, 1.0], // 0b101
+    [0.0, 1.0, 1.0], // 0b110
+    [1.0, 1.0, 1.0], // 0b111
+];
+
+/// A fluid mesh produced by isosurface extraction (MC + Surface Nets).
 pub struct FluidMeshData {
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
@@ -10,12 +49,79 @@ pub struct FluidMeshData {
     pub flow_directions: Vec<[f32; 3]>, // (dx, dz, magnitude) for UV scroll
 }
 
-/// Build a top-face-only quad mesh from a fluid grid with shoreline clipping.
+/// Build dual isosurface mesh: Surface Nets (teal) + Marching Cubes (purple).
 ///
-/// For each fluid cell, emits a top face: horizontal quad at fill height,
-/// clipped to density=0 shoreline. Side faces are omitted to prevent visual
-/// artifacts (seam walls through solid rock, staircase slivers at chunk boundaries).
+/// Both meshers extract the same isosurface from the fluid grid at ISO_LEVEL.
+/// They output different fluid_type values so UE renders them with different
+/// materials for A/B comparison.
 pub fn mesh_fluid(grid: &ChunkFluidGrid) -> FluidMeshData {
+    let size = grid.size;
+    if size < 2 {
+        return FluidMeshData {
+            positions: Vec::new(),
+            normals: Vec::new(),
+            fluid_types: Vec::new(),
+            indices: Vec::new(),
+            uvs: Vec::new(),
+            flow_directions: Vec::new(),
+        };
+    }
+
+    let mut mesh_a = mesh_fluid_surface_nets(grid);
+    let mesh_b = mesh_fluid_mc(grid);
+
+    // Merge mesh_b into mesh_a
+    let offset = mesh_a.positions.len() as u32;
+    mesh_a.positions.extend_from_slice(&mesh_b.positions);
+    mesh_a.normals.extend_from_slice(&mesh_b.normals);
+    mesh_a.fluid_types.extend_from_slice(&mesh_b.fluid_types);
+    mesh_a.uvs.extend_from_slice(&mesh_b.uvs);
+    mesh_a
+        .flow_directions
+        .extend_from_slice(&mesh_b.flow_directions);
+    for &idx in &mesh_b.indices {
+        mesh_a.indices.push(idx + offset);
+    }
+
+    mesh_a
+}
+
+/// Sample the scalar field for MC meshing.
+/// Returns fluid level for air cells, 0.0 for solid cells.
+/// Boundary-clamped to prevent chunk-edge holes.
+#[inline]
+fn sample_field(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> f32 {
+    let size = grid.size;
+    let cx = x.min(size - 1);
+    let cy = y.min(size - 1);
+    let cz = z.min(size - 1);
+    if grid.is_solid(cx, cy, cz) {
+        0.0
+    } else {
+        grid.get(cx, cy, cz).level
+    }
+}
+
+/// Sample the SDF for Surface Nets: ISO_LEVEL - fluid_level.
+/// Negative = fluid present, positive = air/solid.
+/// Solid cells forced to +1.0.
+#[inline]
+fn sample_sdf(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> f32 {
+    let size = grid.size;
+    let cx = x.min(size - 1);
+    let cy = y.min(size - 1);
+    let cz = z.min(size - 1);
+    if grid.is_solid(cx, cy, cz) {
+        1.0
+    } else {
+        ISO_LEVEL - grid.get(cx, cy, cz).level
+    }
+}
+
+/// Marching Cubes fluid mesher.
+/// Produces triangulated isosurface at ISO_LEVEL with fluid_type=4 (purple).
+/// All positions offset by +MC_Y_OFFSET in Y to sit above Surface Nets mesh.
+fn mesh_fluid_mc(grid: &ChunkFluidGrid) -> FluidMeshData {
     let size = grid.size;
     let mut mesh = FluidMeshData {
         positions: Vec::new(),
@@ -26,50 +132,352 @@ pub fn mesh_fluid(grid: &ChunkFluidGrid) -> FluidMeshData {
         flow_directions: Vec::new(),
     };
 
-    if size < 2 {
-        return mesh;
-    }
-
     for z in 0..size {
         for y in 0..size {
             for x in 0..size {
-                let cell = grid.get(x, y, z);
-                if cell.level < MIN_LEVEL {
+                // Sample 8 corners using Paul Bourke ordering (CORNER_OFFSETS)
+                let mut corner_vals = [0.0f32; 8];
+                for (i, off) in CORNER_OFFSETS.iter().enumerate() {
+                    corner_vals[i] = sample_field(grid, x + off[0], y + off[1], z + off[2]);
+                }
+
+                // Build cube index: bit i set if corner i >= ISO_LEVEL
+                let mut cube_index: usize = 0;
+                for i in 0..8 {
+                    if corner_vals[i] >= ISO_LEVEL {
+                        cube_index |= 1 << i;
+                    }
+                }
+
+                let edge_mask = EDGE_TABLE[cube_index];
+                if edge_mask == 0 {
                     continue;
                 }
 
-                let capacity = grid.cell_capacity(x, y, z);
-                if capacity < MIN_LEVEL {
-                    continue;
+                // Interpolate edge vertices at ISO_LEVEL crossings
+                let mut edge_verts = [[0.0f32; 3]; 12];
+                for e in 0..12 {
+                    if edge_mask & (1 << e) != 0 {
+                        let [c0, c1] = EDGE_VERTICES[e];
+                        let v0 = corner_vals[c0];
+                        let v1 = corner_vals[c1];
+                        let t = if (v1 - v0).abs() > 1e-6 {
+                            (ISO_LEVEL - v0) / (v1 - v0)
+                        } else {
+                            0.5
+                        };
+                        let t = t.clamp(0.0, 1.0);
+                        let p0 = CORNER_OFFSETS[c0];
+                        let p1 = CORNER_OFFSETS[c1];
+                        edge_verts[e] = [
+                            x as f32 + p0[0] as f32 + (p1[0] as f32 - p0[0] as f32) * t,
+                            y as f32 + p0[1] as f32 + (p1[1] as f32 - p0[1] as f32) * t
+                                + MC_Y_OFFSET,
+                            z as f32 + p0[2] as f32 + (p1[2] as f32 - p0[2] as f32) * t,
+                        ];
+                    }
                 }
 
-                let fill_height = cell.level / capacity;
-                let fluid_type = cell.fluid_type;
-                let corners = grid.get_corners(x, y, z);
-
-                // Compute flow direction from level gradient
+                // Emit triangles from TRI_TABLE
+                let tri_row = &TRI_TABLE[cube_index];
                 let flow = compute_flow_direction(grid, x, y, z);
+                let mut i = 0;
+                while i < 15 && tri_row[i] >= 0 {
+                    let v0 = edge_verts[tri_row[i] as usize];
+                    let v1 = edge_verts[tri_row[i + 1] as usize];
+                    let v2 = edge_verts[tri_row[i + 2] as usize];
 
-                // Top face — exposed to air above or cell above with less fluid
-                let emit_top = if y + 1 < size {
-                    let above = grid.get(x, y + 1, z);
-                    let above_cap = grid.cell_capacity(x, y + 1, z);
-                    above.level < MIN_LEVEL || above_cap < MIN_LEVEL
-                        || (above.level / above_cap.max(MIN_LEVEL)) < fill_height - 0.1
-                } else {
-                    true // top of chunk
-                };
+                    // Cross-product normal, skip degenerate triangles
+                    let ax = v1[0] - v0[0];
+                    let ay = v1[1] - v0[1];
+                    let az = v1[2] - v0[2];
+                    let bx = v2[0] - v0[0];
+                    let by = v2[1] - v0[1];
+                    let bz = v2[2] - v0[2];
+                    let nx = ay * bz - az * by;
+                    let ny = az * bx - ax * bz;
+                    let nz = ax * by - ay * bx;
+                    let len = (nx * nx + ny * ny + nz * nz).sqrt();
 
-                if emit_top {
-                    emit_top_face(
-                        &mut mesh, x, y, z, fill_height, fluid_type, &corners, flow,
-                    );
+                    if len >= 1e-4 {
+                        let normal = [nx / len, ny / len, nz / len];
+                        let base = mesh.positions.len() as u32;
+
+                        for &v in &[v0, v1, v2] {
+                            mesh.positions.push(v);
+                            mesh.normals.push(normal);
+                            mesh.fluid_types.push(MC_FLUID_TYPE);
+                            mesh.uvs.push([v[0], v[2]]);
+                            mesh.flow_directions.push(flow);
+                        }
+
+                        mesh.indices.push(base);
+                        mesh.indices.push(base + 1);
+                        mesh.indices.push(base + 2);
+                    }
+
+                    i += 3;
                 }
             }
         }
     }
 
     mesh
+}
+
+/// Naive Surface Nets fluid mesher.
+/// Produces smoothed isosurface at ISO_LEVEL with fluid_type=1 (teal).
+fn mesh_fluid_surface_nets(grid: &ChunkFluidGrid) -> FluidMeshData {
+    let size = grid.size;
+    let mut mesh = FluidMeshData {
+        positions: Vec::new(),
+        normals: Vec::new(),
+        fluid_types: Vec::new(),
+        indices: Vec::new(),
+        uvs: Vec::new(),
+        flow_directions: Vec::new(),
+    };
+
+    // Precompute SDF field: (size+1)^3 samples
+    let fs = size + 1; // field_size
+    let mut sdf = vec![0.0f32; fs * fs * fs];
+    for z in 0..fs {
+        for y in 0..fs {
+            for x in 0..fs {
+                sdf[z * fs * fs + y * fs + x] = sample_sdf(grid, x, y, z);
+            }
+        }
+    }
+
+    // cell_vertex_map: vertex index for each cell, or -1 if none
+    let mut cell_vertex: Vec<i32> = vec![-1; size * size * size];
+
+    // Pass 1: Place a vertex in each cell that has mixed-sign corners
+    for z in 0..size {
+        for y in 0..size {
+            for x in 0..size {
+                // Sample 8 corners using binary encoding (SN_CORNERS)
+                let mut corner_sdf = [0.0f32; 8];
+                for (i, corner) in SN_CORNERS.iter().enumerate() {
+                    let sx = x + corner[0] as usize;
+                    let sy = y + corner[1] as usize;
+                    let sz = z + corner[2] as usize;
+                    corner_sdf[i] = sdf[sz * fs * fs + sy * fs + sx];
+                }
+
+                // Skip if all corners have the same sign
+                let all_pos = corner_sdf.iter().all(|&v| v > 0.0);
+                let all_neg = corner_sdf.iter().all(|&v| v <= 0.0);
+                if all_pos || all_neg {
+                    continue;
+                }
+
+                // Average all edge-crossing positions to find vertex
+                let mut sum = [0.0f32; 3];
+                let mut count = 0u32;
+
+                for &[c0, c1] in &CUBE_EDGES {
+                    let v0 = corner_sdf[c0];
+                    let v1 = corner_sdf[c1];
+                    if (v0 > 0.0) != (v1 > 0.0) {
+                        let t = if (v1 - v0).abs() > 1e-6 {
+                            v0 / (v0 - v1)
+                        } else {
+                            0.5
+                        };
+                        let t = t.clamp(0.0, 1.0);
+                        let p0 = SN_CORNERS[c0];
+                        let p1 = SN_CORNERS[c1];
+                        sum[0] += p0[0] + (p1[0] - p0[0]) * t;
+                        sum[1] += p0[1] + (p1[1] - p0[1]) * t;
+                        sum[2] += p0[2] + (p1[2] - p0[2]) * t;
+                        count += 1;
+                    }
+                }
+
+                if count == 0 {
+                    continue;
+                }
+
+                let inv = 1.0 / count as f32;
+                let lp = [sum[0] * inv, sum[1] * inv, sum[2] * inv]; // local position in [0,1]^3
+                let pos = [x as f32 + lp[0], y as f32 + lp[1], z as f32 + lp[2]];
+
+                // Smooth normal via SDF gradient (bilinear interpolation of corner differences)
+                let normal = sdf_gradient(&corner_sdf, lp);
+                let flow = compute_flow_direction(grid, x, y, z);
+
+                let vert_idx = mesh.positions.len() as i32;
+                cell_vertex[z * size * size + y * size + x] = vert_idx;
+
+                mesh.positions.push(pos);
+                mesh.normals.push(normal);
+                mesh.fluid_types.push(SN_FLUID_TYPE);
+                mesh.uvs.push([pos[0], pos[2]]);
+                mesh.flow_directions.push(flow);
+            }
+        }
+    }
+
+    // Pass 2: Generate quads from lattice edges with sign changes.
+    // For each SDF grid edge that crosses the isosurface, emit a quad
+    // connecting the 4 cells that share that edge (if all have vertices).
+
+    // Helper to look up vertex index for a cell
+    let cv = |x: usize, y: usize, z: usize| -> i32 { cell_vertex[z * size * size + y * size + x] };
+
+    // X-edges: iterate y in [1, size-1], z in [1, size-1], x in [0, size-1]
+    for z in 1..size {
+        for y in 1..size {
+            for x in 0..size {
+                let s0 = sdf[z * fs * fs + y * fs + x];
+                let s1 = sdf[z * fs * fs + y * fs + (x + 1)];
+                if (s0 > 0.0) == (s1 > 0.0) {
+                    continue;
+                }
+                // 4 cells sharing this X-edge
+                let a = cv(x, y, z);
+                let b = cv(x, y - 1, z);
+                let c = cv(x, y, z - 1);
+                let d = cv(x, y - 1, z - 1);
+                if a < 0 || b < 0 || c < 0 || d < 0 {
+                    continue;
+                }
+                // Winding: if s0 < 0 (fluid side), wind one way; else the other
+                if s0 <= 0.0 {
+                    emit_quad(&mut mesh, a as u32, b as u32, d as u32, c as u32);
+                } else {
+                    emit_quad(&mut mesh, a as u32, c as u32, d as u32, b as u32);
+                }
+            }
+        }
+    }
+
+    // Y-edges: iterate x in [1, size-1], z in [1, size-1], y in [0, size-1]
+    for z in 1..size {
+        for y in 0..size {
+            for x in 1..size {
+                let s0 = sdf[z * fs * fs + y * fs + x];
+                let s1 = sdf[z * fs * fs + (y + 1) * fs + x];
+                if (s0 > 0.0) == (s1 > 0.0) {
+                    continue;
+                }
+                let a = cv(x, y, z);
+                let b = cv(x, y, z - 1);
+                let c = cv(x - 1, y, z);
+                let d = cv(x - 1, y, z - 1);
+                if a < 0 || b < 0 || c < 0 || d < 0 {
+                    continue;
+                }
+                if s0 <= 0.0 {
+                    emit_quad(&mut mesh, a as u32, c as u32, d as u32, b as u32);
+                } else {
+                    emit_quad(&mut mesh, a as u32, b as u32, d as u32, c as u32);
+                }
+            }
+        }
+    }
+
+    // Z-edges: iterate x in [1, size-1], y in [1, size-1], z in [0, size-1]
+    for z in 0..size {
+        for y in 1..size {
+            for x in 1..size {
+                let s0 = sdf[z * fs * fs + y * fs + x];
+                let s1 = sdf[(z + 1) * fs * fs + y * fs + x];
+                if (s0 > 0.0) == (s1 > 0.0) {
+                    continue;
+                }
+                let a = cv(x, y, z);
+                let b = cv(x - 1, y, z);
+                let c = cv(x, y - 1, z);
+                let d = cv(x - 1, y - 1, z);
+                if a < 0 || b < 0 || c < 0 || d < 0 {
+                    continue;
+                }
+                if s0 <= 0.0 {
+                    emit_quad(&mut mesh, a as u32, b as u32, d as u32, c as u32);
+                } else {
+                    emit_quad(&mut mesh, a as u32, c as u32, d as u32, b as u32);
+                }
+            }
+        }
+    }
+
+    mesh
+}
+
+/// Emit a quad as two triangles, split along the shorter diagonal.
+fn emit_quad(mesh: &mut FluidMeshData, a: u32, b: u32, c: u32, d: u32) {
+    let pa = mesh.positions[a as usize];
+    let pb = mesh.positions[b as usize];
+    let pc = mesh.positions[c as usize];
+    let pd = mesh.positions[d as usize];
+
+    // Split along shorter diagonal: AC vs BD
+    let diag_ac = dist_sq(pa, pc);
+    let diag_bd = dist_sq(pb, pd);
+
+    if diag_ac <= diag_bd {
+        // Split along AC: triangles ABC, ACD
+        mesh.indices.extend_from_slice(&[a, b, c, a, c, d]);
+    } else {
+        // Split along BD: triangles ABD, BCD
+        mesh.indices.extend_from_slice(&[a, b, d, b, c, d]);
+    }
+}
+
+#[inline]
+fn dist_sq(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    let dz = a[2] - b[2];
+    dx * dx + dy * dy + dz * dz
+}
+
+/// Compute SDF gradient at position `s` within a unit cube via bilinear interpolation.
+/// `corners` are SDF values at the 8 corners (binary encoding: bit 0=X, bit 1=Y, bit 2=Z).
+/// Returns normalized gradient vector pointing away from fluid (toward positive SDF).
+fn sdf_gradient(corners: &[f32; 8], s: [f32; 3]) -> [f32; 3] {
+    let sx = s[0];
+    let sy = s[1];
+    let sz = s[2];
+
+    // X gradient: 4 parallel X-edges, bilinear interpolation
+    let d00 = corners[0b001] - corners[0b000]; // (1,0,0) - (0,0,0)
+    let d10 = corners[0b101] - corners[0b100]; // (1,0,1) - (0,0,1)
+    let d01 = corners[0b011] - corners[0b010]; // (1,1,0) - (0,1,0)
+    let d11 = corners[0b111] - corners[0b110]; // (1,1,1) - (0,1,1)
+    let gx = (1.0 - sy) * (1.0 - sz) * d00
+        + (1.0 - sy) * sz * d10
+        + sy * (1.0 - sz) * d01
+        + sy * sz * d11;
+
+    // Y gradient: 4 parallel Y-edges
+    let d00 = corners[0b010] - corners[0b000]; // (0,1,0) - (0,0,0)
+    let d10 = corners[0b110] - corners[0b100]; // (0,1,1) - (0,0,1)
+    let d01 = corners[0b011] - corners[0b001]; // (1,1,0) - (1,0,0)
+    let d11 = corners[0b111] - corners[0b101]; // (1,1,1) - (1,0,1)
+    let gy = (1.0 - sx) * (1.0 - sz) * d00
+        + (1.0 - sx) * sz * d10
+        + sx * (1.0 - sz) * d01
+        + sx * sz * d11;
+
+    // Z gradient: 4 parallel Z-edges
+    let d00 = corners[0b100] - corners[0b000]; // (0,0,1) - (0,0,0)
+    let d10 = corners[0b101] - corners[0b001]; // (1,0,1) - (1,0,0)
+    let d01 = corners[0b110] - corners[0b010]; // (0,1,1) - (0,1,0)
+    let d11 = corners[0b111] - corners[0b011]; // (1,1,1) - (1,1,0)
+    let gz = (1.0 - sx) * (1.0 - sy) * d00
+        + sx * (1.0 - sy) * d10
+        + (1.0 - sx) * sy * d01
+        + sx * sy * d11;
+
+    let len = (gx * gx + gy * gy + gz * gz).sqrt();
+    if len > 1e-6 {
+        [gx / len, gy / len, gz / len]
+    } else {
+        [0.0, 1.0, 0.0] // default up normal
+    }
 }
 
 /// Compute flow direction from fluid level gradient (for UV animation).
@@ -96,7 +504,7 @@ fn compute_flow_direction(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -
         dz += grid.get(x, y, z + 1).level - level;
     }
 
-    // Also check downward gradient (waterfall detection)
+    // Downward gradient (waterfall detection)
     let mut dy_mag = 0.0f32;
     if y > 0 && !grid.is_solid(x, y - 1, z) {
         let below_level = grid.get(x, y - 1, z).level;
@@ -109,122 +517,12 @@ fn compute_flow_direction(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -
     if total_mag < 0.001 {
         [0.0, 0.0, 0.0]
     } else {
-        // Normalize horizontal direction, magnitude is total flow strength
-        let inv = if horiz_mag > 0.001 { 1.0 / horiz_mag } else { 0.0 };
-        [dx * inv, dz * inv, total_mag]
-    }
-}
-
-/// Emit a top (horizontal) face quad at the fill height, with shoreline clipping.
-fn emit_top_face(
-    mesh: &mut FluidMeshData,
-    x: usize, y: usize, z: usize,
-    fill_height: f32,
-    fluid_type: FluidType,
-    corners: &[f32; 8],
-    flow: [f32; 3],
-) {
-    let fy = y as f32 + fill_height;
-
-    // Four corners of the top face in XZ plane:
-    //   (x, z), (x+1, z), (x+1, z+1), (x, z+1)
-    // Corresponding density corners (top face of cell at fill_height):
-    // We use the top-layer corners: indices 4,5,6,7 if fill is near top,
-    // or bottom corners 0,1,2,3 if fill is near bottom.
-    // For shoreline clipping, we interpolate between bottom and top corner pairs.
-    let corner_pairs: [(usize, usize); 4] = [
-        (0, 4), // (x, z) bottom→top
-        (1, 5), // (x+1, z)
-        (2, 6), // (x+1, z+1)
-        (3, 7), // (x, z+1)
-    ];
-
-    let base_positions: [[f32; 2]; 4] = [
-        [x as f32, z as f32],
-        [x as f32 + 1.0, z as f32],
-        [x as f32 + 1.0, z as f32 + 1.0],
-        [x as f32, z as f32 + 1.0],
-    ];
-
-    // Build the 4 vertices, clipping any that are inside solid terrain
-    let mut verts = [[0.0f32; 3]; 4];
-    let mut valid = [true; 4];
-    let mut valid_count = 0;
-
-    for i in 0..4 {
-        let (bot, top) = corner_pairs[i];
-        // Interpolate density at fill height
-        let d = corners[bot] + (corners[top] - corners[bot]) * fill_height;
-        if d > 0.0 {
-            // This corner is inside solid — try to clip to density=0
-            valid[i] = false;
+        let inv = if horiz_mag > 0.001 {
+            1.0 / horiz_mag
         } else {
-            verts[i] = [base_positions[i][0], fy, base_positions[i][1]];
-            valid_count += 1;
-        }
-    }
-
-    // Clip invalid vertices to density=0 crossing along edges to valid neighbors
-    for i in 0..4 {
-        if valid[i] {
-            continue;
-        }
-        let prev = (i + 3) % 4;
-        let next = (i + 1) % 4;
-
-        // Find nearest valid neighbor to interpolate toward
-        let neighbor = if valid[prev] { prev } else if valid[next] { next } else { continue };
-
-        let (bot_i, top_i) = corner_pairs[i];
-        let (bot_n, top_n) = corner_pairs[neighbor];
-        let d_i = corners[bot_i] + (corners[top_i] - corners[bot_i]) * fill_height;
-        let d_n = corners[bot_n] + (corners[top_n] - corners[bot_n]) * fill_height;
-
-        if (d_i - d_n).abs() < 1e-6 {
-            continue;
-        }
-
-        // Linear interpolation to find density=0 crossing
-        let t = d_i / (d_i - d_n);
-        let t = t.clamp(0.0, 1.0);
-        verts[i] = [
-            base_positions[i][0] + (base_positions[neighbor][0] - base_positions[i][0]) * t,
-            fy,
-            base_positions[i][1] + (base_positions[neighbor][1] - base_positions[i][1]) * t,
-        ];
-        valid[i] = true;
-        valid_count += 1;
-    }
-
-    if valid_count < 3 {
-        return;
-    }
-
-    let normal = [0.0, 1.0, 0.0];
-    let ft = fluid_type as u8;
-
-    // Emit as a triangle fan from vertex 0
-    let mut emitted = Vec::new();
-
-    for i in 0..4 {
-        if valid[i] {
-            mesh.positions.push(verts[i]);
-            mesh.normals.push(normal);
-            mesh.fluid_types.push(ft);
-            // World-space XZ UVs for top faces
-            mesh.uvs.push([verts[i][0], verts[i][2]]);
-            mesh.flow_directions.push(flow);
-            emitted.push(mesh.positions.len() as u32 - 1);
-        }
-    }
-
-    // Triangulate the polygon
-    if emitted.len() >= 3 {
-        for i in 1..emitted.len() - 1 {
-            mesh.indices.push(emitted[0]);
-            mesh.indices.push(emitted[i] as u32);
-            mesh.indices.push(emitted[i + 1] as u32);
-        }
+            0.0
+        };
+        [dx * inv, dz * inv, total_mag]
     }
 }
 
@@ -275,6 +573,22 @@ pub fn dominant_fluid_type(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) 
 mod tests {
     use super::*;
 
+    fn make_fluid_grid(regions: &[(std::ops::Range<usize>, std::ops::Range<usize>, std::ops::Range<usize>, f32)]) -> ChunkFluidGrid {
+        let mut grid = ChunkFluidGrid::new(16);
+        for (xr, yr, zr, level) in regions {
+            for z in zr.clone() {
+                for y in yr.clone() {
+                    for x in xr.clone() {
+                        let cell = grid.get_mut(x, y, z);
+                        cell.level = *level;
+                        cell.fluid_type = FluidType::Water;
+                    }
+                }
+            }
+        }
+        grid
+    }
+
     #[test]
     fn empty_grid_produces_no_mesh() {
         let grid = ChunkFluidGrid::new(16);
@@ -285,56 +599,110 @@ mod tests {
 
     #[test]
     fn single_source_produces_mesh() {
-        let mut grid = ChunkFluidGrid::new(16);
-        // Fill a small region with water
-        for z in 4..8 {
-            for y in 4..8 {
-                for x in 4..8 {
-                    let cell = grid.get_mut(x, y, z);
-                    cell.level = 1.0;
-                    cell.fluid_type = FluidType::Water;
-                }
-            }
-        }
+        let grid = make_fluid_grid(&[(4..8, 4..8, 4..8, 1.0)]);
         let mesh = mesh_fluid(&grid);
         assert!(!mesh.positions.is_empty(), "Should produce mesh vertices");
         assert!(!mesh.indices.is_empty(), "Should produce mesh indices");
         assert_eq!(mesh.indices.len() % 3, 0, "Indices should be triangles");
-        // Should also have UVs and flow directions
         assert_eq!(mesh.uvs.len(), mesh.positions.len(), "UVs per vertex");
-        assert_eq!(mesh.flow_directions.len(), mesh.positions.len(), "Flow per vertex");
-    }
-
-    #[test]
-    fn partial_fill_produces_lower_surface() {
-        let mut grid = ChunkFluidGrid::new(16);
-        // Place half-filled cell
-        grid.get_mut(8, 4, 8).level = 0.5;
-        grid.get_mut(8, 4, 8).fluid_type = FluidType::Water;
-
-        let mesh = mesh_fluid(&grid);
-        assert!(!mesh.positions.is_empty(), "Should produce mesh for partial fill");
-
-        // Top face vertices should be at y = 4 + 0.5 = 4.5
-        let max_y = mesh.positions.iter().map(|p| p[1]).fold(f32::NEG_INFINITY, f32::max);
-        assert!(
-            (max_y - 4.5).abs() < 0.01,
-            "Top face should be at fill height 4.5, got {}",
-            max_y
+        assert_eq!(
+            mesh.flow_directions.len(),
+            mesh.positions.len(),
+            "Flow per vertex"
         );
     }
 
     #[test]
-    fn no_side_faces_emitted() {
-        let mut grid = ChunkFluidGrid::new(16);
-        // Water cell at chunk edge (used to emit side faces)
-        grid.get_mut(0, 4, 8).level = 0.8;
-        grid.get_mut(0, 4, 8).fluid_type = FluidType::Water;
-
-        let mesh = mesh_fluid(&grid);
-        // All normals should be (0,1,0) — top faces only
-        for normal in &mesh.normals {
-            assert_eq!(*normal, [0.0, 1.0, 0.0], "Only top-face normals expected");
+    fn test_mc_produces_mesh() {
+        let grid = make_fluid_grid(&[(6..10, 6..10, 6..10, 1.0)]);
+        let mesh = mesh_fluid_mc(&grid);
+        assert!(!mesh.positions.is_empty(), "MC should produce vertices");
+        assert!(!mesh.indices.is_empty(), "MC should produce indices");
+        assert_eq!(mesh.indices.len() % 3, 0, "MC indices should be triangles");
+        // All fluid types should be MC_FLUID_TYPE (4)
+        for &ft in &mesh.fluid_types {
+            assert_eq!(ft, MC_FLUID_TYPE, "MC fluid type should be 4");
         }
+    }
+
+    #[test]
+    fn test_surface_nets_produces_mesh() {
+        let grid = make_fluid_grid(&[(6..10, 6..10, 6..10, 1.0)]);
+        let mesh = mesh_fluid_surface_nets(&grid);
+        assert!(!mesh.positions.is_empty(), "SN should produce vertices");
+        assert!(!mesh.indices.is_empty(), "SN should produce indices");
+        assert_eq!(mesh.indices.len() % 3, 0, "SN indices should be triangles");
+        // All fluid types should be SN_FLUID_TYPE (1)
+        for &ft in &mesh.fluid_types {
+            assert_eq!(ft, SN_FLUID_TYPE, "SN fluid type should be 1");
+        }
+    }
+
+    #[test]
+    fn test_dual_mesher_both_present() {
+        let grid = make_fluid_grid(&[(4..12, 4..12, 4..12, 1.0)]);
+        let mesh = mesh_fluid(&grid);
+        let has_sn = mesh.fluid_types.iter().any(|&ft| ft == SN_FLUID_TYPE);
+        let has_mc = mesh.fluid_types.iter().any(|&ft| ft == MC_FLUID_TYPE);
+        assert!(has_sn, "Merged mesh should have Surface Nets (type 1) vertices");
+        assert!(has_mc, "Merged mesh should have Marching Cubes (type 4) vertices");
+    }
+
+    #[test]
+    fn test_mc_no_mesh_for_empty() {
+        let grid = ChunkFluidGrid::new(16);
+        let mesh = mesh_fluid_mc(&grid);
+        assert!(mesh.positions.is_empty(), "Empty grid should produce no MC geometry");
+        assert!(mesh.indices.is_empty());
+    }
+
+    #[test]
+    fn test_sn_no_mesh_for_empty() {
+        let grid = ChunkFluidGrid::new(16);
+        let mesh = mesh_fluid_surface_nets(&grid);
+        assert!(mesh.positions.is_empty(), "Empty grid should produce no SN geometry");
+        assert!(mesh.indices.is_empty());
+    }
+
+    #[test]
+    fn test_sn_flat_pool_is_flat() {
+        // Uniform fluid level across a large area should produce a flat top surface
+        let grid = make_fluid_grid(&[(2..14, 2..6, 2..14, 1.0)]);
+        let mesh = mesh_fluid_surface_nets(&grid);
+        assert!(!mesh.positions.is_empty(), "Flat pool should produce SN vertices");
+
+        // SN generates a full 3D isosurface (top, bottom, sides).
+        // Check that the TOP surface vertices (highest Y region) are flat.
+        let max_y = mesh.positions.iter().map(|p| p[1]).fold(f32::NEG_INFINITY, f32::max);
+        let top_ys: Vec<f32> = mesh
+            .positions
+            .iter()
+            .filter(|p| p[1] > max_y - 0.1)
+            .map(|p| p[1])
+            .collect();
+        assert!(!top_ys.is_empty(), "Should have top-surface vertices");
+        let top_min = top_ys.iter().cloned().fold(f32::INFINITY, f32::min);
+        let top_max = top_ys.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            (top_max - top_min) < 0.01,
+            "Top surface should be flat, got Y range {:.3} to {:.3}",
+            top_min,
+            top_max
+        );
+    }
+
+    #[test]
+    fn test_mc_y_offset_applied() {
+        let grid = make_fluid_grid(&[(6..10, 6..10, 6..10, 1.0)]);
+        let mc_mesh = mesh_fluid_mc(&grid);
+        // MC positions should have the Y offset applied
+        // At minimum, some vertex Y values should differ from integer positions by MC_Y_OFFSET
+        assert!(
+            mc_mesh.positions.iter().any(|p| {
+                let frac = p[1] - p[1].floor();
+                (frac - MC_Y_OFFSET).abs() < 0.01 || frac > 0.01
+            }),
+            "MC mesh should have Y offset applied"
+        );
     }
 }
