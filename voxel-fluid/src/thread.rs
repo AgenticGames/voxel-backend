@@ -151,6 +151,22 @@ fn handle_event(
             };
             let _ = reply_tx.send(snapshot);
         }
+        FluidEvent::PlaceGeologicalSprings { chunk, springs } => {
+            let grid = chunks
+                .entry(chunk)
+                .or_insert_with(|| ChunkFluidGrid::new(chunk_size));
+            for (lx, ly, lz, level) in springs {
+                let xu = lx as usize;
+                let yu = ly as usize;
+                let zu = lz as usize;
+                if xu < chunk_size && yu < chunk_size && zu < chunk_size && !grid.is_solid(xu, yu, zu) {
+                    let cell = grid.get_mut(xu, yu, zu);
+                    cell.fluid_type = crate::cell::FluidType::Water;
+                    cell.level = level.min(crate::cell::MAX_LEVEL);
+                    grid.dirty = true;
+                }
+            }
+        }
         FluidEvent::AddFluid { chunk, x, y, z, fluid_type, level, is_source } => {
             let grid = chunks
                 .entry(chunk)

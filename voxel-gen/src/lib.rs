@@ -4,6 +4,9 @@ pub mod worm;
 pub mod blend;
 pub mod formations;
 pub mod pools;
+pub mod springs;
+pub mod lava_tubes;
+pub mod rivers;
 pub mod crystal_placements;
 pub mod hermite_extract;
 pub mod pipeline;
@@ -15,6 +18,7 @@ use voxel_core::chunk::{Chunk, ChunkCoord};
 use config::GenerationConfig;
 use density::DensityField;
 pub use pools::{FluidSeed, PoolDescriptor};
+pub use springs::{SpringDescriptor, SpringType, LavaDescriptor};
 pub use crystal_placements::CrystalPlacement;
 
 /// Top-level function to generate a single chunk
@@ -71,6 +75,25 @@ pub fn generate_density(coord: ChunkCoord, config: &GenerationConfig) -> (Densit
         worm::carve::carve_junction_sphere(&mut density, *start, junction_radius, world_origin, config.worm.falloff_power);
         worm::carve::carve_junction_sphere(&mut density, *end, junction_radius, world_origin, config.worm.falloff_power);
     }
+
+    // Step 3a: Carve lava tubes (basalt-lined tunnels at depth)
+    let _tube_lava = lava_tubes::carve_lava_tubes(
+        &mut density,
+        &config.lava_tubes,
+        (world_origin.x as f64, world_origin.y as f64, world_origin.z as f64),
+        config.seed,
+        c_seed,
+    );
+
+    // Step 3a2: Carve underground rivers (wide flat passages in limestone)
+    let _river_springs = rivers::carve_rivers(
+        &mut density,
+        &config.rivers,
+        &config.water_table,
+        (world_origin.x as f64, world_origin.y as f64, world_origin.z as f64),
+        config.seed,
+        c_seed,
+    );
 
     // Step 3b: Place cave pools (water/lava lakes on cave floors)
     let (pool_descriptors, fluid_seeds) = pools::place_pools(

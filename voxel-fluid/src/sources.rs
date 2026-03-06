@@ -6,16 +6,15 @@ use crate::FluidConfig;
 
 /// Place initial fluid sources in a chunk based on noise and terrain analysis.
 ///
-/// Water springs: placed where air meets solid with high noise value.
-/// Lava sources: placed deep underground with high noise value.
-/// Finite water pockets: placed in enclosed air spaces.
+/// Water springs are now handled by the geological spring detection system
+/// (PlaceGeologicalSprings events from the worker thread).
+/// This function only places noise-driven lava sources deep underground.
 pub fn place_sources(
     grid: &mut ChunkFluidGrid,
     chunk: (i32, i32, i32),
     chunk_size: usize,
     config: &FluidConfig,
 ) {
-    let water_noise = Simplex3D::new(config.seed.wrapping_add(500));
     let lava_noise = Simplex3D::new(config.seed.wrapping_add(501));
 
     let size = grid.size;
@@ -35,43 +34,7 @@ pub fn place_sources(
                 let wy = origin_y + y as f64;
                 let wz = origin_z + z as f64;
 
-                // Compute bias terms once per cell
-                let air_count = count_air_neighbors(grid, x, y, z);
-                let solid_dirs = count_solid_face_directions(grid, x, y, z);
-
-                // Water springs: air cell adjacent to solid with high noise
-                if has_solid_neighbor(grid, x, y, z) {
-                    // Water depth filtering
-                    if wy < config.water_depth_min || wy > config.water_depth_max {
-                        // Skip water placement outside depth range
-                    } else {
-                        let freq = config.water_noise_frequency;
-                        let val = water_noise.sample(wx * freq, wy * freq, wz * freq);
-                        let norm = val * 0.5 + 0.5;
-
-                        let mut effective_threshold = config.water_spring_threshold;
-                        // Apply cavern bias
-                        effective_threshold -= config.cavern_source_bias * (air_count as f64 / 26.0);
-                        // Apply tunnel bend bias
-                        if solid_dirs >= 3 {
-                            effective_threshold -= config.tunnel_bend_threshold * ((solid_dirs - 2) as f64 / 4.0);
-                        }
-                        if effective_threshold < 0.0 {
-                            effective_threshold = 0.0;
-                        }
-
-                        if norm > effective_threshold {
-                            let cell = grid.get_mut(x, y, z);
-                            cell.level = SOURCE_LEVEL;
-                            cell.fluid_type = FluidType::Water;
-                            grid.dirty = true;
-                            continue;
-                        }
-                    }
-                }
-
                 // Lava sources: deep underground with high noise
-                // Apply lava depth filtering
                 if wy < config.lava_depth_min {
                     continue;
                 }
@@ -80,12 +43,16 @@ pub fn place_sources(
                     let val = lava_noise.sample(wx * freq, wy * freq, wz * freq);
                     let norm = val * 0.5 + 0.5;
 
+                    let air_count = count_air_neighbors(grid, x, y, z);
+                    let solid_dirs = count_solid_face_directions(grid, x, y, z);
+
                     let mut effective_threshold = config.lava_source_threshold;
                     // Apply cavern bias
                     effective_threshold -= config.cavern_source_bias * (air_count as f64 / 26.0);
                     // Apply tunnel bend bias
                     if solid_dirs >= 3 {
-                        effective_threshold -= config.tunnel_bend_threshold * ((solid_dirs - 2) as f64 / 4.0);
+                        effective_threshold -=
+                            config.tunnel_bend_threshold * ((solid_dirs - 2) as f64 / 4.0);
                     }
                     if effective_threshold < 0.0 {
                         effective_threshold = 0.0;
@@ -103,30 +70,7 @@ pub fn place_sources(
     }
 }
 
-/// Check if a cell has any solid face-adjacent neighbor.
-fn has_solid_neighbor(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> bool {
-    let size = grid.size;
-    let neighbors: [(i32, i32, i32); 6] = [
-        (x as i32 + 1, y as i32, z as i32),
-        (x as i32 - 1, y as i32, z as i32),
-        (x as i32, y as i32 + 1, z as i32),
-        (x as i32, y as i32 - 1, z as i32),
-        (x as i32, y as i32, z as i32 + 1),
-        (x as i32, y as i32, z as i32 - 1),
-    ];
-
-    for (nx, ny, nz) in neighbors {
-        if nx >= 0 && nx < size as i32 && ny >= 0 && ny < size as i32 && nz >= 0 && nz < size as i32 {
-            if grid.is_solid(nx as usize, ny as usize, nz as usize) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 /// Count air cells in the 3x3x3 Moore neighborhood (26 surrounding cells).
-/// Air = not solid in the solid mask.
 fn count_air_neighbors(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> u8 {
     let size = grid.size as i32;
     let mut count: u8 = 0;
@@ -144,7 +88,6 @@ fn count_air_neighbors(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> u
                         count += 1;
                     }
                 }
-                // Out-of-bounds neighbors are not counted
             }
         }
     }
@@ -185,9 +128,15 @@ mod tests {
         let mut grid = ChunkFluidGrid::new(16);
         let config = FluidConfig::default();
         place_sources(&mut grid, (0, 0, 0), 16, &config);
-        // With no solid cells, no water springs should be placed
-        let water_count: usize = grid.cells.iter().filter(|c| c.level > 0.0 && c.fluid_type == FluidType::Water).count();
-        assert_eq!(water_count, 0, "No water springs without solid neighbors");
+        // With no solid cells, no lava sources should be placed (lava doesn't require solid neighbors)
+        // but noise threshold is very high (0.98) so unlikely in empty grid
+        let count: usize = grid
+            .cells
+            .iter()
+            .filter(|c| c.level > 0.0)
+            .count();
+        // In an empty grid at y=0 (above lava_depth_max of -50), no lava either
+        assert_eq!(count, 0, "No sources in empty grid above lava depth");
     }
 
     #[test]
@@ -201,13 +150,16 @@ mod tests {
                 }
             }
         }
-        // Use very low threshold so sources are abundant
-        let config = FluidConfig {
-            water_spring_threshold: 0.01,
-            ..FluidConfig::default()
-        };
+        // Lava sources only appear deep; at chunk (0,0,0), wy ranges 0-15 which is above
+        // lava_depth_max (-50), so no lava sources expected with default config.
+        let config = FluidConfig::default();
         place_sources(&mut grid, (0, 0, 0), 16, &config);
-        let water_count: usize = grid.cells.iter().filter(|c| c.level > 0.0).count();
-        assert!(water_count > 0, "Should place some water sources near solid surface");
+        // Water is now handled by geological springs, not by this function
+        let water_count: usize = grid
+            .cells
+            .iter()
+            .filter(|c| c.level > 0.0 && c.fluid_type == FluidType::Water)
+            .count();
+        assert_eq!(water_count, 0, "Water springs are now geological, not noise-based");
     }
 }

@@ -485,6 +485,64 @@ fn handle_request(
                         mask,
                     });
                     let _ = fluid_event_tx.send(FluidEvent::PlaceSources { chunk });
+
+                    // Detect geological springs (spring lines + vadose drips)
+                    let mut geo_springs: Vec<(u8, u8, u8, f32)> = Vec::new();
+                    {
+                        let springs = voxel_gen::springs::detect_spring_lines(
+                            density, chunk, cfg.chunk_size,
+                            &cfg.water_table, &cfg.ore.host_rock, cfg.seed,
+                        );
+                        for s in &springs {
+                            geo_springs.push((s.lx, s.ly, s.lz, s.level));
+                        }
+                        let drips = voxel_gen::springs::detect_vadose_drips(
+                            density, chunk, cfg.chunk_size,
+                            &cfg.water_table, cfg.seed,
+                        );
+                        for d in &drips {
+                            geo_springs.push((d.lx, d.ly, d.lz, d.level));
+                        }
+                        // Hydrothermal springs near heat sources
+                        let hydro = voxel_gen::springs::detect_hydrothermal_springs(
+                            density, chunk, cfg.chunk_size,
+                            &cfg.water_table, &cfg.hydrothermal, cfg.seed,
+                        );
+                        for h in &hydro {
+                            geo_springs.push((h.lx, h.ly, h.lz, h.level));
+                        }
+                        // Artesian springs from confined aquifer
+                        let artesian = voxel_gen::springs::detect_artesian_springs(
+                            density, chunk, cfg.chunk_size,
+                            &cfg.artesian, cfg.seed,
+                        );
+                        for a in &artesian {
+                            geo_springs.push((a.lx, a.ly, a.lz, a.level));
+                        }
+                    }
+                    if !geo_springs.is_empty() {
+                        let _ = fluid_event_tx.send(FluidEvent::PlaceGeologicalSprings {
+                            chunk,
+                            springs: geo_springs,
+                        });
+                    }
+
+                    // Detect pipe lava sources near kimberlite
+                    let pipe_lava = voxel_gen::springs::detect_pipe_lava(
+                        density, chunk, cfg.chunk_size,
+                        &cfg.pipe_lava, cfg.seed,
+                    );
+                    for lv in &pipe_lava {
+                        let _ = fluid_event_tx.send(FluidEvent::AddFluid {
+                            chunk,
+                            x: lv.lx,
+                            y: lv.ly,
+                            z: lv.lz,
+                            fluid_type: voxel_fluid::cell::FluidType::Lava,
+                            level: lv.level,
+                            is_source: true,
+                        });
+                    }
                 }
             }
 
@@ -788,8 +846,17 @@ fn handle_request(
 
             // Stress/collapse deferred to sleep-only — no live stress update
 
-            // Send terrain modifications to fluid thread
+            // Send terrain modifications to fluid thread + detect aquifer breaches
             {
+                // Approximate mined cells: cells near the mine center in each dirty chunk
+                let mine_cx = (center.x / cfg.chunk_size as f32).floor() as i32;
+                let mine_cy = (center.y / cfg.chunk_size as f32).floor() as i32;
+                let mine_cz = (center.z / cfg.chunk_size as f32).floor() as i32;
+                let mine_lx = ((center.x - mine_cx as f32 * cfg.chunk_size as f32) as usize).min(cfg.chunk_size - 1);
+                let mine_ly = ((center.y - mine_cy as f32 * cfg.chunk_size as f32) as usize).min(cfg.chunk_size - 1);
+                let mine_lz = ((center.z - mine_cz as f32 * cfg.chunk_size as f32) as usize).min(cfg.chunk_size - 1);
+                let mined_cells = vec![(mine_lx, mine_ly, mine_lz)];
+
                 let s = store.read().unwrap();
                 for &key in &dirty_keys {
                     if let Some(density) = s.density_fields.get(&key) {
@@ -798,6 +865,24 @@ fn handle_request(
                             chunk: key,
                             mask,
                         });
+
+                        // Detect aquifer breaches near the mined area
+                        let breaches = voxel_gen::springs::detect_aquifer_breaches(
+                            density, key, cfg.chunk_size,
+                            &cfg.water_table, &cfg.ore.host_rock, cfg.seed,
+                            &mined_cells,
+                        );
+                        for b in &breaches {
+                            let _ = fluid_event_tx.send(FluidEvent::AddFluid {
+                                chunk: key,
+                                x: b.lx,
+                                y: b.ly,
+                                z: b.lz,
+                                fluid_type: voxel_fluid::cell::FluidType::Water,
+                                level: b.level,
+                                is_source: true,
+                            });
+                        }
                     }
                 }
             }

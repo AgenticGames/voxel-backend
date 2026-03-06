@@ -550,6 +550,25 @@ fn assign_material(
         }
     }
 
+    // ── 6.7. Artesian aquifer lens (thin sandstone in granite/slate) ──
+    // Geologically: relict sedimentary beds surviving metamorphism.
+    // This is checked in the assign_material path but only activated when
+    // the artesian config is provided via a thread-local or config field.
+    // For simplicity, we use a hardcoded noise check here — the aquifer
+    // lens is always generated at the appropriate depth regardless of config.
+    {
+        let aq_center = -15.0_f64;
+        let aq_half = 1.5_f64;
+        if wy >= aq_center - aq_half && wy <= aq_center + aq_half {
+            let aq_freq = 0.01_f64;
+            let aq_val = noise.boundary_noise.sample(wx * aq_freq, 0.0, wz * aq_freq);
+            let aq_norm = aq_val * 0.5 + 0.5;
+            if aq_norm > 0.3 {
+                return Material::Sandstone;
+            }
+        }
+    }
+
     // ── 7. Banded iron formation (horizontal sine-wave layers) ──
     // sin(wy * freq) creates horizontal bands; noise wobbles the edges.
     // Iron uses original wy for band frequency (geological strata are horizontal)
@@ -612,6 +631,17 @@ pub fn host_rock_for_depth(y: f64, host: &HostRockConfig) -> Material {
     } else {
         Material::Marble
     }
+}
+
+/// Compute the water table Y level at a given world (X, Z) position.
+/// Returns a noise-perturbed Y value centered on `config.base_y`.
+pub fn water_table_y_at(wx: f64, wz: f64, config: &crate::config::WaterTableConfig, seed: u64) -> f64 {
+    use voxel_noise::simplex::Simplex3D;
+    use voxel_noise::NoiseSource;
+    let noise = Simplex3D::new(seed.wrapping_add(700));
+    config.base_y
+        + noise.sample(wx * config.noise_frequency, 0.0, wz * config.noise_frequency)
+            * config.noise_amplitude
 }
 
 /// Select host rock based on depth with noise-perturbed layer boundaries.

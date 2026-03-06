@@ -96,6 +96,12 @@ pub enum FluidEvent {
     ChunkUnloaded {
         chunk: (i32, i32, i32),
     },
+    /// Place geological springs (spring lines, drips) in a chunk.
+    /// Springs are detected by the worker thread which has access to the DensityField.
+    PlaceGeologicalSprings {
+        chunk: (i32, i32, i32),
+        springs: Vec<(u8, u8, u8, f32)>, // (lx, ly, lz, level)
+    },
     /// Inject fluid at a specific cell (debug / scripted spawning).
     AddFluid {
         chunk: (i32, i32, i32),

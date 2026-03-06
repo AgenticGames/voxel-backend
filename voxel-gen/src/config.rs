@@ -319,6 +319,12 @@ pub struct GenerationConfig {
     pub ore: OreConfig,
     pub formations: FormationConfig,
     pub pools: PoolConfig,
+    pub water_table: WaterTableConfig,
+    pub pipe_lava: PipeLavaConfig,
+    pub lava_tubes: LavaTubeConfig,
+    pub hydrothermal: HydrothermalConfig,
+    pub rivers: RiverConfig,
+    pub artesian: ArtesianConfig,
     pub mine: MineConfig,
     pub crystals: CrystalConfig,
     pub octree_max_depth: u32,
@@ -388,6 +394,12 @@ impl Default for GenerationConfig {
             ore: OreConfig::default(),
             formations: FormationConfig::default(),
             pools: PoolConfig::default(),
+            water_table: WaterTableConfig::default(),
+            pipe_lava: PipeLavaConfig::default(),
+            lava_tubes: LavaTubeConfig::default(),
+            hydrothermal: HydrothermalConfig::default(),
+            rivers: RiverConfig::default(),
+            artesian: ArtesianConfig::default(),
             mine: MineConfig::default(),
             crystals: CrystalConfig::default(),
             octree_max_depth: 4,
@@ -835,6 +847,210 @@ impl Default for FormationConfig {
             shield_radius_max: 3.0,
             shield_max_tilt: 30.0,
             shield_stalactite_chance: 0.5,
+        }
+    }
+}
+
+// ── Water Table Config ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaterTableConfig {
+    pub enabled: bool,
+    /// Base Y level for water table (default: limestone/granite boundary)
+    pub base_y: f64,
+    /// Noise amplitude for water table undulation
+    pub noise_amplitude: f64,
+    /// Noise frequency for water table undulation
+    pub noise_frequency: f64,
+    /// Flow rate for geological contact springs
+    pub spring_flow_rate: f32,
+    /// Minimum porosity of permeable rock to emit a spring
+    pub min_porosity_for_spring: f32,
+    /// Noise frequency controlling drip clustering
+    pub drip_noise_frequency: f64,
+    /// Noise threshold for drip placement (higher = fewer drips)
+    pub drip_noise_threshold: f64,
+    /// Flow level for vadose drips (weaker than springs)
+    pub drip_level: f32,
+    /// Maximum geological contact springs per chunk
+    pub max_springs_per_chunk: u32,
+    /// Maximum vadose drips per chunk
+    pub max_drips_per_chunk: u32,
+}
+
+impl Default for WaterTableConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            base_y: 170.0,
+            noise_amplitude: 15.0,
+            noise_frequency: 0.008,
+            spring_flow_rate: 0.8,
+            min_porosity_for_spring: 0.5,
+            drip_noise_frequency: 0.15,
+            drip_noise_threshold: 0.7,
+            drip_level: 0.4,
+            max_springs_per_chunk: 8,
+            max_drips_per_chunk: 12,
+        }
+    }
+}
+
+// ── Pipe Lava Config ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PipeLavaConfig {
+    pub enabled: bool,
+    /// Y depth below which kimberlite pipes have active lava
+    pub activation_depth: f64,
+    /// Maximum lava sources per chunk from pipes
+    pub max_lava_per_chunk: u32,
+    /// Depth scaling factor (deeper = more lava)
+    pub depth_scaling: f64,
+}
+
+impl Default for PipeLavaConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            activation_depth: -80.0,
+            max_lava_per_chunk: 6,
+            depth_scaling: 0.5,
+        }
+    }
+}
+
+// ── Lava Tube Config ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LavaTubeConfig {
+    pub enabled: bool,
+    /// Tubes per 4x4x4 chunk region
+    pub tubes_per_region: f32,
+    /// Minimum depth for tube generation
+    pub depth_min: f64,
+    /// Maximum depth for tube generation
+    pub depth_max: f64,
+    /// Minimum tube radius
+    pub radius_min: f32,
+    /// Maximum tube radius
+    pub radius_max: f32,
+    /// Maximum path steps
+    pub max_steps: u32,
+    /// Distance per step
+    pub step_length: f32,
+    /// Below this depth, tubes are lava-filled (active)
+    pub active_depth: f64,
+    /// Radius to connect tubes to nearby kimberlite pipes
+    pub pipe_connection_radius: f32,
+}
+
+impl Default for LavaTubeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            tubes_per_region: 2.0,
+            depth_min: -250.0,
+            depth_max: -50.0,
+            radius_min: 2.0,
+            radius_max: 4.0,
+            max_steps: 150,
+            step_length: 1.5,
+            active_depth: -120.0,
+            pipe_connection_radius: 20.0,
+        }
+    }
+}
+
+// ── Hydrothermal Config ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HydrothermalConfig {
+    pub enabled: bool,
+    /// Search radius from heat source for hydrothermal springs
+    pub radius: u32,
+    /// Maximum hydrothermal springs per chunk
+    pub max_per_chunk: u32,
+}
+
+impl Default for HydrothermalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            radius: 8,
+            max_per_chunk: 4,
+        }
+    }
+}
+
+// ── River Config ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiverConfig {
+    pub enabled: bool,
+    /// Rivers per 4x4x4 chunk region (rarer than worms)
+    pub rivers_per_region: f32,
+    /// Minimum river passage width
+    pub width_min: f32,
+    /// Maximum river passage width
+    pub width_max: f32,
+    /// Passage height (flat-ceilinged)
+    pub height: f32,
+    /// Maximum path steps (rivers are long)
+    pub max_steps: u32,
+    /// Distance per step
+    pub step_length: f32,
+    /// Restrict to limestone layer only
+    pub layer_restriction: bool,
+    /// Gentle downhill bias
+    pub downslope_bias: f64,
+}
+
+impl Default for RiverConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            rivers_per_region: 1.0,
+            width_min: 3.0,
+            width_max: 6.0,
+            height: 2.5,
+            max_steps: 300,
+            step_length: 1.5,
+            layer_restriction: true,
+            downslope_bias: 0.02,
+        }
+    }
+}
+
+// ── Artesian Config ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtesianConfig {
+    pub enabled: bool,
+    /// Center Y of the confined aquifer lens
+    pub aquifer_y_center: f64,
+    /// Thickness of the aquifer lens in voxels
+    pub aquifer_thickness: f64,
+    /// Noise frequency for aquifer extent (broad patches)
+    pub aquifer_noise_freq: f64,
+    /// Noise threshold for aquifer presence
+    pub aquifer_noise_threshold: f64,
+    /// Noise frequency for pressure field
+    pub pressure_noise_freq: f64,
+    /// Maximum artesian springs per chunk
+    pub max_per_chunk: u32,
+}
+
+impl Default for ArtesianConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            aquifer_y_center: -15.0,
+            aquifer_thickness: 3.0,
+            aquifer_noise_freq: 0.01,
+            aquifer_noise_threshold: 0.3,
+            pressure_noise_freq: 0.02,
+            max_per_chunk: 3,
         }
     }
 }

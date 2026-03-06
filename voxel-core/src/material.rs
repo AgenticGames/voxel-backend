@@ -118,6 +118,30 @@ impl Material {
         matches!(self, Material::Crystal | Material::Amethyst)
     }
 
+    /// Permeable materials allow water to flow through.
+    pub fn is_permeable(self) -> bool {
+        matches!(self, Material::Sandstone | Material::Limestone | Material::Coal)
+    }
+
+    /// Impermeable materials block water flow, creating geological contacts.
+    pub fn is_impermeable(self) -> bool {
+        matches!(self, Material::Granite | Material::Basalt | Material::Slate | Material::Marble)
+    }
+
+    /// Porosity value (0.0 = impervious, 1.0 = highly porous).
+    pub fn porosity(self) -> f32 {
+        match self {
+            Material::Limestone => 1.0,
+            Material::Sandstone => 0.8,
+            Material::Coal => 0.6,
+            Material::Slate => 0.5,
+            Material::Marble => 0.3,
+            Material::Granite => 0.2,
+            Material::Basalt => 0.1,
+            _ => 0.0,
+        }
+    }
+
     /// Returns true for non-host-rock solid materials (ores, minerals, special formations).
     /// Used to identify chunks that benefit from higher mesh resolution.
     pub fn is_detail_material(self) -> bool {
@@ -203,5 +227,40 @@ impl Material {
             Material::Graphite,
             Material::Opal,
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn permeable_materials() {
+        assert!(Material::Sandstone.is_permeable());
+        assert!(Material::Limestone.is_permeable());
+        assert!(Material::Coal.is_permeable());
+        assert!(!Material::Granite.is_permeable());
+        assert!(!Material::Basalt.is_permeable());
+        assert!(!Material::Air.is_permeable());
+    }
+
+    #[test]
+    fn impermeable_materials() {
+        assert!(Material::Granite.is_impermeable());
+        assert!(Material::Basalt.is_impermeable());
+        assert!(Material::Slate.is_impermeable());
+        assert!(Material::Marble.is_impermeable());
+        assert!(!Material::Sandstone.is_impermeable());
+        assert!(!Material::Limestone.is_impermeable());
+    }
+
+    #[test]
+    fn porosity_values() {
+        assert_eq!(Material::Limestone.porosity(), 1.0);
+        assert_eq!(Material::Sandstone.porosity(), 0.8);
+        assert_eq!(Material::Coal.porosity(), 0.6);
+        assert_eq!(Material::Basalt.porosity(), 0.1);
+        assert_eq!(Material::Air.porosity(), 0.0);
+        assert_eq!(Material::Iron.porosity(), 0.0);
     }
 }

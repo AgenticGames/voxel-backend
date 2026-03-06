@@ -38,7 +38,7 @@ impl NoiseSource for Simplex3D {
         let j = (y + s).floor() as i32;
         let k = (z + s).floor() as i32;
 
-        let t = (i + j + k) as f64 * G3;
+        let t = (i.wrapping_add(j).wrapping_add(k)) as f64 * G3;
         // Unskew the cell origin back to (x, y, z) space
         let x0 = x - (i as f64 - t);
         let y0 = y - (j as f64 - t);
