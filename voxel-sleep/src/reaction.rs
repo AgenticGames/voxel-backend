@@ -10,7 +10,7 @@ use voxel_core::density::DensityField;
 use voxel_core::material::Material;
 use voxel_core::stress::world_to_chunk_local;
 use voxel_fluid::FluidSnapshot;
-use voxel_fluid::cell::FluidType;
+
 
 use crate::config::ReactionConfig;
 use crate::manifest::ChangeManifest;
@@ -209,7 +209,7 @@ pub fn apply_reaction(
                     for x in 0..cs {
                         let idx = z * cs * cs + y * cs + x;
                         let cell = &cells[idx];
-                        if cell.level > 0.001 && cell.fluid_type == FluidType::Lava {
+                        if cell.level > 0.001 && cell.fluid_type.is_lava() {
                             let wx = cx * (cs as i32) + x as i32;
                             let wy = cy * (cs as i32) + y as i32;
                             let wz = cz * (cs as i32) + z as i32;
@@ -305,7 +305,7 @@ pub fn apply_reaction(
                                         let idx = flz * cs * cs + fly * cs + flx;
                                         if idx < cells.len() {
                                             let cell = &cells[idx];
-                                            if cell.level > 0.001 && cell.fluid_type == FluidType::Water {
+                                            if cell.level > 0.001 && cell.fluid_type.is_water() {
                                                 found = true;
                                                 break;
                                             }

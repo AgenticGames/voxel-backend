@@ -390,7 +390,7 @@ impl VoxelEngine {
         let ly = ((rust_pos.y - cy as f32 * cs) as i32).clamp(0, chunk_size as i32 - 1) as u8;
         let lz = ((rust_pos.z - cz as f32 * cs) as i32).clamp(0, chunk_size as i32 - 1) as u8;
 
-        let ft = if fluid_type == 2 { FluidType::Lava } else { FluidType::Water };
+        let ft = FluidType::from_u8(fluid_type);
 
         match self.fluid_event_tx.try_send(FluidEvent::AddFluid {
             chunk: (cx, cy, cz),

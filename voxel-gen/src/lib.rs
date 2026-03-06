@@ -28,8 +28,8 @@ pub fn generate_chunk(coord: ChunkCoord, config: &GenerationConfig) -> Chunk {
 
 /// Generate the full density field for a chunk, including noise + worm carving + pools.
 /// This is the shared density pipeline used by both the full pipeline and CLI commands.
-/// Returns the density field, pool descriptors, and fluid seeds placed in this chunk.
-pub fn generate_density(coord: ChunkCoord, config: &GenerationConfig) -> (DensityField, Vec<PoolDescriptor>, Vec<FluidSeed>) {
+/// Returns the density field, pool descriptors, fluid seeds, and river spring descriptors.
+pub fn generate_density(coord: ChunkCoord, config: &GenerationConfig) -> (DensityField, Vec<PoolDescriptor>, Vec<FluidSeed>, Vec<SpringDescriptor>) {
     let world_origin = coord.world_origin_sized(config.chunk_size);
     let c_seed = seed::chunk_seed(config.seed, coord);
 
@@ -86,7 +86,7 @@ pub fn generate_density(coord: ChunkCoord, config: &GenerationConfig) -> (Densit
     );
 
     // Step 3a2: Carve underground rivers (wide flat passages in limestone)
-    let _river_springs = rivers::carve_rivers(
+    let river_springs = rivers::carve_rivers(
         &mut density,
         &config.rivers,
         &config.water_table,
@@ -117,7 +117,7 @@ pub fn generate_density(coord: ChunkCoord, config: &GenerationConfig) -> (Densit
     // Step 5: Compute cached metadata (geode flag, air count) for search optimization
     density.compute_metadata();
 
-    (density, pool_descriptors, fluid_seeds)
+    (density, pool_descriptors, fluid_seeds, river_springs)
 }
 
 /// Compute crystal placements for a chunk after density generation.

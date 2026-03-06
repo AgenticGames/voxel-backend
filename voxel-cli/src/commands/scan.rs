@@ -105,7 +105,7 @@ pub fn run(args: &[String]) {
 
     // Phase 1: Generate region densities (includes worm carving + formations)
     let gen_start = Instant::now();
-    let (density_fields, _pools, _seeds, worm_paths, _timings) =
+    let (density_fields, _pools, _seeds, worm_paths, _timings, _river_springs) =
         region_gen::generate_region_densities(&coords, &config);
     let gen_elapsed = gen_start.elapsed();
     println!("  Region generated in {:.2?} ({} chunks)", gen_elapsed, coords.len());

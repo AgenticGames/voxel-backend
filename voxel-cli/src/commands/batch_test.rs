@@ -87,7 +87,7 @@ pub fn run(args: &[String]) {
             let coord = ChunkCoord::new(0, 0, 0);
 
             // Generate density field (includes worm carving)
-            let (density, _pools, _seeds) = voxel_gen::generate_density(coord, &config);
+            let (density, _pools, _seeds, _river_springs) = voxel_gen::generate_density(coord, &config);
 
             // Check navigability
             let densities = density.densities();

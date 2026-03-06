@@ -24,6 +24,18 @@ use crate::profiler::{ChunkTimings, StreamingProfiler};
 use crate::store::{extract_solid_mask, ChunkStore};
 use crate::types::{FfiCollapseEvent, FfiCrystalPlacement, WorkerRequest, WorkerResult};
 
+/// Map SpringType → FluidType u8 for debug-colored water rendering.
+fn spring_type_to_fluid_u8(st: &voxel_gen::springs::SpringType) -> u8 {
+    use voxel_gen::springs::SpringType;
+    match st {
+        SpringType::SpringLine => 3,  // WaterSpringLine (cyan)
+        SpringType::VadoseDrip => 4,  // WaterDrip (purple)
+        SpringType::AquiferBreach => 5, // WaterBreach (yellow-green)
+        SpringType::RiverSource => 6, // WaterRiver (green)
+        SpringType::Artesian => 7,    // WaterArtesian (silver)
+    }
+}
+
 /// Retrieve existing crystal data from ChunkStore for a chunk, converted to UE coords.
 /// Used by remesh/seam/mining paths that don't recompute crystals from density.
 fn retrieve_crystal_data(
@@ -161,6 +173,7 @@ fn handle_request(
             };
 
             let mut pool_fluid_seeds: Vec<voxel_gen::pools::FluidSeed> = Vec::new();
+            let mut region_river_springs: Vec<((i32, i32, i32), voxel_gen::springs::SpringDescriptor)> = Vec::new();
 
             let (mesh, dc_vertices, boundary_edges) = if let Some(result) = mesh_result {
                 result
@@ -170,8 +183,9 @@ fn handle_request(
 
                 let t0 = Instant::now();
                 let coords = region_chunks(rk, cfg.region_size);
-                let (mut densities, _pools, fluid_seeds, worm_paths, rt) = generate_region_densities(&coords, &cfg);
+                let (mut densities, _pools, fluid_seeds, worm_paths, rt, river_springs) = generate_region_densities(&coords, &cfg);
                 pool_fluid_seeds = fluid_seeds;
+                region_river_springs = river_springs;
                 if profiling {
                     t_region_density += t0.elapsed();
                     region_timings = rt;
@@ -487,21 +501,21 @@ fn handle_request(
                     let _ = fluid_event_tx.send(FluidEvent::PlaceSources { chunk });
 
                     // Detect geological springs (spring lines + vadose drips)
-                    let mut geo_springs: Vec<(u8, u8, u8, f32)> = Vec::new();
+                    let mut geo_springs: Vec<(u8, u8, u8, f32, u8)> = Vec::new();
                     {
                         let springs = voxel_gen::springs::detect_spring_lines(
                             density, chunk, cfg.chunk_size,
                             &cfg.water_table, &cfg.ore.host_rock, cfg.seed,
                         );
                         for s in &springs {
-                            geo_springs.push((s.lx, s.ly, s.lz, s.level));
+                            geo_springs.push((s.lx, s.ly, s.lz, s.level, spring_type_to_fluid_u8(&s.source_type)));
                         }
                         let drips = voxel_gen::springs::detect_vadose_drips(
                             density, chunk, cfg.chunk_size,
                             &cfg.water_table, cfg.seed,
                         );
                         for d in &drips {
-                            geo_springs.push((d.lx, d.ly, d.lz, d.level));
+                            geo_springs.push((d.lx, d.ly, d.lz, d.level, spring_type_to_fluid_u8(&d.source_type)));
                         }
                         // Hydrothermal springs near heat sources
                         let hydro = voxel_gen::springs::detect_hydrothermal_springs(
@@ -509,7 +523,8 @@ fn handle_request(
                             &cfg.water_table, &cfg.hydrothermal, cfg.seed,
                         );
                         for h in &hydro {
-                            geo_springs.push((h.lx, h.ly, h.lz, h.level));
+                            // Hydrothermal springs use SpringLine type but render as amber
+                            geo_springs.push((h.lx, h.ly, h.lz, h.level, 8)); // WaterHydrothermal
                         }
                         // Artesian springs from confined aquifer
                         let artesian = voxel_gen::springs::detect_artesian_springs(
@@ -517,7 +532,13 @@ fn handle_request(
                             &cfg.artesian, cfg.seed,
                         );
                         for a in &artesian {
-                            geo_springs.push((a.lx, a.ly, a.lz, a.level));
+                            geo_springs.push((a.lx, a.ly, a.lz, a.level, spring_type_to_fluid_u8(&a.source_type)));
+                        }
+                        // River springs from carve_rivers (collected during region gen)
+                        for (rs_chunk, rs_desc) in &region_river_springs {
+                            if *rs_chunk == chunk {
+                                geo_springs.push((rs_desc.lx, rs_desc.ly, rs_desc.lz, rs_desc.level, spring_type_to_fluid_u8(&rs_desc.source_type)));
+                            }
                         }
                     }
                     if !geo_springs.is_empty() {
@@ -878,7 +899,7 @@ fn handle_request(
                                 x: b.lx,
                                 y: b.ly,
                                 z: b.lz,
-                                fluid_type: voxel_fluid::cell::FluidType::Water,
+                                fluid_type: voxel_fluid::cell::FluidType::WaterBreach,
                                 level: b.level,
                                 is_source: true,
                             });

@@ -10,7 +10,7 @@ use voxel_core::density::DensityField;
 use voxel_core::material::Material;
 use voxel_core::stress::{StressField, SupportField, world_to_chunk_local};
 use voxel_fluid::FluidSnapshot;
-use voxel_fluid::cell::FluidType;
+
 
 use crate::aureole::HeatMap;
 use crate::collapse::{apply_collapse, CollapseResult};
@@ -111,7 +111,7 @@ pub fn apply_deeptime(
                     for x in 0..cs {
                         let idx = z * cs * cs + y * cs + x;
                         let cell = &cells[idx];
-                        if cell.level <= 0.001 || cell.fluid_type != FluidType::Water {
+                        if cell.level <= 0.001 || !cell.fluid_type.is_water() {
                             continue;
                         }
 
@@ -475,7 +475,7 @@ pub fn apply_deeptime(
                             let idx = flz * cs * cs + fly * cs + flx;
                             if idx < cells.len() {
                                 let cell = &cells[idx];
-                                if cell.level > 0.001 && cell.fluid_type == FluidType::Water {
+                                if cell.level > 0.001 && cell.fluid_type.is_water() {
                                     found = true;
                                     break;
                                 }
@@ -507,7 +507,7 @@ pub fn apply_deeptime(
                             let idx = flz * cs * cs + fly * cs + flx;
                             if idx < cells.len() {
                                 let cell = &cells[idx];
-                                if cell.level > 0.001 && cell.fluid_type == FluidType::Lava {
+                                if cell.level > 0.001 && cell.fluid_type.is_lava() {
                                     found = true;
                                     break;
                                 }

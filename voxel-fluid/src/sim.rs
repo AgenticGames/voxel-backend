@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::cell::{ChunkFluidGrid, FluidType, MAX_LEVEL, MIN_LEVEL, SOURCE_LEVEL};
+use crate::cell::{ChunkFluidGrid, MAX_LEVEL, MIN_LEVEL, SOURCE_LEVEL};
 use crate::FluidConfig;
 
 /// Simulate one tick of fluid for all loaded chunks.
@@ -94,7 +94,7 @@ fn tick_chunk(
                 }
 
                 // Check fluid type vs tick type
-                let is_lava = cell.fluid_type == FluidType::Lava;
+                let is_lava = cell.fluid_type.is_lava();
                 if is_lava && !is_lava_tick {
                     continue;
                 }
@@ -238,7 +238,7 @@ pub fn detect_solidification(
                     }
 
                     // Check if this is a lava cell adjacent to water (or vice versa)
-                    let is_lava = cell.fluid_type == FluidType::Lava;
+                    let is_lava = cell.fluid_type.is_lava();
                     let neighbors: [(i32, i32, i32); 6] = [
                         (x as i32 + 1, y as i32, z as i32),
                         (x as i32 - 1, y as i32, z as i32),
@@ -256,7 +256,7 @@ pub fn detect_solidification(
                         if n.level < MIN_LEVEL {
                             continue;
                         }
-                        let n_is_lava = n.fluid_type == FluidType::Lava;
+                        let n_is_lava = n.fluid_type.is_lava();
                         if is_lava && !n_is_lava {
                             // Lava touched water: lava solidifies
                             solidify.push((key, x, y, z));
@@ -285,6 +285,7 @@ pub fn regen_sources(chunks: &mut HashMap<(i32, i32, i32), ChunkFluidGrid>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cell::FluidType;
 
     fn make_chunk(size: usize) -> ChunkFluidGrid {
         ChunkFluidGrid::new(size)
@@ -372,6 +373,26 @@ mod tests {
 
         let solidify = detect_solidification(&chunks);
         assert!(!solidify.is_empty(), "Should detect solidification");
+    }
+
+    #[test]
+    fn water_subtype_solidifies_lava() {
+        let mut chunks = HashMap::new();
+        let key = (0, 0, 0);
+        let mut grid = make_chunk(16);
+
+        // Lava at (8,8,8)
+        grid.get_mut(8, 8, 8).level = 0.5;
+        grid.get_mut(8, 8, 8).fluid_type = FluidType::Lava;
+
+        // WaterSpringLine at (9,8,8) — should solidify lava just like Water
+        grid.get_mut(9, 8, 8).level = 0.5;
+        grid.get_mut(9, 8, 8).fluid_type = FluidType::WaterSpringLine;
+
+        chunks.insert(key, grid);
+
+        let solidify = detect_solidification(&chunks);
+        assert!(!solidify.is_empty(), "Water subtype should solidify lava");
     }
 
     #[test]

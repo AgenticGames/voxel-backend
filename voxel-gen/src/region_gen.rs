@@ -18,6 +18,7 @@ use voxel_core::octree::node::VoxelSample;
 use crate::config::GenerationConfig;
 use crate::density::{DensityField, generate_density_field};
 use crate::pools::{FluidSeed, PoolDescriptor};
+use crate::springs::SpringDescriptor;
 use crate::worm;
 use crate::worm::path::WormSegment;
 
@@ -75,7 +76,7 @@ pub fn region_chunks(region: (i32, i32, i32), region_size: i32) -> Vec<(i32, i32
 pub fn generate_region_densities(
     coords: &[(i32, i32, i32)],
     config: &GenerationConfig,
-) -> (HashMap<(i32, i32, i32), DensityField>, Vec<PoolDescriptor>, Vec<FluidSeed>, Vec<Vec<WormSegment>>, RegionTimings) {
+) -> (HashMap<(i32, i32, i32), DensityField>, Vec<PoolDescriptor>, Vec<FluidSeed>, Vec<Vec<WormSegment>>, RegionTimings, Vec<((i32, i32, i32), SpringDescriptor)>) {
     let eb = config.effective_bounds();
     let chunk_size_f = eb;
     let mut timings = RegionTimings::default();
@@ -198,6 +199,30 @@ pub fn generate_region_densities(
     timings.worm_carving = t3.elapsed();
     timings.worm_count = all_worm_paths.len() as u32;
 
+    // Phase 4b: Carve lava tubes + underground rivers per chunk
+    let mut all_river_springs: Vec<((i32, i32, i32), SpringDescriptor)> = Vec::new();
+    {
+        let mut sorted_keys: Vec<_> = density_fields.keys().copied().collect();
+        sorted_keys.sort();
+        for &(cx, cy, cz) in &sorted_keys {
+            let coord = ChunkCoord::new(cx, cy, cz);
+            let c_seed = crate::seed::chunk_seed(config.seed, coord);
+            let origin = coord.world_origin_bounds(eb);
+            let wo = (origin.x as f64, origin.y as f64, origin.z as f64);
+            if let Some(density) = density_fields.get_mut(&(cx, cy, cz)) {
+                crate::lava_tubes::carve_lava_tubes(
+                    density, &config.lava_tubes, wo, config.seed, c_seed,
+                );
+                let river_springs = crate::rivers::carve_rivers(
+                    density, &config.rivers, &config.water_table, wo, config.seed, c_seed,
+                );
+                for rs in river_springs {
+                    all_river_springs.push(((cx, cy, cz), rs));
+                }
+            }
+        }
+    }
+
     // Phase 5: Place cave pools per chunk (sort keys for determinism)
     let t4 = Instant::now();
     let mut all_pool_descriptors = Vec::new();
@@ -259,7 +284,7 @@ pub fn generate_region_densities(
     }
     timings.metadata = t6.elapsed();
 
-    (density_fields, all_pool_descriptors, all_fluid_seeds, all_worm_paths, timings)
+    (density_fields, all_pool_descriptors, all_fluid_seeds, all_worm_paths, timings, all_river_springs)
 }
 
 /// Compute a deterministic worm seed for a set of coordinates.
@@ -745,7 +770,7 @@ mod tests {
             ..GenerationConfig::default()
         };
         let coords = region_chunks((0, 0, 0), 2);
-        let (densities, _pools, _seeds, _worms, _timings) = generate_region_densities(&coords, &config);
+        let (densities, _pools, _seeds, _worms, _timings, _river_springs) = generate_region_densities(&coords, &config);
         assert_eq!(densities.len(), 8);
         for &c in &coords {
             assert!(densities.contains_key(&c));

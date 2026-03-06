@@ -18,7 +18,7 @@ use crate::hermite_extract::extract_hermite_data;
 /// 8. Return Chunk with octree
 pub fn generate(coord: ChunkCoord, config: &GenerationConfig) -> Chunk {
     // Steps 1-4: Shared density pipeline (noise + worms + pools + formations)
-    let (density, _pool_descriptors, _fluid_seeds) = crate::generate_density(coord, config);
+    let (density, _pool_descriptors, _fluid_seeds, _river_springs) = crate::generate_density(coord, config);
 
     // Step 5: Extract hermite data from the final density field
     let _hermite = extract_hermite_data(&density);

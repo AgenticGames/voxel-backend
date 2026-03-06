@@ -155,13 +155,13 @@ fn handle_event(
             let grid = chunks
                 .entry(chunk)
                 .or_insert_with(|| ChunkFluidGrid::new(chunk_size));
-            for (lx, ly, lz, level) in springs {
+            for (lx, ly, lz, level, fluid_type_u8) in springs {
                 let xu = lx as usize;
                 let yu = ly as usize;
                 let zu = lz as usize;
                 if xu < chunk_size && yu < chunk_size && zu < chunk_size && !grid.is_solid(xu, yu, zu) {
                     let cell = grid.get_mut(xu, yu, zu);
-                    cell.fluid_type = crate::cell::FluidType::Water;
+                    cell.fluid_type = crate::cell::FluidType::from_u8(fluid_type_u8);
                     cell.level = level.min(crate::cell::MAX_LEVEL);
                     grid.dirty = true;
                 }

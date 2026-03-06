@@ -10,7 +10,7 @@ use voxel_core::density::DensityField;
 use voxel_core::material::Material;
 use voxel_core::stress::world_to_chunk_local;
 use voxel_fluid::FluidSnapshot;
-use voxel_fluid::cell::FluidType;
+
 
 use crate::config::{AureoleConfig, GroundwaterConfig};
 use crate::groundwater::ambient_moisture;
@@ -68,7 +68,7 @@ pub fn build_heat_map(
                 for x in 0..cs {
                     let idx = z * cs * cs + y * cs + x;
                     let cell = &cells[idx];
-                    if cell.level > 0.001 && cell.fluid_type == FluidType::Lava {
+                    if cell.level > 0.001 && cell.fluid_type.is_lava() {
                         let wx = cx * (cs as i32) + x as i32;
                         let wy = cy * (cs as i32) + y as i32;
                         let wz = cz * (cs as i32) + z as i32;
@@ -135,7 +135,7 @@ pub fn apply_aureole(
 
     // Check if water exists anywhere in the fluid snapshot (for silicification)
     let has_water_in_snapshot = fluid_snapshot.chunks.values().any(|cells| {
-        cells.iter().any(|cell| cell.level > 0.001 && cell.fluid_type == FluidType::Water)
+        cells.iter().any(|cell| cell.level > 0.001 && cell.fluid_type.is_water())
     });
 
     if config.metamorphism_enabled && !heat_map.is_empty() {
@@ -281,7 +281,7 @@ pub fn apply_aureole(
                     for x in 0..cs {
                         let idx = z * cs * cs + y * cs + x;
                         let cell = &cells[idx];
-                        if cell.level <= 0.001 || cell.fluid_type != FluidType::Water {
+                        if cell.level <= 0.001 || !cell.fluid_type.is_water() {
                             continue;
                         }
 

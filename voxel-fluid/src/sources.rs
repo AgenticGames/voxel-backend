@@ -158,7 +158,7 @@ mod tests {
         let water_count: usize = grid
             .cells
             .iter()
-            .filter(|c| c.level > 0.0 && c.fluid_type == FluidType::Water)
+            .filter(|c| c.level > 0.0 && c.fluid_type.is_water())
             .count();
         assert_eq!(water_count, 0, "Water springs are now geological, not noise-based");
     }

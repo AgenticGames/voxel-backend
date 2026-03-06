@@ -848,7 +848,7 @@ mod tests {
             for cy in -2..2 {
                 for cz in -2..2 {
                     let coord = ChunkCoord::new(cx, cy, cz);
-                    let (density, pool_descs, fluid_seeds) =
+                    let (density, pool_descs, fluid_seeds, _river_springs) =
                         crate::generate_density(coord, &config);
 
                     // Count floor cells manually to diagnose

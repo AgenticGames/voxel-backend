@@ -1,10 +1,45 @@
-/// Fluid type: Water or Lava.
-/// Values match UE rendering expectations: 1=Water, 2=Lava.
+/// Fluid type: Water (6 debug-colored subtypes) or Lava.
+/// Values match UE rendering expectations: 1=Water, 2=Lava, 3-8=water subtypes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FluidType {
     Water = 1,
     Lava = 2,
+    WaterSpringLine = 3,
+    WaterDrip = 4,
+    WaterBreach = 5,
+    WaterRiver = 6,
+    WaterArtesian = 7,
+    WaterHydrothermal = 8,
+}
+
+impl FluidType {
+    /// Returns true for all water-family types (Water + 6 subtypes).
+    #[inline]
+    pub fn is_water(self) -> bool {
+        self != FluidType::Lava
+    }
+
+    /// Returns true only for Lava.
+    #[inline]
+    pub fn is_lava(self) -> bool {
+        self == FluidType::Lava
+    }
+
+    /// Convert from raw u8, defaulting unknown values to Water.
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => FluidType::Water,
+            2 => FluidType::Lava,
+            3 => FluidType::WaterSpringLine,
+            4 => FluidType::WaterDrip,
+            5 => FluidType::WaterBreach,
+            6 => FluidType::WaterRiver,
+            7 => FluidType::WaterArtesian,
+            8 => FluidType::WaterHydrothermal,
+            _ => FluidType::Water,
+        }
+    }
 }
 
 /// A single fluid cell within a chunk.
@@ -134,5 +169,42 @@ mod tests {
         let cell = FluidCell::default();
         assert!(cell.is_empty());
         assert!(!cell.is_source());
+    }
+
+    #[test]
+    fn is_water_and_is_lava() {
+        assert!(FluidType::Water.is_water());
+        assert!(FluidType::WaterSpringLine.is_water());
+        assert!(FluidType::WaterDrip.is_water());
+        assert!(FluidType::WaterBreach.is_water());
+        assert!(FluidType::WaterRiver.is_water());
+        assert!(FluidType::WaterArtesian.is_water());
+        assert!(FluidType::WaterHydrothermal.is_water());
+        assert!(!FluidType::Lava.is_water());
+
+        assert!(FluidType::Lava.is_lava());
+        assert!(!FluidType::Water.is_lava());
+        assert!(!FluidType::WaterSpringLine.is_lava());
+        assert!(!FluidType::WaterDrip.is_lava());
+        assert!(!FluidType::WaterBreach.is_lava());
+        assert!(!FluidType::WaterRiver.is_lava());
+        assert!(!FluidType::WaterArtesian.is_lava());
+        assert!(!FluidType::WaterHydrothermal.is_lava());
+    }
+
+    #[test]
+    fn from_u8_roundtrip() {
+        assert_eq!(FluidType::from_u8(1), FluidType::Water);
+        assert_eq!(FluidType::from_u8(2), FluidType::Lava);
+        assert_eq!(FluidType::from_u8(3), FluidType::WaterSpringLine);
+        assert_eq!(FluidType::from_u8(4), FluidType::WaterDrip);
+        assert_eq!(FluidType::from_u8(5), FluidType::WaterBreach);
+        assert_eq!(FluidType::from_u8(6), FluidType::WaterRiver);
+        assert_eq!(FluidType::from_u8(7), FluidType::WaterArtesian);
+        assert_eq!(FluidType::from_u8(8), FluidType::WaterHydrothermal);
+        // Unknown values default to Water
+        assert_eq!(FluidType::from_u8(0), FluidType::Water);
+        assert_eq!(FluidType::from_u8(9), FluidType::Water);
+        assert_eq!(FluidType::from_u8(255), FluidType::Water);
     }
 }

@@ -155,9 +155,11 @@ pub fn mesh_fluid(grid: &ChunkFluidGrid) -> FluidMeshData {
 const ISO_LEVEL: f32 = 0.15;
 
 /// Determine the dominant fluid type among non-empty neighboring cells.
+/// When water-family wins over lava, returns the most common water subtype.
 fn dominant_fluid_type(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> FluidType {
-    let mut water = 0;
-    let mut lava = 0;
+    let mut lava_count = 0u32;
+    // Index 0 unused; indices 1,3-8 are water-family types
+    let mut water_counts = [0u32; 9];
     let size = grid.size;
 
     for cz in z..=(z + 1).min(size - 1) {
@@ -165,19 +167,33 @@ fn dominant_fluid_type(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> F
             for cx in x..=(x + 1).min(size - 1) {
                 let cell = grid.get(cx, cy, cz);
                 if cell.level >= MIN_LEVEL {
-                    match cell.fluid_type {
-                        FluidType::Water => water += 1,
-                        FluidType::Lava => lava += 1,
+                    if cell.fluid_type.is_lava() {
+                        lava_count += 1;
+                    } else {
+                        let idx = cell.fluid_type as u8 as usize;
+                        if idx < water_counts.len() {
+                            water_counts[idx] += 1;
+                        }
                     }
                 }
             }
         }
     }
 
-    if lava > water {
+    let total_water: u32 = water_counts.iter().sum();
+    if lava_count > total_water {
         FluidType::Lava
     } else {
-        FluidType::Water
+        // Return the most common water subtype
+        let mut best_idx = 1u8; // default to Water
+        let mut best_count = 0u32;
+        for i in 0..water_counts.len() {
+            if water_counts[i] > best_count {
+                best_count = water_counts[i];
+                best_idx = i as u8;
+            }
+        }
+        FluidType::from_u8(best_idx)
     }
 }
 
