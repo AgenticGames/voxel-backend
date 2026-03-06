@@ -1,7 +1,17 @@
 use std::collections::HashMap;
 
-use crate::cell::{ChunkFluidGrid, MAX_LEVEL, MIN_LEVEL, SOURCE_LEVEL};
+use crate::cell::{ChunkFluidGrid, FluidType, MAX_LEVEL, MIN_LEVEL, SOURCE_LEVEL};
 use crate::FluidConfig;
+
+/// A pending fluid transfer across a chunk boundary.
+struct CrossChunkTransfer {
+    dest_key: (i32, i32, i32),
+    dest_x: usize,
+    dest_y: usize,
+    dest_z: usize,
+    amount: f32,
+    fluid_type: FluidType,
+}
 
 /// Simulate one tick of fluid for all loaded chunks.
 ///
@@ -16,14 +26,36 @@ pub fn tick_fluid(
     config: &FluidConfig,
 ) -> Vec<(i32, i32, i32)> {
     let mut dirty = Vec::new();
+    let mut all_transfers: Vec<CrossChunkTransfer> = Vec::new();
 
     // Collect keys to iterate
     let keys: Vec<(i32, i32, i32)> = chunks.keys().copied().collect();
 
     for key in keys {
-        let changed = tick_chunk(chunks, key, chunk_size, is_lava_tick, config);
+        let (changed, transfers) = tick_chunk(chunks, key, chunk_size, is_lava_tick, config);
         if changed {
             dirty.push(key);
+        }
+        all_transfers.extend(transfers);
+    }
+
+    // Apply cross-chunk transfers (second pass — no borrow conflicts)
+    for xfer in &all_transfers {
+        if let Some(grid) = chunks.get_mut(&xfer.dest_key) {
+            if grid.is_solid(xfer.dest_x, xfer.dest_y, xfer.dest_z) {
+                continue;
+            }
+            let cell = grid.get_mut(xfer.dest_x, xfer.dest_y, xfer.dest_z);
+            let space = MAX_LEVEL - cell.level;
+            let actual = xfer.amount.min(space);
+            if actual > MIN_LEVEL {
+                cell.level += actual;
+                cell.fluid_type = xfer.fluid_type;
+                grid.dirty = true;
+                if !dirty.contains(&xfer.dest_key) {
+                    dirty.push(xfer.dest_key);
+                }
+            }
         }
     }
 
@@ -54,17 +86,17 @@ fn count_solid_face_neighbors(solid_mask: &[u64], size: usize, x: usize, y: usiz
     count
 }
 
-/// Simulate one tick for a single chunk. Returns true if any cell changed.
+/// Simulate one tick for a single chunk. Returns (changed, cross_chunk_transfers).
 fn tick_chunk(
     chunks: &mut HashMap<(i32, i32, i32), ChunkFluidGrid>,
     key: (i32, i32, i32),
     _chunk_size: usize,
     is_lava_tick: bool,
     config: &FluidConfig,
-) -> bool {
+) -> (bool, Vec<CrossChunkTransfer>) {
     let grid = match chunks.get(&key) {
         Some(g) => g,
-        None => return false,
+        None => return (false, Vec::new()),
     };
 
     let size = grid.size;
@@ -73,6 +105,7 @@ fn tick_chunk(
     let mut new_cells = grid.cells.clone();
     let solid_mask = grid.solid_mask.clone();
     let mut changed = false;
+    let mut cross_transfers: Vec<CrossChunkTransfer> = Vec::new();
 
     // Process each cell
     for z in 0..size {
@@ -152,9 +185,15 @@ fn tick_chunk(
                                     if !is_source {
                                         new_cells[idx].level -= transfer;
                                     }
+                                    cross_transfers.push(CrossChunkTransfer {
+                                        dest_key: below_key,
+                                        dest_x: x,
+                                        dest_y: by,
+                                        dest_z: z,
+                                        amount: transfer,
+                                        fluid_type: cell.fluid_type,
+                                    });
                                     changed = true;
-                                    // Note: we don't modify the neighbor chunk here to avoid
-                                    // borrow issues. Cross-chunk flow is approximate.
                                 }
                             }
                         }
@@ -215,7 +254,7 @@ fn tick_chunk(
         }
     }
 
-    changed
+    (changed, cross_transfers)
 }
 
 /// Detect water-lava contact and return cells to solidify (become basalt).
@@ -285,7 +324,6 @@ pub fn regen_sources(chunks: &mut HashMap<(i32, i32, i32), ChunkFluidGrid>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cell::FluidType;
 
     fn make_chunk(size: usize) -> ChunkFluidGrid {
         ChunkFluidGrid::new(size)
@@ -393,6 +431,40 @@ mod tests {
 
         let solidify = detect_solidification(&chunks);
         assert!(!solidify.is_empty(), "Water subtype should solidify lava");
+    }
+
+    #[test]
+    fn cross_chunk_downward_flow() {
+        // Water at y=0 of upper chunk should flow to y=15 of lower chunk
+        let mut chunks = HashMap::new();
+        let upper_key = (0, 1, 0);
+        let lower_key = (0, 0, 0);
+
+        let mut upper_grid = make_chunk(16);
+        // Place water at y=0 (chunk boundary)
+        upper_grid.get_mut(8, 0, 8).level = 0.8;
+        upper_grid.get_mut(8, 0, 8).fluid_type = FluidType::Water;
+        chunks.insert(upper_key, upper_grid);
+
+        let lower_grid = make_chunk(16);
+        chunks.insert(lower_key, lower_grid);
+
+        let config = crate::FluidConfig::default();
+        tick_fluid(&mut chunks, 16, false, &config);
+
+        // Fluid should appear at y=15 of lower chunk
+        let lower = &chunks[&lower_key];
+        assert!(
+            lower.get(8, 15, 8).level > 0.0,
+            "Water should flow across chunk boundary to y=15 below"
+        );
+
+        // Upper chunk should have lost some fluid
+        let upper = &chunks[&upper_key];
+        assert!(
+            upper.get(8, 0, 8).level < 0.8,
+            "Upper chunk should have transferred fluid downward"
+        );
     }
 
     #[test]

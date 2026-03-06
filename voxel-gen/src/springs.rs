@@ -56,6 +56,35 @@ const FACE_OFFSETS: [(i32, i32, i32); 6] = [
     (0, 0, -1),
 ];
 
+/// Returns true if the air cell at (x,y,z) has at least one solid face-neighbor.
+/// Springs must touch a rock surface — no floating mid-cavern.
+fn has_solid_face_neighbor(
+    density: &DensityField,
+    grid_size: usize,
+    x: usize,
+    y: usize,
+    z: usize,
+) -> bool {
+    for (dx, dy, dz) in FACE_OFFSETS {
+        let nx = x as i32 + dx;
+        let ny = y as i32 + dy;
+        let nz = z as i32 + dz;
+        if nx < 0
+            || ny < 0
+            || nz < 0
+            || nx >= grid_size as i32
+            || ny >= grid_size as i32
+            || nz >= grid_size as i32
+        {
+            continue;
+        }
+        if density.get(nx as usize, ny as usize, nz as usize).density > 0.0 {
+            return true;
+        }
+    }
+    false
+}
+
 /// Detect geological contact springs: air voxels below the water table where
 /// permeable rock meets impermeable rock.
 pub fn detect_spring_lines(
@@ -85,6 +114,11 @@ pub fn detect_spring_lines(
 
                 // Must be air
                 if sample.density > 0.0 || sample.material != Material::Air {
+                    continue;
+                }
+
+                // Must touch rock surface (no floating mid-cavern)
+                if !has_solid_face_neighbor(density, grid_size, x, y, z) {
                     continue;
                 }
 
@@ -177,6 +211,11 @@ pub fn detect_vadose_drips(
 
                 // Must be air
                 if sample.density > 0.0 || sample.material != Material::Air {
+                    continue;
+                }
+
+                // Must touch rock surface (no floating mid-cavern)
+                if !has_solid_face_neighbor(density, grid_size, x, y, z) {
                     continue;
                 }
 
@@ -469,6 +508,11 @@ pub fn detect_hydrothermal_springs(
                     continue;
                 }
 
+                // Must touch rock surface (no floating mid-cavern)
+                if !has_solid_face_neighbor(density, grid_size, x, y, z) {
+                    continue;
+                }
+
                 let wx = chunk.0 as f64 * chunk_size as f64 + x as f64;
                 let wy = chunk.1 as f64 * chunk_size as f64 + y as f64;
                 let wz = chunk.2 as f64 * chunk_size as f64 + z as f64;
@@ -555,6 +599,11 @@ pub fn detect_artesian_springs(
 
                 // Must be air
                 if sample.density > 0.0 || sample.material != Material::Air {
+                    continue;
+                }
+
+                // Must touch rock surface (no floating mid-cavern)
+                if !has_solid_face_neighbor(density, grid_size, x, y, z) {
                     continue;
                 }
 
@@ -748,6 +797,43 @@ mod tests {
         let result = detect_vadose_drips(&density, (0, 0, 0), chunk_size, &config, 42);
         assert!(!result.is_empty(), "Should detect drip below permeable ceiling");
         assert_eq!(result[0].source_type, SpringType::VadoseDrip);
+    }
+
+    #[test]
+    fn no_spring_floating_in_air() {
+        // Air cell at depth with sandstone aquifer below but NO solid face-neighbors
+        // should NOT produce an artesian spring (floating mid-cavern).
+        let chunk_size = 16;
+        let grid_size = chunk_size + 1;
+        let mut density = make_test_density(chunk_size);
+
+        // Carve a large air pocket (8,4,8) through (8,8,8) — all air, no solid neighbors for (8,6,8)
+        for y in 4..=8 {
+            set_voxel(&mut density, grid_size, 8, y, 8, -1.0, Material::Air);
+        }
+        // Also clear horizontal neighbors of (8,6,8) so it has 0 solid face-neighbors
+        set_voxel(&mut density, grid_size, 7, 6, 8, -1.0, Material::Air);
+        set_voxel(&mut density, grid_size, 9, 6, 8, -1.0, Material::Air);
+        set_voxel(&mut density, grid_size, 8, 6, 7, -1.0, Material::Air);
+        set_voxel(&mut density, grid_size, 8, 6, 9, -1.0, Material::Air);
+
+        // Place sandstone aquifer below with impermeable cap and base
+        // y=3 is granite (impermeable cap), y=2 is sandstone (aquifer), y=1 is granite (base)
+        set_voxel(&mut density, grid_size, 8, 3, 8, 1.0, Material::Granite);
+        set_voxel(&mut density, grid_size, 8, 2, 8, 1.0, Material::Sandstone);
+        set_voxel(&mut density, grid_size, 8, 1, 8, 1.0, Material::Granite);
+
+        // Chunk at Y=-2 → world y = -2*16 + 6 = -26 → below depth threshold (20.0)
+        let config = crate::config::ArtesianConfig {
+            enabled: true,
+            max_per_chunk: 10,
+            pressure_noise_freq: 0.0, // constant noise → will pass threshold
+            ..crate::config::ArtesianConfig::default()
+        };
+        let result = detect_artesian_springs(&density, (0, -2, 0), chunk_size, &config, 42);
+        // (8,6,8) has no solid face-neighbors → should be rejected
+        let has_floating = result.iter().any(|s| s.ly == 6);
+        assert!(!has_floating, "No artesian spring should float mid-air without solid neighbor");
     }
 
     #[test]
