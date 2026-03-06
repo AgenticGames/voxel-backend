@@ -87,7 +87,8 @@ pub fn mesh_fluid(grid: &ChunkFluidGrid) -> FluidMeshData {
 }
 
 /// Sample the scalar field for MC meshing.
-/// Returns fluid level for air cells, 0.0 for solid cells.
+/// Returns fluid level for air cells. Solid cells return 1.0 (treated as "inside")
+/// so no isosurface forms at rock/fluid boundaries — only at fluid/air boundaries.
 /// Boundary-clamped to prevent chunk-edge holes.
 #[inline]
 fn sample_field(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> f32 {
@@ -96,15 +97,15 @@ fn sample_field(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> f32 {
     let cy = y.min(size - 1);
     let cz = z.min(size - 1);
     if grid.is_solid(cx, cy, cz) {
-        0.0
+        1.0 // inside — prevents surface at rock/fluid boundary
     } else {
         grid.get(cx, cy, cz).level
     }
 }
 
 /// Sample the SDF for Surface Nets: ISO_LEVEL - fluid_level.
-/// Negative = fluid present, positive = air/solid.
-/// Solid cells forced to +1.0.
+/// Negative = fluid present, positive = air only.
+/// Solid cells return -1.0 (treated as "inside") so no isosurface at rock/fluid boundary.
 #[inline]
 fn sample_sdf(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> f32 {
     let size = grid.size;
@@ -112,10 +113,31 @@ fn sample_sdf(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> f32 {
     let cy = y.min(size - 1);
     let cz = z.min(size - 1);
     if grid.is_solid(cx, cy, cz) {
-        1.0
+        -1.0 // inside — prevents surface at rock/fluid boundary
     } else {
         ISO_LEVEL - grid.get(cx, cy, cz).level
     }
+}
+
+/// Returns true if any corner of the unit cube at (x,y,z) has real fluid.
+/// Used to skip cubes in pure rock/air regions — without this, treating solid as
+/// "inside" would generate phantom water surfaces on every cave wall.
+#[inline]
+fn cube_has_fluid(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> bool {
+    let size = grid.size;
+    for dz in 0..=1usize {
+        for dy in 0..=1usize {
+            for dx in 0..=1usize {
+                let cx = (x + dx).min(size - 1);
+                let cy = (y + dy).min(size - 1);
+                let cz = (z + dz).min(size - 1);
+                if !grid.is_solid(cx, cy, cz) && grid.get(cx, cy, cz).level >= MIN_LEVEL {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Marching Cubes fluid mesher.
@@ -135,6 +157,11 @@ fn mesh_fluid_mc(grid: &ChunkFluidGrid) -> FluidMeshData {
     for z in 0..size {
         for y in 0..size {
             for x in 0..size {
+                // Skip cubes with no actual fluid — prevents phantom surfaces on cave walls
+                if !cube_has_fluid(grid, x, y, z) {
+                    continue;
+                }
+
                 // Sample 8 corners using Paul Bourke ordering (CORNER_OFFSETS)
                 let mut corner_vals = [0.0f32; 8];
                 for (i, off) in CORNER_OFFSETS.iter().enumerate() {
@@ -256,6 +283,11 @@ fn mesh_fluid_surface_nets(grid: &ChunkFluidGrid) -> FluidMeshData {
     for z in 0..size {
         for y in 0..size {
             for x in 0..size {
+                // Skip cells with no actual fluid — prevents phantom surfaces on cave walls
+                if !cube_has_fluid(grid, x, y, z) {
+                    continue;
+                }
+
                 // Sample 8 corners using binary encoding (SN_CORNERS)
                 let mut corner_sdf = [0.0f32; 8];
                 for (i, corner) in SN_CORNERS.iter().enumerate() {
@@ -703,6 +735,65 @@ mod tests {
                 (frac - MC_Y_OFFSET).abs() < 0.01 || frac > 0.01
             }),
             "MC mesh should have Y offset applied"
+        );
+    }
+
+    #[test]
+    fn test_solid_no_phantom_surface() {
+        // A grid with solid rock and air but NO fluid should produce no mesh at all.
+        // This verifies cube_has_fluid() prevents phantom surfaces at cave walls.
+        let mut grid = ChunkFluidGrid::new(16);
+        // Make bottom half solid, top half air
+        for z in 0..16 {
+            for y in 0..8 {
+                for x in 0..16 {
+                    grid.set_density(x, y, z, 1.0); // solid
+                }
+            }
+        }
+        let mesh = mesh_fluid(&grid);
+        assert!(
+            mesh.positions.is_empty(),
+            "Solid/air boundary with no fluid should produce no mesh, got {} verts",
+            mesh.positions.len()
+        );
+    }
+
+    #[test]
+    fn test_fluid_on_rock_floor_not_floating() {
+        // Fluid sitting on a solid floor should produce a surface only at the top (air boundary).
+        // No surface should form at the bottom (rock boundary).
+        let mut grid = ChunkFluidGrid::new(16);
+        // Solid floor at y=0..4
+        for z in 4..12 {
+            for y in 0..4 {
+                for x in 4..12 {
+                    grid.set_density(x, y, z, 1.0);
+                }
+            }
+        }
+        // Fluid at y=4..6 (sitting on the solid floor)
+        for z in 4..12 {
+            for y in 4..6 {
+                for x in 4..12 {
+                    let cell = grid.get_mut(x, y, z);
+                    cell.level = 1.0;
+                    cell.fluid_type = FluidType::Water;
+                }
+            }
+        }
+        let mesh = mesh_fluid(&grid);
+        assert!(!mesh.positions.is_empty(), "Should produce fluid mesh");
+
+        // The minimum Y of vertices should be near the solid/fluid boundary (y≈3-4),
+        // NOT deep inside the solid (y<3). The isosurface wraps at corners where
+        // solid/fluid/air meet, so vertices can dip to y≈3 at boundary cubes.
+        // With solid treated as "inside", no surface forms at the rock/fluid interface.
+        let min_y = mesh.positions.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
+        assert!(
+            min_y >= 2.9,
+            "Mesh should not extend deep into solid rock, min_y = {:.2}",
+            min_y
         );
     }
 }
