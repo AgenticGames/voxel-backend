@@ -68,7 +68,7 @@ impl Default for FluidConfig {
             water_depth_min: -9999.0,
             water_depth_max: 9999.0,
             water_flow_rate: 1.0,
-            water_spread_rate: 0.3,
+            water_spread_rate: 0.6,
             lava_noise_frequency: 0.03,
             lava_depth_min: -9999.0,
             lava_flow_rate: 0.1,

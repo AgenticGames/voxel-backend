@@ -5,8 +5,8 @@ use crate::tables::{CORNER_OFFSETS, EDGE_TABLE, EDGE_VERTICES, TRI_TABLE};
 const ISO_LEVEL: f32 = 0.15;
 /// Y offset for MC mesh to avoid z-fighting with Surface Nets.
 const MC_Y_OFFSET: f32 = 0.05;
-/// Surface Nets fluid type: Water (teal).
-const SN_FLUID_TYPE: u8 = 1;
+/// Surface Nets fluid type: WaterBreach (yellow-green, highly visible for A/B).
+const SN_FLUID_TYPE: u8 = 5;
 /// Marching Cubes fluid type: WaterDrip (purple).
 const MC_FLUID_TYPE: u8 = 4;
 
