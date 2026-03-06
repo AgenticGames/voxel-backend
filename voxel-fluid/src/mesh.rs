@@ -86,9 +86,22 @@ pub fn mesh_fluid(grid: &ChunkFluidGrid) -> FluidMeshData {
     mesh_a
 }
 
+/// Check if the cell above (x,y+1,z) is non-solid and has real fluid.
+/// Used to detect floor-adjacent cells that should be extended.
+#[inline]
+fn has_fluid_above(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> bool {
+    let size = grid.size;
+    if y + 1 >= size {
+        return false;
+    }
+    !grid.is_solid(x, y + 1, z) && grid.get(x, y + 1, z).level >= ISO_LEVEL
+}
+
 /// Sample the scalar field for MC meshing.
 /// Returns fluid level for air cells. Solid cells return 1.0 (treated as "inside")
 /// so no isosurface forms at rock/fluid boundaries — only at fluid/air boundaries.
+/// Floor extension: non-solid cells with low fluid sitting on solid rock with fluid
+/// above get boosted to 1.0 to close the visual gap at rock floors.
 /// Boundary-clamped to prevent chunk-edge holes.
 #[inline]
 fn sample_field(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> f32 {
@@ -99,13 +112,21 @@ fn sample_field(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> f32 {
     if grid.is_solid(cx, cy, cz) {
         1.0 // inside — prevents surface at rock/fluid boundary
     } else {
-        grid.get(cx, cy, cz).level
+        let level = grid.get(cx, cy, cz).level;
+        // Floor extension: low-fluid cell on solid rock with real fluid above
+        if level < ISO_LEVEL && cy > 0 && grid.is_solid(cx, cy - 1, cz) && has_fluid_above(grid, cx, cy, cz) {
+            1.0 // boost to close floor gap
+        } else {
+            level
+        }
     }
 }
 
 /// Sample the SDF for Surface Nets: ISO_LEVEL - fluid_level.
 /// Negative = fluid present, positive = air only.
 /// Solid cells return -1.0 (treated as "inside") so no isosurface at rock/fluid boundary.
+/// Floor extension: non-solid cells with low fluid on solid rock with fluid above
+/// get boosted to -1.0 to close the visual gap at rock floors.
 #[inline]
 fn sample_sdf(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> f32 {
     let size = grid.size;
@@ -115,13 +136,20 @@ fn sample_sdf(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> f32 {
     if grid.is_solid(cx, cy, cz) {
         -1.0 // inside — prevents surface at rock/fluid boundary
     } else {
-        ISO_LEVEL - grid.get(cx, cy, cz).level
+        let level = grid.get(cx, cy, cz).level;
+        // Floor extension: low-fluid cell on solid rock with real fluid above
+        if level < ISO_LEVEL && cy > 0 && grid.is_solid(cx, cy - 1, cz) && has_fluid_above(grid, cx, cy, cz) {
+            -1.0 // boost to close floor gap
+        } else {
+            ISO_LEVEL - level
+        }
     }
 }
 
-/// Returns true if any corner of the unit cube at (x,y,z) has real fluid.
-/// Used to skip cubes in pure rock/air regions — without this, treating solid as
-/// "inside" would generate phantom water surfaces on every cave wall.
+/// Returns true if any corner of the unit cube at (x,y,z) has real fluid,
+/// or if any corner is a floor extension cell (non-solid, low fluid, on solid rock
+/// with fluid above). Used to skip cubes in pure rock/air regions — without this,
+/// treating solid as "inside" would generate phantom water surfaces on every cave wall.
 #[inline]
 fn cube_has_fluid(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> bool {
     let size = grid.size;
@@ -131,8 +159,15 @@ fn cube_has_fluid(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> bool {
                 let cx = (x + dx).min(size - 1);
                 let cy = (y + dy).min(size - 1);
                 let cz = (z + dz).min(size - 1);
-                if !grid.is_solid(cx, cy, cz) && grid.get(cx, cy, cz).level >= MIN_LEVEL {
-                    return true;
+                if !grid.is_solid(cx, cy, cz) {
+                    let level = grid.get(cx, cy, cz).level;
+                    if level >= MIN_LEVEL {
+                        return true;
+                    }
+                    // Floor extension: low-fluid cell on solid rock with fluid above
+                    if level < ISO_LEVEL && cy > 0 && grid.is_solid(cx, cy - 1, cz) && has_fluid_above(grid, cx, cy, cz) {
+                        return true;
+                    }
                 }
             }
         }
@@ -761,8 +796,9 @@ mod tests {
 
     #[test]
     fn test_fluid_on_rock_floor_not_floating() {
-        // Fluid sitting on a solid floor should produce a surface only at the top (air boundary).
-        // No surface should form at the bottom (rock boundary).
+        // Fluid sitting on a solid floor should produce mesh.
+        // With full fluid levels at the boundary, floor extension doesn't trigger
+        // (only triggers for low-fluid transition cells).
         let mut grid = ChunkFluidGrid::new(16);
         // Solid floor at y=0..4
         for z in 4..12 {
@@ -772,7 +808,7 @@ mod tests {
                 }
             }
         }
-        // Fluid at y=4..6 (sitting on the solid floor)
+        // Fluid at y=4..6 (sitting on the solid floor, full level)
         for z in 4..12 {
             for y in 4..6 {
                 for x in 4..12 {
@@ -785,15 +821,133 @@ mod tests {
         let mesh = mesh_fluid(&grid);
         assert!(!mesh.positions.is_empty(), "Should produce fluid mesh");
 
-        // The minimum Y of vertices should be near the solid/fluid boundary (y≈3-4),
-        // NOT deep inside the solid (y<3). The isosurface wraps at corners where
-        // solid/fluid/air meet, so vertices can dip to y≈3 at boundary cubes.
-        // With solid treated as "inside", no surface forms at the rock/fluid interface.
+        // The minimum Y of vertices should be near the solid/fluid boundary (y≈3-4).
         let min_y = mesh.positions.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
         assert!(
             min_y >= 2.9,
             "Mesh should not extend deep into solid rock, min_y = {:.2}",
             min_y
+        );
+    }
+
+    #[test]
+    fn test_floor_extension_mc() {
+        // Production scenario: solid floor, transition cell with near-zero fluid,
+        // then real fluid above. MC mesh should extend down through the transition cell.
+        let mut grid = ChunkFluidGrid::new(16);
+        // Solid floor at y=0..4
+        for z in 4..12 {
+            for y in 0..4 {
+                for x in 4..12 {
+                    grid.set_density(x, y, z, 1.0);
+                }
+            }
+        }
+        // Transition cell at y=4: near-zero fluid (mimics averaged density boundary)
+        for z in 4..12 {
+            for x in 4..12 {
+                let cell = grid.get_mut(x, 4, z);
+                cell.level = 0.02; // below ISO_LEVEL
+                cell.fluid_type = FluidType::Water;
+            }
+        }
+        // Real fluid at y=5..8
+        for z in 4..12 {
+            for y in 5..8 {
+                for x in 4..12 {
+                    let cell = grid.get_mut(x, y, z);
+                    cell.level = 1.0;
+                    cell.fluid_type = FluidType::Water;
+                }
+            }
+        }
+        let mesh = mesh_fluid_mc(&grid);
+        assert!(!mesh.positions.is_empty(), "MC should produce vertices");
+        let min_y = mesh.positions.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
+        // Without floor extension, mesh bottom would be at y≈4.9 (above transition cell).
+        // With extension, transition cell gets boosted, so mesh extends down to y≈3-4.
+        assert!(
+            min_y < 4.9,
+            "MC mesh should extend below the transition cell gap, min_y = {:.2}",
+            min_y
+        );
+    }
+
+    #[test]
+    fn test_floor_extension_sn() {
+        // Same production scenario for Surface Nets.
+        let mut grid = ChunkFluidGrid::new(16);
+        // Solid floor at y=0..4
+        for z in 4..12 {
+            for y in 0..4 {
+                for x in 4..12 {
+                    grid.set_density(x, y, z, 1.0);
+                }
+            }
+        }
+        // Transition cell at y=4: near-zero fluid
+        for z in 4..12 {
+            for x in 4..12 {
+                let cell = grid.get_mut(x, 4, z);
+                cell.level = 0.02;
+                cell.fluid_type = FluidType::Water;
+            }
+        }
+        // Real fluid at y=5..8
+        for z in 4..12 {
+            for y in 5..8 {
+                for x in 4..12 {
+                    let cell = grid.get_mut(x, y, z);
+                    cell.level = 1.0;
+                    cell.fluid_type = FluidType::Water;
+                }
+            }
+        }
+        let mesh = mesh_fluid_surface_nets(&grid);
+        assert!(!mesh.positions.is_empty(), "SN should produce vertices");
+        let min_y = mesh.positions.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
+        // SN should also extend below the transition cell
+        assert!(
+            min_y < 4.9,
+            "SN mesh should extend below the transition cell gap, min_y = {:.2}",
+            min_y
+        );
+    }
+
+    #[test]
+    fn test_no_phantom_walls() {
+        // Solid cells beside (not below) fluid should NOT generate phantom mesh.
+        // Wall of solid rock next to fluid, with no solid floor below the fluid.
+        let mut grid = ChunkFluidGrid::new(16);
+        // Solid wall at x=0..4, y=4..12, z=4..12
+        for z in 4..12 {
+            for y in 4..12 {
+                for x in 0..4 {
+                    grid.set_density(x, y, z, 1.0);
+                }
+            }
+        }
+        // Fluid at x=4..8, y=4..8, z=4..8 (floating in air, next to wall)
+        for z in 4..8 {
+            for y in 4..8 {
+                for x in 4..8 {
+                    let cell = grid.get_mut(x, y, z);
+                    cell.level = 1.0;
+                    cell.fluid_type = FluidType::Water;
+                }
+            }
+        }
+        let mesh = mesh_fluid(&grid);
+        assert!(!mesh.positions.is_empty(), "Should produce fluid mesh");
+        // The mesh should not generate phantom water on the wall face.
+        // Solid wall cells return 1.0 ("inside"), same as fluid cells,
+        // so no isosurface forms at the wall/fluid boundary.
+        // Vertices can approach x=4 (the boundary) but should not go into x<3.
+        let min_x = mesh.positions.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min);
+        assert!(
+            min_x >= 3.0,
+            "Mesh should not extend deep into solid wall, min_x = {:.2}",
+            min_x
         );
     }
 }
