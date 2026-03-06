@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::cell::{ChunkDensityCache, ChunkFluidGrid, FluidType, MIN_LEVEL, SOURCE_LEVEL};
+use crate::cell::{ChunkDensityCache, ChunkFluidGrid, FluidType, MIN_LEVEL, SOURCE_LEVEL, density_to_capacity};
 use crate::FluidConfig;
 
 /// A pending fluid transfer across a chunk boundary.
@@ -170,7 +170,7 @@ fn tick_chunk(
                 }
 
                 let is_source = cell.is_source();
-                let src_capacity = (-cell_density[idx]).clamp(0.0, 1.0);
+                let src_capacity = density_to_capacity(cell_density[idx]);
 
                 let flow_rate = if is_lava { config.lava_flow_rate } else { config.water_flow_rate };
                 let horizontal_spread = if is_lava { config.lava_spread_rate } else { config.water_spread_rate };
@@ -179,7 +179,7 @@ fn tick_chunk(
                 if y > 0 {
                     let below_idx = z * size * size + (y - 1) * size + x;
                     if cell_density[below_idx] <= config.solid_threshold {
-                        let below_capacity = (-cell_density[below_idx]).clamp(0.0, 1.0);
+                        let below_capacity = density_to_capacity(cell_density[below_idx]);
                         let below_space = (below_capacity - new_cells[below_idx].level).max(0.0);
                         if below_space > MIN_LEVEL {
                             let transfer = cell.level.min(below_space).min(flow_rate * 4.0);
@@ -267,7 +267,7 @@ fn tick_chunk(
                                 if cell_density[ni] > config.solid_threshold {
                                     continue;
                                 }
-                                let dst_capacity = (-cell_density[ni]).clamp(0.0, 1.0);
+                                let dst_capacity = density_to_capacity(cell_density[ni]);
                                 if dst_capacity < MIN_LEVEL {
                                     continue;
                                 }
@@ -349,7 +349,7 @@ fn tick_chunk(
                         if cell_density[ni] > config.solid_threshold {
                             continue;
                         }
-                        let dst_capacity = (-cell_density[ni]).clamp(0.0, 1.0);
+                        let dst_capacity = density_to_capacity(cell_density[ni]);
                         if dst_capacity < MIN_LEVEL {
                             continue;
                         }
@@ -408,7 +408,7 @@ pub fn squeeze_excess_fluid(grid: &mut ChunkFluidGrid) {
         for y in 0..size {
             for x in 0..size {
                 let idx = z * size * size + y * size + x;
-                let capacity = (-grid.cell_density[idx]).clamp(0.0, 1.0);
+                let capacity = density_to_capacity(grid.cell_density[idx]);
                 let level = grid.cells[idx].level;
 
                 if level <= capacity {
@@ -440,7 +440,7 @@ pub fn squeeze_excess_fluid(grid: &mut ChunkFluidGrid) {
                         continue;
                     }
                     let ni = nz as usize * size * size + ny as usize * size + nx as usize;
-                    let n_capacity = (-grid.cell_density[ni]).clamp(0.0, 1.0);
+                    let n_capacity = density_to_capacity(grid.cell_density[ni]);
                     let n_space = (n_capacity - grid.cells[ni].level).max(0.0);
                     if n_space > MIN_LEVEL {
                         let push = remaining.min(n_space);
@@ -729,7 +729,7 @@ mod tests {
         let mut chunks = HashMap::new();
         let key = (0, 0, 0);
         let mut grid = make_chunk(16);
-        // Cell with 50% capacity (density = -0.5)
+        // Cell with density=-0.5 (air side of SDF → binary capacity 1.0)
         grid.set_density(8, 7, 8, -0.5);
         // Place water above
         grid.get_mut(8, 8, 8).level = 0.8;
@@ -744,11 +744,12 @@ mod tests {
             tick_fluid(&mut chunks, &density_cache, 16, false, &config);
         }
 
-        // Cell at y=7 should not exceed its capacity of 0.5
+        // With binary capacity, density=-0.5 → capacity 1.0
+        // Fluid should flow down and not exceed capacity
         let grid = &chunks[&key];
         assert!(
-            grid.get(8, 7, 8).level <= 0.501,
-            "Fluid should not exceed cell capacity of 0.5, got {}",
+            grid.get(8, 7, 8).level <= 1.001,
+            "Fluid should not exceed cell capacity, got {}",
             grid.get(8, 7, 8).level
         );
     }
@@ -956,18 +957,18 @@ mod tests {
         grid.get_mut(8, 8, 8).level = 0.8;
         grid.get_mut(8, 8, 8).fluid_type = FluidType::Water;
 
-        // Now make the cell partially solid (capacity drops to 0.3)
-        grid.set_density(8, 8, 8, -0.3);
+        // Make the cell solid (capacity drops to 0.0 with binary capacity)
+        grid.set_density(8, 8, 8, 0.5);
 
         squeeze_excess_fluid(&mut grid);
 
-        // Level should be clamped to capacity
+        // Level should be squeezed to capacity (0.0 for solid)
         assert!(
-            grid.get(8, 8, 8).level <= 0.301,
+            grid.get(8, 8, 8).level <= 0.001,
             "Level should be squeezed to capacity, got {}",
             grid.get(8, 8, 8).level
         );
-        // Excess should have been pushed to a neighbor
+        // All excess should have been pushed to neighbors
         let mut total_neighbors = 0.0f32;
         let deltas: [(i32, i32, i32); 6] = [
             (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
@@ -979,7 +980,7 @@ mod tests {
             total_neighbors += grid.get(nx, ny, nz).level;
         }
         assert!(
-            total_neighbors > 0.4,
+            total_neighbors > 0.7,
             "Excess fluid should have been pushed to neighbors, got {}",
             total_neighbors
         );

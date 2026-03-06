@@ -129,6 +129,14 @@ impl ChunkDensityCache {
     }
 }
 
+/// Convert density to fluid capacity: binary step at the SDF zero-crossing.
+/// density ≤ 0 (air) → 1.0 (full capacity), density > 0 (solid) → 0.0.
+/// This aligns fluid boundaries with the DC mesh surface.
+#[inline]
+pub fn density_to_capacity(density: f32) -> f32 {
+    if density <= 0.0 { 1.0 } else { 0.0 }
+}
+
 /// Per-chunk fluid grid: 16^3 cells with continuous density data.
 ///
 /// Replaces the old binary solid_mask with density values from the terrain's
@@ -200,11 +208,11 @@ impl ChunkFluidGrid {
     }
 
     /// Returns the fluid capacity of a cell: how much fluid it can hold.
-    /// Positive density = solid (capacity 0), negative = air (up to 1.0).
+    /// Binary: density ≤ 0 (air) → 1.0, density > 0 (solid) → 0.0.
     #[inline]
     pub fn cell_capacity(&self, x: usize, y: usize, z: usize) -> f32 {
         let idx = self.index(x, y, z);
-        (-self.cell_density[idx]).clamp(0.0, 1.0)
+        density_to_capacity(self.cell_density[idx])
     }
 
     /// Set density for a single cell (used in tests and terrain modification).
@@ -292,10 +300,10 @@ mod tests {
         assert!(grid.is_solid(5, 5, 5));
         assert!(grid.cell_capacity(5, 5, 5) < 0.01);
 
-        // Set back to air
+        // Set back to air (any negative density → capacity 1.0)
         grid.set_density(5, 5, 5, -0.5);
         assert!(!grid.is_solid(5, 5, 5));
-        assert!((grid.cell_capacity(5, 5, 5) - 0.5).abs() < 0.01);
+        assert!((grid.cell_capacity(5, 5, 5) - 1.0).abs() < 0.01);
     }
 
     #[test]
@@ -305,9 +313,9 @@ mod tests {
         grid.set_density(0, 0, 0, -10.0);
         assert!((grid.cell_capacity(0, 0, 0) - 1.0).abs() < 0.001);
 
-        // Partially solid → partial capacity
+        // Negative density → binary capacity 1.0
         grid.set_density(0, 0, 0, -0.3);
-        assert!((grid.cell_capacity(0, 0, 0) - 0.3).abs() < 0.001);
+        assert!((grid.cell_capacity(0, 0, 0) - 1.0).abs() < 0.001);
 
         // Solid → zero capacity
         grid.set_density(0, 0, 0, 0.5);
