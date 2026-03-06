@@ -21,7 +21,7 @@ use voxel_gen::region_gen::{
 use crate::convert::{convert_mesh_to_ue_scaled, from_ue_normal, from_ue_world_pos};
 use crate::engine::{terrace_size_for_scale, building_terrace_size_for_scale};
 use crate::profiler::{ChunkTimings, StreamingProfiler};
-use crate::store::{extract_solid_mask, ChunkStore};
+use crate::store::ChunkStore;
 use crate::types::{FfiCollapseEvent, FfiCrystalPlacement, WorkerRequest, WorkerResult};
 
 /// Map SpringType → FluidType u8 for debug-colored water rendering.
@@ -489,14 +489,14 @@ fn handle_request(
                 s.base_meshes.insert(chunk, mesh.clone());
             }
 
-            // Extract solid mask and send to fluid thread
+            // Extract density values and send to fluid thread
             {
                 let s = store.read().unwrap();
                 if let Some(density) = s.density_fields.get(&chunk) {
-                    let mask = extract_solid_mask(density, cfg.chunk_size);
-                    let _ = fluid_event_tx.send(FluidEvent::SolidMaskUpdate {
+                    let densities: Vec<f32> = density.samples.iter().map(|s| s.density).collect();
+                    let _ = fluid_event_tx.send(FluidEvent::DensityUpdate {
                         chunk,
-                        mask,
+                        densities,
                     });
                     let _ = fluid_event_tx.send(FluidEvent::PlaceSources { chunk });
 
@@ -881,10 +881,10 @@ fn handle_request(
                 let s = store.read().unwrap();
                 for &key in &dirty_keys {
                     if let Some(density) = s.density_fields.get(&key) {
-                        let mask = extract_solid_mask(density, cfg.chunk_size);
+                        let densities: Vec<f32> = density.samples.iter().map(|s| s.density).collect();
                         let _ = fluid_event_tx.send(FluidEvent::TerrainModified {
                             chunk: key,
-                            mask,
+                            densities,
                         });
 
                         // Detect aquifer breaches near the mined area

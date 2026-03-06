@@ -1,7 +1,7 @@
 use voxel_noise::simplex::Simplex3D;
 use voxel_noise::NoiseSource;
 
-use crate::cell::{ChunkFluidGrid, FluidType, SOURCE_LEVEL};
+use crate::cell::{ChunkFluidGrid, FluidType, MIN_LEVEL, SOURCE_LEVEL};
 use crate::FluidConfig;
 
 /// Place initial fluid sources in a chunk based on noise and terrain analysis.
@@ -25,8 +25,8 @@ pub fn place_sources(
     for z in 0..size {
         for y in 0..size {
             for x in 0..size {
-                // Skip solid cells
-                if grid.is_solid(x, y, z) {
+                // Skip cells with no fluid capacity
+                if grid.cell_capacity(x, y, z) < MIN_LEVEL {
                     continue;
                 }
 
@@ -146,7 +146,7 @@ mod tests {
         for z in 0..16 {
             for y in 0..8 {
                 for x in 0..16 {
-                    grid.set_solid(x, y, z, true);
+                    grid.set_density(x, y, z, 1.0);
                 }
             }
         }

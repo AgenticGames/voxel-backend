@@ -67,6 +67,8 @@ pub struct FfiFluidMeshData {
     pub vertex_count: u32,
     pub indices: *mut u32,
     pub index_count: u32,
+    pub uvs: *mut [f32; 2],
+    pub flow_directions: *mut FfiVec3,
 }
 
 /// Single crystal placement in UE coordinate space.
@@ -809,6 +811,8 @@ pub struct ConvertedFluidMesh {
     pub normals: Vec<FfiVec3>,
     pub fluid_types: Vec<u8>,
     pub indices: Vec<u32>,
+    pub uvs: Vec<[f32; 2]>,
+    pub flow_directions: Vec<FfiVec3>,
 }
 
 /// Messages sent to worker threads.

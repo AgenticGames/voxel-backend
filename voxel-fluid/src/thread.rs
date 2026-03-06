@@ -7,7 +7,7 @@ use crossbeam_channel::{Receiver, Sender};
 
 use crate::cell::ChunkFluidGrid;
 use crate::mesh::mesh_fluid;
-use crate::sim::{detect_solidification, regen_sources, tick_fluid};
+use crate::sim::{detect_solidification, regen_sources, squeeze_excess_fluid, tick_fluid};
 use crate::sources::place_sources;
 use crate::{FluidConfig, FluidEvent, FluidResult, FluidSnapshot};
 
@@ -122,11 +122,11 @@ fn handle_event(
     config: &FluidConfig,
 ) {
     match event {
-        FluidEvent::SolidMaskUpdate { chunk, mask } => {
+        FluidEvent::DensityUpdate { chunk, densities } => {
             let grid = chunks
                 .entry(chunk)
                 .or_insert_with(|| ChunkFluidGrid::new(chunk_size));
-            grid.update_solid_mask(&mask);
+            grid.update_density(&densities);
             grid.dirty = true;
         }
         FluidEvent::PlaceSources { chunk } => {
@@ -135,9 +135,10 @@ fn handle_event(
                 .or_insert_with(|| ChunkFluidGrid::new(chunk_size));
             place_sources(grid, chunk, chunk_size, config);
         }
-        FluidEvent::TerrainModified { chunk, mask } => {
+        FluidEvent::TerrainModified { chunk, densities } => {
             if let Some(grid) = chunks.get_mut(&chunk) {
-                grid.update_solid_mask(&mask);
+                grid.update_density(&densities);
+                squeeze_excess_fluid(grid);
                 grid.dirty = true;
             }
         }
@@ -159,7 +160,9 @@ fn handle_event(
                 let xu = lx as usize;
                 let yu = ly as usize;
                 let zu = lz as usize;
-                if xu < chunk_size && yu < chunk_size && zu < chunk_size && !grid.is_solid(xu, yu, zu) {
+                if xu < chunk_size && yu < chunk_size && zu < chunk_size
+                    && grid.cell_capacity(xu, yu, zu) > crate::cell::MIN_LEVEL
+                {
                     let cell = grid.get_mut(xu, yu, zu);
                     cell.fluid_type = crate::cell::FluidType::from_u8(fluid_type_u8);
                     cell.level = level.min(crate::cell::MAX_LEVEL);
@@ -174,7 +177,9 @@ fn handle_event(
             let xu = x as usize;
             let yu = y as usize;
             let zu = z as usize;
-            if xu < chunk_size && yu < chunk_size && zu < chunk_size && !grid.is_solid(xu, yu, zu) {
+            if xu < chunk_size && yu < chunk_size && zu < chunk_size
+                && grid.cell_capacity(xu, yu, zu) > crate::cell::MIN_LEVEL
+            {
                 let cell = grid.get_mut(xu, yu, zu);
                 cell.fluid_type = fluid_type;
                 cell.level = level;

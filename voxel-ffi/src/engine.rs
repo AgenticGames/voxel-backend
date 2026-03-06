@@ -1470,7 +1470,7 @@ fn ffi_config_to_fluid(c: &FfiEngineConfig) -> FluidConfig {
     FluidConfig {
         seed: c.seed,
         chunk_size: c.chunk_size as usize,
-        tick_rate: if c.fluid_tick_rate > 0.0 { c.fluid_tick_rate } else { 15.0 },
+        tick_rate: if c.fluid_tick_rate > 0.0 { c.fluid_tick_rate } else { 10.0 },
         lava_tick_divisor: if c.fluid_lava_tick_divisor > 0 { c.fluid_lava_tick_divisor } else { 4 },
         water_spring_threshold: if c.fluid_water_spring_threshold > 0.0 { c.fluid_water_spring_threshold } else { 2.0 },
         lava_source_threshold: if c.fluid_lava_source_threshold > 0.0 { c.fluid_lava_source_threshold } else { 0.98 },
@@ -1486,6 +1486,8 @@ fn ffi_config_to_fluid(c: &FfiEngineConfig) -> FluidConfig {
         lava_spread_rate: if c.fluid_lava_spread_rate > 0.0 { c.fluid_lava_spread_rate } else { 0.125 },
         cavern_source_bias: c.fluid_cavern_source_bias,
         tunnel_bend_threshold: c.fluid_tunnel_bend_threshold,
+        flow_anim_speed: 1.0,
+        solid_threshold: 0.0,
     }
 }
 
@@ -1707,6 +1709,7 @@ fn convert_fluid_mesh_to_ue(
 ) -> ConvertedFluidMesh {
     let mut positions = Vec::with_capacity(mesh.positions.len());
     let mut normals = Vec::with_capacity(mesh.normals.len());
+    let mut flow_directions = Vec::with_capacity(mesh.flow_directions.len());
 
     for p in &mesh.positions {
         // Rust Y-up -> UE Z-up: (x, -z, y) * scale
@@ -1726,11 +1729,23 @@ fn convert_fluid_mesh_to_ue(
         });
     }
 
+    // Flow directions: (dx, dz, magnitude) — transform horizontal components
+    // Rust (dx, dz) → UE (dx, -dz) to match the Y→Z axis swap
+    for f in &mesh.flow_directions {
+        flow_directions.push(FfiVec3 {
+            x: f[0],       // dx unchanged
+            y: -f[1],      // dz negated (Rust Z → UE -Y)
+            z: f[2],       // magnitude
+        });
+    }
+
     ConvertedFluidMesh {
         positions,
         normals,
         fluid_types: mesh.fluid_types.clone(),
         indices: mesh.indices.clone(),
+        uvs: mesh.uvs.clone(),
+        flow_directions,
     }
 }
 

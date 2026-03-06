@@ -49,6 +49,9 @@ pub struct FluidConfig {
     // General
     pub cavern_source_bias: f64,
     pub tunnel_bend_threshold: f64,
+    // New: flow animation / density threshold
+    pub flow_anim_speed: f32,
+    pub solid_threshold: f32,
 }
 
 impl Default for FluidConfig {
@@ -56,7 +59,7 @@ impl Default for FluidConfig {
         Self {
             seed: 42,
             chunk_size: 16,
-            tick_rate: 15.0,
+            tick_rate: 10.0,
             lava_tick_divisor: 4,
             water_spring_threshold: 2.0,
             lava_source_threshold: 0.98,
@@ -72,25 +75,27 @@ impl Default for FluidConfig {
             lava_spread_rate: 0.125,
             cavern_source_bias: 0.0,
             tunnel_bend_threshold: 0.0,
+            flow_anim_speed: 1.0,
+            solid_threshold: 0.0,
         }
     }
 }
 
 /// Events sent from the voxel engine workers to the fluid simulation thread.
 pub enum FluidEvent {
-    /// A chunk's solid mask was generated (after density generation).
-    SolidMaskUpdate {
+    /// A chunk's density field was generated — provides raw 17^3 density values.
+    DensityUpdate {
         chunk: (i32, i32, i32),
-        mask: Vec<u64>,
+        densities: Vec<f32>, // 17^3 = 4913 raw density values
     },
     /// Place initial fluid sources in a newly generated chunk.
     PlaceSources {
         chunk: (i32, i32, i32),
     },
-    /// Terrain was modified by mining; solid mask updated.
+    /// Terrain was modified by mining; density values updated.
     TerrainModified {
         chunk: (i32, i32, i32),
-        mask: Vec<u64>,
+        densities: Vec<f32>, // 17^3 = 4913 raw density values
     },
     /// A chunk was unloaded; remove its fluid data.
     ChunkUnloaded {

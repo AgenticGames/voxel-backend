@@ -290,6 +290,20 @@ pub unsafe extern "C" fn voxel_free_result(result: *mut FfiResult) {
                 fluid.vertex_count as usize,
             ));
         }
+        if !fluid.uvs.is_null() {
+            drop(Vec::from_raw_parts(
+                fluid.uvs,
+                fluid.vertex_count as usize,
+                fluid.vertex_count as usize,
+            ));
+        }
+        if !fluid.flow_directions.is_null() {
+            drop(Vec::from_raw_parts(
+                fluid.flow_directions,
+                fluid.vertex_count as usize,
+                fluid.vertex_count as usize,
+            ));
+        }
     }
     if fluid.index_count > 0 && !fluid.indices.is_null() {
         drop(Vec::from_raw_parts(
@@ -1309,6 +1323,8 @@ fn empty_fluid_mesh_data() -> FfiFluidMeshData {
         vertex_count: 0,
         indices: ptr::null_mut(),
         index_count: 0,
+        uvs: ptr::null_mut(),
+        flow_directions: ptr::null_mut(),
     }
 }
 
@@ -1320,16 +1336,22 @@ fn converted_fluid_mesh_to_ffi(mesh: ConvertedFluidMesh) -> FfiFluidMeshData {
     let mut normals = mesh.normals.into_boxed_slice();
     let mut fluid_types = mesh.fluid_types.into_boxed_slice();
     let mut indices = mesh.indices.into_boxed_slice();
+    let mut uvs = mesh.uvs.into_boxed_slice();
+    let mut flow_directions = mesh.flow_directions.into_boxed_slice();
 
     let positions_ptr = positions.as_mut_ptr();
     let normals_ptr = normals.as_mut_ptr();
     let fluid_types_ptr = fluid_types.as_mut_ptr();
     let indices_ptr = indices.as_mut_ptr();
+    let uvs_ptr = uvs.as_mut_ptr();
+    let flow_directions_ptr = flow_directions.as_mut_ptr();
 
     std::mem::forget(positions);
     std::mem::forget(normals);
     std::mem::forget(fluid_types);
     std::mem::forget(indices);
+    std::mem::forget(uvs);
+    std::mem::forget(flow_directions);
 
     FfiFluidMeshData {
         positions: positions_ptr,
@@ -1338,6 +1360,8 @@ fn converted_fluid_mesh_to_ffi(mesh: ConvertedFluidMesh) -> FfiFluidMeshData {
         vertex_count,
         indices: indices_ptr,
         index_count,
+        uvs: uvs_ptr,
+        flow_directions: flow_directions_ptr,
     }
 }
 

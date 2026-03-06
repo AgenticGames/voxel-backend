@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::cell::{ChunkFluidGrid, FluidType, MAX_LEVEL, MIN_LEVEL, SOURCE_LEVEL};
+use crate::cell::{ChunkFluidGrid, FluidType, MIN_LEVEL, SOURCE_LEVEL};
 use crate::FluidConfig;
 
 /// A pending fluid transfer across a chunk boundary.
@@ -16,7 +16,8 @@ struct CrossChunkTransfer {
 /// Simulate one tick of fluid for all loaded chunks.
 ///
 /// Uses double-buffering: reads from current state, writes to a new buffer,
-/// then swaps. Gravity flows downward first, then horizontal spread.
+/// then swaps. Gravity flows downward first, then horizontal spread uses
+/// fill-fraction equalization for correct behavior with partial-volume cells.
 ///
 /// Returns the set of chunk keys that had any fluid changes (dirty).
 pub fn tick_fluid(
@@ -42,12 +43,13 @@ pub fn tick_fluid(
     // Apply cross-chunk transfers (second pass — no borrow conflicts)
     for xfer in &all_transfers {
         if let Some(grid) = chunks.get_mut(&xfer.dest_key) {
-            if grid.is_solid(xfer.dest_x, xfer.dest_y, xfer.dest_z) {
-                continue;
+            let capacity = grid.cell_capacity(xfer.dest_x, xfer.dest_y, xfer.dest_z);
+            if capacity < MIN_LEVEL {
+                continue; // solid cell
             }
             let cell = grid.get_mut(xfer.dest_x, xfer.dest_y, xfer.dest_z);
-            let space = MAX_LEVEL - cell.level;
-            let actual = xfer.amount.min(space);
+            let space = capacity - cell.level;
+            let actual = xfer.amount.min(space).max(0.0);
             if actual > MIN_LEVEL {
                 cell.level += actual;
                 cell.fluid_type = xfer.fluid_type;
@@ -63,7 +65,8 @@ pub fn tick_fluid(
 }
 
 /// Count how many of the 6 face neighbors are solid (or out of bounds).
-fn count_solid_face_neighbors(solid_mask: &[u64], size: usize, x: usize, y: usize, z: usize) -> u8 {
+fn count_solid_face_neighbors(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> u8 {
+    let size = grid.size;
     let mut count: u8 = 0;
     let deltas: [(i32, i32, i32); 6] = [
         (1, 0, 0), (-1, 0, 0),
@@ -77,8 +80,7 @@ fn count_solid_face_neighbors(solid_mask: &[u64], size: usize, x: usize, y: usiz
         if nx < 0 || nx >= size as i32 || ny < 0 || ny >= size as i32 || nz < 0 || nz >= size as i32 {
             count += 1; // out of bounds = solid
         } else {
-            let ni = nz as usize * size * size + ny as usize * size + nx as usize;
-            if (solid_mask[ni / 64] >> (ni % 64)) & 1 == 1 {
+            if grid.is_solid(nx as usize, ny as usize, nz as usize) {
                 count += 1;
             }
         }
@@ -101,9 +103,9 @@ fn tick_chunk(
 
     let size = grid.size;
 
-    // Create new buffer
+    // Create new buffer + snapshot density
     let mut new_cells = grid.cells.clone();
-    let solid_mask = grid.solid_mask.clone();
+    let cell_density = &grid.cell_density;
     let mut changed = false;
     let mut cross_transfers: Vec<CrossChunkTransfer> = Vec::new();
 
@@ -113,10 +115,8 @@ fn tick_chunk(
             for x in 0..size {
                 let idx = z * size * size + y * size + x;
 
-                // Skip solid cells
-                let word = idx / 64;
-                let bit = idx % 64;
-                if (solid_mask[word] >> bit) & 1 == 1 {
+                // Skip solid cells (density > threshold)
+                if cell_density[idx] > config.solid_threshold {
                     new_cells[idx].level = 0.0;
                     continue;
                 }
@@ -136,12 +136,15 @@ fn tick_chunk(
                 }
 
                 // Skip flow for sources trapped in solid rock pockets
-                let solid_neighbors = count_solid_face_neighbors(&solid_mask, size, x, y, z);
+                let solid_neighbors = count_solid_face_neighbors(
+                    chunks.get(&key).unwrap(), x, y, z,
+                );
                 if solid_neighbors >= 5 {
                     continue;
                 }
 
                 let is_source = cell.is_source();
+                let src_capacity = (-cell_density[idx]).clamp(0.0, 1.0);
 
                 let flow_rate = if is_lava { config.lava_flow_rate } else { config.water_flow_rate };
                 let horizontal_spread = if is_lava { config.lava_spread_rate } else { config.water_spread_rate };
@@ -149,13 +152,12 @@ fn tick_chunk(
                 // Gravity: try to flow down
                 if y > 0 {
                     let below_idx = z * size * size + (y - 1) * size + x;
-                    let below_solid = (solid_mask[below_idx / 64] >> (below_idx % 64)) & 1 == 1;
-                    if !below_solid {
-                        let below_space = MAX_LEVEL - new_cells[below_idx].level;
+                    if cell_density[below_idx] <= config.solid_threshold {
+                        let below_capacity = (-cell_density[below_idx]).clamp(0.0, 1.0);
+                        let below_space = (below_capacity - new_cells[below_idx].level).max(0.0);
                         if below_space > MIN_LEVEL {
                             let transfer = cell.level.min(below_space).min(flow_rate * 2.0);
                             if transfer > MIN_LEVEL {
-                                // Sources emit fluid without losing any
                                 if !is_source {
                                     new_cells[idx].level -= transfer;
                                 }
@@ -172,13 +174,9 @@ fn tick_chunk(
                     if let Some(below_grid) = chunks.get(&below_key) {
                         let by = size - 1;
                         let below_idx = z * size * size + by * size + x;
-                        let below_solid = {
-                            let w = below_idx / 64;
-                            let b = below_idx % 64;
-                            (below_grid.solid_mask[w] >> b) & 1 == 1
-                        };
-                        if !below_solid {
-                            let below_space = MAX_LEVEL - below_grid.cells[below_idx].level;
+                        let below_capacity = below_grid.cell_capacity(x, by, z);
+                        if below_capacity > MIN_LEVEL {
+                            let below_space = (below_capacity - below_grid.cells[below_idx].level).max(0.0);
                             if below_space > MIN_LEVEL {
                                 let transfer = new_cells[idx].level.min(below_space).min(flow_rate * 2.0);
                                 if transfer > MIN_LEVEL {
@@ -200,9 +198,14 @@ fn tick_chunk(
                     }
                 }
 
-                // Horizontal spread (4 neighbors: +x, -x, +z, -z)
+                // Horizontal spread using fill-fraction equalization
                 if new_cells[idx].level > MIN_LEVEL {
                     let remaining = new_cells[idx].level;
+                    let src_fill = if src_capacity > MIN_LEVEL {
+                        remaining / src_capacity
+                    } else {
+                        1.0
+                    };
                     let neighbors: [(i32, i32, i32); 4] = [
                         (x as i32 + 1, y as i32, z as i32),
                         (x as i32 - 1, y as i32, z as i32),
@@ -215,16 +218,18 @@ fn tick_chunk(
                             continue;
                         }
                         let ni = nz as usize * size * size + ny as usize * size + nx as usize;
-                        let n_solid = (solid_mask[ni / 64] >> (ni % 64)) & 1 == 1;
-                        if n_solid {
+                        if cell_density[ni] > config.solid_threshold {
                             continue;
                         }
-                        let n_level = new_cells[ni].level;
-                        if remaining > n_level + MIN_LEVEL {
-                            let diff = remaining - n_level;
-                            let transfer = (diff * horizontal_spread).min(flow_rate);
+                        let dst_capacity = (-cell_density[ni]).clamp(0.0, 1.0);
+                        if dst_capacity < MIN_LEVEL {
+                            continue;
+                        }
+                        let dst_fill = new_cells[ni].level / dst_capacity;
+                        let diff = src_fill - dst_fill;
+                        if diff > MIN_LEVEL {
+                            let transfer = (diff * horizontal_spread * src_capacity).min(flow_rate);
                             if transfer > MIN_LEVEL {
-                                // Sources emit fluid without losing any
                                 if !is_source {
                                     new_cells[idx].level -= transfer;
                                 }
@@ -255,6 +260,67 @@ fn tick_chunk(
     }
 
     (changed, cross_transfers)
+}
+
+/// After a density update, squeeze excess fluid from cells whose capacity decreased.
+/// Excess is pushed to non-solid neighbors; any remainder is evaporated.
+pub fn squeeze_excess_fluid(grid: &mut ChunkFluidGrid) {
+    let size = grid.size;
+    let mut any_change = false;
+
+    for z in 0..size {
+        for y in 0..size {
+            for x in 0..size {
+                let idx = z * size * size + y * size + x;
+                let capacity = (-grid.cell_density[idx]).clamp(0.0, 1.0);
+                let level = grid.cells[idx].level;
+
+                if level <= capacity {
+                    continue;
+                }
+
+                let excess = level - capacity;
+                grid.cells[idx].level = capacity;
+                any_change = true;
+
+                // Try to push excess to neighbors
+                let mut remaining = excess;
+                let fluid_type = grid.cells[idx].fluid_type;
+                let deltas: [(i32, i32, i32); 6] = [
+                    (0, 1, 0), (0, -1, 0), // up/down first
+                    (1, 0, 0), (-1, 0, 0),
+                    (0, 0, 1), (0, 0, -1),
+                ];
+                for (dx, dy, dz) in deltas {
+                    if remaining < MIN_LEVEL {
+                        break;
+                    }
+                    let nx = x as i32 + dx;
+                    let ny = y as i32 + dy;
+                    let nz = z as i32 + dz;
+                    if nx < 0 || nx >= size as i32 || ny < 0 || ny >= size as i32
+                        || nz < 0 || nz >= size as i32
+                    {
+                        continue;
+                    }
+                    let ni = nz as usize * size * size + ny as usize * size + nx as usize;
+                    let n_capacity = (-grid.cell_density[ni]).clamp(0.0, 1.0);
+                    let n_space = (n_capacity - grid.cells[ni].level).max(0.0);
+                    if n_space > MIN_LEVEL {
+                        let push = remaining.min(n_space);
+                        grid.cells[ni].level += push;
+                        grid.cells[ni].fluid_type = fluid_type;
+                        remaining -= push;
+                    }
+                }
+                // Any remaining excess evaporates (no neighbor space available)
+            }
+        }
+    }
+
+    if any_change {
+        grid.dirty = true;
+    }
 }
 
 /// Detect water-lava contact and return cells to solidify (become basalt).
@@ -383,7 +449,7 @@ mod tests {
         grid.get_mut(8, 8, 8).level = 0.5;
         grid.get_mut(8, 8, 8).fluid_type = FluidType::Water;
         // Make y=7 solid
-        grid.set_solid(8, 7, 8, true);
+        grid.set_density(8, 7, 8, 1.0);
         chunks.insert(key, grid);
 
         let config = crate::FluidConfig::default();
@@ -476,12 +542,12 @@ mod tests {
         grid.get_mut(8, 8, 8).level = SOURCE_LEVEL;
         grid.get_mut(8, 8, 8).fluid_type = FluidType::Water;
         // Surround with solid on all 6 faces
-        grid.set_solid(7, 8, 8, true);
-        grid.set_solid(9, 8, 8, true);
-        grid.set_solid(8, 7, 8, true);
-        grid.set_solid(8, 9, 8, true);
-        grid.set_solid(8, 8, 7, true);
-        grid.set_solid(8, 8, 9, true);
+        grid.set_density(7, 8, 8, 1.0);
+        grid.set_density(9, 8, 8, 1.0);
+        grid.set_density(8, 7, 8, 1.0);
+        grid.set_density(8, 9, 8, 1.0);
+        grid.set_density(8, 8, 7, 1.0);
+        grid.set_density(8, 8, 9, 1.0);
         chunks.insert(key, grid);
 
         let config = crate::FluidConfig::default();
@@ -501,5 +567,68 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn partial_capacity_limits_fill() {
+        let mut chunks = HashMap::new();
+        let key = (0, 0, 0);
+        let mut grid = make_chunk(16);
+        // Cell with 50% capacity (density = -0.5)
+        grid.set_density(8, 7, 8, -0.5);
+        // Place water above
+        grid.get_mut(8, 8, 8).level = 0.8;
+        grid.get_mut(8, 8, 8).fluid_type = FluidType::Water;
+        chunks.insert(key, grid);
+
+        let config = crate::FluidConfig::default();
+        // Multiple ticks to let fluid settle
+        for _ in 0..20 {
+            tick_fluid(&mut chunks, 16, false, &config);
+        }
+
+        // Cell at y=7 should not exceed its capacity of 0.5
+        let grid = &chunks[&key];
+        assert!(
+            grid.get(8, 7, 8).level <= 0.501,
+            "Fluid should not exceed cell capacity of 0.5, got {}",
+            grid.get(8, 7, 8).level
+        );
+    }
+
+    #[test]
+    fn squeeze_excess_works() {
+        let mut grid = make_chunk(16);
+        // Fill cell with water
+        grid.get_mut(8, 8, 8).level = 0.8;
+        grid.get_mut(8, 8, 8).fluid_type = FluidType::Water;
+
+        // Now make the cell partially solid (capacity drops to 0.3)
+        grid.set_density(8, 8, 8, -0.3);
+
+        squeeze_excess_fluid(&mut grid);
+
+        // Level should be clamped to capacity
+        assert!(
+            grid.get(8, 8, 8).level <= 0.301,
+            "Level should be squeezed to capacity, got {}",
+            grid.get(8, 8, 8).level
+        );
+        // Excess should have been pushed to a neighbor
+        let mut total_neighbors = 0.0f32;
+        let deltas: [(i32, i32, i32); 6] = [
+            (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
+        ];
+        for (dx, dy, dz) in deltas {
+            let nx = (8i32 + dx) as usize;
+            let ny = (8i32 + dy) as usize;
+            let nz = (8i32 + dz) as usize;
+            total_neighbors += grid.get(nx, ny, nz).level;
+        }
+        assert!(
+            total_neighbors > 0.4,
+            "Excess fluid should have been pushed to neighbors, got {}",
+            total_neighbors
+        );
     }
 }

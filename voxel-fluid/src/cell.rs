@@ -75,13 +75,28 @@ pub const SOURCE_LEVEL: f32 = 1.0;
 /// Maximum fluid level.
 pub const MAX_LEVEL: f32 = 1.0;
 
-/// Per-chunk fluid grid: 16^3 cells + 64-bit solid mask.
+/// Corner offsets for the 8 corners of a cell, matching MC convention:
+///   0=(0,0,0) 1=(1,0,0) 2=(1,1,0) 3=(0,1,0)
+///   4=(0,0,1) 5=(1,0,1) 6=(1,1,1) 7=(0,1,1)
+const CELL_CORNER_OFFSETS: [[usize; 3]; 8] = [
+    [0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
+    [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1],
+];
+
+/// Per-chunk fluid grid: 16^3 cells with continuous density data.
 ///
-/// The solid_mask uses a packed bitfield: one bit per voxel in the 16^3 grid.
-/// 16*16*16 = 4096 bits = 64 u64 values.
+/// Replaces the old binary solid_mask with density values from the terrain's
+/// DensityField. This allows partial-volume fluid simulation where cells
+/// partially occupied by terrain have reduced fluid capacity.
 pub struct ChunkFluidGrid {
     pub cells: Vec<FluidCell>,
-    pub solid_mask: Vec<u64>,
+    /// Density at each cell center (average of 8 corners). 16^3 = 4096 values.
+    /// Positive = solid, negative = air.
+    pub cell_density: Vec<f32>,
+    /// 8 corner densities per cell for meshing shoreline clipping.
+    /// Layout: cell_corners[cell_idx * 8 + corner] where corner is MC ordering.
+    /// 16^3 * 8 = 32768 values.
+    pub cell_corners: Vec<f32>,
     pub size: usize,
     pub dirty: bool,
 }
@@ -89,10 +104,10 @@ pub struct ChunkFluidGrid {
 impl ChunkFluidGrid {
     pub fn new(size: usize) -> Self {
         let total = size * size * size;
-        let mask_words = (total + 63) / 64;
         Self {
             cells: vec![FluidCell::default(); total],
-            solid_mask: vec![0u64; mask_words],
+            cell_density: vec![-1.0; total], // default to air (negative density)
+            cell_corners: vec![-1.0; total * 8],
             size,
             dirty: false,
         }
@@ -114,30 +129,78 @@ impl ChunkFluidGrid {
         &mut self.cells[idx]
     }
 
+    /// Returns true if the cell is solid (density > solid_threshold, default 0.0).
     #[inline]
     pub fn is_solid(&self, x: usize, y: usize, z: usize) -> bool {
         let idx = self.index(x, y, z);
-        let word = idx / 64;
-        let bit = idx % 64;
-        (self.solid_mask[word] >> bit) & 1 == 1
+        self.cell_density[idx] > 0.0
     }
 
+    /// Returns the fluid capacity of a cell: how much fluid it can hold.
+    /// Positive density = solid (capacity 0), negative = air (up to 1.0).
     #[inline]
-    pub fn set_solid(&mut self, x: usize, y: usize, z: usize, solid: bool) {
+    pub fn cell_capacity(&self, x: usize, y: usize, z: usize) -> f32 {
         let idx = self.index(x, y, z);
-        let word = idx / 64;
-        let bit = idx % 64;
-        if solid {
-            self.solid_mask[word] |= 1u64 << bit;
-        } else {
-            self.solid_mask[word] &= !(1u64 << bit);
+        (-self.cell_density[idx]).clamp(0.0, 1.0)
+    }
+
+    /// Set density for a single cell (used in tests and terrain modification).
+    /// Positive = solid, negative = air.
+    #[inline]
+    pub fn set_density(&mut self, x: usize, y: usize, z: usize, density: f32) {
+        let idx = self.index(x, y, z);
+        self.cell_density[idx] = density;
+        // Also set all 8 corners to the same value for consistency in tests
+        for c in 0..8 {
+            self.cell_corners[idx * 8 + c] = density;
         }
     }
 
-    /// Update solid mask from a flat bitfield (provided by voxel-ffi after density gen).
-    pub fn update_solid_mask(&mut self, mask: &[u64]) {
-        let len = self.solid_mask.len().min(mask.len());
-        self.solid_mask[..len].copy_from_slice(&mask[..len]);
+    /// Get the 8 corner densities for a cell (for meshing/shoreline clipping).
+    #[inline]
+    pub fn get_corners(&self, x: usize, y: usize, z: usize) -> [f32; 8] {
+        let idx = self.index(x, y, z);
+        let base = idx * 8;
+        let mut corners = [0.0f32; 8];
+        corners.copy_from_slice(&self.cell_corners[base..base + 8]);
+        corners
+    }
+
+    /// Update density data from a raw 17^3 DensityField.
+    ///
+    /// Extracts center densities (average of 8 corners) and per-cell corner
+    /// densities from the full (chunk_size+1)^3 density grid.
+    pub fn update_density(&mut self, densities: &[f32]) {
+        let size = self.size;
+        let stride = size + 1; // 17 for chunk_size=16
+
+        // Validate input size
+        if densities.len() < stride * stride * stride {
+            return;
+        }
+
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..size {
+                    let cell_idx = z * size * size + y * size + x;
+
+                    // Extract 8 corner densities from the 17^3 grid
+                    let mut sum = 0.0f32;
+                    for (c, offsets) in CELL_CORNER_OFFSETS.iter().enumerate() {
+                        let gx = x + offsets[0];
+                        let gy = y + offsets[1];
+                        let gz = z + offsets[2];
+                        let grid_idx = gz * stride * stride + gy * stride + gx;
+                        let d = densities[grid_idx];
+                        self.cell_corners[cell_idx * 8 + c] = d;
+                        sum += d;
+                    }
+
+                    // Center density = average of 8 corners
+                    self.cell_density[cell_idx] = sum / 8.0;
+                }
+            }
+        }
     }
 }
 
@@ -155,13 +218,71 @@ mod tests {
     }
 
     #[test]
-    fn solid_mask_set_get() {
+    fn density_solid_check() {
         let mut grid = ChunkFluidGrid::new(16);
+        // Default is air (density -1.0)
         assert!(!grid.is_solid(5, 5, 5));
-        grid.set_solid(5, 5, 5, true);
+        assert!((grid.cell_capacity(5, 5, 5) - 1.0).abs() < 0.01);
+
+        // Set to solid
+        grid.set_density(5, 5, 5, 1.0);
         assert!(grid.is_solid(5, 5, 5));
-        grid.set_solid(5, 5, 5, false);
+        assert!(grid.cell_capacity(5, 5, 5) < 0.01);
+
+        // Set back to air
+        grid.set_density(5, 5, 5, -0.5);
         assert!(!grid.is_solid(5, 5, 5));
+        assert!((grid.cell_capacity(5, 5, 5) - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn cell_capacity_clamped() {
+        let mut grid = ChunkFluidGrid::new(16);
+        // Very negative density → capacity capped at 1.0
+        grid.set_density(0, 0, 0, -10.0);
+        assert!((grid.cell_capacity(0, 0, 0) - 1.0).abs() < 0.001);
+
+        // Partially solid → partial capacity
+        grid.set_density(0, 0, 0, -0.3);
+        assert!((grid.cell_capacity(0, 0, 0) - 0.3).abs() < 0.001);
+
+        // Solid → zero capacity
+        grid.set_density(0, 0, 0, 0.5);
+        assert!(grid.cell_capacity(0, 0, 0) < 0.001);
+    }
+
+    #[test]
+    fn update_density_from_grid() {
+        let size = 4; // small for testing
+        let stride = size + 1;
+        let mut grid = ChunkFluidGrid::new(size);
+
+        // Create a 5^3 density field: all air (-1.0)
+        let mut densities = vec![-1.0f32; stride * stride * stride];
+
+        // Make cell (1,1,1) solid by setting all its corners to positive
+        for offsets in &CELL_CORNER_OFFSETS {
+            let gx = 1 + offsets[0];
+            let gy = 1 + offsets[1];
+            let gz = 1 + offsets[2];
+            densities[gz * stride * stride + gy * stride + gx] = 1.0;
+        }
+
+        grid.update_density(&densities);
+
+        // Cell (1,1,1) should be solid
+        assert!(grid.is_solid(1, 1, 1));
+        assert!(grid.cell_capacity(1, 1, 1) < 0.001);
+
+        // Cell (0,0,0) should be air
+        assert!(!grid.is_solid(0, 0, 0));
+        assert!(grid.cell_capacity(0, 0, 0) > 0.5);
+
+        // Corner densities should be accessible
+        let corners = grid.get_corners(1, 1, 1);
+        for c in &corners {
+            assert!(*c > 0.0);
+        }
     }
 
     #[test]
