@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
 
-use crate::cell::{ChunkDensityCache, ChunkFluidGrid};
-use crate::mesh::{mesh_fluid, BoundaryLevels};
+use crate::cell::{ChunkDensityCache, ChunkFluidGrid, MIN_LEVEL};
+use crate::mesh::{mesh_fluid, BoundaryLevels, ISO_LEVEL};
 use crate::sim::{detect_solidification, regen_sources, squeeze_excess_fluid, tick_fluid};
 use crate::sources::place_sources;
 use crate::{FluidConfig, FluidEvent, FluidResult, FluidSnapshot};
@@ -206,6 +206,8 @@ fn handle_event(
 }
 
 /// Build boundary levels from neighboring chunks for seamless fluid meshing.
+/// Pre-bakes field values (density + floor extension) to match what sample_field()
+/// produces for in-bounds cells, eliminating the density discontinuity at chunk edges.
 fn build_boundary_levels(
     key: (i32, i32, i32),
     chunks: &HashMap<(i32, i32, i32), ChunkFluidGrid>,
@@ -213,45 +215,107 @@ fn build_boundary_levels(
 ) -> BoundaryLevels {
     let mut boundary = BoundaryLevels::empty(size);
 
-    // +X neighbor: extract x=0 face levels
+    // +X neighbor: extract x=0 face as pre-baked field values
     let px_key = (key.0 + 1, key.1, key.2);
     if let Some(nbr) = chunks.get(&px_key) {
         if nbr.has_fluid {
             let mut levels = vec![0.0f32; size * size];
+            let mut has_fluid = vec![false; size * size];
             for z in 0..size {
                 for y in 0..size {
-                    levels[z * size + y] = nbr.get(0, y, z).level;
+                    let i = z * size + y;
+                    let cell = nbr.get(0, y, z);
+                    let density = nbr.grid_point_density(0, y, z);
+                    levels[i] = if density > 0.0 {
+                        1.0
+                    } else {
+                        let level = cell.level;
+                        // Floor extension: same logic as sample_field in-bounds path
+                        if level < ISO_LEVEL
+                            && (y == 0 || nbr.grid_point_density(0, y - 1, z) > 0.0)
+                            && y + 1 < size
+                            && nbr.grid_point_density(0, y + 1, z) <= 0.0
+                            && nbr.get(0, y + 1, z).level >= ISO_LEVEL
+                        {
+                            1.0
+                        } else {
+                            level
+                        }
+                    };
+                    has_fluid[i] = cell.level >= MIN_LEVEL;
                 }
             }
             boundary.pos_x = Some(levels);
+            boundary.pos_x_fluid = Some(has_fluid);
         }
     }
 
-    // +Y neighbor: extract y=0 face levels
+    // +Y neighbor: extract y=0 face as pre-baked field values
     let py_key = (key.0, key.1 + 1, key.2);
     if let Some(nbr) = chunks.get(&py_key) {
         if nbr.has_fluid {
             let mut levels = vec![0.0f32; size * size];
+            let mut has_fluid = vec![false; size * size];
             for z in 0..size {
                 for x in 0..size {
-                    levels[z * size + x] = nbr.get(x, 0, z).level;
+                    let i = z * size + x;
+                    let cell = nbr.get(x, 0, z);
+                    let density = nbr.grid_point_density(x, 0, z);
+                    levels[i] = if density > 0.0 {
+                        1.0
+                    } else {
+                        let level = cell.level;
+                        // Floor extension: y=0 always satisfies (y==0) condition
+                        if level < ISO_LEVEL
+                            && 1 < size
+                            && nbr.grid_point_density(x, 1, z) <= 0.0
+                            && nbr.get(x, 1, z).level >= ISO_LEVEL
+                        {
+                            1.0
+                        } else {
+                            level
+                        }
+                    };
+                    has_fluid[i] = cell.level >= MIN_LEVEL;
                 }
             }
             boundary.pos_y = Some(levels);
+            boundary.pos_y_fluid = Some(has_fluid);
         }
     }
 
-    // +Z neighbor: extract z=0 face levels
+    // +Z neighbor: extract z=0 face as pre-baked field values
     let pz_key = (key.0, key.1, key.2 + 1);
     if let Some(nbr) = chunks.get(&pz_key) {
         if nbr.has_fluid {
             let mut levels = vec![0.0f32; size * size];
+            let mut has_fluid = vec![false; size * size];
             for y in 0..size {
                 for x in 0..size {
-                    levels[y * size + x] = nbr.get(x, y, 0).level;
+                    let i = y * size + x;
+                    let cell = nbr.get(x, y, 0);
+                    let density = nbr.grid_point_density(x, y, 0);
+                    levels[i] = if density > 0.0 {
+                        1.0
+                    } else {
+                        let level = cell.level;
+                        // Floor extension
+                        if level < ISO_LEVEL
+                            && (y == 0 || nbr.grid_point_density(x, y - 1, 0) > 0.0)
+                            && y + 1 < size
+                            && nbr.grid_point_density(x, y + 1, 0) <= 0.0
+                            && nbr.get(x, y + 1, 0).level >= ISO_LEVEL
+                        {
+                            1.0
+                        } else {
+                            level
+                        }
+                    };
+                    has_fluid[i] = cell.level >= MIN_LEVEL;
                 }
             }
             boundary.pos_z = Some(levels);
+            boundary.pos_z_fluid = Some(has_fluid);
         }
     }
 

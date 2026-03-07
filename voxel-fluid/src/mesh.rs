@@ -2,7 +2,7 @@ use crate::cell::{ChunkFluidGrid, FluidType, MIN_LEVEL};
 use crate::tables::{CORNER_OFFSETS, EDGE_TABLE, EDGE_VERTICES, TRI_TABLE};
 
 /// Isosurface threshold for fluid meshing.
-const ISO_LEVEL: f32 = 0.15;
+pub(crate) const ISO_LEVEL: f32 = 0.15;
 /// Tiny SDF value for out-of-bounds samples — places boundary faces near chunk edge.
 const BOUNDARY_SDF: f32 = 0.001;
 /// Field value for out-of-bounds samples — just below ISO_LEVEL so MC places face at edge.
@@ -46,12 +46,18 @@ const SN_CORNERS: [[f32; 3]; 8] = [
 /// Fluid levels from neighboring chunks at the 3 positive boundary faces.
 /// Used to create seamless mesh at chunk edges instead of sealing the isosurface.
 pub struct BoundaryLevels {
-    /// Neighbor's x=0 face fluid levels, indexed [z * size + y]. size*size values.
+    /// Neighbor's x=0 face pre-baked field values, indexed [z * size + y]. size*size values.
     pub pos_x: Option<Vec<f32>>,
-    /// Neighbor's y=0 face fluid levels, indexed [z * size + x]. size*size values.
+    /// Neighbor's y=0 face pre-baked field values, indexed [z * size + x]. size*size values.
     pub pos_y: Option<Vec<f32>>,
-    /// Neighbor's z=0 face fluid levels, indexed [y * size + x]. size*size values.
+    /// Neighbor's z=0 face pre-baked field values, indexed [y * size + x]. size*size values.
     pub pos_z: Option<Vec<f32>>,
+    /// Whether the neighbor cell at x=0 face has actual fluid (level >= MIN_LEVEL).
+    pub pos_x_fluid: Option<Vec<bool>>,
+    /// Whether the neighbor cell at y=0 face has actual fluid.
+    pub pos_y_fluid: Option<Vec<bool>>,
+    /// Whether the neighbor cell at z=0 face has actual fluid.
+    pub pos_z_fluid: Option<Vec<bool>>,
     pub size: usize,
 }
 
@@ -62,6 +68,9 @@ impl BoundaryLevels {
             pos_x: None,
             pos_y: None,
             pos_z: None,
+            pos_x_fluid: None,
+            pos_y_fluid: None,
+            pos_z_fluid: None,
             size,
         }
     }
@@ -88,6 +97,27 @@ impl BoundaryLevels {
         } else {
             // z == size: look up pos_z face at [y * size + x]
             self.pos_z.as_ref().map(|v| v[y * size + x])
+        }
+    }
+
+    /// Get whether the cell at an out-of-bounds coordinate has actual fluid.
+    /// Returns None for multi-axis overflow or if no neighbor data exists.
+    pub fn get_has_fluid(&self, x: usize, y: usize, z: usize) -> Option<bool> {
+        let size = self.size;
+        let x_over = x >= size;
+        let y_over = y >= size;
+        let z_over = z >= size;
+
+        if (x_over as u8 + y_over as u8 + z_over as u8) != 1 {
+            return None;
+        }
+
+        if x_over {
+            self.pos_x_fluid.as_ref().map(|v| v[z * size + y])
+        } else if y_over {
+            self.pos_y_fluid.as_ref().map(|v| v[z * size + x])
+        } else {
+            self.pos_z_fluid.as_ref().map(|v| v[y * size + x])
         }
     }
 }
@@ -160,13 +190,13 @@ fn has_fluid_above(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> bool 
 fn sample_field(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary: &BoundaryLevels) -> f32 {
     let size = grid.size;
     if x >= size || y >= size || z >= size {
-        // Density at boundary coords is valid via grid_point_density (handles up to size)
-        if grid.grid_point_density(x, y, z) > 0.0 {
-            return 1.0;
-        }
-        // Try neighbor fluid level
+        // Pre-baked boundary value includes density + floor extension
         if let Some(level) = boundary.get_level(x, y, z) {
             return level;
+        }
+        // Fallback: density check at boundary coords
+        if grid.grid_point_density(x, y, z) > 0.0 {
+            return 1.0;
         }
         return BOUNDARY_FIELD;
     }
@@ -193,13 +223,13 @@ fn sample_field(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary: &
 fn sample_sdf(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary: &BoundaryLevels) -> f32 {
     let size = grid.size;
     if x >= size || y >= size || z >= size {
-        // Density at boundary coords is valid via grid_point_density
-        if grid.grid_point_density(x, y, z) > 0.0 {
-            return -1.0;
-        }
-        // Try neighbor fluid level (convert to SDF: ISO_LEVEL - level)
+        // Pre-baked boundary value includes density + floor extension (convert to SDF)
         if let Some(level) = boundary.get_level(x, y, z) {
             return ISO_LEVEL - level;
+        }
+        // Fallback: density check at boundary coords
+        if grid.grid_point_density(x, y, z) > 0.0 {
+            return -1.0;
         }
         return BOUNDARY_SDF;
     }
@@ -236,12 +266,10 @@ fn cube_has_fluid(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary:
                     if overflows > 1 {
                         continue;
                     }
-                    // Single-axis: check density + boundary level
-                    if !(grid.grid_point_density(cx, cy, cz) > 0.0) {
-                        if let Some(level) = boundary.get_level(cx, cy, cz) {
-                            if level >= MIN_LEVEL {
-                                return true;
-                            }
+                    // Single-axis: check pre-baked has_fluid flag
+                    if let Some(has) = boundary.get_has_fluid(cx, cy, cz) {
+                        if has {
+                            return true;
                         }
                     }
                     continue;
@@ -1052,12 +1080,15 @@ mod tests {
         // Build boundary levels from the neighbor's x=0 face
         let mut boundary = BoundaryLevels::empty(16);
         let mut pos_x_levels = vec![0.0f32; 16 * 16];
+        let mut pos_x_fluid = vec![false; 16 * 16];
         for z in 4..8 {
             for y in 4..8 {
                 pos_x_levels[z * 16 + y] = 1.0; // neighbor has fluid at x=0
+                pos_x_fluid[z * 16 + y] = true;
             }
         }
         boundary.pos_x = Some(pos_x_levels);
+        boundary.pos_x_fluid = Some(pos_x_fluid);
 
         let mesh_with_boundary = mesh_fluid(&grid_a, &boundary);
         let mesh_without_boundary = mesh_fluid(&grid_a, &no_boundary());

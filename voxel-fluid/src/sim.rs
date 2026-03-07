@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::cell::{ChunkDensityCache, ChunkFluidGrid, FluidType, MIN_LEVEL, SOURCE_LEVEL};
+use crate::cell::{ChunkDensityCache, ChunkFluidGrid, FluidCell, FluidType, MIN_LEVEL, SOURCE_LEVEL};
 use crate::FluidConfig;
 
 /// A pending fluid transfer across a chunk boundary.
@@ -160,6 +160,81 @@ fn resolve_neighbor(
     }
 
     Some((chunk_key, lx as usize, ly as usize, lz as usize))
+}
+
+/// Extra horizontal equalization pass over a cell buffer.
+/// Iterates in forward or reverse x/z order to eliminate directional bias.
+/// Only handles intra-chunk equalization (no cross-chunk transfers).
+fn equalize_horizontal(
+    new_cells: &mut [FluidCell],
+    cell_solid: &[bool],
+    size: usize,
+    is_lava: bool,
+    config: &FluidConfig,
+    reverse: bool,
+) -> bool {
+    let mut changed = false;
+    let horizontal_spread = if is_lava { config.lava_spread_rate } else { config.water_spread_rate };
+    let flow_rate = if is_lava { config.lava_flow_rate } else { config.water_flow_rate };
+
+    let order: Vec<usize> = if reverse {
+        (0..size).rev().collect()
+    } else {
+        (0..size).collect()
+    };
+
+    for &z in &order {
+        for y in 0..size {
+            for &x in &order {
+                let idx = z * size * size + y * size + x;
+                if cell_solid[idx] {
+                    continue;
+                }
+                let level = new_cells[idx].level;
+                if level < MIN_LEVEL {
+                    continue;
+                }
+                if new_cells[idx].fluid_type.is_lava() != is_lava {
+                    continue;
+                }
+
+                let is_source = new_cells[idx].is_source();
+                let src_fill = level; // capacity is 1.0 for non-solid cells
+                let fluid_type = new_cells[idx].fluid_type;
+
+                let neighbors: [(i32, i32); 4] = [
+                    (1, 0), (-1, 0), (0, 1), (0, -1),
+                ];
+
+                for (dx, dz) in neighbors {
+                    let nx = x as i32 + dx;
+                    let nz = z as i32 + dz;
+                    if nx < 0 || nx >= size as i32 || nz < 0 || nz >= size as i32 {
+                        continue;
+                    }
+                    let ni = nz as usize * size * size + y * size + nx as usize;
+                    if cell_solid[ni] {
+                        continue;
+                    }
+                    let dst_fill = new_cells[ni].level; // capacity is 1.0
+                    let diff = src_fill - dst_fill;
+                    if diff > MIN_LEVEL {
+                        let transfer = (diff * horizontal_spread).min(flow_rate);
+                        if transfer > MIN_LEVEL {
+                            if !is_source {
+                                new_cells[idx].level -= transfer;
+                            }
+                            new_cells[ni].level += transfer;
+                            new_cells[ni].fluid_type = fluid_type;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    changed
 }
 
 /// Simulate one tick for a single chunk. Returns (changed, cross_chunk_transfers).
@@ -465,6 +540,10 @@ fn tick_chunk(
             }
         }
     }
+
+    // Extra equalization passes for faster pooling convergence (reverse + forward)
+    changed |= equalize_horizontal(&mut new_cells, cell_solid, size, is_lava_tick, config, true);
+    changed |= equalize_horizontal(&mut new_cells, cell_solid, size, is_lava_tick, config, false);
 
     // Clean up tiny residual amounts and track has_fluid
     let mut any_fluid = false;
@@ -1162,5 +1241,121 @@ mod tests {
             "Excess fluid should have been pushed to neighbors, got {}",
             total_neighbors
         );
+    }
+
+    #[test]
+    fn test_pool_convergence() {
+        // 1D channel at y=1, z=8 with solid floor + z-walls.
+        // Water at x=0..4 should equalize within 10 ticks (3 passes each).
+        let mut chunks = HashMap::new();
+        let key = (0, 0, 0);
+        let mut grid = make_chunk(16);
+
+        // Full solid floor at y=0 (blocks gravity + slope flow everywhere)
+        for x in 0..16 {
+            for z in 0..16 {
+                grid.set_density(x, 0, z, 1.0);
+            }
+        }
+        // Z-walls to contain water to a 1D row
+        for x in 0..16 {
+            grid.set_density(x, 1, 7, 1.0);
+            grid.set_density(x, 1, 9, 1.0);
+        }
+
+        // Place water at x=0..4
+        for x in 0..4 {
+            let cell = grid.get_mut(x, 1, 8);
+            cell.level = 0.8;
+            cell.fluid_type = FluidType::Water;
+        }
+        grid.has_fluid = true;
+        chunks.insert(key, grid);
+
+        let config = crate::FluidConfig::default();
+        let density_cache = empty_density_cache();
+        for _ in 0..10 {
+            tick_fluid(&mut chunks, &density_cache, 16, false, &config);
+        }
+
+        let grid = &chunks[&key];
+        let mut fluid_levels: Vec<f32> = Vec::new();
+        for x in 0..16 {
+            let level = grid.get(x, 1, 8).level;
+            if level > MIN_LEVEL {
+                fluid_levels.push(level);
+            }
+        }
+
+        assert!(
+            fluid_levels.len() >= 4,
+            "Water should spread to at least 4 cells, got {}",
+            fluid_levels.len()
+        );
+
+        // Among cells with fluid, check rough convergence (max:min ratio)
+        let min_level = fluid_levels.iter().cloned().fold(f32::INFINITY, f32::min);
+        let max_level = fluid_levels.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            max_level < min_level * 5.0,
+            "Pool should roughly converge: min={:.4}, max={:.4} (ratio={:.1}), levels={:?}",
+            min_level, max_level, max_level / min_level, fluid_levels
+        );
+    }
+
+    #[test]
+    fn test_directional_symmetry() {
+        // Source at x=0 vs x=15 should produce symmetric fill patterns after N ticks.
+        let config = crate::FluidConfig::default();
+        let density_cache = empty_density_cache();
+        let key = (0, 0, 0);
+
+        // Build scenario A: water at x=0
+        let mut chunks_a = HashMap::new();
+        let mut grid_a = make_chunk(16);
+        for x in 0..16 {
+            for z in 0..16 {
+                grid_a.set_density(x, 0, z, 1.0);
+            }
+            grid_a.set_density(x, 1, 7, 1.0);
+            grid_a.set_density(x, 1, 9, 1.0);
+        }
+        grid_a.get_mut(0, 1, 8).level = 0.8;
+        grid_a.get_mut(0, 1, 8).fluid_type = FluidType::Water;
+        grid_a.has_fluid = true;
+        chunks_a.insert(key, grid_a);
+
+        // Build scenario B: water at x=15
+        let mut chunks_b = HashMap::new();
+        let mut grid_b = make_chunk(16);
+        for x in 0..16 {
+            for z in 0..16 {
+                grid_b.set_density(x, 0, z, 1.0);
+            }
+            grid_b.set_density(x, 1, 7, 1.0);
+            grid_b.set_density(x, 1, 9, 1.0);
+        }
+        grid_b.get_mut(15, 1, 8).level = 0.8;
+        grid_b.get_mut(15, 1, 8).fluid_type = FluidType::Water;
+        grid_b.has_fluid = true;
+        chunks_b.insert(key, grid_b);
+
+        for _ in 0..10 {
+            tick_fluid(&mut chunks_a, &density_cache, 16, false, &config);
+            tick_fluid(&mut chunks_b, &density_cache, 16, false, &config);
+        }
+
+        // Compare: A's distribution should mirror B's
+        let ga = &chunks_a[&key];
+        let gb = &chunks_b[&key];
+        for x in 0..16 {
+            let a_level = ga.get(x, 1, 8).level;
+            let b_level = gb.get(15 - x, 1, 8).level;
+            assert!(
+                (a_level - b_level).abs() < 0.05,
+                "Asymmetric fill at x={}: left-start={:.4}, right-start(mirrored)={:.4}",
+                x, a_level, b_level
+            );
+        }
     }
 }
