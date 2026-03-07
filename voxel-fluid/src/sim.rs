@@ -170,6 +170,31 @@ fn resolve_neighbor(
     Some((chunk_key, lx as usize, ly as usize, lz as usize))
 }
 
+/// Check if a cell has any downward flow outlet (gravity or slope).
+/// Used to suppress horizontal spread on slopes — water should flow down, not sideways.
+#[inline]
+fn has_downward_outlet(cell_solid: &[bool], x: usize, y: usize, z: usize, size: usize) -> bool {
+    if y == 0 {
+        return false; // can't check cross-chunk here, allow horizontal spread at boundary
+    }
+    let below_idx = z * size * size + (y - 1) * size + x;
+    if !cell_solid[below_idx] {
+        return true; // gravity outlet — cell below is air/water
+    }
+    // Check 4 diagonal-down neighbors for slope outlets
+    for &(dx, dz) in &[(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+        let nx = x as i32 + dx;
+        let nz = z as i32 + dz;
+        if nx >= 0 && nx < size as i32 && nz >= 0 && nz < size as i32 {
+            let diag_idx = nz as usize * size * size + (y - 1) * size + nx as usize;
+            if !cell_solid[diag_idx] {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Extra horizontal equalization pass over a cell buffer.
 /// Iterates in forward or reverse x/z order to eliminate directional bias.
 /// Only handles intra-chunk equalization (no cross-chunk transfers).
@@ -203,6 +228,11 @@ fn equalize_horizontal(
                     continue;
                 }
                 if new_cells[idx].fluid_type.is_lava() != is_lava {
+                    continue;
+                }
+
+                // Skip horizontal spread for cells that can drain downward (slope)
+                if has_downward_outlet(cell_solid, x, y, z, size) {
                     continue;
                 }
 
@@ -475,8 +505,10 @@ fn tick_chunk(
                     }
                 }
 
-                // Horizontal spread using fill-fraction equalization
-                if new_cells[idx].level > MIN_LEVEL {
+                // Horizontal spread — suppressed on slopes so water flows down as a stream
+                if new_cells[idx].level > MIN_LEVEL
+                    && !has_downward_outlet(cell_solid, x, y, z, size)
+                {
                     let remaining = new_cells[idx].level;
                     let src_fill = if src_capacity > MIN_LEVEL {
                         remaining / src_capacity
