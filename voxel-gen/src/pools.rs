@@ -462,7 +462,7 @@ pub fn place_pools(
             fluid_type,
         });
 
-        // Step 7: Collect fluid seeds at the pool surface level within the basin
+        // Step 7: Collect fluid seeds for the ENTIRE basin volume (pre-filled, already settled)
         for dz in -(effective_radius as i32)..=(effective_radius as i32) {
             for dx in -(effective_radius as i32)..=(effective_radius as i32) {
                 if dx * dx + dz * dz > r2 {
@@ -473,16 +473,23 @@ pub fn place_pools(
                 if gx < 0 || gx >= size as i32 || gz < 0 || gz >= size as i32 {
                     continue;
                 }
-                if surface_y >= size {
-                    continue;
+                // Fill from surface_y downward through the entire carved basin
+                for dy in 0..=(config.basin_depth) {
+                    let gy = surface_y.wrapping_sub(dy);
+                    if gy >= size {
+                        break;
+                    }
+                    if density.get(gx as usize, gy, gz as usize).material.is_solid() {
+                        break;
+                    }
+                    fluid_seeds.push(FluidSeed {
+                        chunk: (chunk_cx, chunk_cy, chunk_cz),
+                        lx: gx as u8,
+                        ly: gy as u8,
+                        lz: gz as u8,
+                        fluid_type,
+                    });
                 }
-                fluid_seeds.push(FluidSeed {
-                    chunk: (chunk_cx, chunk_cy, chunk_cz),
-                    lx: gx as u8,
-                    ly: surface_y as u8,
-                    lz: gz as u8,
-                    fluid_type,
-                });
             }
         }
     }

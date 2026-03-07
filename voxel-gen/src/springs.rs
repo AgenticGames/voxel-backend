@@ -689,6 +689,14 @@ pub fn detect_artesian_springs(
                             {
                                 continue;
                             }
+                            // Only emit floor-level cells: must be air with solid below
+                            let cell = density.get(px as usize, py as usize, pz as usize);
+                            if cell.material.is_solid() {
+                                continue;
+                            }
+                            if py < 1 || !density.get(px as usize, (py - 1) as usize, pz as usize).material.is_solid() {
+                                continue;
+                            }
                             results.push(SpringDescriptor {
                                 lx: px as u8,
                                 ly: py as u8,
@@ -895,10 +903,12 @@ mod tests {
         let grid_size = chunk_size + 1;
         let mut density = make_test_density(chunk_size);
 
-        // Air voxel at (8, 5, 8) with solid face-neighbor
+        // Air pocket at y=5 with solid floor at y=4 (all default solid)
         set_voxel(&mut density, grid_size, 8, 5, 8, -1.0, Material::Air);
-        // Solid neighbor (so it's not floating)
-        set_voxel(&mut density, grid_size, 7, 5, 8, 1.0, Material::Granite);
+        set_voxel(&mut density, grid_size, 7, 5, 8, -1.0, Material::Air);
+        set_voxel(&mut density, grid_size, 9, 5, 8, -1.0, Material::Air);
+        set_voxel(&mut density, grid_size, 8, 5, 7, -1.0, Material::Air);
+        set_voxel(&mut density, grid_size, 8, 5, 9, -1.0, Material::Air);
 
         // Aquifer structure: granite cap at y=3, sandstone at y=2, granite base at y=1
         set_voxel(&mut density, grid_size, 8, 3, 8, 1.0, Material::Granite);

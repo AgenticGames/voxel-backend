@@ -502,7 +502,6 @@ fn handle_request(
                         chunk,
                         densities,
                     });
-                    let _ = fluid_event_tx.send(FluidEvent::PlaceSources { chunk });
 
                     // Detect geological springs (spring lines + vadose drips)
                     let mut geo_springs: Vec<(u8, u8, u8, f32, u8)> = Vec::new();
