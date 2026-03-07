@@ -1485,6 +1485,7 @@ fn ffi_config_to_fluid(c: &FfiEngineConfig) -> FluidConfig {
         lava_depth_min: if c.fluid_lava_depth_min != 0.0 { c.fluid_lava_depth_min } else { -9999.0 },
         lava_flow_rate: if c.fluid_lava_flow_rate > 0.0 { c.fluid_lava_flow_rate } else { 0.1 },
         lava_spread_rate: if c.fluid_lava_spread_rate > 0.0 { c.fluid_lava_spread_rate } else { 0.125 },
+        pool_equalization: true,
         cavern_source_bias: c.fluid_cavern_source_bias,
         tunnel_bend_threshold: c.fluid_tunnel_bend_threshold,
         flow_anim_speed: 1.0,

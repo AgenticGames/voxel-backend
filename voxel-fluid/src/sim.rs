@@ -82,6 +82,14 @@ pub fn tick_fluid(
         }
     }
 
+    // Pool detection and equalization (post-pass)
+    if config.pool_equalization {
+        let pool_dirty = crate::pool::detect_and_equalize_pools(
+            chunks, chunk_densities, chunk_size, is_lava_tick,
+        );
+        dirty.extend(pool_dirty);
+    }
+
     dirty
 }
 

@@ -1,5 +1,6 @@
 pub mod cell;
 pub mod mesh;
+pub mod pool;
 pub mod sim;
 pub mod sources;
 pub mod tables;
@@ -46,6 +47,8 @@ pub struct FluidConfig {
     pub lava_depth_min: f64,
     pub lava_flow_rate: f32,
     pub lava_spread_rate: f32,
+    // Pool equalization
+    pub pool_equalization: bool,
     // General
     pub cavern_source_bias: f64,
     pub tunnel_bend_threshold: f64,
@@ -73,6 +76,7 @@ impl Default for FluidConfig {
             lava_depth_min: -9999.0,
             lava_flow_rate: 0.1,
             lava_spread_rate: 0.125,
+            pool_equalization: true,
             cavern_source_bias: 0.0,
             tunnel_bend_threshold: 0.0,
             flow_anim_speed: 1.0,
