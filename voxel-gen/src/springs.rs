@@ -587,11 +587,12 @@ pub fn detect_artesian_springs(
     let grid_size = chunk_size + 1;
     let pressure_noise = Simplex3D::new(seed.wrapping_add(730));
     let mut results = Vec::new();
+    let mut site_count = 0u32;
 
     for z in 0..chunk_size {
         for y in 0..chunk_size {
             for x in 0..chunk_size {
-                if results.len() >= config.max_per_chunk as usize {
+                if site_count >= config.max_per_chunk as u32 {
                     return results;
                 }
 
@@ -674,13 +675,30 @@ pub fn detect_artesian_springs(
                     continue;
                 }
 
-                results.push(SpringDescriptor {
-                    lx: x as u8,
-                    ly: y as u8,
-                    lz: z as u8,
-                    level: pressure as f32,
-                    source_type: SpringType::Artesian,
-                });
+                // Emit a 3x3x2 pocket of finite fluid around this site
+                site_count += 1;
+                for dz in -1..=1i32 {
+                    for dy in 0..=1i32 {
+                        for dx in -1..=1i32 {
+                            let px = x as i32 + dx;
+                            let py = y as i32 + dy;
+                            let pz = z as i32 + dz;
+                            if px < 0 || px >= chunk_size as i32
+                                || py < 0 || py >= chunk_size as i32
+                                || pz < 0 || pz >= chunk_size as i32
+                            {
+                                continue;
+                            }
+                            results.push(SpringDescriptor {
+                                lx: px as u8,
+                                ly: py as u8,
+                                lz: pz as u8,
+                                level: 0.9,
+                                source_type: SpringType::Artesian,
+                            });
+                        }
+                    }
+                }
             }
         }
     }
@@ -729,7 +747,7 @@ mod tests {
         set_voxel(&mut density, grid_size, 9, 15, 8, 1.0, Material::Granite);
 
         // Chunk at Y=100 → world y = 100*16 + 15 = 1615 → far above water table (170)
-        let config = WaterTableConfig::default();
+        let config = WaterTableConfig { enabled: true, ..WaterTableConfig::default() };
         let host = crate::config::HostRockConfig::default();
         let result = detect_spring_lines(&density, (0, 100, 0), chunk_size, &config, &host, 42);
         assert!(result.is_empty(), "No springs above water table");
@@ -748,7 +766,7 @@ mod tests {
         set_voxel(&mut density, grid_size, 9, 8, 8, 1.0, Material::Granite);
 
         // Chunk at Y=0 → world y = 8 → below water table (170 default)
-        let config = WaterTableConfig::default();
+        let config = WaterTableConfig { enabled: true, ..WaterTableConfig::default() };
         let host = crate::config::HostRockConfig::default();
         let result = detect_spring_lines(&density, (0, 0, 0), chunk_size, &config, &host, 42);
         assert!(!result.is_empty(), "Should detect spring at contact");
@@ -770,7 +788,7 @@ mod tests {
         set_voxel(&mut density, grid_size, 8, 8, 7, 1.0, Material::Limestone);
         set_voxel(&mut density, grid_size, 8, 8, 9, 1.0, Material::Limestone);
 
-        let config = WaterTableConfig::default();
+        let config = WaterTableConfig { enabled: true, ..WaterTableConfig::default() };
         let host = crate::config::HostRockConfig::default();
         let result = detect_spring_lines(&density, (0, 0, 0), chunk_size, &config, &host, 42);
         assert!(result.is_empty(), "No spring without impermeable neighbor");
@@ -791,6 +809,7 @@ mod tests {
 
         // Use very low drip threshold to guarantee drips
         let config = WaterTableConfig {
+            enabled: true,
             drip_noise_threshold: 0.0, // accept all
             ..WaterTableConfig::default()
         };
@@ -816,6 +835,11 @@ mod tests {
         set_voxel(&mut density, grid_size, 9, 6, 8, -1.0, Material::Air);
         set_voxel(&mut density, grid_size, 8, 6, 7, -1.0, Material::Air);
         set_voxel(&mut density, grid_size, 8, 6, 9, -1.0, Material::Air);
+        // Also clear horizontal neighbors of (8,5,8) so its 3x3x2 pocket can't reach y=6
+        set_voxel(&mut density, grid_size, 7, 5, 8, -1.0, Material::Air);
+        set_voxel(&mut density, grid_size, 9, 5, 8, -1.0, Material::Air);
+        set_voxel(&mut density, grid_size, 8, 5, 7, -1.0, Material::Air);
+        set_voxel(&mut density, grid_size, 8, 5, 9, -1.0, Material::Air);
 
         // Place sandstone aquifer below with impermeable cap and base
         // y=3 is granite (impermeable cap), y=2 is sandstone (aquifer), y=1 is granite (base)
@@ -854,11 +878,48 @@ mod tests {
         }
 
         let config = WaterTableConfig {
+            enabled: true,
             max_springs_per_chunk: 3,
             ..WaterTableConfig::default()
         };
         let host = crate::config::HostRockConfig::default();
         let result = detect_spring_lines(&density, (0, 0, 0), chunk_size, &config, &host, 42);
         assert!(result.len() <= 3, "Budget cap should limit springs to 3");
+    }
+
+    #[test]
+    fn artesian_pocket_is_finite_cluster() {
+        // Artesian springs should emit >1 descriptor per site (3x3x2 pocket)
+        // and all descriptors should have level < 1.0 (finite, not source)
+        let chunk_size = 16;
+        let grid_size = chunk_size + 1;
+        let mut density = make_test_density(chunk_size);
+
+        // Air voxel at (8, 5, 8) with solid face-neighbor
+        set_voxel(&mut density, grid_size, 8, 5, 8, -1.0, Material::Air);
+        // Solid neighbor (so it's not floating)
+        set_voxel(&mut density, grid_size, 7, 5, 8, 1.0, Material::Granite);
+
+        // Aquifer structure: granite cap at y=3, sandstone at y=2, granite base at y=1
+        set_voxel(&mut density, grid_size, 8, 3, 8, 1.0, Material::Granite);
+        set_voxel(&mut density, grid_size, 8, 2, 8, 1.0, Material::Sandstone);
+        set_voxel(&mut density, grid_size, 8, 1, 8, 1.0, Material::Granite);
+
+        // Chunk at Y=-2 → world y = -2*16 + 5 = -27 → below depth threshold (20.0)
+        let config = crate::config::ArtesianConfig {
+            enabled: true,
+            max_per_chunk: 10,
+            pressure_noise_freq: 0.0, // constant noise → will pass threshold
+            ..crate::config::ArtesianConfig::default()
+        };
+        let result = detect_artesian_springs(&density, (0, -2, 0), chunk_size, &config, 42);
+        // Should have >1 descriptor (3x3x2 pocket = up to 18 descriptors)
+        assert!(result.len() > 1,
+            "Artesian pocket should emit >1 descriptor, got {}", result.len());
+        // All should be finite (level < 1.0)
+        for s in &result {
+            assert!(s.level < 1.0,
+                "Artesian descriptor level={} should be < 1.0 (finite)", s.level);
+        }
     }
 }

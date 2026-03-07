@@ -176,6 +176,9 @@ fn handle_request(
             let mut region_river_springs: Vec<((i32, i32, i32), voxel_gen::springs::SpringDescriptor)> = Vec::new();
 
             let (mesh, dc_vertices, boundary_edges) = if let Some(result) = mesh_result {
+                // Fast path: retrieve pool seeds from store (persisted on slow path)
+                pool_fluid_seeds = store.read().unwrap().region_pool_seeds
+                    .get(&rk).cloned().unwrap_or_default();
                 result
             } else {
                 // Slow path: (re)generate region densities
@@ -243,6 +246,7 @@ fn handle_request(
                         s.mark_region_generated(rk);
                     }
                     s.store_region_worms(rk, worm_paths.clone());
+                    s.region_pool_seeds.insert(rk, pool_fluid_seeds.clone());
                 }
                 // Backward sharing: carve new worms into already-loaded chunks
                 // from other regions, then re-extract hermite and re-mesh
@@ -567,22 +571,20 @@ fn handle_request(
                 }
             }
 
-            // Inject pool fluid seeds into the fluid simulation
-            if was_slow_path {
-                for seed in &pool_fluid_seeds {
-                    let _ = fluid_event_tx.send(FluidEvent::AddFluid {
-                        chunk: seed.chunk,
-                        x: seed.lx,
-                        y: seed.ly,
-                        z: seed.lz,
-                        fluid_type: match seed.fluid_type {
-                            voxel_gen::pools::PoolFluid::Water => voxel_fluid::cell::FluidType::Water,
-                            voxel_gen::pools::PoolFluid::Lava => voxel_fluid::cell::FluidType::Lava,
-                        },
-                        level: 1.0,
-                        is_source: true,
-                    });
-                }
+            // Inject pool fluid seeds into the fluid simulation (finite: not sources)
+            for seed in &pool_fluid_seeds {
+                let _ = fluid_event_tx.send(FluidEvent::AddFluid {
+                    chunk: seed.chunk,
+                    x: seed.lx,
+                    y: seed.ly,
+                    z: seed.lz,
+                    fluid_type: match seed.fluid_type {
+                        voxel_gen::pools::PoolFluid::Water => voxel_fluid::cell::FluidType::Water,
+                        voxel_gen::pools::PoolFluid::Lava => voxel_fluid::cell::FluidType::Lava,
+                    },
+                    level: 0.9,
+                    is_source: false,
+                });
             }
 
             // Compute crystal placements and store them

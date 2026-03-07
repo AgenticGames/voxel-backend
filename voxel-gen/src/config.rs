@@ -781,9 +781,9 @@ impl Default for PoolConfig {
         Self {
             enabled: true,
             placement_frequency: 0.08,
-            placement_threshold: 0.75,
-            pool_chance: 0.3,
-            min_area: 6,
+            placement_threshold: 0.4,
+            pool_chance: 0.6,
+            min_area: 3,
             max_radius: 4,
             basin_depth: 2,
             rim_height: 1,
@@ -881,7 +881,7 @@ pub struct WaterTableConfig {
 impl Default for WaterTableConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             base_y: 170.0,
             noise_amplitude: 15.0,
             noise_frequency: 0.008,
@@ -912,7 +912,7 @@ pub struct PipeLavaConfig {
 impl Default for PipeLavaConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             activation_depth: -80.0,
             max_lava_per_chunk: 6,
             depth_scaling: 0.5,

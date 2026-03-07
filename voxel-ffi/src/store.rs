@@ -13,6 +13,7 @@ use voxel_gen::config::{GenerationConfig, StressConfig};
 use voxel_gen::density::DensityField;
 use voxel_gen::hermite_extract::extract_hermite_data;
 use voxel_gen::region_gen::{self, region_key, ChunkSeamData};
+use voxel_gen::pools::FluidSeed;
 use voxel_gen::worm::path::WormSegment;
 
 use crate::convert::convert_mesh_to_ue_scaled;
@@ -48,6 +49,8 @@ pub struct ChunkStore {
     pub region_worm_paths: HashMap<(i32, i32, i32), Vec<Vec<WormSegment>>>,
     /// Per-chunk crystal placement data (computed during generation).
     pub crystal_placements: HashMap<(i32, i32, i32), Vec<voxel_gen::CrystalPlacement>>,
+    /// Pool fluid seeds per region key, for persistence across chunk unload/reload.
+    pub region_pool_seeds: HashMap<(i32, i32, i32), Vec<FluidSeed>>,
     /// Region size for computing region keys (needed by unload).
     region_size: i32,
 }
@@ -66,6 +69,7 @@ impl ChunkStore {
             terraced_columns: HashMap::new(),
             region_worm_paths: HashMap::new(),
             crystal_placements: HashMap::new(),
+            region_pool_seeds: HashMap::new(),
             region_size,
         }
     }
@@ -137,6 +141,7 @@ impl ChunkStore {
         });
         if !any_remaining {
             self.region_worm_paths.remove(&rk);
+            self.region_pool_seeds.remove(&rk);
         }
     }
 

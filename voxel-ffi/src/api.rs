@@ -1456,7 +1456,7 @@ mod tests {
             fluid_tick_rate: 15.0,
             fluid_lava_tick_divisor: 4,
             fluid_water_spring_threshold: 2.0,
-            fluid_lava_source_threshold: 0.98,
+            fluid_lava_source_threshold: 2.0,
             fluid_lava_depth_max: -50.0,
             fluid_water_noise_frequency: 0.05,
             fluid_water_depth_min: -9999.0,

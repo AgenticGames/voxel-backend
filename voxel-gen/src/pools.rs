@@ -185,11 +185,35 @@ pub fn place_pools(
         if roll < config.empty_pct {
             continue; // skip this site entirely
         }
-        let fluid_type = if roll < config.empty_pct + config.lava_pct {
+        let mut fluid_type = if roll < config.empty_pct + config.lava_pct {
             PoolFluid::Lava
         } else {
             PoolFluid::Water
         };
+
+        // Kimberlite proximity override: if kimberlite is found within 5 voxels
+        // of the cluster centroid, force lava type (natural pipe lava association).
+        if fluid_type == PoolFluid::Water {
+            let cx = cluster.centroid_x as i32;
+            let cy = cluster.centroid_y as i32;
+            let cz = cluster.centroid_z as i32;
+            'kimb_scan: for dz in -5..=5i32 {
+                for dy in -5..=5i32 {
+                    for dx in -5..=5i32 {
+                        let gx = cx + dx;
+                        let gy = cy + dy;
+                        let gz = cz + dz;
+                        if gx < 0 || gx >= size as i32 || gy < 0 || gy >= size as i32 || gz < 0 || gz >= size as i32 {
+                            continue;
+                        }
+                        if density.get(gx as usize, gy as usize, gz as usize).material == Material::Kimberlite {
+                            fluid_type = PoolFluid::Lava;
+                            break 'kimb_scan;
+                        }
+                    }
+                }
+            }
+        }
 
         // Step 5: Carve basin
         // Compute effective radius from cluster area.
@@ -1057,5 +1081,58 @@ mod tests {
              (pillar only 3 voxels tall). Got {} pools.",
             descriptors.len()
         );
+    }
+
+    #[test]
+    fn test_kimberlite_proximity_forces_lava() {
+        // Pool near kimberlite should be forced to lava even when water_pct=1.0
+        let config = PoolConfig {
+            pool_chance: 1.0,
+            placement_threshold: -1.0,
+            min_area: 2,
+            water_pct: 1.0,
+            lava_pct: 0.0,
+            empty_pct: 0.0,
+            max_cave_height: 0,
+            min_floor_thickness: 0,
+            min_ground_depth: 0,
+            ..Default::default()
+        };
+
+        let size = 17;
+        let mut density = DensityField::new(size);
+
+        // Fill bottom half with limestone, top half with air
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..size {
+                    let sample = density.get_mut(x, y, z);
+                    if y < size / 2 {
+                        sample.density = 1.0;
+                        sample.material = Material::Limestone;
+                    } else {
+                        sample.density = -1.0;
+                        sample.material = Material::Air;
+                    }
+                }
+            }
+        }
+
+        // Place kimberlite within 5 voxels of where the pool center will be
+        let sample = density.get_mut(8, 6, 8);
+        sample.density = 1.0;
+        sample.material = Material::Kimberlite;
+
+        let (descriptors, seeds) = place_pools(&mut density, &config, Vec3::ZERO, 42, 100);
+        // Should have pools, and they should be lava due to kimberlite proximity
+        assert!(!descriptors.is_empty(), "Should place at least one pool");
+        for d in &descriptors {
+            assert_eq!(d.fluid_type, PoolFluid::Lava,
+                "Pool near kimberlite should be lava, not water");
+        }
+        for s in &seeds {
+            assert_eq!(s.fluid_type, PoolFluid::Lava,
+                "Seeds near kimberlite should be lava, not water");
+        }
     }
 }
