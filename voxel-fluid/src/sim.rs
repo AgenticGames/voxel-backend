@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::cell::{ChunkDensityCache, ChunkFluidGrid, FluidType, MIN_LEVEL, SOURCE_LEVEL, density_to_capacity};
+use crate::cell::{ChunkDensityCache, ChunkFluidGrid, FluidType, MIN_LEVEL, SOURCE_LEVEL};
 use crate::FluidConfig;
 
 /// A pending fluid transfer across a chunk boundary.
@@ -109,6 +109,59 @@ fn count_solid_face_neighbors(grid: &ChunkFluidGrid, x: usize, y: usize, z: usiz
     count
 }
 
+/// Map out-of-bounds coords to (neighbor_chunk_key, local_x, local_y, local_z).
+/// Returns None for multi-axis overflow (diagonal chunks) or if all coords are in bounds.
+fn resolve_neighbor(
+    key: (i32, i32, i32),
+    nx: i32,
+    ny: i32,
+    nz: i32,
+    size: usize,
+) -> Option<((i32, i32, i32), usize, usize, usize)> {
+    let s = size as i32;
+    let mut chunk_key = key;
+    let mut lx = nx;
+    let mut ly = ny;
+    let mut lz = nz;
+    let mut crosses = 0u8;
+
+    if lx < 0 {
+        chunk_key.0 -= 1;
+        lx = s - 1;
+        crosses += 1;
+    } else if lx >= s {
+        chunk_key.0 += 1;
+        lx = 0;
+        crosses += 1;
+    }
+
+    if ly < 0 {
+        chunk_key.1 -= 1;
+        ly = s - 1;
+        crosses += 1;
+    } else if ly >= s {
+        chunk_key.1 += 1;
+        ly = 0;
+        crosses += 1;
+    }
+
+    if lz < 0 {
+        chunk_key.2 -= 1;
+        lz = s - 1;
+        crosses += 1;
+    } else if lz >= s {
+        chunk_key.2 += 1;
+        lz = 0;
+        crosses += 1;
+    }
+
+    if crosses != 1 {
+        return None; // Multi-axis or same chunk
+    }
+
+    Some((chunk_key, lx as usize, ly as usize, lz as usize))
+}
+
 /// Simulate one tick for a single chunk. Returns (changed, cross_chunk_transfers).
 fn tick_chunk(
     chunks: &mut HashMap<(i32, i32, i32), ChunkFluidGrid>,
@@ -129,9 +182,9 @@ fn tick_chunk(
         return (false, Vec::new());
     }
 
-    // Create new buffer + snapshot density
+    // Create new buffer + snapshot density/solid
     let mut new_cells = grid.cells.clone();
-    let cell_density = &grid.cell_density;
+    let cell_solid = &grid.cell_solid;
     let mut changed = false;
     let mut cross_transfers: Vec<CrossChunkTransfer> = Vec::new();
 
@@ -141,8 +194,8 @@ fn tick_chunk(
             for x in 0..size {
                 let idx = z * size * size + y * size + x;
 
-                // Skip solid cells (density > threshold)
-                if cell_density[idx] > config.solid_threshold {
+                // Skip solid cells (all 8 corners positive)
+                if cell_solid[idx] {
                     new_cells[idx].level = 0.0;
                     continue;
                 }
@@ -170,7 +223,7 @@ fn tick_chunk(
                 }
 
                 let is_source = cell.is_source();
-                let src_capacity = density_to_capacity(cell_density[idx]);
+                let src_capacity = if cell_solid[idx] { 0.0 } else { 1.0 };
 
                 let flow_rate = if is_lava { config.lava_flow_rate } else { config.water_flow_rate };
                 let horizontal_spread = if is_lava { config.lava_spread_rate } else { config.water_spread_rate };
@@ -178,8 +231,8 @@ fn tick_chunk(
                 // Gravity: try to flow down (4x flow rate for fast pooling)
                 if y > 0 {
                     let below_idx = z * size * size + (y - 1) * size + x;
-                    if cell_density[below_idx] <= config.solid_threshold {
-                        let below_capacity = density_to_capacity(cell_density[below_idx]);
+                    if !cell_solid[below_idx] {
+                        let below_capacity = if cell_solid[below_idx] { 0.0 } else { 1.0 };
                         let below_space = (below_capacity - new_cells[below_idx].level).max(0.0);
                         if below_space > MIN_LEVEL {
                             let transfer = cell.level.min(below_space).min(flow_rate * 4.0);
@@ -229,7 +282,7 @@ fn tick_chunk(
                 if new_cells[idx].level > MIN_LEVEL {
                     let slope_below_solid = if y > 0 {
                         let below_idx = z * size * size + (y - 1) * size + x;
-                        cell_density[below_idx] > config.solid_threshold
+                        cell_solid[below_idx]
                     } else {
                         // y==0: check chunk below
                         let below_key = (key.0, key.1 - 1, key.2);
@@ -258,16 +311,29 @@ fn tick_chunk(
                             let nz = z as i32 + dz;
 
                             if nx < 0 || nx >= size as i32 || nz < 0 || nz >= size as i32 {
-                                continue; // X/Z out of chunk bounds — skip for now
+                                // Cross-chunk slope flow for X/Z boundary
+                                if let Some((dest_key, tx, ty, tz)) = resolve_neighbor(key, nx, ny, nz, size) {
+                                    if let Some(nbr_grid) = chunks.get(&dest_key) {
+                                        let cap = nbr_grid.cell_capacity(tx, ty, tz);
+                                        if cap >= MIN_LEVEL {
+                                            let bi = tz * size * size + ty * size + tx;
+                                            let dst_space = (cap - nbr_grid.cells[bi].level).max(0.0);
+                                            if dst_space > MIN_LEVEL {
+                                                candidates.push((dst_space, 0, true, dest_key, tx, ty, tz));
+                                            }
+                                        }
+                                    }
+                                }
+                                continue;
                             }
 
                             if ny >= 0 && ny < size as i32 {
                                 // Within same chunk
                                 let ni = nz as usize * size * size + ny as usize * size + nx as usize;
-                                if cell_density[ni] > config.solid_threshold {
+                                if cell_solid[ni] {
                                     continue;
                                 }
-                                let dst_capacity = density_to_capacity(cell_density[ni]);
+                                let dst_capacity = if cell_solid[ni] { 0.0 } else { 1.0 };
                                 if dst_capacity < MIN_LEVEL {
                                     continue;
                                 }
@@ -343,13 +409,41 @@ fn tick_chunk(
 
                     for (nx, ny, nz) in neighbors {
                         if nx < 0 || nx >= size as i32 || ny < 0 || ny >= size as i32 || nz < 0 || nz >= size as i32 {
+                            // Cross-chunk horizontal flow
+                            if let Some((dest_key, tx, ty, tz)) = resolve_neighbor(key, nx, ny, nz, size) {
+                                if let Some(nbr_grid) = chunks.get(&dest_key) {
+                                    let cap = nbr_grid.cell_capacity(tx, ty, tz);
+                                    if cap >= MIN_LEVEL {
+                                        let bi = tz * size * size + ty * size + tx;
+                                        let dst_fill = nbr_grid.cells[bi].level / cap;
+                                        let diff = src_fill - dst_fill;
+                                        if diff > MIN_LEVEL {
+                                            let transfer = (diff * horizontal_spread * src_capacity).min(flow_rate);
+                                            if transfer > MIN_LEVEL {
+                                                if !is_source {
+                                                    new_cells[idx].level -= transfer;
+                                                }
+                                                cross_transfers.push(CrossChunkTransfer {
+                                                    dest_key,
+                                                    dest_x: tx,
+                                                    dest_y: ty,
+                                                    dest_z: tz,
+                                                    amount: transfer,
+                                                    fluid_type: cell.fluid_type,
+                                                });
+                                                changed = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             continue;
                         }
                         let ni = nz as usize * size * size + ny as usize * size + nx as usize;
-                        if cell_density[ni] > config.solid_threshold {
+                        if cell_solid[ni] {
                             continue;
                         }
-                        let dst_capacity = density_to_capacity(cell_density[ni]);
+                        let dst_capacity = if cell_solid[ni] { 0.0 } else { 1.0 };
                         if dst_capacity < MIN_LEVEL {
                             continue;
                         }
@@ -408,7 +502,7 @@ pub fn squeeze_excess_fluid(grid: &mut ChunkFluidGrid) {
         for y in 0..size {
             for x in 0..size {
                 let idx = z * size * size + y * size + x;
-                let capacity = density_to_capacity(grid.cell_density[idx]);
+                let capacity = if grid.cell_solid[idx] { 0.0 } else { 1.0 };
                 let level = grid.cells[idx].level;
 
                 if level <= capacity {
@@ -440,7 +534,7 @@ pub fn squeeze_excess_fluid(grid: &mut ChunkFluidGrid) {
                         continue;
                     }
                     let ni = nz as usize * size * size + ny as usize * size + nx as usize;
-                    let n_capacity = density_to_capacity(grid.cell_density[ni]);
+                    let n_capacity = if grid.cell_solid[ni] { 0.0 } else { 1.0 };
                     let n_space = (n_capacity - grid.cells[ni].level).max(0.0);
                     if n_space > MIN_LEVEL {
                         let push = remaining.min(n_space);
@@ -947,6 +1041,90 @@ mod tests {
             lower.get(9, 15, 8).level > 0.0,
             "Water should cross-chunk slope-flow to (9,15,8), got {}",
             lower.get(9, 15, 8).level
+        );
+    }
+
+    #[test]
+    fn cross_chunk_horizontal_flow() {
+        // Water at x=15 with solid floor should spread to x=0 of +X neighbor chunk
+        let mut chunks = HashMap::new();
+        let key_a = (0, 0, 0);
+        let key_b = (1, 0, 0);
+
+        let mut grid_a = make_chunk(16);
+        // Solid floor at y=0
+        for x in 0..16 {
+            for z in 0..16 {
+                grid_a.set_density(x, 0, z, 1.0);
+            }
+        }
+        // Place water at x=15, y=1 (on solid floor, near +X boundary)
+        grid_a.get_mut(15, 1, 8).level = 0.8;
+        grid_a.get_mut(15, 1, 8).fluid_type = FluidType::Water;
+        grid_a.has_fluid = true;
+        chunks.insert(key_a, grid_a);
+
+        let mut grid_b = make_chunk(16);
+        // Solid floor in neighbor too
+        for x in 0..16 {
+            for z in 0..16 {
+                grid_b.set_density(x, 0, z, 1.0);
+            }
+        }
+        chunks.insert(key_b, grid_b);
+
+        let config = crate::FluidConfig::default();
+        let density_cache = empty_density_cache();
+        // Several ticks to let water spread horizontally
+        for _ in 0..10 {
+            tick_fluid(&mut chunks, &density_cache, 16, false, &config);
+        }
+
+        // Water should have spread to x=0 of the +X neighbor chunk
+        let nbr = &chunks[&key_b];
+        assert!(
+            nbr.get(0, 1, 8).level > 0.0,
+            "Water should flow across chunk boundary to x=0 of +X neighbor, got {}",
+            nbr.get(0, 1, 8).level
+        );
+    }
+
+    #[test]
+    fn cross_chunk_slope_flow_xz() {
+        // Water at x=15, y=1 with solid directly below should slope-flow to +X neighbor
+        let mut chunks = HashMap::new();
+        let key_a = (0, 0, 0);
+        let key_b = (1, 0, 0);
+
+        let mut grid_a = make_chunk(16);
+        // Solid floor at y=0 everywhere
+        for x in 0..16 {
+            for z in 0..16 {
+                grid_a.set_density(x, 0, z, 1.0);
+            }
+        }
+        // Place water at x=15, y=1
+        grid_a.get_mut(15, 1, 8).level = 0.8;
+        grid_a.get_mut(15, 1, 8).fluid_type = FluidType::Water;
+        grid_a.has_fluid = true;
+        chunks.insert(key_a, grid_a);
+
+        let grid_b = make_chunk(16);
+        // No floor in neighbor at y=0 — so slope target (x=0, y=0, z=8) is open
+        chunks.insert(key_b, grid_b);
+
+        let config = crate::FluidConfig::default();
+        let density_cache = empty_density_cache();
+        for _ in 0..5 {
+            tick_fluid(&mut chunks, &density_cache, 16, false, &config);
+        }
+
+        // Water should have slope-flowed to x=0, y=0 in the +X neighbor
+        let nbr = &chunks[&key_b];
+        assert!(
+            nbr.get(0, 0, 8).level > 0.0,
+            "Water should cross-chunk slope-flow to (0,0,8) in +X neighbor, got {}",
+            nbr.get(0, 0, 8).level
         );
     }
 

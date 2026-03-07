@@ -43,6 +43,55 @@ const SN_CORNERS: [[f32; 3]; 8] = [
     [1.0, 1.0, 1.0], // 0b111
 ];
 
+/// Fluid levels from neighboring chunks at the 3 positive boundary faces.
+/// Used to create seamless mesh at chunk edges instead of sealing the isosurface.
+pub struct BoundaryLevels {
+    /// Neighbor's x=0 face fluid levels, indexed [z * size + y]. size*size values.
+    pub pos_x: Option<Vec<f32>>,
+    /// Neighbor's y=0 face fluid levels, indexed [z * size + x]. size*size values.
+    pub pos_y: Option<Vec<f32>>,
+    /// Neighbor's z=0 face fluid levels, indexed [y * size + x]. size*size values.
+    pub pos_z: Option<Vec<f32>>,
+    pub size: usize,
+}
+
+impl BoundaryLevels {
+    /// Create empty boundary levels (no neighbor data — mesh seals at edges).
+    pub fn empty(size: usize) -> Self {
+        Self {
+            pos_x: None,
+            pos_y: None,
+            pos_z: None,
+            size,
+        }
+    }
+
+    /// Get the fluid level at an out-of-bounds coordinate from neighbor data.
+    /// Returns None for multi-axis overflow or if no neighbor data exists.
+    pub fn get_level(&self, x: usize, y: usize, z: usize) -> Option<f32> {
+        let size = self.size;
+        let x_over = x >= size;
+        let y_over = y >= size;
+        let z_over = z >= size;
+
+        // Multi-axis overflow or no overflow — no data
+        if (x_over as u8 + y_over as u8 + z_over as u8) != 1 {
+            return None;
+        }
+
+        if x_over {
+            // x == size: look up pos_x face at [z * size + y]
+            self.pos_x.as_ref().map(|v| v[z * size + y])
+        } else if y_over {
+            // y == size: look up pos_y face at [z * size + x]
+            self.pos_y.as_ref().map(|v| v[z * size + x])
+        } else {
+            // z == size: look up pos_z face at [y * size + x]
+            self.pos_z.as_ref().map(|v| v[y * size + x])
+        }
+    }
+}
+
 /// A fluid mesh produced by isosurface extraction (MC + Surface Nets).
 pub struct FluidMeshData {
     pub positions: Vec<[f32; 3]>,
@@ -58,7 +107,7 @@ pub struct FluidMeshData {
 /// Both meshers extract the same isosurface from the fluid grid at ISO_LEVEL.
 /// They output different fluid_type values so UE renders them with different
 /// materials for A/B comparison.
-pub fn mesh_fluid(grid: &ChunkFluidGrid) -> FluidMeshData {
+pub fn mesh_fluid(grid: &ChunkFluidGrid, boundary: &BoundaryLevels) -> FluidMeshData {
     let size = grid.size;
     if size < 2 {
         return FluidMeshData {
@@ -71,8 +120,8 @@ pub fn mesh_fluid(grid: &ChunkFluidGrid) -> FluidMeshData {
         };
     }
 
-    let mut mesh_a = mesh_fluid_surface_nets(grid);
-    let mesh_b = mesh_fluid_mc(grid);
+    let mut mesh_a = mesh_fluid_surface_nets(grid, boundary);
+    let mesh_b = mesh_fluid_mc(grid, boundary);
 
     // Merge mesh_b into mesh_a
     let offset = mesh_a.positions.len() as u32;
@@ -98,7 +147,7 @@ fn has_fluid_above(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> bool 
     if y + 1 >= size {
         return false;
     }
-    !grid.is_solid(x, y + 1, z) && grid.get(x, y + 1, z).level >= ISO_LEVEL
+    grid.grid_point_density(x, y + 1, z) <= 0.0 && grid.get(x, y + 1, z).level >= ISO_LEVEL
 }
 
 /// Sample the scalar field for MC meshing.
@@ -108,17 +157,25 @@ fn has_fluid_above(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> bool 
 /// bottom boundary) with fluid above get boosted to 1.0 to close the visual gap.
 /// Out-of-bounds coordinates return BOUNDARY_FIELD to close mesh at chunk edges.
 #[inline]
-fn sample_field(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> f32 {
+fn sample_field(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary: &BoundaryLevels) -> f32 {
     let size = grid.size;
     if x >= size || y >= size || z >= size {
-        return BOUNDARY_FIELD; // just below ISO_LEVEL → MC face at chunk edge
+        // Density at boundary coords is valid via grid_point_density (handles up to size)
+        if grid.grid_point_density(x, y, z) > 0.0 {
+            return 1.0;
+        }
+        // Try neighbor fluid level
+        if let Some(level) = boundary.get_level(x, y, z) {
+            return level;
+        }
+        return BOUNDARY_FIELD;
     }
-    if grid.is_solid(x, y, z) {
+    if grid.grid_point_density(x, y, z) > 0.0 {
         1.0 // inside — prevents surface at rock/fluid boundary
     } else {
         let level = grid.get(x, y, z).level;
         // Floor extension: low-fluid cell on solid rock (or chunk bottom) with fluid above
-        if level < ISO_LEVEL && (y == 0 || grid.is_solid(x, y - 1, z)) && has_fluid_above(grid, x, y, z) {
+        if level < ISO_LEVEL && (y == 0 || grid.grid_point_density(x, y - 1, z) > 0.0) && has_fluid_above(grid, x, y, z) {
             1.0 // boost to close floor gap
         } else {
             level
@@ -133,17 +190,25 @@ fn sample_field(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> f32 {
 /// with fluid above get boosted to -1.0 to close the visual gap.
 /// Out-of-bounds coordinates return BOUNDARY_SDF to close mesh at chunk edges.
 #[inline]
-fn sample_sdf(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> f32 {
+fn sample_sdf(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary: &BoundaryLevels) -> f32 {
     let size = grid.size;
     if x >= size || y >= size || z >= size {
-        return BOUNDARY_SDF; // tiny positive → SN places vertex near chunk edge
+        // Density at boundary coords is valid via grid_point_density
+        if grid.grid_point_density(x, y, z) > 0.0 {
+            return -1.0;
+        }
+        // Try neighbor fluid level (convert to SDF: ISO_LEVEL - level)
+        if let Some(level) = boundary.get_level(x, y, z) {
+            return ISO_LEVEL - level;
+        }
+        return BOUNDARY_SDF;
     }
-    if grid.is_solid(x, y, z) {
+    if grid.grid_point_density(x, y, z) > 0.0 {
         -1.0 // inside — prevents surface at rock/fluid boundary
     } else {
         let level = grid.get(x, y, z).level;
         // Floor extension: low-fluid cell on solid rock (or chunk bottom) with fluid above
-        if level < ISO_LEVEL && (y == 0 || grid.is_solid(x, y - 1, z)) && has_fluid_above(grid, x, y, z) {
+        if level < ISO_LEVEL && (y == 0 || grid.grid_point_density(x, y - 1, z) > 0.0) && has_fluid_above(grid, x, y, z) {
             -1.0 // boost to close floor gap
         } else {
             ISO_LEVEL - level
@@ -157,7 +222,7 @@ fn sample_sdf(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> f32 {
 /// treating solid as "inside" would generate phantom water surfaces on every cave wall.
 /// Out-of-bounds corners are treated as having no fluid.
 #[inline]
-fn cube_has_fluid(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> bool {
+fn cube_has_fluid(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary: &BoundaryLevels) -> bool {
     let size = grid.size;
     for dz in 0..=1usize {
         for dy in 0..=1usize {
@@ -165,17 +230,29 @@ fn cube_has_fluid(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> bool {
                 let cx = x + dx;
                 let cy = y + dy;
                 let cz = z + dz;
-                // Out-of-bounds corners: no fluid (prevents phantom surfaces at boundary)
                 if cx >= size || cy >= size || cz >= size {
+                    // Multi-axis overflow: skip
+                    let overflows = (cx >= size) as u8 + (cy >= size) as u8 + (cz >= size) as u8;
+                    if overflows > 1 {
+                        continue;
+                    }
+                    // Single-axis: check density + boundary level
+                    if !(grid.grid_point_density(cx, cy, cz) > 0.0) {
+                        if let Some(level) = boundary.get_level(cx, cy, cz) {
+                            if level >= MIN_LEVEL {
+                                return true;
+                            }
+                        }
+                    }
                     continue;
                 }
-                if !grid.is_solid(cx, cy, cz) {
+                if !(grid.grid_point_density(cx, cy, cz) > 0.0) {
                     let level = grid.get(cx, cy, cz).level;
                     if level >= MIN_LEVEL {
                         return true;
                     }
                     // Floor extension: low-fluid cell on solid rock (or chunk bottom) with fluid above
-                    if level < ISO_LEVEL && (cy == 0 || grid.is_solid(cx, cy - 1, cz)) && has_fluid_above(grid, cx, cy, cz) {
+                    if level < ISO_LEVEL && (cy == 0 || grid.grid_point_density(cx, cy - 1, cz) > 0.0) && has_fluid_above(grid, cx, cy, cz) {
                         return true;
                     }
                 }
@@ -188,7 +265,7 @@ fn cube_has_fluid(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> bool {
 /// Marching Cubes fluid mesher.
 /// Produces triangulated isosurface at ISO_LEVEL with fluid_type=4 (purple).
 /// All positions offset by +MC_Y_OFFSET in Y to sit above Surface Nets mesh.
-fn mesh_fluid_mc(grid: &ChunkFluidGrid) -> FluidMeshData {
+fn mesh_fluid_mc(grid: &ChunkFluidGrid, boundary: &BoundaryLevels) -> FluidMeshData {
     let size = grid.size;
     let mut mesh = FluidMeshData {
         positions: Vec::new(),
@@ -203,14 +280,14 @@ fn mesh_fluid_mc(grid: &ChunkFluidGrid) -> FluidMeshData {
         for y in 0..size {
             for x in 0..size {
                 // Skip cubes with no actual fluid — prevents phantom surfaces on cave walls
-                if !cube_has_fluid(grid, x, y, z) {
+                if !cube_has_fluid(grid, x, y, z, boundary) {
                     continue;
                 }
 
                 // Sample 8 corners using Paul Bourke ordering (CORNER_OFFSETS)
                 let mut corner_vals = [0.0f32; 8];
                 for (i, off) in CORNER_OFFSETS.iter().enumerate() {
-                    corner_vals[i] = sample_field(grid, x + off[0], y + off[1], z + off[2]);
+                    corner_vals[i] = sample_field(grid, x + off[0], y + off[1], z + off[2], boundary);
                 }
 
                 // Build cube index: bit i set if corner i >= ISO_LEVEL
@@ -299,7 +376,7 @@ fn mesh_fluid_mc(grid: &ChunkFluidGrid) -> FluidMeshData {
 
 /// Naive Surface Nets fluid mesher.
 /// Produces smoothed isosurface at ISO_LEVEL with fluid_type=1 (teal).
-fn mesh_fluid_surface_nets(grid: &ChunkFluidGrid) -> FluidMeshData {
+fn mesh_fluid_surface_nets(grid: &ChunkFluidGrid, boundary: &BoundaryLevels) -> FluidMeshData {
     let size = grid.size;
     let mut mesh = FluidMeshData {
         positions: Vec::new(),
@@ -316,7 +393,7 @@ fn mesh_fluid_surface_nets(grid: &ChunkFluidGrid) -> FluidMeshData {
     for z in 0..fs {
         for y in 0..fs {
             for x in 0..fs {
-                sdf[z * fs * fs + y * fs + x] = sample_sdf(grid, x, y, z);
+                sdf[z * fs * fs + y * fs + x] = sample_sdf(grid, x, y, z, boundary);
             }
         }
     }
@@ -329,7 +406,7 @@ fn mesh_fluid_surface_nets(grid: &ChunkFluidGrid) -> FluidMeshData {
         for y in 0..size {
             for x in 0..size {
                 // Skip cells with no actual fluid — prevents phantom surfaces on cave walls
-                if !cube_has_fluid(grid, x, y, z) {
+                if !cube_has_fluid(grid, x, y, z, boundary) {
                     continue;
                 }
 
@@ -566,24 +643,24 @@ fn compute_flow_direction(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -
     let mut dz = 0.0f32;
 
     // X gradient
-    if x > 0 && !grid.is_solid(x - 1, y, z) {
+    if x > 0 && grid.grid_point_density(x - 1, y, z) <= 0.0 {
         dx += level - grid.get(x - 1, y, z).level;
     }
-    if x + 1 < size && !grid.is_solid(x + 1, y, z) {
+    if x + 1 < size && grid.grid_point_density(x + 1, y, z) <= 0.0 {
         dx += grid.get(x + 1, y, z).level - level;
     }
 
     // Z gradient
-    if z > 0 && !grid.is_solid(x, y, z - 1) {
+    if z > 0 && grid.grid_point_density(x, y, z - 1) <= 0.0 {
         dz += level - grid.get(x, y, z - 1).level;
     }
-    if z + 1 < size && !grid.is_solid(x, y, z + 1) {
+    if z + 1 < size && grid.grid_point_density(x, y, z + 1) <= 0.0 {
         dz += grid.get(x, y, z + 1).level - level;
     }
 
     // Downward gradient (waterfall detection)
     let mut dy_mag = 0.0f32;
-    if y > 0 && !grid.is_solid(x, y - 1, z) {
+    if y > 0 && grid.grid_point_density(x, y - 1, z) <= 0.0 {
         let below_level = grid.get(x, y - 1, z).level;
         dy_mag = (level - below_level).max(0.0);
     }
@@ -666,10 +743,14 @@ mod tests {
         grid
     }
 
+    fn no_boundary() -> BoundaryLevels {
+        BoundaryLevels::empty(16)
+    }
+
     #[test]
     fn empty_grid_produces_no_mesh() {
         let grid = ChunkFluidGrid::new(16);
-        let mesh = mesh_fluid(&grid);
+        let mesh = mesh_fluid(&grid, &no_boundary());
         assert!(mesh.positions.is_empty());
         assert!(mesh.indices.is_empty());
     }
@@ -677,7 +758,7 @@ mod tests {
     #[test]
     fn single_source_produces_mesh() {
         let grid = make_fluid_grid(&[(4..8, 4..8, 4..8, 1.0)]);
-        let mesh = mesh_fluid(&grid);
+        let mesh = mesh_fluid(&grid, &no_boundary());
         assert!(!mesh.positions.is_empty(), "Should produce mesh vertices");
         assert!(!mesh.indices.is_empty(), "Should produce mesh indices");
         assert_eq!(mesh.indices.len() % 3, 0, "Indices should be triangles");
@@ -692,7 +773,7 @@ mod tests {
     #[test]
     fn test_mc_produces_mesh() {
         let grid = make_fluid_grid(&[(6..10, 6..10, 6..10, 1.0)]);
-        let mesh = mesh_fluid_mc(&grid);
+        let mesh = mesh_fluid_mc(&grid, &no_boundary());
         assert!(!mesh.positions.is_empty(), "MC should produce vertices");
         assert!(!mesh.indices.is_empty(), "MC should produce indices");
         assert_eq!(mesh.indices.len() % 3, 0, "MC indices should be triangles");
@@ -705,7 +786,7 @@ mod tests {
     #[test]
     fn test_surface_nets_produces_mesh() {
         let grid = make_fluid_grid(&[(6..10, 6..10, 6..10, 1.0)]);
-        let mesh = mesh_fluid_surface_nets(&grid);
+        let mesh = mesh_fluid_surface_nets(&grid, &no_boundary());
         assert!(!mesh.positions.is_empty(), "SN should produce vertices");
         assert!(!mesh.indices.is_empty(), "SN should produce indices");
         assert_eq!(mesh.indices.len() % 3, 0, "SN indices should be triangles");
@@ -718,7 +799,7 @@ mod tests {
     #[test]
     fn test_dual_mesher_both_present() {
         let grid = make_fluid_grid(&[(4..12, 4..12, 4..12, 1.0)]);
-        let mesh = mesh_fluid(&grid);
+        let mesh = mesh_fluid(&grid, &no_boundary());
         let has_sn = mesh.fluid_types.iter().any(|&ft| ft == SN_FLUID_TYPE);
         let has_mc = mesh.fluid_types.iter().any(|&ft| ft == MC_FLUID_TYPE);
         assert!(has_sn, "Merged mesh should have Surface Nets (type 1) vertices");
@@ -728,7 +809,7 @@ mod tests {
     #[test]
     fn test_mc_no_mesh_for_empty() {
         let grid = ChunkFluidGrid::new(16);
-        let mesh = mesh_fluid_mc(&grid);
+        let mesh = mesh_fluid_mc(&grid, &no_boundary());
         assert!(mesh.positions.is_empty(), "Empty grid should produce no MC geometry");
         assert!(mesh.indices.is_empty());
     }
@@ -736,7 +817,7 @@ mod tests {
     #[test]
     fn test_sn_no_mesh_for_empty() {
         let grid = ChunkFluidGrid::new(16);
-        let mesh = mesh_fluid_surface_nets(&grid);
+        let mesh = mesh_fluid_surface_nets(&grid, &no_boundary());
         assert!(mesh.positions.is_empty(), "Empty grid should produce no SN geometry");
         assert!(mesh.indices.is_empty());
     }
@@ -745,7 +826,7 @@ mod tests {
     fn test_sn_flat_pool_is_flat() {
         // Uniform fluid level across a large area should produce a flat top surface
         let grid = make_fluid_grid(&[(2..14, 2..6, 2..14, 1.0)]);
-        let mesh = mesh_fluid_surface_nets(&grid);
+        let mesh = mesh_fluid_surface_nets(&grid, &no_boundary());
         assert!(!mesh.positions.is_empty(), "Flat pool should produce SN vertices");
 
         // SN generates a full 3D isosurface (top, bottom, sides).
@@ -771,7 +852,7 @@ mod tests {
     #[test]
     fn test_mc_y_offset_applied() {
         let grid = make_fluid_grid(&[(6..10, 6..10, 6..10, 1.0)]);
-        let mc_mesh = mesh_fluid_mc(&grid);
+        let mc_mesh = mesh_fluid_mc(&grid, &no_boundary());
         // MC positions should have the Y offset applied
         // At minimum, some vertex Y values should differ from integer positions by MC_Y_OFFSET
         assert!(
@@ -796,7 +877,7 @@ mod tests {
                 }
             }
         }
-        let mesh = mesh_fluid(&grid);
+        let mesh = mesh_fluid(&grid, &no_boundary());
         assert!(
             mesh.positions.is_empty(),
             "Solid/air boundary with no fluid should produce no mesh, got {} verts",
@@ -828,7 +909,7 @@ mod tests {
                 }
             }
         }
-        let mesh = mesh_fluid(&grid);
+        let mesh = mesh_fluid(&grid, &no_boundary());
         assert!(!mesh.positions.is_empty(), "Should produce fluid mesh");
 
         // The minimum Y of vertices should be near the solid/fluid boundary (y≈3-4).
@@ -871,7 +952,7 @@ mod tests {
                 }
             }
         }
-        let mesh = mesh_fluid_mc(&grid);
+        let mesh = mesh_fluid_mc(&grid, &no_boundary());
         assert!(!mesh.positions.is_empty(), "MC should produce vertices");
         let min_y = mesh.positions.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
         // Without floor extension, mesh bottom would be at y≈4.9 (above transition cell).
@@ -913,7 +994,7 @@ mod tests {
                 }
             }
         }
-        let mesh = mesh_fluid_surface_nets(&grid);
+        let mesh = mesh_fluid_surface_nets(&grid, &no_boundary());
         assert!(!mesh.positions.is_empty(), "SN should produce vertices");
         let min_y = mesh.positions.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
         // SN should also extend below the transition cell
@@ -947,7 +1028,7 @@ mod tests {
                 }
             }
         }
-        let mesh = mesh_fluid(&grid);
+        let mesh = mesh_fluid(&grid, &no_boundary());
         assert!(!mesh.positions.is_empty(), "Should produce fluid mesh");
         // The mesh should not generate phantom water on the wall face.
         // Solid wall cells return 1.0 ("inside"), same as fluid cells,
@@ -958,6 +1039,37 @@ mod tests {
             min_x >= 3.0,
             "Mesh should not extend deep into solid wall, min_x = {:.2}",
             min_x
+        );
+    }
+
+    #[test]
+    fn test_boundary_levels_seamless() {
+        // Two adjacent fluid grids: mesh with boundary levels should not seal at the shared edge.
+        // Grid A has fluid at x=12..16, Grid B (the +X neighbor) has fluid at x=0..4.
+        // Without boundary data, mesh seals at x=16. With it, the surface should be open.
+        let grid_a = make_fluid_grid(&[(12..16, 4..8, 4..8, 1.0)]);
+
+        // Build boundary levels from the neighbor's x=0 face
+        let mut boundary = BoundaryLevels::empty(16);
+        let mut pos_x_levels = vec![0.0f32; 16 * 16];
+        for z in 4..8 {
+            for y in 4..8 {
+                pos_x_levels[z * 16 + y] = 1.0; // neighbor has fluid at x=0
+            }
+        }
+        boundary.pos_x = Some(pos_x_levels);
+
+        let mesh_with_boundary = mesh_fluid(&grid_a, &boundary);
+        let mesh_without_boundary = mesh_fluid(&grid_a, &no_boundary());
+
+        // With boundary data, the mesh should have fewer vertices at the +X face
+        // (the surface is open there instead of sealed). Alternatively, the vertex count
+        // should differ, indicating the boundary data changed the mesh.
+        assert!(
+            mesh_with_boundary.positions.len() != mesh_without_boundary.positions.len(),
+            "Boundary levels should change the mesh at the shared edge (with={}, without={})",
+            mesh_with_boundary.positions.len(),
+            mesh_without_boundary.positions.len()
         );
     }
 }

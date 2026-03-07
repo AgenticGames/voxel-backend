@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, Sender};
 
 use crate::cell::{ChunkDensityCache, ChunkFluidGrid};
-use crate::mesh::mesh_fluid;
+use crate::mesh::{mesh_fluid, BoundaryLevels};
 use crate::sim::{detect_solidification, regen_sources, squeeze_excess_fluid, tick_fluid};
 use crate::sources::place_sources;
 use crate::{FluidConfig, FluidEvent, FluidResult, FluidSnapshot};
@@ -94,8 +94,9 @@ pub fn fluid_sim_loop(
 
         // Mesh dirty chunks and send results
         for key in &all_dirty {
+            let boundary = build_boundary_levels(*key, &chunks, chunk_size);
             if let Some(grid) = chunks.get_mut(key) {
-                let mesh = mesh_fluid(grid);
+                let mesh = mesh_fluid(grid, &boundary);
                 grid.dirty = false;
 
                 if !mesh.positions.is_empty() {
@@ -202,6 +203,59 @@ fn handle_event(
             }
         }
     }
+}
+
+/// Build boundary levels from neighboring chunks for seamless fluid meshing.
+fn build_boundary_levels(
+    key: (i32, i32, i32),
+    chunks: &HashMap<(i32, i32, i32), ChunkFluidGrid>,
+    size: usize,
+) -> BoundaryLevels {
+    let mut boundary = BoundaryLevels::empty(size);
+
+    // +X neighbor: extract x=0 face levels
+    let px_key = (key.0 + 1, key.1, key.2);
+    if let Some(nbr) = chunks.get(&px_key) {
+        if nbr.has_fluid {
+            let mut levels = vec![0.0f32; size * size];
+            for z in 0..size {
+                for y in 0..size {
+                    levels[z * size + y] = nbr.get(0, y, z).level;
+                }
+            }
+            boundary.pos_x = Some(levels);
+        }
+    }
+
+    // +Y neighbor: extract y=0 face levels
+    let py_key = (key.0, key.1 + 1, key.2);
+    if let Some(nbr) = chunks.get(&py_key) {
+        if nbr.has_fluid {
+            let mut levels = vec![0.0f32; size * size];
+            for z in 0..size {
+                for x in 0..size {
+                    levels[z * size + x] = nbr.get(x, 0, z).level;
+                }
+            }
+            boundary.pos_y = Some(levels);
+        }
+    }
+
+    // +Z neighbor: extract z=0 face levels
+    let pz_key = (key.0, key.1, key.2 + 1);
+    if let Some(nbr) = chunks.get(&pz_key) {
+        if nbr.has_fluid {
+            let mut levels = vec![0.0f32; size * size];
+            for y in 0..size {
+                for x in 0..size {
+                    levels[y * size + x] = nbr.get(x, y, 0).level;
+                }
+            }
+            boundary.pos_z = Some(levels);
+        }
+    }
+
+    boundary
 }
 
 /// Ensure a full fluid grid exists for a chunk, promoting from density cache if needed.
