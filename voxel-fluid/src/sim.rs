@@ -170,29 +170,32 @@ fn resolve_neighbor(
     Some((chunk_key, lx as usize, ly as usize, lz as usize))
 }
 
-/// Check if a cell has any downward flow outlet (gravity or slope).
-/// Used to suppress horizontal spread on slopes — water should flow down, not sideways.
+/// Check if a cell sits on a flat floor (solid below, ≥3/4 horizontal neighbors also solid below).
+/// Used to allow horizontal spread on flat floors while suppressing it on slopes/ledges.
+/// At basin edges (3/4 solid), spread is still allowed so pools can fill to the rim.
 #[inline]
-fn has_downward_outlet(cell_solid: &[bool], x: usize, y: usize, z: usize, size: usize) -> bool {
+fn is_flat_floor(cell_solid: &[bool], x: usize, y: usize, z: usize, size: usize) -> bool {
     if y == 0 {
-        return false; // can't check cross-chunk here, allow horizontal spread at boundary
+        return true; // conservative at chunk boundary — allow spread
     }
     let below_idx = z * size * size + (y - 1) * size + x;
     if !cell_solid[below_idx] {
-        return true; // gravity outlet — cell below is air/water
+        return false; // gravity active — cell below is air, not a floor
     }
-    // Check 4 diagonal-down neighbors for slope outlets
+    // Count how many horizontal neighbors also have solid floor below them
+    let mut count = 0u8;
     for &(dx, dz) in &[(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
         let nx = x as i32 + dx;
         let nz = z as i32 + dz;
         if nx >= 0 && nx < size as i32 && nz >= 0 && nz < size as i32 {
-            let diag_idx = nz as usize * size * size + (y - 1) * size + nx as usize;
-            if !cell_solid[diag_idx] {
-                return true;
+            if cell_solid[nz as usize * size * size + (y - 1) * size + nx as usize] {
+                count += 1;
             }
+        } else {
+            count += 1; // chunk boundary = conservative solid
         }
     }
-    false
+    count >= 3
 }
 
 /// Extra horizontal equalization pass over a cell buffer.
@@ -231,8 +234,8 @@ fn equalize_horizontal(
                     continue;
                 }
 
-                // Skip horizontal spread for cells that can drain downward (slope)
-                if has_downward_outlet(cell_solid, x, y, z, size) {
+                // Skip horizontal spread for cells NOT on a flat floor (slopes/ledges)
+                if !is_flat_floor(cell_solid, x, y, z, size) {
                     continue;
                 }
 
@@ -481,7 +484,7 @@ fn tick_chunk(
                             if new_cells[idx].level < MIN_LEVEL && !is_source {
                                 break;
                             }
-                            let transfer = new_cells[idx].level.min(dst_space).min(flow_rate * 2.0);
+                            let transfer = new_cells[idx].level.min(dst_space).min(flow_rate * 4.0);
                             if transfer > MIN_LEVEL {
                                 if !is_source {
                                     new_cells[idx].level -= transfer;
@@ -505,9 +508,9 @@ fn tick_chunk(
                     }
                 }
 
-                // Horizontal spread — suppressed on slopes so water flows down as a stream
+                // Horizontal spread — only on flat floors, suppressed on slopes
                 if new_cells[idx].level > MIN_LEVEL
-                    && !has_downward_outlet(cell_solid, x, y, z, size)
+                    && is_flat_floor(cell_solid, x, y, z, size)
                 {
                     let remaining = new_cells[idx].level;
                     let src_fill = if src_capacity > MIN_LEVEL {
@@ -585,10 +588,10 @@ fn tick_chunk(
     changed |= equalize_horizontal(&mut new_cells, cell_solid, size, is_lava_tick, config, true);
     changed |= equalize_horizontal(&mut new_cells, cell_solid, size, is_lava_tick, config, false);
 
-    // Clean up tiny residual amounts and track has_fluid
+    // Clean up tiny residual and negative amounts, track has_fluid
     let mut any_fluid = false;
     for cell in &mut new_cells {
-        if cell.level < MIN_LEVEL && cell.level > 0.0 {
+        if cell.level < MIN_LEVEL {
             cell.level = 0.0;
         }
         if cell.level >= MIN_LEVEL {
@@ -1397,5 +1400,94 @@ mod tests {
                 x, a_level, b_level
             );
         }
+    }
+
+    #[test]
+    fn is_flat_floor_classification() {
+        let size = 16;
+        let mut cell_solid = vec![false; size * size * size];
+
+        // Helper to set solid
+        let set = |s: &mut Vec<bool>, x: usize, y: usize, z: usize| {
+            s[z * size * size + y * size + x] = true;
+        };
+
+        // Interior flat floor: solid below + all 4 neighbors have solid below
+        set(&mut cell_solid, 8, 4, 8); // floor below (8,5,8)
+        set(&mut cell_solid, 9, 4, 8); // floor below neighbor +X
+        set(&mut cell_solid, 7, 4, 8); // floor below neighbor -X
+        set(&mut cell_solid, 8, 4, 9); // floor below neighbor +Z
+        set(&mut cell_solid, 8, 4, 7); // floor below neighbor -Z
+        assert!(is_flat_floor(&cell_solid, 8, 5, 8, size), "Interior flat floor (4/4) should be true");
+
+        // Edge flat floor: 3/4 neighbors have solid below (one side drops off)
+        let mut edge_solid = vec![false; size * size * size];
+        set(&mut edge_solid, 8, 4, 8); // floor below
+        set(&mut edge_solid, 7, 4, 8); // -X has floor
+        set(&mut edge_solid, 8, 4, 9); // +Z has floor
+        set(&mut edge_solid, 8, 4, 7); // -Z has floor
+        // +X (9,4,8) is air — drop-off
+        assert!(is_flat_floor(&edge_solid, 8, 5, 8, size), "Edge flat floor (3/4) should be true");
+
+        // Slope: only 2/4 neighbors have solid below
+        let mut slope_solid = vec![false; size * size * size];
+        set(&mut slope_solid, 8, 4, 8); // floor below
+        set(&mut slope_solid, 7, 4, 8); // -X has floor
+        set(&mut slope_solid, 8, 4, 7); // -Z has floor
+        // +X and +Z are air
+        assert!(!is_flat_floor(&slope_solid, 8, 5, 8, size), "Slope (2/4) should be false");
+
+        // Air below: gravity active
+        let air_below = vec![false; size * size * size];
+        assert!(!is_flat_floor(&air_below, 8, 5, 8, size), "Air below should be false");
+    }
+
+    #[test]
+    fn flat_floor_edge_allows_spread() {
+        // Water on a flat floor should spread horizontally, even near basin edges.
+        // The key behavior: is_flat_floor returns true for cells with 3/4 solid floor neighbors,
+        // so horizontal spread is allowed at basin edges (unlike the old has_downward_outlet
+        // which blocked ALL horizontal spread when ANY diagonal-down neighbor was air).
+        let mut chunks = HashMap::new();
+        let key = (0, 0, 0);
+        let mut grid = make_chunk(16);
+
+        // Solid floor everywhere at y=0 (16x16)
+        for x in 0..16 {
+            for z in 0..16 {
+                grid.set_density(x, 0, z, 1.0);
+            }
+        }
+
+        // Z-walls to channel flow along X axis
+        for x in 0..16 {
+            grid.set_density(x, 1, 7, 1.0);
+            grid.set_density(x, 1, 9, 1.0);
+        }
+
+        // Place water at x=4 (enough room to spread to x=10+)
+        grid.get_mut(4, 1, 8).level = 0.8;
+        grid.get_mut(4, 1, 8).fluid_type = FluidType::Water;
+        grid.has_fluid = true;
+
+        chunks.insert(key, grid);
+
+        let config = crate::FluidConfig::default();
+        let density_cache = empty_density_cache();
+
+        // Multiple ticks to let water spread
+        for _ in 0..15 {
+            tick_fluid(&mut chunks, &density_cache, 16, false, &config);
+        }
+
+        // Water should have spread to x=10 — a cell 6 positions away on a flat floor.
+        // All cells along this row have is_flat_floor=true (floor below is solid everywhere).
+        let grid = &chunks[&key];
+        let spread_level = grid.get(10, 1, 8).level;
+        assert!(
+            spread_level > MIN_LEVEL,
+            "Water should spread to cell (10,1,8) on flat floor, got {}",
+            spread_level
+        );
     }
 }
