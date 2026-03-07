@@ -415,6 +415,101 @@ pub fn detect_and_equalize_pools(
         }
     }
 
+    // Phase 4: Edge Expansion
+    // For each equalized pool, seed dry neighbor cells at the pool surface
+    // so pools can grow past basin edges one cell per tick.
+    for pool in &pools {
+        // Find the surface layer (highest world-Y with fluid)
+        let mut max_wy = i32::MIN;
+        for &cell in &pool.cells {
+            let wy = cell.world_y(chunk_size);
+            if wy > max_wy {
+                max_wy = wy;
+            }
+        }
+
+        // Collect surface-layer pool cells
+        let surface_cells: Vec<CellRef> = pool.cells.iter()
+            .filter(|c| c.world_y(chunk_size) == max_wy)
+            .copied()
+            .collect();
+
+        for &cell in &surface_cells {
+            let cell_level = get_level(chunks, cell.chunk, cell.x as usize, cell.y as usize, cell.z as usize);
+            if cell_level < 0.1 || cell_level >= SOURCE_LEVEL {
+                continue; // not enough to donate, or source (never drain sources)
+            }
+
+            // Check 4 horizontal neighbors
+            let neighbors: [(i32, i32, i32); 4] = [
+                (1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1),
+            ];
+            for (dx, dy, dz) in neighbors {
+                let nx = cell.x as i32 + dx;
+                let ny = cell.y as i32 + dy;
+                let nz = cell.z as i32 + dz;
+                let resolved = resolve_cell(cell.chunk, nx, ny, nz, chunk_size);
+                let (nchunk, nlx, nly, nlz) = match resolved {
+                    Some(r) => r,
+                    None => continue,
+                };
+
+                let neighbor_ref = CellRef { chunk: nchunk, x: nlx, y: nly, z: nlz };
+
+                // Skip if already in pool
+                if candidates.contains(&neighbor_ref) {
+                    continue;
+                }
+                // Skip if solid
+                if is_solid(chunks, chunk_densities, nchunk, nlx as usize, nly as usize, nlz as usize, chunk_size) {
+                    continue;
+                }
+                // Must have solid below (sitting on a floor)
+                let below = resolve_cell(nchunk, nlx as i32, nly as i32 - 1, nlz as i32, chunk_size);
+                let has_floor = match below {
+                    Some((bck, bx, by, bz)) => {
+                        is_solid(chunks, chunk_densities, bck, bx as usize, by as usize, bz as usize, chunk_size)
+                    }
+                    None => true, // world edge = floor
+                };
+                if !has_floor {
+                    continue;
+                }
+                // Must have room for water
+                let nbr_level = get_level(chunks, nchunk, nlx as usize, nly as usize, nlz as usize);
+                if nbr_level >= cell_level {
+                    continue;
+                }
+                // Seed a small transfer
+                let transfer = (cell_level * 0.1).min(0.05);
+                // Re-check donor level (may have donated to previous neighbor)
+                let donor_level = get_level(chunks, cell.chunk, cell.x as usize, cell.y as usize, cell.z as usize);
+                if donor_level < 0.1 {
+                    break; // exhausted
+                }
+                let transfer = transfer.min(donor_level - 0.05);
+                if transfer < MIN_LEVEL {
+                    continue;
+                }
+                // Transfer from pool cell to neighbor
+                if let Some(grid) = chunks.get_mut(&cell.chunk) {
+                    let fc = grid.get_mut(cell.x as usize, cell.y as usize, cell.z as usize);
+                    fc.level -= transfer;
+                    grid.dirty = true;
+                    dirty.insert(cell.chunk);
+                }
+                if let Some(grid) = chunks.get_mut(&nchunk) {
+                    let fc = grid.get_mut(nlx as usize, nly as usize, nlz as usize);
+                    fc.level += transfer;
+                    fc.fluid_type = pool.fluid_type;
+                    grid.dirty = true;
+                    grid.has_fluid = true;
+                    dirty.insert(nchunk);
+                }
+            }
+        }
+    }
+
     dirty
 }
 
@@ -439,12 +534,19 @@ mod tests {
     fn flat_floor_equalization() {
         // 5 cells on a flat floor at y=1 (floor at y=0), with varying levels.
         // After equalization, all should have the same level.
+        // Enclosed by walls so edge expansion doesn't drain volume.
         let size = 16;
         let chunk_key = (0, 0, 0);
         let mut grid = make_air_chunk(size);
 
         // Solid floor at y=0
         set_solid_floor(&mut grid, 0, size);
+
+        // Walls at y=1 to contain the pool (prevent edge expansion)
+        grid.set_density(5, 1, 0, 1.0); // wall to the right
+        for x in 0..6 {
+            grid.set_density(x, 1, 1, 1.0); // wall behind (z=1)
+        }
 
         // Place water at y=1, x=0..5, z=0 with varying levels
         let levels = [0.8, 0.6, 0.4, 0.2, 0.5];
@@ -532,11 +634,18 @@ mod tests {
     #[test]
     fn source_stays_at_full() {
         // Source cell in pool should stay at 1.0, not be reduced by equalization.
+        // Enclosed by walls so edge expansion doesn't drain non-source cells.
         let size = 16;
         let chunk_key = (0, 0, 0);
         let mut grid = make_air_chunk(size);
 
         set_solid_floor(&mut grid, 0, size);
+
+        // Walls at y=1 to contain the pool
+        grid.set_density(3, 1, 0, 1.0); // wall to the right
+        for x in 0..4 {
+            grid.set_density(x, 1, 1, 1.0); // wall behind
+        }
 
         // Source at x=0
         let cell = grid.get_mut(0, 1, 0);
@@ -558,7 +667,7 @@ mod tests {
         detect_and_equalize_pools(&mut chunks, &densities, size, false);
 
         let grid = chunks.get(&chunk_key).unwrap();
-        // Source stays at 1.0
+        // Source stays at SOURCE_LEVEL (edge expansion skips sources)
         assert_eq!(grid.get(0, 1, 0).level, SOURCE_LEVEL);
         // Non-source cells equalize: total non-source = 0.6, cells = 2 → 0.3 each
         let expected = 0.3;
@@ -569,6 +678,7 @@ mod tests {
     #[test]
     fn cross_chunk_pool() {
         // Pool spanning two chunks: chunk (0,0,0) x=15 and chunk (1,0,0) x=0.
+        // Walled off with solid at y=1 to prevent edge expansion from draining volume.
         let size = 16;
         let key_a = (0, 0, 0);
         let key_b = (1, 0, 0);
@@ -579,6 +689,12 @@ mod tests {
         // Solid floor at y=0 in both
         set_solid_floor(&mut grid_a, 0, size);
         set_solid_floor(&mut grid_b, 0, size);
+
+        // Walls at y=1 to contain pool cells
+        grid_a.set_density(14, 1, 0, 1.0); // wall left of A's water cell
+        grid_a.set_density(15, 1, 1, 1.0); // wall behind A's water cell
+        grid_b.set_density(1, 1, 0, 1.0);  // wall right of B's water cell
+        grid_b.set_density(0, 1, 1, 1.0);  // wall behind B's water cell
 
         // Water at boundary: chunk A x=15, chunk B x=0, both at y=1, z=0
         grid_a.get_mut(15, 1, 0).level = 0.8;
@@ -639,11 +755,18 @@ mod tests {
     #[test]
     fn lava_pool_on_lava_tick() {
         // Lava pool should only equalize during lava ticks.
+        // Enclosed by walls to prevent edge expansion.
         let size = 16;
         let chunk_key = (0, 0, 0);
         let mut grid = make_air_chunk(size);
 
         set_solid_floor(&mut grid, 0, size);
+
+        // Walls at y=1 to contain the pool
+        grid.set_density(3, 1, 0, 1.0); // wall to the right
+        for x in 0..4 {
+            grid.set_density(x, 1, 1, 1.0); // wall behind
+        }
 
         for x in 0..3 {
             let cell = grid.get_mut(x, 1, 0);
@@ -675,5 +798,49 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn pool_expands_to_basin_edge() {
+        // Pool on flat floor with a dry neighbor cell at basin edge.
+        // After equalization + edge expansion, water should seed the edge cell.
+        let size = 16;
+        let chunk_key = (0, 0, 0);
+        let mut grid = make_air_chunk(size);
+
+        // Solid floor at y=0
+        set_solid_floor(&mut grid, 0, size);
+
+        // Pool: 3 cells at y=1, x=0..3, z=0 with water
+        for x in 0..3 {
+            let cell = grid.get_mut(x, 1, 0);
+            cell.level = 0.5;
+            cell.fluid_type = FluidType::Water;
+        }
+        grid.has_fluid = true;
+
+        // x=3, y=1, z=0 is dry but has solid floor below — expansion candidate
+
+        let mut chunks = HashMap::new();
+        chunks.insert(chunk_key, grid);
+        let densities = HashMap::new();
+
+        let dirty = detect_and_equalize_pools(&mut chunks, &densities, size, false);
+        assert!(!dirty.is_empty());
+
+        // The dry neighbor at x=3 should have been seeded with a small amount of water
+        let grid = chunks.get(&chunk_key).unwrap();
+        let edge_level = grid.get(3, 1, 0).level;
+        assert!(
+            edge_level > MIN_LEVEL,
+            "Pool should expand to basin edge cell (3,1,0), got {}",
+            edge_level
+        );
+        // The seeded amount should be small (≤ 0.05)
+        assert!(
+            edge_level <= 0.06,
+            "Edge expansion seed should be small, got {}",
+            edge_level
+        );
     }
 }
