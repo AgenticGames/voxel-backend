@@ -1,0 +1,68 @@
+{
+  "total_seeds": 10,
+  "passed": 9,
+  "failed": 1,
+  "results": [
+    {
+      "seed": 0,
+      "passed": true,
+      "reason": "",
+      "obj_path": "batch_output/seed_0.obj"
+    },
+    {
+      "seed": 1,
+      "passed": true,
+      "reason": "",
+      "obj_path": "batch_output/seed_1.obj"
+    },
+    {
+      "seed": 2,
+      "passed": true,
+      "reason": "",
+      "obj_path": "batch_output/seed_2.obj"
+    },
+    {
+      "seed": 3,
+      "passed": true,
+      "reason": "",
+      "obj_path": "batch_output/seed_3.obj"
+    },
+    {
+      "seed": 4,
+      "passed": false,
+      "reason": "not navigable, not watertight",
+      "obj_path": "batch_output/seed_4.obj"
+    },
+    {
+      "seed": 5,
+      "passed": true,
+      "reason": "",
+      "obj_path": "batch_output/seed_5.obj"
+    },
+    {
+      "seed": 6,
+      "passed": true,
+      "reason": "",
+      "obj_path": "batch_output/seed_6.obj"
+    },
+    {
+      "seed": 7,
+      "passed": true,
+      "reason": "",
+      "obj_path": "batch_output/seed_7.obj"
+    },
+    {
+      "seed": 8,
+      "passed": true,
+      "reason": "",
+      "obj_path": "batch_output/seed_8.obj"
+    },
+    {
+      "seed": 9,
+      "passed": true,
+      "reason": "",
+      "obj_path": "batch_output/seed_9.obj"
+    }
+  ],
+  "failures": []
+}

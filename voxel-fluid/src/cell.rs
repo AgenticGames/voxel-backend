@@ -129,13 +129,6 @@ impl ChunkDensityCache {
     }
 }
 
-/// Convert density to fluid capacity: binary step at the SDF zero-crossing.
-/// density ≤ 0 (air) → 1.0 (full capacity), density > 0 (solid) → 0.0.
-/// This aligns fluid boundaries with the DC mesh surface.
-#[inline]
-pub fn density_to_capacity(density: f32) -> f32 {
-    if density <= 0.0 { 1.0 } else { 0.0 }
-}
 
 /// Per-chunk fluid grid: 16^3 cells with continuous density data.
 ///
@@ -151,6 +144,8 @@ pub struct ChunkFluidGrid {
     /// Layout: cell_corners[cell_idx * 8 + corner] where corner is MC ordering.
     /// 16^3 * 8 = 32768 values.
     pub cell_corners: Vec<f32>,
+    /// Precomputed: true if ALL 8 corner densities > 0 (fully solid cell).
+    pub cell_solid: Vec<bool>,
     pub size: usize,
     pub dirty: bool,
     /// True if any cell has level > MIN_LEVEL. Used to skip empty chunks in sim.
@@ -164,6 +159,7 @@ impl ChunkFluidGrid {
             cells: vec![FluidCell::default(); total],
             cell_density: vec![-1.0; total], // default to air (negative density)
             cell_corners: vec![-1.0; total * 8],
+            cell_solid: vec![false; total],
             size,
             dirty: false,
             has_fluid: false,
@@ -174,10 +170,14 @@ impl ChunkFluidGrid {
     pub fn from_density_cache(cache: &ChunkDensityCache) -> Self {
         let size = cache.size;
         let total = size * size * size;
+        let cell_solid: Vec<bool> = (0..total)
+            .map(|idx| (0..8).all(|c| cache.cell_corners[idx * 8 + c] > 0.0))
+            .collect();
         Self {
             cells: vec![FluidCell::default(); total],
             cell_density: cache.cell_density.clone(),
             cell_corners: cache.cell_corners.clone(),
+            cell_solid,
             size,
             dirty: false,
             has_fluid: false,
@@ -200,19 +200,17 @@ impl ChunkFluidGrid {
         &mut self.cells[idx]
     }
 
-    /// Returns true if the cell is solid (density > solid_threshold, default 0.0).
+    /// Returns true if the cell is fully solid (ALL 8 corner densities > 0).
     #[inline]
     pub fn is_solid(&self, x: usize, y: usize, z: usize) -> bool {
-        let idx = self.index(x, y, z);
-        self.cell_density[idx] > 0.0
+        self.cell_solid[self.index(x, y, z)]
     }
 
     /// Returns the fluid capacity of a cell: how much fluid it can hold.
-    /// Binary: density ≤ 0 (air) → 1.0, density > 0 (solid) → 0.0.
+    /// Binary: not fully solid → 1.0, fully solid → 0.0.
     #[inline]
     pub fn cell_capacity(&self, x: usize, y: usize, z: usize) -> f32 {
-        let idx = self.index(x, y, z);
-        density_to_capacity(self.cell_density[idx])
+        if self.cell_solid[self.index(x, y, z)] { 0.0 } else { 1.0 }
     }
 
     /// Set density for a single cell (used in tests and terrain modification).
@@ -225,6 +223,7 @@ impl ChunkFluidGrid {
         for c in 0..8 {
             self.cell_corners[idx * 8 + c] = density;
         }
+        self.cell_solid[idx] = density > 0.0; // all corners set to same value
     }
 
     /// Get the 8 corner densities for a cell (for meshing/shoreline clipping).
@@ -269,9 +268,29 @@ impl ChunkFluidGrid {
 
                     // Center density = average of 8 corners
                     self.cell_density[cell_idx] = sum / 8.0;
+                    // Fully solid only if ALL 8 corners are positive
+                    self.cell_solid[cell_idx] = (0..8).all(|c| self.cell_corners[cell_idx * 8 + c] > 0.0);
                 }
             }
         }
+    }
+
+    /// Raw terrain density at grid point (gx, gy, gz) in the 17^3 density grid.
+    /// Used by the mesher to align fluid boundaries with DC mesh surfaces.
+    #[inline]
+    pub fn grid_point_density(&self, gx: usize, gy: usize, gz: usize) -> f32 {
+        let size = self.size;
+        let cx = gx.min(size - 1);
+        let cy = gy.min(size - 1);
+        let cz = gz.min(size - 1);
+        // CELL_CORNER_OFFSETS: 0=(0,0,0) 1=(1,0,0) 2=(1,1,0) 3=(0,1,0)
+        //                      4=(0,0,1) 5=(1,0,1) 6=(1,1,1) 7=(0,1,1)
+        let corner = match (gx - cx, gy - cy, gz - cz) {
+            (0, 0, 0) => 0, (1, 0, 0) => 1, (1, 1, 0) => 2, (0, 1, 0) => 3,
+            (0, 0, 1) => 4, (1, 0, 1) => 5, (1, 1, 1) => 6, (0, 1, 1) => 7,
+            _ => 0,
+        };
+        self.cell_corners[self.index(cx, cy, cz) * 8 + corner]
     }
 }
 

@@ -87,6 +87,7 @@ impl VoxelEngine {
     pub fn new(ffi_config: &FfiEngineConfig) -> Self {
         debug_log_pool_config(ffi_config);
         let config = ffi_config_to_generation(ffi_config);
+        let voxel_scale = config.voxel_scale();
         let fluid_config = ffi_config_to_fluid(ffi_config);
         let world_scale = ffi_config.world_scale;
         // Gate 4: force single worker thread to test for concurrency races
@@ -120,7 +121,7 @@ impl VoxelEngine {
         // Spawn fluid simulation thread
         let fluid_result_tx = result_tx.clone();
         let fluid_shutdown = Arc::clone(&shutdown);
-        let fluid_world_scale = world_scale;
+        let fluid_world_scale = voxel_scale * world_scale;
         let fluid_thread = thread::spawn(move || {
             fluid_sim_loop_wrapper(
                 fluid_shutdown,
