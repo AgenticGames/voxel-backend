@@ -93,7 +93,21 @@ pub fn place_pools(
             for x in 1..size - 1 {
                 let sample = density.get(x, y, z);
                 let above = density.get(x, y + 1, z);
-                if sample.material.is_solid() && !above.material.is_solid() {
+                // Use density values (not material enum) to match formations logic.
+                // Floor = solid voxel (density > 0) with air above (density <= 0).
+                if sample.density > 0.0 && above.density <= 0.0 {
+                    // Wall exclusion: reject voxels that are also wall surfaces.
+                    // A floor-only cell has solid neighbors horizontally; a wall cell
+                    // has air to the side. This matches formations.rs detect_surfaces()
+                    // which classifies Floor vs Wall mutually exclusively (lines 821-825).
+                    let has_air_xn = x > 0 && density.get(x - 1, y, z).density <= 0.0;
+                    let has_air_xp = x + 1 < size && density.get(x + 1, y, z).density <= 0.0;
+                    let has_air_zn = z > 0 && density.get(x, y, z - 1).density <= 0.0;
+                    let has_air_zp = z + 1 < size && density.get(x, y, z + 1).density <= 0.0;
+                    if has_air_xn || has_air_xp || has_air_zn || has_air_zp {
+                        continue; // wall surface or wall-floor edge — skip
+                    }
+
                     // Ground depth check: require min_ground_depth contiguous solid below
                     if config.min_ground_depth > 0 {
                         let mut solid_below = 0usize;
@@ -104,7 +118,7 @@ pub fn place_pools(
                                 solid_below = config.min_ground_depth;
                                 break;
                             }
-                            if density.get(x, check_y, z).material.is_solid() {
+                            if density.get(x, check_y, z).density > 0.0 {
                                 solid_below += 1;
                             } else {
                                 break; // air gap — not deep ground
@@ -113,26 +127,6 @@ pub fn place_pools(
                         if solid_below < config.min_ground_depth {
                             continue; // pillar top or formation surface
                         }
-                    }
-
-                    // Horizontality check: require at least 3 of 4 horizontal neighbors
-                    // at the same Y to also be solid. True floors extend horizontally;
-                    // wall surfaces have air on the cave-interior side.
-                    let mut solid_horiz = 0u32;
-                    let horiz: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
-                    for (dx, dz) in horiz {
-                        let nx = x as i32 + dx;
-                        let nz = z as i32 + dz;
-                        if nx >= 0 && nx < size as i32 && nz >= 0 && nz < size as i32 {
-                            if density.get(nx as usize, y, nz as usize).material.is_solid() {
-                                solid_horiz += 1;
-                            }
-                        } else {
-                            solid_horiz += 1; // boundary counts as solid (conservative)
-                        }
-                    }
-                    if solid_horiz < 3 {
-                        continue; // wall surface or ledge edge — skip
                     }
 
                     floor_cells.push((x, y, z));
