@@ -774,6 +774,12 @@ pub struct PoolConfig {
     /// Minimum contiguous solid voxels below a floor cell to qualify as ground.
     /// Rejects pillar tops and formation surfaces. 0 disables the check.
     pub min_ground_depth: usize,
+    /// BFS clustering Y tolerance: max Y-level difference between adjacent floor cells.
+    /// Higher values connect undulating cavern floors. (default: 2)
+    pub max_y_step: usize,
+    /// Footprint validation Y scan range around median floor level.
+    /// Allows pools on uneven terrain by accepting solid-below-air within this range. (default: 2)
+    pub footprint_y_tolerance: usize,
 }
 
 impl Default for PoolConfig {
@@ -783,7 +789,7 @@ impl Default for PoolConfig {
             placement_frequency: 0.08,
             placement_threshold: 0.75,
             pool_chance: 0.3,
-            min_area: 6,
+            min_area: 4,
             max_radius: 4,
             basin_depth: 2,
             rim_height: 1,
@@ -793,7 +799,9 @@ impl Default for PoolConfig {
             min_air_above: 3,
             max_cave_height: 20,
             min_floor_thickness: 2,
-            min_ground_depth: 4,
+            min_ground_depth: 2,
+            max_y_step: 2,
+            footprint_y_tolerance: 2,
         }
     }
 }

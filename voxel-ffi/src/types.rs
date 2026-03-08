@@ -240,6 +240,8 @@ pub struct FfiEngineConfig {
     pub pool_max_cave_height: u32,
     pub pool_min_floor_thickness: u32,
     pub pool_min_ground_depth: u32,
+    pub pool_max_y_step: u32,
+    pub pool_footprint_y_tolerance: u32,
     // ── Formation Config (42 fields) ──
     pub formation_enabled: u8,
     pub formation_placement_frequency: f32,

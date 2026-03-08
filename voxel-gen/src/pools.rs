@@ -65,6 +65,7 @@ struct FloorCluster {
     centroid_x: f32,
     centroid_y: f32,
     centroid_z: f32,
+    median_y: usize,
 }
 
 /// Place cave pools in a density field. Returns descriptors and fluid seeds for placed pools.
@@ -127,7 +128,7 @@ pub fn place_pools(
     }
 
     // Step 2: Cluster adjacent floors via BFS flood-fill on XZ at similar Y
-    let clusters = cluster_floors(&floor_cells, size, config.min_area);
+    let clusters = cluster_floors(&floor_cells, size, config.min_area, config.max_y_step);
     eprintln!("[POOL] chunk ({},{},{}) floors={} clusters={} (min_area={}, thresh={:.2}, chance={:.2}, basin_depth={}, max_radius={})",
         world_origin.x, world_origin.y, world_origin.z,
         floor_cells.len(), clusters.len(),
@@ -196,20 +197,23 @@ pub fn place_pools(
         let area_radius = ((cluster.cells.len() as f32) / std::f32::consts::PI).sqrt() as usize;
         let effective_radius = area_radius.min(config.max_radius).max(1);
 
-        // Pick center as the cluster cell closest to the XZ centroid.
-        // This guarantees center is an actual floor cell (no misalignment).
-        let (center_x, floor_y, center_z) = find_nearest_to_centroid(
+        // Pick center XZ as the cluster cell closest to the XZ centroid.
+        // Use median Y from the cluster instead of the single cell's Y —
+        // this represents the typical floor level on undulating terrain.
+        let (center_x, _nearest_y, center_z) = find_nearest_to_centroid(
             &cluster.cells, cluster.centroid_x, cluster.centroid_z,
         );
+        let floor_y = cluster.median_y;
         let surface_y = floor_y + 1; // pool surface is at the air layer above floor
 
         let r2 = (effective_radius * effective_radius) as i32;
 
-        // Pool footprint validation: check that enough of the disc has floor at center_y.
-        // Rejects pools whose radius extends beyond available floor (e.g. pillar tops).
+        // Pool footprint validation: check that enough of the disc has floor near median Y.
+        // Scans within ±footprint_y_tolerance of median Y to accept undulating terrain.
         {
             let mut floor_count = 0u32;
             let mut total_count = 0u32;
+            let tol = config.footprint_y_tolerance;
             for dz in -(effective_radius as i32)..=(effective_radius as i32) {
                 for dx in -(effective_radius as i32)..=(effective_radius as i32) {
                     if dx * dx + dz * dz > r2 {
@@ -221,12 +225,22 @@ pub fn place_pools(
                         continue;
                     }
                     total_count += 1;
-                    if floor_y < size && surface_y < size {
-                        let f = density.get(gx as usize, floor_y, gz as usize);
-                        let a = density.get(gx as usize, surface_y, gz as usize);
-                        if f.material.is_solid() && !a.material.is_solid() {
-                            floor_count += 1;
+                    // Check if ANY Y in [median_y - tol, median_y + tol] has solid-below-air
+                    let y_lo = floor_y.saturating_sub(tol);
+                    let y_hi = (floor_y + tol).min(size.saturating_sub(2));
+                    let mut cell_ok = false;
+                    for check_y in y_lo..=y_hi {
+                        if check_y + 1 < size {
+                            let f = density.get(gx as usize, check_y, gz as usize);
+                            let a = density.get(gx as usize, check_y + 1, gz as usize);
+                            if f.material.is_solid() && !a.material.is_solid() {
+                                cell_ok = true;
+                                break;
+                            }
                         }
+                    }
+                    if cell_ok {
+                        floor_count += 1;
                     }
                 }
             }
@@ -304,15 +318,26 @@ pub fn place_pools(
             }
         }
 
-        // Validate: floor_y should be solid and surface_y should be air at center.
-        // This catches cases where the chosen Y doesn't have a valid floor/air interface.
-        if floor_y < size && surface_y < size {
-            let floor_sample = density.get(center_x, floor_y, center_z);
-            let surface_sample = density.get(center_x, surface_y, center_z);
-            if !floor_sample.material.is_solid() || surface_sample.material.is_solid() {
-                eprintln!("[POOL]   cluster cells={} invalid floor/air at center ({},{},{}) floor_solid={} surface_air={} → skip",
-                    cluster.cells.len(), center_x, floor_y, center_z,
-                    floor_sample.material.is_solid(), !surface_sample.material.is_solid());
+        // Validate: floor/air interface near center, scanning within ±footprint_y_tolerance
+        // of median Y to handle undulating terrain where median_y may not be exact.
+        {
+            let tol = config.footprint_y_tolerance;
+            let y_lo = floor_y.saturating_sub(tol);
+            let y_hi = (floor_y + tol).min(size.saturating_sub(2));
+            let mut found_interface = false;
+            for check_y in y_lo..=y_hi {
+                if check_y + 1 < size {
+                    let f = density.get(center_x, check_y, center_z);
+                    let a = density.get(center_x, check_y + 1, center_z);
+                    if f.material.is_solid() && !a.material.is_solid() {
+                        found_interface = true;
+                        break;
+                    }
+                }
+            }
+            if !found_interface {
+                eprintln!("[POOL]   cluster cells={} no floor/air interface within ±{} of median_y={} at center ({},{}) → skip",
+                    cluster.cells.len(), tol, floor_y, center_x, center_z);
                 continue;
             }
         }
@@ -516,10 +541,12 @@ pub fn is_pool_contained(
 }
 
 /// BFS flood-fill to cluster adjacent floor cells on XZ at similar Y levels.
+/// `max_y_step` controls how many Y-levels apart adjacent cells can be and still merge.
 fn cluster_floors(
     floor_cells: &[(usize, usize, usize)],
     grid_size: usize,
     min_area: usize,
+    max_y_step: usize,
 ) -> Vec<FloorCluster> {
     // Build a lookup set for O(1) membership checks
     // Key: (x, z) -> y values at that position
@@ -564,10 +591,9 @@ fn cluster_floors(
 
                 if let Some(ys) = floor_map.get(&(nx, nz)) {
                     for &ny in ys {
-                        // Similar Y level: within 1 voxel (tighter to avoid
-                        // merging floor cells at very different heights)
+                        // Similar Y level: within max_y_step voxels
                         if !visited.contains(&(nx, ny, nz))
-                            && (ny as i32 - cy as i32).unsigned_abs() <= 1
+                            && (ny as i32 - cy as i32).unsigned_abs() <= max_y_step as u32
                         {
                             visited.insert((nx, ny, nz));
                             queue.push_back((nx, ny, nz));
@@ -592,11 +618,17 @@ fn cluster_floors(
         }
         let n = cells.len() as f32;
 
+        // Compute median Y from sorted Y values
+        let mut y_values: Vec<usize> = cells.iter().map(|&(_, y, _)| y).collect();
+        y_values.sort_unstable();
+        let median_y = y_values[y_values.len() / 2];
+
         clusters.push(FloorCluster {
             cells,
             centroid_x: sum_x / n,
             centroid_y: sum_y / n,
             centroid_z: sum_z / n,
+            median_y,
         });
     }
 
@@ -802,7 +834,7 @@ mod tests {
     fn test_cluster_floors_basic() {
         // 3 adjacent floor cells should form one cluster
         let cells = vec![(5, 8, 5), (6, 8, 5), (7, 8, 5), (5, 8, 6), (6, 8, 6), (7, 8, 6)];
-        let clusters = cluster_floors(&cells, 17, 3);
+        let clusters = cluster_floors(&cells, 17, 3, 1);
         assert_eq!(clusters.len(), 1);
         assert_eq!(clusters[0].cells.len(), 6);
     }
@@ -811,8 +843,92 @@ mod tests {
     fn test_cluster_floors_min_area_filter() {
         // 2 cells, min_area=3 → no clusters
         let cells = vec![(5, 8, 5), (6, 8, 5)];
-        let clusters = cluster_floors(&cells, 17, 3);
+        let clusters = cluster_floors(&cells, 17, 3, 1);
         assert!(clusters.is_empty());
+    }
+
+    #[test]
+    fn test_cluster_floors_y_step_connects_undulating() {
+        // Floor cells at Y=8, 9, 10, 9, 8 across X — undulating by ±1 per step.
+        // With max_y_step=1, they should form one cluster.
+        // With max_y_step=2, cells 2 steps apart should also connect.
+        let cells = vec![
+            (3, 8, 5), (4, 9, 5), (5, 10, 5), (6, 9, 5), (7, 8, 5),
+        ];
+        // max_y_step=1: all connect because each neighbor differs by exactly 1
+        let clusters_1 = cluster_floors(&cells, 17, 2, 1);
+        assert_eq!(clusters_1.len(), 1, "max_y_step=1 should connect ±1 undulating floor");
+        assert_eq!(clusters_1[0].cells.len(), 5);
+
+        // Cells with a 2-step Y gap between adjacent XZ neighbors.
+        // Use enough cells at each Y level so they can form clusters individually.
+        let cells_gap = vec![
+            (3, 8, 5), (3, 8, 6),   // cluster A at Y=8
+            (4, 10, 5), (4, 10, 6), // cluster B at Y=10
+        ];
+        // max_y_step=1: gaps of 2 → two separate clusters
+        let clusters_tight = cluster_floors(&cells_gap, 17, 2, 1);
+        assert_eq!(clusters_tight.len(), 2, "max_y_step=1 should NOT connect 2-step gaps");
+
+        // max_y_step=2: gaps of 2 → single cluster
+        let clusters_wide = cluster_floors(&cells_gap, 17, 2, 2);
+        assert_eq!(clusters_wide.len(), 1, "max_y_step=2 should connect 2-step gaps");
+        assert_eq!(clusters_wide[0].cells.len(), 4);
+    }
+
+    #[test]
+    fn test_footprint_y_tolerance_accepts_undulating() {
+        // Build a density field with an undulating floor (Y varies between 7-9)
+        // and verify pools can place on it with footprint_y_tolerance=2.
+        let config = PoolConfig {
+            pool_chance: 1.0,
+            placement_threshold: -1.0,
+            min_area: 3,
+            water_pct: 1.0,
+            lava_pct: 0.0,
+            empty_pct: 0.0,
+            max_cave_height: 0,
+            min_floor_thickness: 0,
+            min_ground_depth: 0,
+            max_y_step: 2,
+            footprint_y_tolerance: 2,
+            ..Default::default()
+        };
+
+        let size = 17;
+        let mut density = DensityField::new(size);
+
+        // Fill everything solid
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..size {
+                    let sample = density.get_mut(x, y, z);
+                    sample.density = 1.0;
+                    sample.material = Material::Limestone;
+                }
+            }
+        }
+
+        // Carve air above an undulating floor (Y=7 at edges, Y=9 at center)
+        for z in 3..14 {
+            for x in 3..14 {
+                let dx = (x as f32 - 8.0).abs();
+                let dz = (z as f32 - 8.0).abs();
+                let dist = dx.max(dz);
+                let floor_y = if dist <= 2.0 { 9 } else if dist <= 4.0 { 8 } else { 7 };
+                for y in (floor_y + 1)..15 {
+                    let sample = density.get_mut(x, y, z);
+                    sample.density = -1.0;
+                    sample.material = Material::Air;
+                }
+            }
+        }
+
+        let (descriptors, _seeds) = place_pools(&mut density, &config, Vec3::ZERO, 42, 100);
+        assert!(
+            !descriptors.is_empty(),
+            "Pools should place on undulating terrain with footprint_y_tolerance=2"
+        );
     }
 
     /// Diagnostic: Generate real cave density and check if pools are placed.

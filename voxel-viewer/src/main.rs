@@ -332,6 +332,11 @@ fn serve_generate(
     let mut pool_lava_pct: Option<f32> = None;
     let mut pool_empty_pct: Option<f32> = None;
     let mut pool_min_air_above: Option<usize> = None;
+    let mut pool_max_cave_height: Option<usize> = None;
+    let mut pool_min_floor_thickness: Option<usize> = None;
+    let mut pool_min_ground_depth: Option<usize> = None;
+    let mut pool_max_y_step: Option<usize> = None;
+    let mut pool_footprint_y_tolerance: Option<usize> = None;
     // Formation settings
     let mut formations_enabled: Option<bool> = None;
     let mut form_placement_frequency: Option<f64> = None;
@@ -486,6 +491,11 @@ fn serve_generate(
             "pool_lava_pct" => { pool_lava_pct = val.parse().ok(); }
             "pool_empty_pct" => { pool_empty_pct = val.parse().ok(); }
             "pool_min_air_above" => { pool_min_air_above = val.parse().ok(); }
+            "pool_max_cave_height" => { pool_max_cave_height = val.parse().ok(); }
+            "pool_min_floor_thickness" => { pool_min_floor_thickness = val.parse().ok(); }
+            "pool_min_ground_depth" => { pool_min_ground_depth = val.parse().ok(); }
+            "pool_max_y_step" => { pool_max_y_step = val.parse().ok(); }
+            "pool_footprint_y_tolerance" => { pool_footprint_y_tolerance = val.parse().ok(); }
             // Formation settings
             "formations_enabled" => { formations_enabled = Some(val == "1" || val == "true"); }
             "form_placement_frequency" => { form_placement_frequency = val.parse().ok(); }
@@ -676,6 +686,11 @@ fn serve_generate(
     if let Some(v) = pool_lava_pct { config.pools.lava_pct = v; }
     if let Some(v) = pool_empty_pct { config.pools.empty_pct = v; }
     if let Some(v) = pool_min_air_above { config.pools.min_air_above = v; }
+    if let Some(v) = pool_max_cave_height { config.pools.max_cave_height = v; }
+    if let Some(v) = pool_min_floor_thickness { config.pools.min_floor_thickness = v; }
+    if let Some(v) = pool_min_ground_depth { config.pools.min_ground_depth = v; }
+    if let Some(v) = pool_max_y_step { config.pools.max_y_step = v; }
+    if let Some(v) = pool_footprint_y_tolerance { config.pools.footprint_y_tolerance = v; }
     // Formation settings
     if let Some(v) = formations_enabled { config.formations.enabled = v; }
     if let Some(v) = form_placement_frequency { config.formations.placement_frequency = v; }

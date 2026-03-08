@@ -71,6 +71,8 @@
         "gen-pool-chance", "gen-pool-min-area", "gen-pool-max-radius",
         "gen-pool-basin-depth", "gen-pool-rim-height",
         "gen-pool-water-pct", "gen-pool-lava-pct", "gen-pool-empty-pct", "gen-pool-min-air-above",
+        "gen-pool-max-cave-height", "gen-pool-min-floor-thickness", "gen-pool-min-ground-depth",
+        "gen-pool-max-y-step", "gen-pool-footprint-y-tolerance",
         // Formation settings
         "gen-formations-enabled",
         "gen-form-placement-frequency", "gen-form-placement-threshold",
@@ -1182,6 +1184,11 @@
             appendParam(parts, "pool_lava_pct", "gen-pool-lava-pct");
             appendParam(parts, "pool_empty_pct", "gen-pool-empty-pct");
             appendParam(parts, "pool_min_air_above", "gen-pool-min-air-above");
+            appendParam(parts, "pool_max_cave_height", "gen-pool-max-cave-height");
+            appendParam(parts, "pool_min_floor_thickness", "gen-pool-min-floor-thickness");
+            appendParam(parts, "pool_min_ground_depth", "gen-pool-min-ground-depth");
+            appendParam(parts, "pool_max_y_step", "gen-pool-max-y-step");
+            appendParam(parts, "pool_footprint_y_tolerance", "gen-pool-footprint-y-tolerance");
             // Formation settings
             appendParam(parts, "formations_enabled", "gen-formations-enabled");
             appendParam(parts, "form_placement_frequency", "gen-form-placement-frequency");

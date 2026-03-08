@@ -1106,7 +1106,7 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
             placement_frequency: if c.pool_placement_freq != 0.0 { c.pool_placement_freq } else { 0.08 },
             placement_threshold: c.pool_placement_thresh, // can be negative
             pool_chance: if c.pool_chance > 0.0 { c.pool_chance } else { 0.3 },
-            min_area: if c.pool_min_area > 0 { c.pool_min_area as usize } else { 6 },
+            min_area: if c.pool_min_area > 0 { c.pool_min_area as usize } else { 4 },
             max_radius: if c.pool_max_radius > 0 { c.pool_max_radius as usize } else { 4 },
             basin_depth: if c.pool_basin_depth > 0 { c.pool_basin_depth as usize } else { 2 },
             rim_height: if c.pool_rim_height > 0 { c.pool_rim_height as usize } else { 1 },
@@ -1120,7 +1120,9 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
             min_air_above: if c.pool_min_air_above > 0 { c.pool_min_air_above as usize } else { 3 },
             max_cave_height: if c.pool_max_cave_height > 0 { c.pool_max_cave_height as usize } else { 20 },
             min_floor_thickness: if c.pool_min_floor_thickness > 0 { c.pool_min_floor_thickness as usize } else { 2 },
-            min_ground_depth: if c.pool_min_ground_depth > 0 { c.pool_min_ground_depth as usize } else { 4 },
+            min_ground_depth: if c.pool_min_ground_depth > 0 { c.pool_min_ground_depth as usize } else { 2 },
+            max_y_step: if c.pool_max_y_step > 0 { c.pool_max_y_step as usize } else { 2 },
+            footprint_y_tolerance: if c.pool_footprint_y_tolerance > 0 { c.pool_footprint_y_tolerance as usize } else { 2 },
         },
         mine: MineConfig {
             smooth_iterations: if c.mine_smooth_iterations == 0 && c.mine_smooth_strength == 0.0 {

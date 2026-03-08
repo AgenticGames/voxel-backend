@@ -258,7 +258,7 @@
                             <label title="Noise frequency for pool site selection (higher = more variation)">Placement Frequency <input type="number" id="gen-pool-placement-freq" step="0.01" placeholder="0.08"></label>
                             <label title="Noise threshold for site selection (higher = fewer pools)">Placement Threshold <input type="number" id="gen-pool-placement-threshold" step="0.05" placeholder="0.75"></label>
                             <label title="Per-site probability of placing a pool (0-1)">Pool Chance <input type="number" id="gen-pool-chance" step="0.05" placeholder="0.3"></label>
-                            <label title="Minimum floor cells to qualify as a pool site">Min Area <input type="number" id="gen-pool-min-area" step="1" min="2" placeholder="6"></label>
+                            <label title="Minimum floor cells to qualify as a pool site">Min Area <input type="number" id="gen-pool-min-area" step="1" min="2" placeholder="4"></label>
                             <label title="Maximum pool radius in voxels">Max Radius <input type="number" id="gen-pool-max-radius" step="1" min="1" placeholder="4"></label>
                             <label title="Voxels carved below floor for the basin">Basin Depth <input type="number" id="gen-pool-basin-depth" step="1" min="1" placeholder="2"></label>
                             <label title="Solid rim height above floor level">Rim Height <input type="number" id="gen-pool-rim-height" step="1" min="0" placeholder="1"></label>
@@ -266,6 +266,11 @@
                             <label title="Probability of lava pool (0-1)">Lava % <input type="number" id="gen-pool-lava-pct" step="0.05" min="0" max="1" placeholder="0.25"></label>
                             <label title="Probability of empty (no pool) (0-1)">Empty % <input type="number" id="gen-pool-empty-pct" step="0.05" min="0" max="1" placeholder="0.0"></label>
                             <label title="Minimum air voxels above pool surface">Min Air Above <input type="number" id="gen-pool-min-air-above" step="1" min="1" placeholder="3"></label>
+                            <label title="Max voxels upward to scan for a solid ceiling. If none found, pool is on open terrain and skipped. 0 disables.">Max Cave Height <input type="number" id="gen-pool-max-cave-height" step="1" min="0" placeholder="20"></label>
+                            <label title="Minimum solid voxels below the basin bottom. Prevents pools on thin floors between stacked caves.">Min Floor Thickness <input type="number" id="gen-pool-min-floor-thickness" step="1" min="0" placeholder="2"></label>
+                            <label title="Minimum contiguous solid below a floor cell. Rejects pillar tops and formation surfaces. 0 disables.">Min Ground Depth <input type="number" id="gen-pool-min-ground-depth" step="1" min="0" placeholder="2"></label>
+                            <label title="Max Y-level difference between adjacent cells during floor clustering. Higher = connects undulating cavern floors.">Max Y Step <input type="number" id="gen-pool-max-y-step" step="1" min="1" placeholder="2"></label>
+                            <label title="Y scan range around median floor level for footprint validation. Allows pools on uneven terrain.">Footprint Y Tolerance <input type="number" id="gen-pool-footprint-y-tolerance" step="1" min="0" placeholder="2"></label>
                         </div>
                     </details>
 
