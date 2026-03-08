@@ -215,6 +215,17 @@ impl ChunkFluidGrid {
         if self.cell_solid[self.index(x, y, z)] { 0.0 } else { 1.0 }
     }
 
+    /// Returns true if the cell is mostly solid (6+ of 8 corners have positive density).
+    /// Used as a safety guard to prevent placing fluid in boundary cells that straddle
+    /// the solid/air interface (e.g. cauldron walls/floors).
+    #[inline]
+    pub fn is_mostly_solid(&self, x: usize, y: usize, z: usize) -> bool {
+        let idx = self.index(x, y, z);
+        let base = idx * 8;
+        let count = (0..8).filter(|&c| self.cell_corners[base + c] > 0.0).count();
+        count >= 6
+    }
+
     /// Set density for a single cell (used in tests and terrain modification).
     /// Positive = solid, negative = air.
     #[inline]
@@ -422,5 +433,43 @@ mod tests {
         assert_eq!(FluidType::from_u8(0), FluidType::Water);
         assert_eq!(FluidType::from_u8(10), FluidType::Water);
         assert_eq!(FluidType::from_u8(255), FluidType::Water);
+    }
+
+    #[test]
+    fn is_mostly_solid_all_positive() {
+        let mut grid = ChunkFluidGrid::new(16);
+        grid.set_density(3, 3, 3, 1.0); // all 8 corners positive
+        assert!(grid.is_mostly_solid(3, 3, 3));
+    }
+
+    #[test]
+    fn is_mostly_solid_all_negative() {
+        let grid = ChunkFluidGrid::new(16);
+        // Default is air (-1.0), all corners negative
+        assert!(!grid.is_mostly_solid(3, 3, 3));
+    }
+
+    #[test]
+    fn is_mostly_solid_mixed_boundary() {
+        let size = 4;
+        let stride = size + 1;
+        let mut grid = ChunkFluidGrid::new(size);
+
+        // Create a density field where cell (1,1,1) has 6/8 corners solid
+        let mut densities = vec![-1.0f32; stride * stride * stride];
+        for (i, offsets) in CELL_CORNER_OFFSETS.iter().enumerate() {
+            let gx = 1 + offsets[0];
+            let gy = 1 + offsets[1];
+            let gz = 1 + offsets[2];
+            if i < 6 {
+                densities[gz * stride * stride + gy * stride + gx] = 1.0;
+            } else {
+                densities[gz * stride * stride + gy * stride + gx] = -1.0;
+            }
+        }
+        grid.update_density(&densities);
+
+        // 6/8 corners solid → is_mostly_solid = true
+        assert!(grid.is_mostly_solid(1, 1, 1));
     }
 }

@@ -771,13 +771,19 @@ fn generate_cauldron_fluid_seeds(
     chunk_coord: (i32, i32, i32),
     size: usize,
 ) {
-    let r_ceil = radius.ceil() as i32;
+    // Inset fill region: keep fluid 1 cell away from walls and 1 voxel above floor
+    // to avoid placing fluid in boundary cells with mixed solid/air corners.
+    let fill_radius = radius - 1.0;
+    if fill_radius < 1.0 {
+        return; // too small to hold fluid safely
+    }
+    let r_ceil = fill_radius.ceil() as i32;
     let ay = anchor_y as f32;
 
     for dz in -r_ceil..=r_ceil {
         for dx in -r_ceil..=r_ceil {
             let dist_h = ((dx * dx + dz * dz) as f32).sqrt();
-            if dist_h >= radius {
+            if dist_h >= fill_radius {
                 continue;
             }
             let gx = anchor_x as i32 + dx;
@@ -786,13 +792,14 @@ fn generate_cauldron_fluid_seeds(
                 continue;
             }
 
-            // Same profile as write_cauldron Phase 1 carve
+            // Same profile as write_cauldron Phase 1 carve (use original radius for depth profile)
             let rim_factor = dist_h / radius;
             let carve_depth_at_r = depth * (1.0 - rim_factor.powf(0.3).min(1.0));
             let bottom_y = (ay - carve_depth_at_r).floor() as i32;
 
-            // Fill from basin bottom up to anchor_y (exclusive — anchor_y is floor surface)
-            let min_y = bottom_y.max(0);
+            // Fill from basin bottom+1 up to anchor_y (exclusive — anchor_y is floor surface)
+            // +1 raises fill above floor boundary cells
+            let min_y = (bottom_y + 1).max(0);
             let max_y = anchor_y as i32; // exclusive
             for iy in min_y..max_y {
                 if iy >= size as i32 {
@@ -2512,5 +2519,67 @@ mod tests {
             solid_after < solid_before,
             "Cauldron should carve some solid voxels: before={solid_before}, after={solid_after}"
         );
+    }
+
+    #[test]
+    fn test_cauldron_fluid_seeds_inset_from_walls_and_floor() {
+        use crate::pools::PoolFluid;
+
+        let mut seeds = Vec::new();
+        let anchor_x = 8;
+        let anchor_y = 8;
+        let anchor_z = 8;
+        let radius = 4.0;
+        let depth = 3.0;
+        let size = 17;
+
+        generate_cauldron_fluid_seeds(
+            &mut seeds,
+            anchor_x,
+            anchor_y,
+            anchor_z,
+            radius,
+            depth,
+            PoolFluid::Water,
+            (0, 0, 0),
+            size,
+        );
+
+        assert!(!seeds.is_empty(), "Should generate some fluid seeds");
+
+        for seed in &seeds {
+            let dx = seed.lx as f32 - anchor_x as f32;
+            let dz = seed.lz as f32 - anchor_z as f32;
+            let dist_h = (dx * dx + dz * dz).sqrt();
+
+            // Fluid should be inset: at least 1 cell from basin wall
+            assert!(
+                dist_h < radius - 1.0,
+                "Seed at ({},{},{}) dist_h={:.2} should be < fill_radius={:.2}",
+                seed.lx, seed.ly, seed.lz, dist_h, radius - 1.0,
+            );
+
+            // Fluid should be raised above floor boundary
+            let rim_factor = dist_h / radius;
+            let carve_depth_at_r = depth * (1.0 - rim_factor.powf(0.3).min(1.0));
+            let bottom_y = (anchor_y as f32 - carve_depth_at_r).floor() as i32;
+            assert!(
+                (seed.ly as i32) >= bottom_y + 1,
+                "Seed y={} should be >= bottom_y+1={} (floor inset)",
+                seed.ly, bottom_y + 1,
+            );
+        }
+    }
+
+    #[test]
+    fn test_cauldron_fluid_seeds_small_radius_skipped() {
+        use crate::pools::PoolFluid;
+
+        let mut seeds = Vec::new();
+        // radius=1.5 → fill_radius=0.5 < 1.0 → should skip
+        generate_cauldron_fluid_seeds(
+            &mut seeds, 8, 8, 8, 1.5, 2.0, PoolFluid::Water, (0, 0, 0), 17,
+        );
+        assert!(seeds.is_empty(), "Small cauldron (radius<2) should produce no seeds");
     }
 }
