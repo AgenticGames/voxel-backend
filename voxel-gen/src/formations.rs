@@ -115,6 +115,18 @@ enum Formation {
         radius: f32,
         material: Material,
     },
+    Cauldron {
+        anchor_x: usize,
+        anchor_y: usize,
+        anchor_z: usize,
+        radius: f32,
+        depth: f32,
+        lip_height: f32,
+        rim_stalagmite_count: u32,
+        rim_stalagmite_scale: f32,
+        floor_noise: f32,
+        material: Material,
+    },
 }
 
 /// Place cave formations into the density field after worm carving.
@@ -454,6 +466,48 @@ pub fn place_formations(
         });
     }
 
+    // Cauldron placement: floor surfaces with enough solid below
+    for sp in &floor_surfaces {
+        if used_floor.contains_key(&(sp.x, sp.y, sp.z)) {
+            continue;
+        }
+        if rng.gen::<f32>() >= config.cauldron_chance {
+            continue;
+        }
+        let radius = rng.gen_range(config.cauldron_radius_min..=config.cauldron_radius_max);
+        let r_ceil = radius.ceil() as usize;
+        // Check chunk edge clearance
+        if sp.x < r_ceil + 1 || sp.x + r_ceil + 1 >= size
+            || sp.z < r_ceil + 1 || sp.z + r_ceil + 1 >= size
+        {
+            continue;
+        }
+        // Check air above for lip clearance
+        let air_up = measure_air_up(density, sp.x, sp.y, sp.z, size);
+        if air_up < 3 {
+            continue;
+        }
+        // Check enough solid below to carve into
+        let solid_down = measure_solid_down(density, sp.x, sp.y, sp.z);
+        if (solid_down as f32) < config.cauldron_depth + 1.0 {
+            continue;
+        }
+        let rim_count = rng.gen_range(config.cauldron_rim_stalagmite_count_min..=config.cauldron_rim_stalagmite_count_max);
+        formations.push(Formation::Cauldron {
+            anchor_x: sp.x,
+            anchor_y: sp.y,
+            anchor_z: sp.z,
+            radius,
+            depth: config.cauldron_depth,
+            lip_height: config.cauldron_lip_height,
+            rim_stalagmite_count: rim_count,
+            rim_stalagmite_scale: config.cauldron_rim_stalagmite_scale,
+            floor_noise: config.cauldron_floor_noise,
+            material: sp.material,
+        });
+        used_floor.insert((sp.x, sp.y, sp.z), true);
+    }
+
     // Step F: Write shapes into density field
     for formation in &formations {
         match formation {
@@ -640,6 +694,35 @@ pub fn place_formations(
                     config,
                     size,
                     &mut rng,
+                );
+            }
+            Formation::Cauldron {
+                anchor_x,
+                anchor_y,
+                anchor_z,
+                radius,
+                depth,
+                lip_height,
+                rim_stalagmite_count,
+                rim_stalagmite_scale,
+                floor_noise,
+                material,
+            } => {
+                write_cauldron(
+                    density,
+                    *anchor_x,
+                    *anchor_y,
+                    *anchor_z,
+                    *radius,
+                    *depth,
+                    *lip_height,
+                    *rim_stalagmite_count,
+                    *rim_stalagmite_scale,
+                    *floor_noise,
+                    *material,
+                    config,
+                    world_seed,
+                    size,
                 );
             }
         }
@@ -873,6 +956,24 @@ fn measure_air_up(density: &DensityField, x: usize, anchor_y: usize, z: usize, s
         cy += 1;
     }
     gap
+}
+
+/// Measure contiguous solid voxels downward from anchor (inclusive).
+/// anchor_y is a solid floor voxel; counts solid starting from anchor_y downward.
+fn measure_solid_down(density: &DensityField, x: usize, anchor_y: usize, z: usize) -> usize {
+    let mut count = 0;
+    let mut cy = anchor_y;
+    loop {
+        if density.get(x, cy, z).density <= 0.0 {
+            break;
+        }
+        count += 1;
+        if cy == 0 {
+            break;
+        }
+        cy -= 1;
+    }
+    count
 }
 
 /// Find the dominant horizontal normal direction from a wall surface into air.
@@ -1502,6 +1603,163 @@ fn write_cave_shield(
     }
 }
 
+/// Write a cauldron: bowl-shaped depression carved into the floor with a raised lip
+/// and small stalagmites on the rim.
+fn write_cauldron(
+    density: &mut DensityField,
+    anchor_x: usize,
+    anchor_y: usize,
+    anchor_z: usize,
+    radius: f32,
+    depth: f32,
+    lip_height: f32,
+    rim_stalagmite_count: u32,
+    rim_stalagmite_scale: f32,
+    floor_noise_amp: f32,
+    material: Material,
+    config: &FormationConfig,
+    world_seed: u64,
+    size: usize,
+) {
+    let r_ceil = (radius + 1.0).ceil() as i32; // +1 for lip ring
+    let d_ceil = depth.ceil() as i32;
+    let ax = anchor_x as f32;
+    let az = anchor_z as f32;
+    let ay = anchor_y as f32;
+
+    let floor_noise = Simplex3D::new(world_seed.wrapping_add(300));
+
+    // Phase 1: Carve basin — circular footprint with steep walls and flat bottom
+    let min_x = (anchor_x as i32 - r_ceil).max(0) as usize;
+    let max_x = ((anchor_x as i32 + r_ceil) as usize + 1).min(size);
+    let min_z = (anchor_z as i32 - r_ceil).max(0) as usize;
+    let max_z = ((anchor_z as i32 + r_ceil) as usize + 1).min(size);
+    let min_y = (anchor_y as i32 - d_ceil).max(0) as usize;
+    let max_y = (anchor_y + 1).min(size);
+
+    for iz in min_z..max_z {
+        for iy in min_y..max_y {
+            for ix in min_x..max_x {
+                let dx = ix as f32 - ax;
+                let dz = iz as f32 - az;
+                let dist_h = (dx * dx + dz * dz).sqrt();
+
+                if dist_h >= radius {
+                    continue;
+                }
+
+                // rim_factor: 0 at center, 1 at edge
+                let rim_factor = dist_h / radius;
+                // Steep walls + flat bottom via powf(0.3) — creates a steep transition near the edge
+                let carve_depth_at_r = depth * (1.0 - rim_factor.powf(0.3).min(1.0));
+                // Distance below floor surface
+                let dy_below = ay - iy as f32;
+                if dy_below < 0.0 || dy_below > carve_depth_at_r {
+                    continue;
+                }
+
+                // Add noise to basin floor
+                let noise_val = if floor_noise_amp > 0.0 {
+                    let n = floor_noise.sample(
+                        ix as f64 * 0.5,
+                        iy as f64 * 0.5,
+                        iz as f64 * 0.5,
+                    ) as f32;
+                    n * floor_noise_amp
+                } else {
+                    0.0
+                };
+
+                // Only carve (make density more negative), don't add solid
+                let carve_val = -0.8 + noise_val * 0.2;
+                let sample = density.get_mut(ix, iy, iz);
+                if carve_val < sample.density {
+                    sample.density = carve_val;
+                }
+            }
+        }
+    }
+
+    // Phase 2: Build lip — ring from radius to radius+1, tapered height
+    let lip_min_y = anchor_y;
+    let lip_max_y = ((anchor_y as f32 + lip_height).ceil() as usize + 1).min(size);
+    for iz in min_z..max_z {
+        for iy in lip_min_y..lip_max_y {
+            for ix in min_x..max_x {
+                let dx = ix as f32 - ax;
+                let dz = iz as f32 - az;
+                let dist_h = (dx * dx + dz * dz).sqrt();
+
+                // Lip ring: between radius and radius+1
+                if dist_h < radius * 0.85 || dist_h > radius + 1.0 {
+                    continue;
+                }
+
+                // Taper height: full at inner edge, zero at outer edge
+                let ring_t = (dist_h - radius * 0.85) / (radius * 0.15 + 1.0);
+                let lip_h_at_r = lip_height * (1.0 - ring_t.max(0.0).min(1.0));
+                let dy_above = iy as f32 - ay;
+                if dy_above < 0.0 || dy_above > lip_h_at_r {
+                    continue;
+                }
+
+                let new_density = ((lip_h_at_r - dy_above) * config.smoothness).min(1.0);
+                let sample = density.get_mut(ix, iy, iz);
+                if new_density > sample.density {
+                    sample.density = new_density;
+                    sample.material = material;
+                }
+            }
+        }
+    }
+
+    // Phase 3: Rim stalagmites — evenly spaced around rim with jitter
+    if rim_stalagmite_count > 0 {
+        let scaled_length_min = config.length_min * rim_stalagmite_scale;
+        let scaled_length_max = config.length_max * rim_stalagmite_scale;
+        let scaled_radius_min = config.radius_min * rim_stalagmite_scale;
+        let scaled_radius_max = config.radius_max * rim_stalagmite_scale;
+
+        let mut stag_rng = ChaCha8Rng::seed_from_u64(
+            world_seed.wrapping_add(301).wrapping_add(anchor_x as u64 * 7 + anchor_z as u64 * 13),
+        );
+
+        for i in 0..rim_stalagmite_count {
+            let base_angle = (i as f32 / rim_stalagmite_count as f32) * std::f32::consts::TAU;
+            let jitter = stag_rng.gen_range(-0.3_f32..=0.3);
+            let angle = base_angle + jitter;
+
+            let sx = (ax + angle.cos() * radius).round() as i32;
+            let sz = (az + angle.sin() * radius).round() as i32;
+            let sy = anchor_y as i32 + 1; // on top of floor
+
+            if sx < 0 || sz < 0 || sy < 0 {
+                continue;
+            }
+            let sx = sx as usize;
+            let sz = sz as usize;
+            let sy = sy as usize;
+            if sx >= size || sz >= size || sy >= size {
+                continue;
+            }
+
+            let stag_length = stag_rng.gen_range(scaled_length_min..=scaled_length_max);
+            let stag_radius = stag_rng.gen_range(scaled_radius_min..=scaled_radius_max);
+
+            write_cone(
+                density,
+                sx, sy, sz,
+                stag_length,
+                stag_radius,
+                1, // upward
+                material,
+                config.smoothness,
+                size,
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2045,6 +2303,51 @@ mod tests {
         assert!(
             air_after < air_before,
             "Normal column should spawn in large-gap cave when mega-column fails: before={air_before}, after={air_after}"
+        );
+    }
+
+    #[test]
+    fn test_cauldron_carves_basin() {
+        // Create a field with thick floor (y=0..8 solid, y=9..16 air)
+        let size = 17;
+        let mut field = make_cave_field(size, 8, 15);
+        let config = FormationConfig {
+            enabled: true,
+            placement_threshold: 0.0,
+            cauldron_chance: 1.0,
+            cauldron_lip_height: 0.0,           // disable lip to isolate carving
+            cauldron_rim_stalagmite_count_min: 0, // disable stalagmites
+            cauldron_rim_stalagmite_count_max: 0,
+            stalactite_chance: 0.0,
+            stalagmite_chance: 0.0,
+            column_chance: 0.0,
+            flowstone_chance: 0.0,
+            drapery_chance: 0.0,
+            rimstone_chance: 0.0,
+            shield_chance: 0.0,
+            mega_column_chance: 0.0,
+            ..FormationConfig::default()
+        };
+
+        // Count solid voxels at/below floor before
+        let solid_before: usize = field
+            .samples
+            .iter()
+            .filter(|s| s.density > 0.0)
+            .count();
+
+        place_formations(&mut field, &config, Vec3::ZERO, 42, 55555);
+
+        let solid_after: usize = field
+            .samples
+            .iter()
+            .filter(|s| s.density > 0.0)
+            .count();
+
+        // Cauldron carves a basin, so solid count should decrease
+        assert!(
+            solid_after < solid_before,
+            "Cauldron should carve some solid voxels: before={solid_before}, after={solid_after}"
         );
     }
 }

@@ -1236,6 +1236,16 @@
             appendParam(parts, "form_shield_radius_max", "gen-form-shield-radius-max");
             appendParam(parts, "form_shield_max_tilt", "gen-form-shield-max-tilt");
             appendParam(parts, "form_shield_stalactite_chance", "gen-form-shield-stalactite-chance");
+            // Cauldron settings
+            appendParam(parts, "form_cauldron_chance", "gen-form-cauldron-chance");
+            appendParam(parts, "form_cauldron_radius_min", "gen-form-cauldron-radius-min");
+            appendParam(parts, "form_cauldron_radius_max", "gen-form-cauldron-radius-max");
+            appendParam(parts, "form_cauldron_depth", "gen-form-cauldron-depth");
+            appendParam(parts, "form_cauldron_lip_height", "gen-form-cauldron-lip-height");
+            appendParam(parts, "form_cauldron_rim_stal_min", "gen-form-cauldron-rim-stal-min");
+            appendParam(parts, "form_cauldron_rim_stal_max", "gen-form-cauldron-rim-stal-max");
+            appendParam(parts, "form_cauldron_rim_stal_scale", "gen-form-cauldron-rim-stal-scale");
+            appendParam(parts, "form_cauldron_floor_noise", "gen-form-cauldron-floor-noise");
             // Stress settings
             appendParam(parts, "stress_gravity", "gen-stress-gravity");
             appendParam(parts, "stress_lateral", "gen-stress-lateral");

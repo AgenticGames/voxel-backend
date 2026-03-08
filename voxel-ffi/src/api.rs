@@ -1620,6 +1620,16 @@ mod tests {
             formation_shield_radius_max: 3.0,
             formation_shield_max_tilt: 30.0,
             formation_shield_stalactite_chance: 0.5,
+            // Cauldron
+            formation_cauldron_chance: 0.03,
+            formation_cauldron_radius_min: 2.0,
+            formation_cauldron_radius_max: 3.0,
+            formation_cauldron_depth: 3.0,
+            formation_cauldron_lip_height: 0.8,
+            formation_cauldron_rim_stalagmite_count_min: 3,
+            formation_cauldron_rim_stalagmite_count_max: 5,
+            formation_cauldron_rim_stalagmite_scale: 0.5,
+            formation_cauldron_floor_noise: 0.3,
             // Geological Realism Toggles (all off in tests)
             ore_iron_sedimentary_only: 0,
             ore_iron_depth_fade: 0,

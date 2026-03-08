@@ -739,6 +739,17 @@ pub struct FormationConfig {
     pub shield_radius_max: f32,
     pub shield_max_tilt: f32,
     pub shield_stalactite_chance: f32,
+
+    // Cauldron settings
+    pub cauldron_chance: f32,
+    pub cauldron_radius_min: f32,
+    pub cauldron_radius_max: f32,
+    pub cauldron_depth: f32,
+    pub cauldron_lip_height: f32,
+    pub cauldron_rim_stalagmite_count_min: u32,
+    pub cauldron_rim_stalagmite_count_max: u32,
+    pub cauldron_rim_stalagmite_scale: f32,
+    pub cauldron_floor_noise: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -855,6 +866,16 @@ impl Default for FormationConfig {
             shield_radius_max: 3.0,
             shield_max_tilt: 30.0,
             shield_stalactite_chance: 0.5,
+            // Cauldron defaults
+            cauldron_chance: 0.03,
+            cauldron_radius_min: 2.0,
+            cauldron_radius_max: 3.0,
+            cauldron_depth: 3.0,
+            cauldron_lip_height: 0.8,
+            cauldron_rim_stalagmite_count_min: 3,
+            cauldron_rim_stalagmite_count_max: 5,
+            cauldron_rim_stalagmite_scale: 0.5,
+            cauldron_floor_noise: 0.3,
         }
     }
 }

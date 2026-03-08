@@ -1143,6 +1143,16 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
             shield_radius_max: if c.formation_shield_radius_max > 0.0 { c.formation_shield_radius_max } else { FormationConfig::default().shield_radius_max },
             shield_max_tilt: if c.formation_shield_max_tilt > 0.0 { c.formation_shield_max_tilt } else { FormationConfig::default().shield_max_tilt },
             shield_stalactite_chance: if c.formation_shield_stalactite_chance > 0.0 { c.formation_shield_stalactite_chance } else { FormationConfig::default().shield_stalactite_chance },
+            // Cauldron
+            cauldron_chance: if c.formation_cauldron_chance > 0.0 { c.formation_cauldron_chance } else { FormationConfig::default().cauldron_chance },
+            cauldron_radius_min: if c.formation_cauldron_radius_min > 0.0 { c.formation_cauldron_radius_min } else { FormationConfig::default().cauldron_radius_min },
+            cauldron_radius_max: if c.formation_cauldron_radius_max > 0.0 { c.formation_cauldron_radius_max } else { FormationConfig::default().cauldron_radius_max },
+            cauldron_depth: if c.formation_cauldron_depth > 0.0 { c.formation_cauldron_depth } else { FormationConfig::default().cauldron_depth },
+            cauldron_lip_height: if c.formation_cauldron_lip_height > 0.0 { c.formation_cauldron_lip_height } else { FormationConfig::default().cauldron_lip_height },
+            cauldron_rim_stalagmite_count_min: if c.formation_cauldron_rim_stalagmite_count_min > 0 { c.formation_cauldron_rim_stalagmite_count_min } else { FormationConfig::default().cauldron_rim_stalagmite_count_min },
+            cauldron_rim_stalagmite_count_max: if c.formation_cauldron_rim_stalagmite_count_max > 0 { c.formation_cauldron_rim_stalagmite_count_max } else { FormationConfig::default().cauldron_rim_stalagmite_count_max },
+            cauldron_rim_stalagmite_scale: if c.formation_cauldron_rim_stalagmite_scale > 0.0 { c.formation_cauldron_rim_stalagmite_scale } else { FormationConfig::default().cauldron_rim_stalagmite_scale },
+            cauldron_floor_noise: if c.formation_cauldron_floor_noise >= 0.0 { c.formation_cauldron_floor_noise } else { FormationConfig::default().cauldron_floor_noise },
         },
         pools: PoolConfig {
             enabled: c.pool_enabled != 0,

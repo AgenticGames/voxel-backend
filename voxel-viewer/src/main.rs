@@ -384,6 +384,16 @@ fn serve_generate(
     let mut form_shield_radius_max: Option<f32> = None;
     let mut form_shield_max_tilt: Option<f32> = None;
     let mut form_shield_stalactite_chance: Option<f32> = None;
+    // Cauldron settings
+    let mut form_cauldron_chance: Option<f32> = None;
+    let mut form_cauldron_radius_min: Option<f32> = None;
+    let mut form_cauldron_radius_max: Option<f32> = None;
+    let mut form_cauldron_depth: Option<f32> = None;
+    let mut form_cauldron_lip_height: Option<f32> = None;
+    let mut form_cauldron_rim_stal_min: Option<u32> = None;
+    let mut form_cauldron_rim_stal_max: Option<u32> = None;
+    let mut form_cauldron_rim_stal_scale: Option<f32> = None;
+    let mut form_cauldron_floor_noise: Option<f32> = None;
     // Stress settings
     let mut stress_gravity: Option<f32> = None;
     let mut stress_lateral: Option<f32> = None;
@@ -543,6 +553,16 @@ fn serve_generate(
             "form_shield_radius_max" => { form_shield_radius_max = val.parse().ok(); }
             "form_shield_max_tilt" => { form_shield_max_tilt = val.parse().ok(); }
             "form_shield_stalactite_chance" => { form_shield_stalactite_chance = val.parse().ok(); }
+            // Cauldron settings
+            "form_cauldron_chance" => { form_cauldron_chance = val.parse().ok(); }
+            "form_cauldron_radius_min" => { form_cauldron_radius_min = val.parse().ok(); }
+            "form_cauldron_radius_max" => { form_cauldron_radius_max = val.parse().ok(); }
+            "form_cauldron_depth" => { form_cauldron_depth = val.parse().ok(); }
+            "form_cauldron_lip_height" => { form_cauldron_lip_height = val.parse().ok(); }
+            "form_cauldron_rim_stal_min" => { form_cauldron_rim_stal_min = val.parse().ok(); }
+            "form_cauldron_rim_stal_max" => { form_cauldron_rim_stal_max = val.parse().ok(); }
+            "form_cauldron_rim_stal_scale" => { form_cauldron_rim_stal_scale = val.parse().ok(); }
+            "form_cauldron_floor_noise" => { form_cauldron_floor_noise = val.parse().ok(); }
             // Stress settings
             "stress_gravity" => { stress_gravity = val.parse().ok(); }
             "stress_lateral" => { stress_lateral = val.parse().ok(); }
@@ -738,6 +758,16 @@ fn serve_generate(
     if let Some(v) = form_shield_radius_max { config.formations.shield_radius_max = v; }
     if let Some(v) = form_shield_max_tilt { config.formations.shield_max_tilt = v; }
     if let Some(v) = form_shield_stalactite_chance { config.formations.shield_stalactite_chance = v; }
+    // Cauldron settings
+    if let Some(v) = form_cauldron_chance { config.formations.cauldron_chance = v; }
+    if let Some(v) = form_cauldron_radius_min { config.formations.cauldron_radius_min = v; }
+    if let Some(v) = form_cauldron_radius_max { config.formations.cauldron_radius_max = v; }
+    if let Some(v) = form_cauldron_depth { config.formations.cauldron_depth = v; }
+    if let Some(v) = form_cauldron_lip_height { config.formations.cauldron_lip_height = v; }
+    if let Some(v) = form_cauldron_rim_stal_min { config.formations.cauldron_rim_stalagmite_count_min = v; }
+    if let Some(v) = form_cauldron_rim_stal_max { config.formations.cauldron_rim_stalagmite_count_max = v; }
+    if let Some(v) = form_cauldron_rim_stal_scale { config.formations.cauldron_rim_stalagmite_scale = v; }
+    if let Some(v) = form_cauldron_floor_noise { config.formations.cauldron_floor_noise = v; }
 
     // Build sleep config from UI overrides (stress settings embedded in sleep config)
     let mut sleep_cfg = SleepConfig::default();
