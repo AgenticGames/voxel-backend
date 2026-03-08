@@ -65,7 +65,6 @@ struct FloorCluster {
     centroid_x: f32,
     centroid_y: f32,
     centroid_z: f32,
-    median_y: usize,
 }
 
 /// Place cave pools in a density field. Returns descriptors and fluid seeds for placed pools.
@@ -197,19 +196,20 @@ pub fn place_pools(
         let area_radius = ((cluster.cells.len() as f32) / std::f32::consts::PI).sqrt() as usize;
         let effective_radius = area_radius.min(config.max_radius).max(1);
 
-        // Pick center XZ as the cluster cell closest to the XZ centroid.
-        // Use median Y from the cluster instead of the single cell's Y —
-        // this represents the typical floor level on undulating terrain.
-        let (center_x, _nearest_y, center_z) = find_nearest_to_centroid(
+        // Pick center as the cluster cell closest to the XZ centroid.
+        // Use that cell's actual Y — it's a real floor cell at the cave bottom.
+        // (Median Y is wrong for bowl-shaped caverns where wall-climbing cells
+        // inflate the median to mid-air. The adaptive footprint validation
+        // handles undulating terrain around this center Y.)
+        let (center_x, floor_y, center_z) = find_nearest_to_centroid(
             &cluster.cells, cluster.centroid_x, cluster.centroid_z,
         );
-        let floor_y = cluster.median_y;
         let surface_y = floor_y + 1; // pool surface is at the air layer above floor
 
         let r2 = (effective_radius * effective_radius) as i32;
 
-        // Pool footprint validation: check that enough of the disc has floor near median Y.
-        // Scans within ±footprint_y_tolerance of median Y to accept undulating terrain.
+        // Pool footprint validation: check that enough of the disc has floor near center Y.
+        // Scans within ±footprint_y_tolerance to accept undulating terrain.
         {
             let mut floor_count = 0u32;
             let mut total_count = 0u32;
@@ -319,7 +319,7 @@ pub fn place_pools(
         }
 
         // Validate: floor/air interface near center, scanning within ±footprint_y_tolerance
-        // of median Y to handle undulating terrain where median_y may not be exact.
+        // to handle undulating terrain.
         {
             let tol = config.footprint_y_tolerance;
             let y_lo = floor_y.saturating_sub(tol);
@@ -336,7 +336,7 @@ pub fn place_pools(
                 }
             }
             if !found_interface {
-                eprintln!("[POOL]   cluster cells={} no floor/air interface within ±{} of median_y={} at center ({},{}) → skip",
+                eprintln!("[POOL]   cluster cells={} no floor/air interface within ±{} of floor_y={} at center ({},{}) → skip",
                     cluster.cells.len(), tol, floor_y, center_x, center_z);
                 continue;
             }
@@ -618,17 +618,11 @@ fn cluster_floors(
         }
         let n = cells.len() as f32;
 
-        // Compute median Y from sorted Y values
-        let mut y_values: Vec<usize> = cells.iter().map(|&(_, y, _)| y).collect();
-        y_values.sort_unstable();
-        let median_y = y_values[y_values.len() / 2];
-
         clusters.push(FloorCluster {
             cells,
             centroid_x: sum_x / n,
             centroid_y: sum_y / n,
             centroid_z: sum_z / n,
-            median_y,
         });
     }
 
