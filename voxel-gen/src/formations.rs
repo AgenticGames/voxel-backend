@@ -1635,7 +1635,7 @@ fn write_cauldron(
     let min_z = (anchor_z as i32 - r_ceil).max(0) as usize;
     let max_z = ((anchor_z as i32 + r_ceil) as usize + 1).min(size);
     let min_y = (anchor_y as i32 - d_ceil).max(0) as usize;
-    let max_y = (anchor_y + 1).min(size);
+    let max_y = ((anchor_y as f32 + lip_height.ceil()) as usize + 1).min(size);
 
     for iz in min_z..max_z {
         for iy in min_y..max_y {
@@ -1648,14 +1648,32 @@ fn write_cauldron(
                     continue;
                 }
 
-                // rim_factor: 0 at center, 1 at edge
-                let rim_factor = dist_h / radius;
-                // Steep walls + flat bottom via powf(0.3) — creates a steep transition near the edge
-                let carve_depth_at_r = depth * (1.0 - rim_factor.powf(0.3).min(1.0));
-                // Distance below floor surface
-                let dy_below = ay - iy as f32;
-                if dy_below < 0.0 || dy_below > carve_depth_at_r {
-                    continue;
+                let fy = iy as f32;
+
+                if fy <= ay {
+                    // Below-floor carve: existing steep-wall + flat-bottom profile
+                    let rim_factor = dist_h / radius;
+                    let carve_depth_at_r = depth * (1.0 - rim_factor.powf(0.3).min(1.0));
+                    let dy_below = ay - fy;
+                    if dy_below > carve_depth_at_r {
+                        continue;
+                    }
+                } else {
+                    // Above-floor carve: clear rock inside the basin up to lip_height.
+                    // Taper the carve height near the lip ring (0.85r..r) so we
+                    // don't cut a sharp vertical edge into the lip Phase 2 builds.
+                    let dy_above = fy - ay;
+                    let max_carve_h = if dist_h < radius * 0.85 {
+                        // Interior: carve up to full lip_height
+                        lip_height
+                    } else {
+                        // Transition zone (0.85r..r): linearly taper from lip_height → 0
+                        let t = (dist_h - radius * 0.85) / (radius * 0.15);
+                        lip_height * (1.0 - t.min(1.0))
+                    };
+                    if dy_above > max_carve_h {
+                        continue;
+                    }
                 }
 
                 // Add noise to basin floor
