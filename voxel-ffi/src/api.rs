@@ -2040,6 +2040,11 @@ mod tests {
             artesian_max_per_chunk: 3,
             // Fluid Sources Toggle
             fluid_sources_enabled: 1,
+            // Fluid Tuning
+            fluid_solid_corner_threshold: 6,
+            // Cauldron Inset Tuning
+            formation_cauldron_wall_inset: 1.0,
+            formation_cauldron_floor_inset: 1,
         }
     }
 

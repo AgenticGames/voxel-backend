@@ -172,7 +172,7 @@ fn handle_event(
                     let zu = lz as usize;
                     if xu < chunk_size && yu < chunk_size && zu < chunk_size
                         && grid.cell_capacity(xu, yu, zu) > crate::cell::MIN_LEVEL
-                        && !grid.is_mostly_solid(xu, yu, zu)
+                        && !grid.is_mostly_solid(xu, yu, zu, config.solid_corner_threshold)
                     {
                         let cell = grid.get_mut(xu, yu, zu);
                         cell.fluid_type = crate::cell::FluidType::from_u8(fluid_type_u8);
@@ -191,7 +191,7 @@ fn handle_event(
                 let zu = z as usize;
                 if xu < chunk_size && yu < chunk_size && zu < chunk_size
                     && grid.cell_capacity(xu, yu, zu) > crate::cell::MIN_LEVEL
-                    && !grid.is_mostly_solid(xu, yu, zu)
+                    && !grid.is_mostly_solid(xu, yu, zu, config.solid_corner_threshold)
                 {
                     let cell = grid.get_mut(xu, yu, zu);
                     cell.fluid_type = fluid_type;

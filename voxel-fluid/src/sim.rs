@@ -33,6 +33,31 @@ pub fn tick_fluid(
     // Collect keys to iterate
     let keys: Vec<(i32, i32, i32)> = chunks.keys().copied().collect();
 
+    // Pre-promote adjacent chunk grids from density cache so cross-chunk flow
+    // can detect and flow into neighbors that have density data but no grid yet.
+    // Without this, tick_chunk skips neighbors with no grid (chicken-and-egg).
+    let fluid_keys: Vec<(i32, i32, i32)> = keys.iter()
+        .filter(|k| chunks.get(k).map_or(false, |g| g.has_fluid))
+        .copied()
+        .collect();
+    let offsets: [(i32, i32, i32); 6] = [
+        (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
+    ];
+    for fk in &fluid_keys {
+        for &(dx, dy, dz) in &offsets {
+            let adj = (fk.0 + dx, fk.1 + dy, fk.2 + dz);
+            if !chunks.contains_key(&adj) {
+                if let Some(cache) = chunk_densities.get(&adj) {
+                    let grid = ChunkFluidGrid::from_density_cache(cache);
+                    chunks.insert(adj, grid);
+                }
+            }
+        }
+    }
+
+    // Re-collect keys after promotion (new grids may have been added)
+    let keys: Vec<(i32, i32, i32)> = chunks.keys().copied().collect();
+
     for key in keys {
         // Skip chunks with no fluid and not dirty (nothing to simulate)
         {

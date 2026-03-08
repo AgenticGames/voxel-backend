@@ -747,6 +747,9 @@ pub fn place_formations(
                         *anchor_z,
                         *radius,
                         *depth,
+                        *lip_height,
+                        config.cauldron_wall_inset,
+                        config.cauldron_floor_inset,
                         *ft,
                         chunk_coord,
                         size,
@@ -767,18 +770,22 @@ fn generate_cauldron_fluid_seeds(
     anchor_z: usize,
     radius: f32,
     depth: f32,
+    lip_height: f32,
+    wall_inset: f32,
+    floor_inset: i32,
     fluid_type: PoolFluid,
     chunk_coord: (i32, i32, i32),
     size: usize,
 ) {
-    // Inset fill region: keep fluid 1 cell away from walls and 1 voxel above floor
+    // Inset fill region: keep fluid wall_inset cells away from walls
     // to avoid placing fluid in boundary cells with mixed solid/air corners.
-    let fill_radius = radius - 1.0;
+    let fill_radius = radius - wall_inset;
     if fill_radius < 1.0 {
         return; // too small to hold fluid safely
     }
     let r_ceil = fill_radius.ceil() as i32;
     let ay = anchor_y as f32;
+    let lip_ceil = lip_height.ceil() as i32;
 
     for dz in -r_ceil..=r_ceil {
         for dx in -r_ceil..=r_ceil {
@@ -797,10 +804,11 @@ fn generate_cauldron_fluid_seeds(
             let carve_depth_at_r = depth * (1.0 - rim_factor.powf(0.3).min(1.0));
             let bottom_y = (ay - carve_depth_at_r).floor() as i32;
 
-            // Fill from basin bottom+1 up to anchor_y (exclusive — anchor_y is floor surface)
-            // +1 raises fill above floor boundary cells
-            let min_y = (bottom_y + 1).max(0);
-            let max_y = anchor_y as i32; // exclusive
+            // Fill from basin bottom+floor_inset+lip_ceil up to anchor_y+lip_ceil
+            // floor_inset raises fill above floor boundary cells
+            // lip_ceil raises fill into the lip ring area
+            let min_y = (bottom_y + floor_inset + lip_ceil).max(0);
+            let max_y = anchor_y as i32 + lip_ceil; // exclusive
             for iy in min_y..max_y {
                 if iy >= size as i32 {
                     continue;
@@ -2540,6 +2548,9 @@ mod tests {
             anchor_z,
             radius,
             depth,
+            0.8, // lip_height
+            1.0, // wall_inset
+            1,   // floor_inset
             PoolFluid::Water,
             (0, 0, 0),
             size,
@@ -2547,26 +2558,28 @@ mod tests {
 
         assert!(!seeds.is_empty(), "Should generate some fluid seeds");
 
+        let lip_ceil = 1i32; // ceil(0.8) = 1
+
         for seed in &seeds {
             let dx = seed.lx as f32 - anchor_x as f32;
             let dz = seed.lz as f32 - anchor_z as f32;
             let dist_h = (dx * dx + dz * dz).sqrt();
 
-            // Fluid should be inset: at least 1 cell from basin wall
+            // Fluid should be inset: at least wall_inset cells from basin wall
             assert!(
                 dist_h < radius - 1.0,
                 "Seed at ({},{},{}) dist_h={:.2} should be < fill_radius={:.2}",
                 seed.lx, seed.ly, seed.lz, dist_h, radius - 1.0,
             );
 
-            // Fluid should be raised above floor boundary
+            // Fluid should be raised above floor boundary + lip_ceil
             let rim_factor = dist_h / radius;
             let carve_depth_at_r = depth * (1.0 - rim_factor.powf(0.3).min(1.0));
             let bottom_y = (anchor_y as f32 - carve_depth_at_r).floor() as i32;
             assert!(
-                (seed.ly as i32) >= bottom_y + 1,
-                "Seed y={} should be >= bottom_y+1={} (floor inset)",
-                seed.ly, bottom_y + 1,
+                (seed.ly as i32) >= bottom_y + 1 + lip_ceil,
+                "Seed y={} should be >= bottom_y+floor_inset+lip_ceil={} (floor inset + lip raise)",
+                seed.ly, bottom_y + 1 + lip_ceil,
             );
         }
     }
@@ -2578,7 +2591,7 @@ mod tests {
         let mut seeds = Vec::new();
         // radius=1.5 → fill_radius=0.5 < 1.0 → should skip
         generate_cauldron_fluid_seeds(
-            &mut seeds, 8, 8, 8, 1.5, 2.0, PoolFluid::Water, (0, 0, 0), 17,
+            &mut seeds, 8, 8, 8, 1.5, 2.0, 0.8, 1.0, 1, PoolFluid::Water, (0, 0, 0), 17,
         );
         assert!(seeds.is_empty(), "Small cauldron (radius<2) should produce no seeds");
     }

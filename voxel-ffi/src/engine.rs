@@ -1155,6 +1155,8 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
             cauldron_floor_noise: if c.formation_cauldron_floor_noise >= 0.0 { c.formation_cauldron_floor_noise } else { FormationConfig::default().cauldron_floor_noise },
             cauldron_water_chance: if c.formation_cauldron_water_chance >= 0.0 { c.formation_cauldron_water_chance } else { FormationConfig::default().cauldron_water_chance },
             cauldron_lava_chance: if c.formation_cauldron_lava_chance >= 0.0 { c.formation_cauldron_lava_chance } else { FormationConfig::default().cauldron_lava_chance },
+            cauldron_wall_inset: if c.formation_cauldron_wall_inset > 0.0 { c.formation_cauldron_wall_inset } else { FormationConfig::default().cauldron_wall_inset },
+            cauldron_floor_inset: if c.formation_cauldron_floor_inset > 0 { c.formation_cauldron_floor_inset } else { FormationConfig::default().cauldron_floor_inset },
         },
         pools: PoolConfig {
             enabled: c.pool_enabled != 0,
@@ -1550,6 +1552,7 @@ fn ffi_config_to_fluid(c: &FfiEngineConfig) -> FluidConfig {
         tunnel_bend_threshold: c.fluid_tunnel_bend_threshold,
         flow_anim_speed: 1.0,
         solid_threshold: 0.0,
+        solid_corner_threshold: if c.fluid_solid_corner_threshold > 0 { c.fluid_solid_corner_threshold } else { 6 },
         mesh_smooth_iterations: 2,
         mesh_smooth_strength: 0.3,
         mesh_qef_refinement: true,

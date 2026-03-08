@@ -756,6 +756,10 @@ pub struct FormationConfig {
     pub cauldron_floor_noise: f32,
     pub cauldron_water_chance: f32,
     pub cauldron_lava_chance: f32,
+    /// Shrinks cauldron fill radius from walls (default 1.0)
+    pub cauldron_wall_inset: f32,
+    /// Raises fluid above basin floor by this many voxels (default 1)
+    pub cauldron_floor_inset: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -884,6 +888,8 @@ impl Default for FormationConfig {
             cauldron_floor_noise: 0.3,
             cauldron_water_chance: 0.5,
             cauldron_lava_chance: 0.2,
+            cauldron_wall_inset: 1.0,
+            cauldron_floor_inset: 1,
         }
     }
 }

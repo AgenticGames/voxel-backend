@@ -714,6 +714,11 @@ pub struct FfiEngineConfig {
     pub artesian_max_per_chunk: u32,
     // ── Fluid Sources Toggle ──
     pub fluid_sources_enabled: u8,
+    // ── Fluid Tuning ──
+    pub fluid_solid_corner_threshold: u8,
+    // ── Cauldron Inset Tuning ──
+    pub formation_cauldron_wall_inset: f32,
+    pub formation_cauldron_floor_inset: i32,
 }
 
 #[repr(C)]
