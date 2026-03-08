@@ -62,6 +62,7 @@ pub fn place_sources(
                         let cell = grid.get_mut(x, y, z);
                         cell.level = SOURCE_LEVEL;
                         cell.fluid_type = FluidType::Lava;
+                        cell.is_source = true;
                         grid.dirty = true;
                     }
                 }

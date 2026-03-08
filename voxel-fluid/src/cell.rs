@@ -49,6 +49,9 @@ impl FluidType {
 pub struct FluidCell {
     pub level: f32,
     pub fluid_type: FluidType,
+    /// True for infinite sources (geological springs, lava vents).
+    /// Non-source cells (e.g. cauldron water) drain when flowing.
+    pub is_source: bool,
 }
 
 impl Default for FluidCell {
@@ -56,6 +59,7 @@ impl Default for FluidCell {
         Self {
             level: 0.0,
             fluid_type: FluidType::Water,
+            is_source: false,
         }
     }
 }
@@ -66,7 +70,7 @@ impl FluidCell {
     }
 
     pub fn is_source(&self) -> bool {
-        self.level >= SOURCE_LEVEL
+        self.is_source
     }
 }
 

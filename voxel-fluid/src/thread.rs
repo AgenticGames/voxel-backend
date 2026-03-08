@@ -177,6 +177,7 @@ fn handle_event(
                         let cell = grid.get_mut(xu, yu, zu);
                         cell.fluid_type = crate::cell::FluidType::from_u8(fluid_type_u8);
                         cell.level = level.min(crate::cell::MAX_LEVEL);
+                        cell.is_source = true; // geological springs are infinite sources
                         grid.dirty = true;
                         grid.has_fluid = true;
                     }
@@ -196,6 +197,7 @@ fn handle_event(
                     let cell = grid.get_mut(xu, yu, zu);
                     cell.fluid_type = fluid_type;
                     cell.level = level;
+                    cell.is_source = is_source;
                     if is_source {
                         cell.level = crate::cell::MAX_LEVEL;
                     }

@@ -213,6 +213,22 @@ fn tick_chunk(
     let mut changed = false;
     let mut cross_transfers: Vec<CrossChunkTransfer> = Vec::new();
 
+    // Pre-compute column fluid weight for pressure equalization.
+    // fluid_weight[idx] = total fluid in this cell plus all cells above in the same column.
+    // A taller column has higher weight at its base, driving upward pressure in shorter neighbors.
+    let total = size * size * size;
+    let mut fluid_weight = vec![0.0f32; total];
+    for z in 0..size {
+        for x in 0..size {
+            let mut cumulative = 0.0f32;
+            for y in (0..size).rev() {
+                let idx = z * size * size + y * size + x;
+                cumulative += grid.cells[idx].level;
+                fluid_weight[idx] = cumulative;
+            }
+        }
+    }
+
     // Process each cell
     for z in 0..size {
         for y in 0..size {
@@ -252,6 +268,7 @@ fn tick_chunk(
 
                 let flow_rate = if is_lava { config.lava_flow_rate } else { config.water_flow_rate };
                 let horizontal_spread = if is_lava { config.lava_spread_rate } else { config.water_spread_rate };
+                let pressure_rate = if is_lava { config.lava_pressure_rate } else { config.water_pressure_rate };
 
                 // Gravity: try to flow down (4x flow rate for fast pooling)
                 if y > 0 {
@@ -487,14 +504,62 @@ fn tick_chunk(
                         }
                     }
                 }
+
+                // Phase 4: Upward pressure equalization
+                // Water pushes up when pressurized from below and a neighboring column
+                // has more total fluid weight (indicating a higher water surface).
+                // This implements hydrostatic pressure: taller columns push shorter
+                // neighbors upward through connected fluid.
+                if new_cells[idx].level > MIN_LEVEL && y + 1 < size {
+                    let below_pressurized = if y > 0 {
+                        let bi = z * size * size + (y - 1) * size + x;
+                        cell_solid[bi] || new_cells[bi].level >= 0.95
+                    } else {
+                        true // chunk floor acts as pressure boundary
+                    };
+
+                    if below_pressurized {
+                        let ai = z * size * size + (y + 1) * size + x;
+                        if !cell_solid[ai] {
+                            // Compare column weight with horizontal neighbors
+                            let our_weight = fluid_weight[idx];
+                            let mut max_neighbor_weight = 0.0f32;
+                            for &(dx, dz) in &[(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+                                let nx = x as i32 + dx;
+                                let nz = z as i32 + dz;
+                                if nx >= 0 && nx < size as i32 && nz >= 0 && nz < size as i32 {
+                                    let ni = nz as usize * size * size + y * size + nx as usize;
+                                    if !cell_solid[ni] {
+                                        max_neighbor_weight = max_neighbor_weight.max(fluid_weight[ni]);
+                                    }
+                                }
+                            }
+
+                            let weight_diff = max_neighbor_weight - our_weight;
+                            if weight_diff > 0.5 {
+                                let above_space = (1.0 - new_cells[ai].level).max(0.0);
+                                let push = (weight_diff * pressure_rate * 0.1)
+                                    .min(above_space)
+                                    .min(flow_rate)
+                                    .min(new_cells[idx].level);
+                                if push > MIN_LEVEL && !is_source {
+                                    new_cells[idx].level -= push;
+                                    new_cells[ai].level += push;
+                                    new_cells[ai].fluid_type = cell.fluid_type;
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 
-    // Clean up tiny residual amounts and track has_fluid
+    // Clean up tiny residual amounts (including negative from overdrain) and track has_fluid
     let mut any_fluid = false;
     for cell in &mut new_cells {
-        if cell.level < MIN_LEVEL && cell.level > 0.0 {
+        if cell.level < MIN_LEVEL {
             cell.level = 0.0;
         }
         if cell.level >= MIN_LEVEL {
@@ -692,6 +757,7 @@ mod tests {
         let mut grid = make_chunk(16);
         grid.get_mut(8, 8, 8).level = SOURCE_LEVEL;
         grid.get_mut(8, 8, 8).fluid_type = FluidType::Water;
+        grid.get_mut(8, 8, 8).is_source = true;
         grid.has_fluid = true;
         chunks.insert(key, grid);
 
@@ -813,6 +879,7 @@ mod tests {
         // Place water source at (8,8,8)
         grid.get_mut(8, 8, 8).level = SOURCE_LEVEL;
         grid.get_mut(8, 8, 8).fluid_type = FluidType::Water;
+        grid.get_mut(8, 8, 8).is_source = true;
         grid.has_fluid = true;
         // Surround with solid on all 6 faces
         grid.set_density(7, 8, 8, 1.0);
@@ -1187,5 +1254,123 @@ mod tests {
             "Excess fluid should have been pushed to neighbors, got {}",
             total_neighbors
         );
+    }
+
+    #[test]
+    fn upward_pressure_equalization() {
+        // Open basin test: tall column next to short column, no divider.
+        // The taller column's weight should push the shorter column upward.
+        //
+        // Layout (side view at z=8):
+        //   y=6:  W [7] |   [8] |   [9]
+        //   y=5:  W [7] |   [8] |   [9]
+        //   y=4:  W [7] |   [8] |   [9]
+        //   y=3:  W [7] | W [8] | W [9]   ← connected at base
+        //   y=2:  S     | S     | S        ← solid floor
+        //
+        // Back/front walls at z=7,9 prevent z-spread. Side walls at x=6,10.
+        let mut chunks = HashMap::new();
+        let key = (0, 0, 0);
+        let mut grid = make_chunk(16);
+
+        // Solid floor at y=2 (span full z width so slope flow can't escape)
+        for x in 6..=10 {
+            for z in 7..=9 {
+                grid.set_density(x, 2, z, 1.0);
+            }
+        }
+        // Side walls (include y=2 to seal floor edges)
+        for y in 2..9 {
+            for z in 7..=9 {
+                grid.set_density(6, y, z, 1.0);
+                grid.set_density(10, y, z, 1.0);
+            }
+        }
+        // Back and front walls
+        for x in 6..=10 {
+            for y in 2..9 {
+                grid.set_density(x, y, 7, 1.0);
+                grid.set_density(x, y, 9, 1.0);
+            }
+        }
+
+        // Fill left column (x=7) with water from y=3 up to y=6 (4 cells)
+        for y in 3..7 {
+            let cell = grid.get_mut(7, y, 8);
+            cell.level = 1.0;
+            cell.fluid_type = FluidType::Water;
+        }
+        // Fill base row at y=3 for x=8,9
+        for x in 8..=9 {
+            let cell = grid.get_mut(x, 3, 8);
+            cell.level = 1.0;
+            cell.fluid_type = FluidType::Water;
+        }
+        grid.has_fluid = true;
+        chunks.insert(key, grid);
+
+        let config = crate::FluidConfig::default();
+        let density_cache = empty_density_cache();
+
+        // Run many ticks to let pressure equalize
+        for _ in 0..200 {
+            tick_fluid(&mut chunks, &density_cache, 16, false, &config);
+        }
+
+        let grid = &chunks[&key];
+        // Adjacent column (x=8) should have water pushed up above y=3
+        let right_y4 = grid.get(8, 4, 8).level;
+        assert!(
+            right_y4 > 0.05,
+            "Water should push upward in shorter column via pressure, got {} at (8,4,8)",
+            right_y4
+        );
+    }
+
+    #[test]
+    fn stable_pool_no_oscillation() {
+        // Flat 3x1x3 pool, all cells at equal level — no upward flow should occur.
+        let mut chunks = HashMap::new();
+        let key = (0, 0, 0);
+        let mut grid = make_chunk(16);
+
+        // Solid floor at y=4
+        for x in 6..=10 {
+            for z in 6..=10 {
+                grid.set_density(x, 4, z, 1.0);
+            }
+        }
+
+        // Fill pool at y=5 with uniform water level
+        for x in 7..=9 {
+            for z in 7..=9 {
+                let cell = grid.get_mut(x, 5, z);
+                cell.level = 0.8;
+                cell.fluid_type = FluidType::Water;
+            }
+        }
+        grid.has_fluid = true;
+        chunks.insert(key, grid);
+
+        let config = crate::FluidConfig::default();
+        let density_cache = empty_density_cache();
+
+        // Run ticks
+        for _ in 0..20 {
+            tick_fluid(&mut chunks, &density_cache, 16, false, &config);
+        }
+
+        // No water should appear at y=6 (above the pool)
+        let grid = &chunks[&key];
+        for x in 7..=9 {
+            for z in 7..=9 {
+                let above = grid.get(x, 6, z).level;
+                assert!(
+                    above < MIN_LEVEL,
+                    "Stable pool should not push water up, got {} at ({},6,{})",
+                    above, x, z
+                );
+            }
+        }
     }
 }

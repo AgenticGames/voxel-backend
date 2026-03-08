@@ -1553,6 +1553,8 @@ fn ffi_config_to_fluid(c: &FfiEngineConfig) -> FluidConfig {
         flow_anim_speed: 1.0,
         solid_threshold: 0.0,
         solid_corner_threshold: if c.fluid_solid_corner_threshold > 0 { c.fluid_solid_corner_threshold } else { 6 },
+        water_pressure_rate: 0.3,
+        lava_pressure_rate: 0.1,
         mesh_smooth_iterations: 2,
         mesh_smooth_strength: 0.3,
         mesh_qef_refinement: true,

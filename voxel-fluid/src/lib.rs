@@ -54,6 +54,9 @@ pub struct FluidConfig {
     pub solid_threshold: f32,
     // Solid corner threshold for is_mostly_solid guard (1-8, default 6)
     pub solid_corner_threshold: u8,
+    // Upward pressure equalization
+    pub water_pressure_rate: f32,
+    pub lava_pressure_rate: f32,
     // Mesh post-processing
     pub mesh_smooth_iterations: u32,
     pub mesh_smooth_strength: f32,
@@ -85,6 +88,8 @@ impl Default for FluidConfig {
             flow_anim_speed: 1.0,
             solid_threshold: 0.0,
             solid_corner_threshold: 6,
+            water_pressure_rate: 0.3,
+            lava_pressure_rate: 0.1,
             mesh_smooth_iterations: 2,
             mesh_smooth_strength: 0.3,
             mesh_qef_refinement: true,
