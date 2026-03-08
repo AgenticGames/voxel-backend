@@ -868,6 +868,12 @@ pub enum WorkerRequest {
     WorldScanWithConfig {
         config: voxel_core::world_scan::ScanConfig,
     },
+    ForceSpawnPool {
+        world_x: f32,
+        world_y: f32,
+        world_z: f32,
+        fluid_type: u8,
+    },
 }
 
 /// Results sent back from worker threads.
@@ -918,6 +924,9 @@ pub enum WorkerResult {
         profile_report: String,
     },
     ScanComplete {
+        json_report: String,
+    },
+    ForceSpawnPoolComplete {
         json_report: String,
     },
 }

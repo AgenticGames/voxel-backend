@@ -568,6 +568,361 @@ pub fn place_pools(
     (descriptors, fluid_seeds)
 }
 
+/// Diagnostic result for each placement gate, used by the force-spawn debug tool.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolDiagnostics {
+    /// Target voxel coordinates (local to chunk)
+    pub target_x: usize,
+    pub target_y: usize,
+    pub target_z: usize,
+    /// Chunk coordinate
+    pub chunk_cx: i32,
+    pub chunk_cy: i32,
+    pub chunk_cz: i32,
+    /// Gate 1: floor cell valid (solid with air above, no horizontal air neighbors)
+    pub floor_cell_valid: bool,
+    pub floor_has_horizontal_air: bool,
+    pub floor_density_positive: bool,
+    pub floor_air_above: bool,
+    /// Gate 2: ground depth
+    pub ground_depth_measured: usize,
+    pub ground_depth_required: usize,
+    pub ground_depth_pass: bool,
+    /// Gate 3: cluster size (BFS floor count)
+    pub cluster_size_measured: usize,
+    pub cluster_size_required: usize,
+    pub cluster_size_pass: bool,
+    /// Gate 4: noise value
+    pub noise_value: f64,
+    pub noise_threshold: f64,
+    pub noise_pass: bool,
+    /// Gate 5: air above
+    pub air_above_measured: usize,
+    pub air_above_required: usize,
+    pub air_above_pass: bool,
+    /// Gate 6: cave height (distance to ceiling)
+    pub cave_height_measured: usize,
+    pub cave_height_max: usize,
+    pub cave_height_pass: bool,
+    /// Gate 7: floor thickness below basin bottom
+    pub floor_thickness_measured: usize,
+    pub floor_thickness_required: usize,
+    pub floor_thickness_pass: bool,
+    /// Summary
+    pub checks_passed: usize,
+    pub checks_total: usize,
+    pub would_spawn_naturally: bool,
+}
+
+/// Force-spawn a pool at a specific location for debugging. Runs each placement gate
+/// as a read-only diagnostic, then unconditionally carves a basin and emits fluid seeds.
+///
+/// If the target voxel is air, scans downward up to 8 voxels to find a floor surface.
+///
+/// Returns diagnostics and fluid seeds for the carved pool.
+pub fn force_spawn_pool(
+    density: &mut DensityField,
+    config: &PoolConfig,
+    world_origin: Vec3,
+    global_seed: u64,
+    target_x: usize,
+    target_y: usize,
+    target_z: usize,
+    fluid_type: PoolFluid,
+    chunk_coord: (i32, i32, i32),
+) -> (PoolDiagnostics, Vec<FluidSeed>) {
+    let size = density.size;
+
+    // If target is air, scan downward to find nearest floor surface
+    let mut floor_y = target_y;
+    if target_y < size {
+        let sample = density.get(target_x, target_y, target_z);
+        if sample.density <= 0.0 {
+            // Air — scan down up to 8 voxels
+            for d in 1..=8usize {
+                let check_y = target_y.wrapping_sub(d);
+                if check_y == 0 || check_y >= size {
+                    break;
+                }
+                let s = density.get(target_x, check_y, target_z);
+                if s.density > 0.0 {
+                    floor_y = check_y;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Clamp to valid range
+    let floor_y = floor_y.min(size.saturating_sub(3));
+    let surface_y = floor_y + 1;
+
+    // === Run diagnostic gates (read-only) ===
+
+    // Gate 1: Floor cell valid
+    let floor_density_positive = floor_y < size && density.get(target_x, floor_y, target_z).density > 0.0;
+    let floor_air_above = surface_y < size && density.get(target_x, surface_y, target_z).density <= 0.0;
+    let has_air_xn = target_x > 0 && density.get(target_x - 1, floor_y, target_z).density <= 0.0;
+    let has_air_xp = target_x + 1 < size && density.get(target_x + 1, floor_y, target_z).density <= 0.0;
+    let has_air_zn = target_z > 0 && density.get(target_x, floor_y, target_z - 1).density <= 0.0;
+    let has_air_zp = target_z + 1 < size && density.get(target_x, floor_y, target_z + 1).density <= 0.0;
+    let floor_has_horizontal_air = has_air_xn || has_air_xp || has_air_zn || has_air_zp;
+    let floor_cell_valid = floor_density_positive && floor_air_above && !floor_has_horizontal_air;
+
+    // Gate 2: Ground depth
+    let ground_depth_required = config.min_ground_depth;
+    let mut ground_depth_measured = 0usize;
+    for d in 1..=ground_depth_required.max(8) {
+        let check_y = floor_y.wrapping_sub(d);
+        if check_y == 0 || check_y >= size {
+            ground_depth_measured = ground_depth_required.max(8);
+            break;
+        }
+        if density.get(target_x, check_y, target_z).density > 0.0 {
+            ground_depth_measured += 1;
+        } else {
+            break;
+        }
+    }
+    let ground_depth_pass = ground_depth_required == 0 || ground_depth_measured >= ground_depth_required;
+
+    // Gate 3: Cluster size — BFS floor count around target
+    let cluster_size_required = config.min_area;
+    let mut cluster_size_measured = 0usize;
+    {
+        let mut visited = std::collections::HashSet::new();
+        let mut queue = VecDeque::new();
+        queue.push_back((target_x, floor_y, target_z));
+        visited.insert((target_x, target_z));
+        while let Some((cx, cy, cz)) = queue.pop_front() {
+            // Check if this is a valid floor cell
+            if cx >= size || cy >= size || cy + 1 >= size {
+                continue;
+            }
+            let s = density.get(cx, cy, cz);
+            let a = density.get(cx, cy + 1, cz);
+            if s.density <= 0.0 || a.density > 0.0 {
+                continue;
+            }
+            cluster_size_measured += 1;
+            // BFS expand on XZ
+            for &(dx, dz) in &[(!0isize, 0isize), (1, 0), (0, !0), (0, 1)] {
+                let nx = cx.wrapping_add(dx as usize);
+                let nz = cz.wrapping_add(dz as usize);
+                if nx < size && nz < size && visited.insert((nx, nz)) {
+                    // Check Y tolerance
+                    for dy_off in 0..=config.max_y_step {
+                        for &sign in &[0isize, -1, 1] {
+                            let ny = if sign == 0 { cy } else { cy.wrapping_add((dy_off as isize * sign) as usize) };
+                            if ny < size && ny + 1 < size {
+                                let ns = density.get(nx, ny, nz);
+                                let na = density.get(nx, ny + 1, nz);
+                                if ns.density > 0.0 && na.density <= 0.0 {
+                                    queue.push_back((nx, ny, nz));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let cluster_size_pass = cluster_size_measured >= cluster_size_required;
+
+    // Gate 4: Noise value
+    let noise = Simplex3D::new(global_seed);
+    let world_x = world_origin.x + target_x as f32;
+    let world_y = world_origin.y + floor_y as f32;
+    let world_z = world_origin.z + target_z as f32;
+    let noise_value = noise.sample(
+        world_x as f64 * config.placement_frequency,
+        world_y as f64 * config.placement_frequency,
+        world_z as f64 * config.placement_frequency,
+    );
+    let noise_pass = noise_value >= config.placement_threshold;
+
+    // Gate 5: Air above
+    let air_above_required = config.min_air_above;
+    let mut air_above_measured = 0usize;
+    for dy in 1..size {
+        let check_y = surface_y + dy;
+        if check_y >= size {
+            break;
+        }
+        if density.get(target_x, check_y, target_z).density <= 0.0 {
+            air_above_measured += 1;
+        } else {
+            break;
+        }
+    }
+    let air_above_pass = air_above_measured >= air_above_required;
+
+    // Gate 6: Cave height (distance to ceiling from surface)
+    let cave_height_max = config.max_cave_height;
+    let mut cave_height_measured = 0usize;
+    {
+        let start_y = surface_y + 1;
+        let mut found_ceiling = false;
+        for dy in 0..size {
+            let check_y = start_y + dy;
+            if check_y >= size {
+                break;
+            }
+            if density.get(target_x, check_y, target_z).material.is_solid() {
+                cave_height_measured = dy;
+                found_ceiling = true;
+                break;
+            }
+        }
+        if !found_ceiling {
+            cave_height_measured = size; // no ceiling found
+        }
+    }
+    let cave_height_pass = cave_height_max == 0 || cave_height_measured <= cave_height_max;
+
+    // Gate 7: Floor thickness below basin bottom
+    let floor_thickness_required = config.min_floor_thickness;
+    let mut floor_thickness_measured = 0usize;
+    if config.basin_depth > 0 {
+        let basin_bottom = floor_y.saturating_sub(config.basin_depth);
+        for d in 1..=floor_thickness_required.max(8) {
+            let check_y = basin_bottom.wrapping_sub(d);
+            if check_y >= size || check_y == 0 {
+                floor_thickness_measured = floor_thickness_required.max(8);
+                break;
+            }
+            if density.get(target_x, check_y, target_z).material.is_solid() {
+                floor_thickness_measured += 1;
+            } else {
+                break;
+            }
+        }
+    } else {
+        floor_thickness_measured = floor_thickness_required; // no basin, trivially passes
+    }
+    let floor_thickness_pass = floor_thickness_required == 0 || floor_thickness_measured >= floor_thickness_required;
+
+    // Summary
+    let checks = [
+        floor_cell_valid,
+        ground_depth_pass,
+        cluster_size_pass,
+        noise_pass,
+        air_above_pass,
+        cave_height_pass,
+        floor_thickness_pass,
+    ];
+    let checks_passed = checks.iter().filter(|&&c| c).count();
+    let checks_total = checks.len();
+    let would_spawn_naturally = checks_passed == checks_total;
+
+    let diagnostics = PoolDiagnostics {
+        target_x,
+        target_y: floor_y,
+        target_z,
+        chunk_cx: chunk_coord.0,
+        chunk_cy: chunk_coord.1,
+        chunk_cz: chunk_coord.2,
+        floor_cell_valid,
+        floor_has_horizontal_air,
+        floor_density_positive,
+        floor_air_above,
+        ground_depth_measured,
+        ground_depth_required,
+        ground_depth_pass,
+        cluster_size_measured,
+        cluster_size_required,
+        cluster_size_pass,
+        noise_value,
+        noise_threshold: config.placement_threshold,
+        noise_pass,
+        air_above_measured,
+        air_above_required,
+        air_above_pass,
+        cave_height_measured,
+        cave_height_max,
+        cave_height_pass,
+        floor_thickness_measured,
+        floor_thickness_required,
+        floor_thickness_pass,
+        checks_passed,
+        checks_total,
+        would_spawn_naturally,
+    };
+
+    // === Force-carve basin regardless of diagnostics ===
+    let effective_radius = config.max_radius.max(1);
+    let r2 = (effective_radius * effective_radius) as i32;
+
+    // Carve basin
+    for dz in -(effective_radius as i32)..=(effective_radius as i32) {
+        for dx in -(effective_radius as i32)..=(effective_radius as i32) {
+            if dx * dx + dz * dz > r2 {
+                continue;
+            }
+            let gx = target_x as i32 + dx;
+            let gz = target_z as i32 + dz;
+            if gx < 0 || gx >= size as i32 || gz < 0 || gz >= size as i32 {
+                continue;
+            }
+            let gx = gx as usize;
+            let gz = gz as usize;
+
+            for d in 0..config.basin_depth {
+                let gy = floor_y.wrapping_sub(d);
+                if gy >= size || gy == 0 {
+                    break;
+                }
+                let sample = density.get_mut(gx, gy, gz);
+                if sample.material.is_solid() {
+                    sample.density = -1.0;
+                    sample.material = Material::Air;
+                }
+            }
+
+            // Ensure surface is air
+            if surface_y < size {
+                let sample = density.get_mut(gx, surface_y, gz);
+                if sample.material.is_solid() {
+                    sample.density = -1.0;
+                    sample.material = Material::Air;
+                }
+            }
+        }
+    }
+
+    // Emit fluid seeds
+    let mut fluid_seeds = Vec::new();
+    let basin_bottom_y = floor_y.saturating_sub(config.basin_depth.saturating_sub(1));
+    for dz in -(effective_radius as i32)..=(effective_radius as i32) {
+        for dx in -(effective_radius as i32)..=(effective_radius as i32) {
+            if dx * dx + dz * dz > r2 {
+                continue;
+            }
+            let gx = target_x as i32 + dx;
+            let gz = target_z as i32 + dz;
+            if gx < 0 || gx >= size as i32 || gz < 0 || gz >= size as i32 {
+                continue;
+            }
+            for gy in basin_bottom_y..=surface_y {
+                if gy >= size {
+                    continue;
+                }
+                fluid_seeds.push(FluidSeed {
+                    chunk: chunk_coord,
+                    lx: gx as u8,
+                    ly: gy as u8,
+                    lz: gz as u8,
+                    fluid_type,
+                });
+            }
+        }
+    }
+
+    (diagnostics, fluid_seeds)
+}
+
 /// Check if a pool's rim is still intact (for drainable pool support).
 /// Returns true if the pool is still contained (all rim voxels solid).
 pub fn is_pool_contained(

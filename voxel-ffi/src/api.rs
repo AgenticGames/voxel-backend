@@ -214,6 +214,10 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                 // If it somehow reaches here, ignore it.
                 ptr::null_mut()
             }
+            WorkerResult::ForceSpawnPoolComplete { .. } => {
+                // Intercepted by engine.poll_result(); ignore if it reaches here.
+                ptr::null_mut()
+            }
         },
     }
 }
@@ -857,6 +861,55 @@ pub unsafe extern "C" fn voxel_free_sleep_result(result: *mut FfiSleepResult) {
     }
     if !r.profile_report.is_null() {
         drop(CString::from_raw(r.profile_report));
+    }
+}
+
+// ── Force Spawn Pool ──
+
+/// Request force-spawning a pool at a UE world position.
+/// fluid_type: 0=water, 1=lava. Coordinates are in UE world space (pre-scale).
+/// Returns 1 on success, 0 if queue full.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_force_spawn_pool(
+    engine: *mut c_void,
+    world_x: f32,
+    world_y: f32,
+    world_z: f32,
+    fluid_type: u8,
+    _world_scale: f32,
+) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.request_force_spawn_pool(world_x, world_y, world_z, fluid_type)
+}
+
+/// Poll for a completed force-spawn pool result.
+/// Returns null if not ready, otherwise a heap-allocated C string with JSON diagnostics.
+/// Caller MUST call `voxel_free_force_spawn_result` on non-null returns.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_poll_force_spawn_result(engine: *mut c_void) -> *mut c_char {
+    if engine.is_null() {
+        return ptr::null_mut();
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    match engine.poll_force_spawn_complete() {
+        Some(json) => {
+            match CString::new(json) {
+                Ok(cstr) => cstr.into_raw(),
+                Err(_) => ptr::null_mut(),
+            }
+        }
+        None => ptr::null_mut(),
+    }
+}
+
+/// Free a force-spawn pool result string. Safe to call with null pointer.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_free_force_spawn_result(ptr: *mut c_char) {
+    if !ptr.is_null() {
+        drop(CString::from_raw(ptr));
     }
 }
 

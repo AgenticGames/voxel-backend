@@ -73,6 +73,9 @@ pub struct VoxelEngine {
     // World Scan
     scan_complete: Arc<Mutex<Option<String>>>,
 
+    // Force Spawn Pool
+    force_spawn_complete: Arc<Mutex<Option<String>>>,
+
     // Profiler
     profiler: Arc<StreamingProfiler>,
 
@@ -180,6 +183,7 @@ impl VoxelEngine {
             shutdown,
             sleep_complete: Arc::new(Mutex::new(None)),
             scan_complete: Arc::new(Mutex::new(None)),
+            force_spawn_complete: Arc::new(Mutex::new(None)),
             profiler,
             workers,
             world_scale,
@@ -299,6 +303,12 @@ impl VoxelEngine {
                 // Don't expose to the FfiResult pipeline; UE polls via voxel_poll_scan_result
                 None
             }
+            Ok(WorkerResult::ForceSpawnPoolComplete { json_report }) => {
+                if let Ok(mut fc) = self.force_spawn_complete.lock() {
+                    *fc = Some(json_report);
+                }
+                None
+            }
             Ok(other) => Some(other),
             Err(_) => None,
         }
@@ -354,6 +364,26 @@ impl VoxelEngine {
     pub fn poll_scan_complete(&self) -> Option<String> {
         let mut sc = self.scan_complete.lock().ok()?;
         sc.take()
+    }
+
+    /// Request force-spawning a pool at a UE world position. Sent through the mine channel.
+    /// fluid_type: 0=water, 1=lava. Returns 1 on success, 0 if queue full.
+    pub fn request_force_spawn_pool(&self, world_x: f32, world_y: f32, world_z: f32, fluid_type: u8) -> u32 {
+        match self.mine_tx.try_send(WorkerRequest::ForceSpawnPool {
+            world_x,
+            world_y,
+            world_z,
+            fluid_type,
+        }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
+    /// Poll for a completed force-spawn pool result. Returns the JSON diagnostics string if ready.
+    pub fn poll_force_spawn_complete(&self) -> Option<String> {
+        let mut fc = self.force_spawn_complete.lock().ok()?;
+        fc.take()
     }
 
     /// Get current engine statistics.

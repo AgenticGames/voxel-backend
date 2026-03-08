@@ -1152,6 +1152,109 @@ fn handle_request(
 
             let _ = result_tx.send(WorkerResult::ScanComplete { json_report: json });
         }
+        WorkerRequest::ForceSpawnPool { world_x, world_y, world_z, fluid_type } => {
+            let cfg = config.read().unwrap().clone();
+
+            // Convert UE world position to Rust coordinates
+            let center = from_ue_world_pos(world_x, world_y, world_z, world_scale);
+            let chunk_size = cfg.chunk_size;
+
+            // Compute chunk coordinate and local position
+            let cx = (center.x / chunk_size as f32).floor() as i32;
+            let cy = (center.y / chunk_size as f32).floor() as i32;
+            let cz = (center.z / chunk_size as f32).floor() as i32;
+            let key = (cx, cy, cz);
+
+            let lx = ((center.x - cx as f32 * chunk_size as f32) as usize).min(chunk_size);
+            let ly = ((center.y - cy as f32 * chunk_size as f32) as usize).min(chunk_size);
+            let lz = ((center.z - cz as f32 * chunk_size as f32) as usize).min(chunk_size);
+
+            // Check if chunk is loaded
+            let has_density = {
+                let s = store.read().unwrap();
+                s.density_fields.contains_key(&key)
+            };
+
+            if !has_density {
+                let json = serde_json::json!({
+                    "error": "chunk not loaded",
+                    "chunk": [cx, cy, cz],
+                }).to_string();
+                let _ = result_tx.send(WorkerResult::ForceSpawnPoolComplete { json_report: json });
+                return;
+            }
+
+            let pool_fluid = if fluid_type == 1 {
+                voxel_gen::pools::PoolFluid::Lava
+            } else {
+                voxel_gen::pools::PoolFluid::Water
+            };
+
+            // Force spawn pool: carve basin + generate diagnostics
+            let (diagnostics, fluid_seeds) = {
+                let mut s = store.write().unwrap();
+                let density = s.density_fields.get_mut(&key).unwrap();
+                let world_origin = glam::Vec3::new(
+                    cx as f32 * chunk_size as f32,
+                    cy as f32 * chunk_size as f32,
+                    cz as f32 * chunk_size as f32,
+                );
+                voxel_gen::pools::force_spawn_pool(
+                    density,
+                    &cfg.pools,
+                    world_origin,
+                    cfg.seed,
+                    lx,
+                    ly,
+                    lz,
+                    pool_fluid,
+                    key,
+                )
+            };
+
+            // Remesh the dirty chunk
+            {
+                let cs = chunk_size;
+                let remesh_bounds = vec![(key, 0usize, 0usize, 0usize, cs, cs, cs)];
+                let mut s = store.write().unwrap();
+                let meshes = s.remesh_dirty(&remesh_bounds, &cfg, world_scale);
+                drop(s);
+
+                for (mkey, mesh) in meshes {
+                    let crystal_data = retrieve_crystal_data(store, mkey, cfg.voxel_scale(), world_scale);
+                    let _ = result_tx.send(WorkerResult::ChunkMesh {
+                        chunk: mkey,
+                        mesh,
+                        generation: 0,
+                        crystal_data,
+                    });
+                }
+            }
+
+            // Inject fluid seeds
+            for seed in &fluid_seeds {
+                let ft = match seed.fluid_type {
+                    voxel_gen::pools::PoolFluid::Water => voxel_fluid::cell::FluidType::WaterPool,
+                    voxel_gen::pools::PoolFluid::Lava => voxel_fluid::cell::FluidType::Lava,
+                };
+                let _ = fluid_event_tx.send(FluidEvent::AddFluid {
+                    chunk: seed.chunk,
+                    x: seed.lx,
+                    y: seed.ly,
+                    z: seed.lz,
+                    fluid_type: ft,
+                    level: 1.0,
+                    is_source: true,
+                });
+            }
+
+            // Run incremental seam pass
+            let _ = incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
+
+            // Send diagnostics as JSON
+            let json = serde_json::to_string(&diagnostics).unwrap_or_else(|_| "{}".to_string());
+            let _ = result_tx.send(WorkerResult::ForceSpawnPoolComplete { json_report: json });
+        }
     }
 }
 
