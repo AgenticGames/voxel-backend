@@ -96,16 +96,16 @@ pub fn place_pools(
                 // Use density values (not material enum) to match formations logic.
                 // Floor = solid voxel (density > 0) with air above (density <= 0).
                 if sample.density > 0.0 && above.density <= 0.0 {
-                    // Wall exclusion: reject voxels that are also wall surfaces.
-                    // A floor-only cell has solid neighbors horizontally; a wall cell
-                    // has air to the side. This matches formations.rs detect_surfaces()
-                    // which classifies Floor vs Wall mutually exclusively (lines 821-825).
-                    let has_air_xn = x > 0 && density.get(x - 1, y, z).density <= 0.0;
-                    let has_air_xp = x + 1 < size && density.get(x + 1, y, z).density <= 0.0;
-                    let has_air_zn = z > 0 && density.get(x, y, z - 1).density <= 0.0;
-                    let has_air_zp = z + 1 < size && density.get(x, y, z + 1).density <= 0.0;
-                    if has_air_xn || has_air_xp || has_air_zn || has_air_zp {
-                        continue; // wall surface or wall-floor edge — skip
+                    // Wall exclusion: reject voxels that are predominantly wall surfaces.
+                    // Allow cells with up to 2 horizontal air neighbors (floor near a wall edge),
+                    // but reject cells with 3+ open sides (ledge/pillar, not a pool-viable floor).
+                    let air_sides =
+                        (x > 0 && density.get(x - 1, y, z).density <= 0.0) as u8
+                        + (x + 1 < size && density.get(x + 1, y, z).density <= 0.0) as u8
+                        + (z > 0 && density.get(x, y, z - 1).density <= 0.0) as u8
+                        + (z + 1 < size && density.get(x, y, z + 1).density <= 0.0) as u8;
+                    if air_sides >= 3 {
+                        continue; // ledge or pillar — skip
                     }
 
                     // Ground depth check: require min_ground_depth contiguous solid below
