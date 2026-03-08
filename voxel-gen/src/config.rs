@@ -757,7 +757,7 @@ pub struct PoolConfig {
     pub max_radius: usize,
     /// Voxels carved below floor for basin
     pub basin_depth: usize,
-    /// Solid rim height above floor
+    /// Legacy: ignored by fill-then-carve basin algorithm (kept for FFI compatibility)
     pub rim_height: usize,
     /// Probability weight for water pools (normalized with lava_pct + empty_pct)
     pub water_pct: f32,
