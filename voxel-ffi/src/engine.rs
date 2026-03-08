@@ -1153,6 +1153,8 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
             cauldron_rim_stalagmite_count_max: if c.formation_cauldron_rim_stalagmite_count_max > 0 { c.formation_cauldron_rim_stalagmite_count_max } else { FormationConfig::default().cauldron_rim_stalagmite_count_max },
             cauldron_rim_stalagmite_scale: if c.formation_cauldron_rim_stalagmite_scale > 0.0 { c.formation_cauldron_rim_stalagmite_scale } else { FormationConfig::default().cauldron_rim_stalagmite_scale },
             cauldron_floor_noise: if c.formation_cauldron_floor_noise >= 0.0 { c.formation_cauldron_floor_noise } else { FormationConfig::default().cauldron_floor_noise },
+            cauldron_water_chance: if c.formation_cauldron_water_chance >= 0.0 { c.formation_cauldron_water_chance } else { FormationConfig::default().cauldron_water_chance },
+            cauldron_lava_chance: if c.formation_cauldron_lava_chance >= 0.0 { c.formation_cauldron_lava_chance } else { FormationConfig::default().cauldron_lava_chance },
         },
         pools: PoolConfig {
             enabled: c.pool_enabled != 0,

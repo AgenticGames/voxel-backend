@@ -1246,6 +1246,8 @@
             appendParam(parts, "form_cauldron_rim_stal_max", "gen-form-cauldron-rim-stal-max");
             appendParam(parts, "form_cauldron_rim_stal_scale", "gen-form-cauldron-rim-stal-scale");
             appendParam(parts, "form_cauldron_floor_noise", "gen-form-cauldron-floor-noise");
+            appendParam(parts, "form_cauldron_water_chance", "gen-form-cauldron-water-chance");
+            appendParam(parts, "form_cauldron_lava_chance", "gen-form-cauldron-lava-chance");
             // Stress settings
             appendParam(parts, "stress_gravity", "gen-stress-gravity");
             appendParam(parts, "stress_lateral", "gen-stress-lateral");

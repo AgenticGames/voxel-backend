@@ -96,7 +96,7 @@ pub fn generate_density(coord: ChunkCoord, config: &GenerationConfig) -> (Densit
     );
 
     // Step 3b: Place cave pools (water/lava lakes on cave floors)
-    let (pool_descriptors, fluid_seeds) = pools::place_pools(
+    let (pool_descriptors, mut fluid_seeds) = pools::place_pools(
         &mut density,
         &config.pools,
         world_origin,
@@ -107,7 +107,11 @@ pub fn generate_density(coord: ChunkCoord, config: &GenerationConfig) -> (Densit
 
     // Step 4: Place cave formations (stalactites, stalagmites, columns, flowstone)
     if config.formations.enabled {
-        formations::place_formations(&mut density, &config.formations, world_origin, config.seed, c_seed);
+        let formation_seeds = formations::place_formations(
+            &mut density, &config.formations, world_origin, config.seed, c_seed,
+            (coord.x, coord.y, coord.z),
+        );
+        fluid_seeds.extend(formation_seeds);
     }
 
     // Step 4b: Apply ore protrusion (push ore surfaces outward with smooth falloff)

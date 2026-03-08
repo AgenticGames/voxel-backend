@@ -286,7 +286,7 @@ pub struct FfiEngineConfig {
     pub formation_shield_radius_max: f32,
     pub formation_shield_max_tilt: f32,
     pub formation_shield_stalactite_chance: f32,
-    // Cauldron (9 fields)
+    // Cauldron (11 fields)
     pub formation_cauldron_chance: f32,
     pub formation_cauldron_radius_min: f32,
     pub formation_cauldron_radius_max: f32,
@@ -296,6 +296,8 @@ pub struct FfiEngineConfig {
     pub formation_cauldron_rim_stalagmite_count_max: u32,
     pub formation_cauldron_rim_stalagmite_scale: f32,
     pub formation_cauldron_floor_noise: f32,
+    pub formation_cauldron_water_chance: f32,
+    pub formation_cauldron_lava_chance: f32,
     // ── Geological Realism Toggles (14 fields, u8 booleans) ──
     pub ore_iron_sedimentary_only: u8,
     pub ore_iron_depth_fade: u8,

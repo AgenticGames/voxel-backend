@@ -1630,6 +1630,8 @@ mod tests {
             formation_cauldron_rim_stalagmite_count_max: 5,
             formation_cauldron_rim_stalagmite_scale: 0.5,
             formation_cauldron_floor_noise: 0.3,
+            formation_cauldron_water_chance: 0.5,
+            formation_cauldron_lava_chance: 0.2,
             // Geological Realism Toggles (all off in tests)
             ore_iron_sedimentary_only: 0,
             ore_iron_depth_fade: 0,

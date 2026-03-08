@@ -750,6 +750,8 @@ pub struct FormationConfig {
     pub cauldron_rim_stalagmite_count_max: u32,
     pub cauldron_rim_stalagmite_scale: f32,
     pub cauldron_floor_noise: f32,
+    pub cauldron_water_chance: f32,
+    pub cauldron_lava_chance: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -876,6 +878,8 @@ impl Default for FormationConfig {
             cauldron_rim_stalagmite_count_max: 5,
             cauldron_rim_stalagmite_scale: 0.5,
             cauldron_floor_noise: 0.3,
+            cauldron_water_chance: 0.5,
+            cauldron_lava_chance: 0.2,
         }
     }
 }

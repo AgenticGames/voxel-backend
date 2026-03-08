@@ -252,16 +252,22 @@ pub fn generate_region_densities(
     // Phase 6: Place cave formations per chunk
     let t5 = Instant::now();
     if config.formations.enabled {
-        for (&(cx, cy, cz), density) in density_fields.iter_mut() {
+        let mut sorted_keys: Vec<_> = density_fields.keys().copied().collect();
+        sorted_keys.sort();
+        for &(cx, cy, cz) in &sorted_keys {
             let coord = ChunkCoord::new(cx, cy, cz);
             let c_seed = crate::seed::chunk_seed(config.seed, coord);
-            crate::formations::place_formations(
-                density,
-                &config.formations,
-                coord.world_origin_bounds(eb),
-                config.seed,
-                c_seed,
-            );
+            if let Some(density) = density_fields.get_mut(&(cx, cy, cz)) {
+                let formation_seeds = crate::formations::place_formations(
+                    density,
+                    &config.formations,
+                    coord.world_origin_bounds(eb),
+                    config.seed,
+                    c_seed,
+                    (cx, cy, cz),
+                );
+                all_fluid_seeds.extend(formation_seeds);
+            }
         }
     }
     timings.formations = t5.elapsed();

@@ -394,6 +394,8 @@ fn serve_generate(
     let mut form_cauldron_rim_stal_max: Option<u32> = None;
     let mut form_cauldron_rim_stal_scale: Option<f32> = None;
     let mut form_cauldron_floor_noise: Option<f32> = None;
+    let mut form_cauldron_water_chance: Option<f32> = None;
+    let mut form_cauldron_lava_chance: Option<f32> = None;
     // Stress settings
     let mut stress_gravity: Option<f32> = None;
     let mut stress_lateral: Option<f32> = None;
@@ -563,6 +565,8 @@ fn serve_generate(
             "form_cauldron_rim_stal_max" => { form_cauldron_rim_stal_max = val.parse().ok(); }
             "form_cauldron_rim_stal_scale" => { form_cauldron_rim_stal_scale = val.parse().ok(); }
             "form_cauldron_floor_noise" => { form_cauldron_floor_noise = val.parse().ok(); }
+            "form_cauldron_water_chance" => { form_cauldron_water_chance = val.parse().ok(); }
+            "form_cauldron_lava_chance" => { form_cauldron_lava_chance = val.parse().ok(); }
             // Stress settings
             "stress_gravity" => { stress_gravity = val.parse().ok(); }
             "stress_lateral" => { stress_lateral = val.parse().ok(); }
@@ -768,6 +772,8 @@ fn serve_generate(
     if let Some(v) = form_cauldron_rim_stal_max { config.formations.cauldron_rim_stalagmite_count_max = v; }
     if let Some(v) = form_cauldron_rim_stal_scale { config.formations.cauldron_rim_stalagmite_scale = v; }
     if let Some(v) = form_cauldron_floor_noise { config.formations.cauldron_floor_noise = v; }
+    if let Some(v) = form_cauldron_water_chance { config.formations.cauldron_water_chance = v; }
+    if let Some(v) = form_cauldron_lava_chance { config.formations.cauldron_lava_chance = v; }
 
     // Build sleep config from UI overrides (stress settings embedded in sleep config)
     let mut sleep_cfg = SleepConfig::default();

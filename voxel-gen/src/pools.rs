@@ -57,6 +57,8 @@ pub struct FluidSeed {
     pub lz: u8,
     /// Water or Lava
     pub fluid_type: PoolFluid,
+    /// True for infinite sources (pools), false for finite fill (cauldrons)
+    pub is_source: bool,
 }
 
 /// A cluster of adjacent floor cells at similar Y levels.
@@ -325,6 +327,7 @@ pub fn place_pools(
                         ly: gy as u8,
                         lz: gz as u8,
                         fluid_type,
+                        is_source: true,
                     });
                 }
             }
@@ -681,6 +684,7 @@ pub fn force_spawn_pool(
                     ly: gy as u8,
                     lz: gz as u8,
                     fluid_type,
+                    is_source: true,
                 });
             }
         }

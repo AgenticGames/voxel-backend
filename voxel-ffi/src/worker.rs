@@ -580,7 +580,7 @@ fn handle_request(
                             voxel_gen::pools::PoolFluid::Lava => voxel_fluid::cell::FluidType::Lava,
                         },
                         level: 1.0,
-                        is_source: true,
+                        is_source: seed.is_source,
                     });
                 }
             }
@@ -1388,7 +1388,7 @@ fn handle_request(
                     z: seed.lz,
                     fluid_type: ft,
                     level: 1.0,
-                    is_source: true,
+                    is_source: seed.is_source,
                 });
             }
 

@@ -17,6 +17,7 @@ use voxel_noise::NoiseSource;
 
 use crate::config::FormationConfig;
 use crate::density::DensityField;
+use crate::pools::{FluidSeed, PoolFluid};
 
 /// Type of surface detected adjacent to air.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +127,7 @@ enum Formation {
         rim_stalagmite_scale: f32,
         floor_noise: f32,
         material: Material,
+        fluid_type: Option<PoolFluid>,
     },
 }
 
@@ -139,20 +141,23 @@ pub fn place_formations(
     world_origin: Vec3,
     world_seed: u64,
     chunk_seed: u64,
-) {
+    chunk_coord: (i32, i32, i32),
+) -> Vec<FluidSeed> {
     if !config.enabled {
-        return;
+        return Vec::new();
     }
+
+    let mut fluid_seeds = Vec::new();
 
     let size = density.size;
     if size < 4 {
-        return;
+        return fluid_seeds;
     }
 
     // Step A: Detect surfaces
     let surfaces = detect_surfaces(density, size);
     if surfaces.is_empty() {
-        return;
+        return fluid_seeds;
     }
 
     // Step B: Noise filter for world-coherent sparse placement
@@ -173,7 +178,7 @@ pub fn place_formations(
         .collect();
 
     if surfaces.is_empty() {
-        return;
+        return fluid_seeds;
     }
 
     // Step B2: Material preference gate — formations cluster in carbonate rocks
@@ -192,7 +197,7 @@ pub fn place_formations(
         .collect();
 
     if surfaces.is_empty() {
-        return;
+        return fluid_seeds;
     }
 
     // Step C: RNG filter + Step D: Column detection + Step E: Dimension rolls
@@ -493,6 +498,14 @@ pub fn place_formations(
             continue;
         }
         let rim_count = rng.gen_range(config.cauldron_rim_stalagmite_count_min..=config.cauldron_rim_stalagmite_count_max);
+        // Roll fluid type: water first, then lava if water fails
+        let cauldron_fluid = if rng.gen::<f32>() < config.cauldron_water_chance {
+            Some(PoolFluid::Water)
+        } else if rng.gen::<f32>() < config.cauldron_lava_chance {
+            Some(PoolFluid::Lava)
+        } else {
+            None
+        };
         formations.push(Formation::Cauldron {
             anchor_x: sp.x,
             anchor_y: sp.y,
@@ -504,6 +517,7 @@ pub fn place_formations(
             rim_stalagmite_scale: config.cauldron_rim_stalagmite_scale,
             floor_noise: config.cauldron_floor_noise,
             material: Material::Limestone,
+            fluid_type: cauldron_fluid,
         });
         used_floor.insert((sp.x, sp.y, sp.z), true);
     }
@@ -707,6 +721,7 @@ pub fn place_formations(
                 rim_stalagmite_scale,
                 floor_noise,
                 material,
+                fluid_type,
             } => {
                 write_cauldron(
                     density,
@@ -724,6 +739,73 @@ pub fn place_formations(
                     world_seed,
                     size,
                 );
+                if let Some(ft) = fluid_type {
+                    generate_cauldron_fluid_seeds(
+                        &mut fluid_seeds,
+                        *anchor_x,
+                        *anchor_y,
+                        *anchor_z,
+                        *radius,
+                        *depth,
+                        *ft,
+                        chunk_coord,
+                        size,
+                    );
+                }
+            }
+        }
+    }
+
+    fluid_seeds
+}
+
+/// Generate fluid seeds to fill a cauldron basin with non-source fluid.
+fn generate_cauldron_fluid_seeds(
+    seeds: &mut Vec<FluidSeed>,
+    anchor_x: usize,
+    anchor_y: usize,
+    anchor_z: usize,
+    radius: f32,
+    depth: f32,
+    fluid_type: PoolFluid,
+    chunk_coord: (i32, i32, i32),
+    size: usize,
+) {
+    let r_ceil = radius.ceil() as i32;
+    let ay = anchor_y as f32;
+
+    for dz in -r_ceil..=r_ceil {
+        for dx in -r_ceil..=r_ceil {
+            let dist_h = ((dx * dx + dz * dz) as f32).sqrt();
+            if dist_h >= radius {
+                continue;
+            }
+            let gx = anchor_x as i32 + dx;
+            let gz = anchor_z as i32 + dz;
+            if gx < 0 || gx >= size as i32 || gz < 0 || gz >= size as i32 {
+                continue;
+            }
+
+            // Same profile as write_cauldron Phase 1 carve
+            let rim_factor = dist_h / radius;
+            let carve_depth_at_r = depth * (1.0 - rim_factor.powf(0.3).min(1.0));
+            let bottom_y = (ay - carve_depth_at_r).floor() as i32;
+
+            // Fill from basin bottom up to anchor_y (exclusive — anchor_y is floor surface)
+            let min_y = bottom_y.max(0);
+            let max_y = anchor_y as i32; // exclusive
+            for iy in min_y..max_y {
+                if iy >= size as i32 {
+                    continue;
+                }
+                seeds.push(FluidSeed {
+                    chunk: chunk_coord,
+                    lx: gx as u8,
+                    ly: iy as u8,
+                    lz: gz as u8,
+                    fluid_type,
+                    is_source: false,
+                });
             }
         }
     }
@@ -1889,6 +1971,7 @@ mod tests {
             Vec3::ZERO,
             42,
             12345,
+            (0, 0, 0),
         );
         // Should complete without panic
     }
@@ -1919,6 +2002,7 @@ mod tests {
             Vec3::ZERO,
             42,
             12345,
+            (0, 0, 0),
         );
 
         // Count air voxels after — should have fewer (some filled by formations)
@@ -1943,7 +2027,7 @@ mod tests {
             enabled: false,
             ..FormationConfig::default()
         };
-        place_formations(&mut field, &config, Vec3::ZERO, 42, 12345);
+        place_formations(&mut field, &config, Vec3::ZERO, 42, 12345, (0, 0, 0));
 
         let after: Vec<f32> = field.samples.iter().map(|s| s.density).collect();
         assert_eq!(original, after, "Disabled formations should not modify field");
@@ -1988,10 +2072,10 @@ mod tests {
         };
 
         let mut field1 = make_cave_field(17, 3, 13);
-        place_formations(&mut field1, &config, Vec3::ZERO, 42, 12345);
+        place_formations(&mut field1, &config, Vec3::ZERO, 42, 12345, (0, 0, 0));
 
         let mut field2 = make_cave_field(17, 3, 13);
-        place_formations(&mut field2, &config, Vec3::ZERO, 42, 12345);
+        place_formations(&mut field2, &config, Vec3::ZERO, 42, 12345, (0, 0, 0));
 
         let d1: Vec<f32> = field1.samples.iter().map(|s| s.density).collect();
         let d2: Vec<f32> = field2.samples.iter().map(|s| s.density).collect();
@@ -2027,7 +2111,7 @@ mod tests {
             .filter(|s| s.density <= 0.0)
             .count();
 
-        place_formations(&mut field, &config, Vec3::ZERO, 42, 99999);
+        place_formations(&mut field, &config, Vec3::ZERO, 42, 99999, (0, 0, 0));
 
         let air_after: usize = field
             .samples
@@ -2083,7 +2167,7 @@ mod tests {
             .filter(|s| s.density <= 0.0)
             .count();
 
-        place_formations(&mut field, &config, Vec3::ZERO, 42, 55555);
+        place_formations(&mut field, &config, Vec3::ZERO, 42, 55555, (0, 0, 0));
 
         let air_after: usize = field
             .samples
@@ -2135,7 +2219,7 @@ mod tests {
             ..FormationConfig::default()
         };
 
-        place_formations(&mut field, &config, Vec3::ZERO, 42, 77777);
+        place_formations(&mut field, &config, Vec3::ZERO, 42, 77777, (0, 0, 0));
 
         // Rimstone dams both fill (dam walls) and carve (basins), so check density changed
         let densities_before: Vec<f32> = make_cave_field(size, 3, 14)
@@ -2188,7 +2272,7 @@ mod tests {
             ..FormationConfig::default()
         };
 
-        place_formations(&mut field, &config, Vec3::ZERO, 42, 88888);
+        place_formations(&mut field, &config, Vec3::ZERO, 42, 88888, (0, 0, 0));
 
         // Verify density field was modified (dams were placed)
         let mut reference = DensityField::new(size);
@@ -2259,7 +2343,7 @@ mod tests {
             .filter(|s| s.density <= 0.0)
             .count();
 
-        place_formations(&mut field, &config, Vec3::ZERO, 42, 88888);
+        place_formations(&mut field, &config, Vec3::ZERO, 42, 88888, (0, 0, 0));
 
         let air_after: usize = field
             .samples
@@ -2290,10 +2374,10 @@ mod tests {
         };
 
         let mut field1 = make_cave_field(17, 3, 13);
-        place_formations(&mut field1, &config, Vec3::ZERO, 42, 12345);
+        place_formations(&mut field1, &config, Vec3::ZERO, 42, 12345, (0, 0, 0));
 
         let mut field2 = make_cave_field(17, 3, 13);
-        place_formations(&mut field2, &config, Vec3::ZERO, 42, 12345);
+        place_formations(&mut field2, &config, Vec3::ZERO, 42, 12345, (0, 0, 0));
 
         let d1: Vec<f32> = field1.samples.iter().map(|s| s.density).collect();
         let d2: Vec<f32> = field2.samples.iter().map(|s| s.density).collect();
@@ -2328,7 +2412,7 @@ mod tests {
             .filter(|s| s.density <= 0.0)
             .count();
 
-        place_formations(&mut field, &config, Vec3::ZERO, 42, 11111);
+        place_formations(&mut field, &config, Vec3::ZERO, 42, 11111, (0, 0, 0));
 
         let air_after: usize = field
             .samples
@@ -2371,7 +2455,7 @@ mod tests {
             .filter(|s| s.density <= 0.0)
             .count();
 
-        place_formations(&mut field, &config, Vec3::ZERO, 42, 22222);
+        place_formations(&mut field, &config, Vec3::ZERO, 42, 22222, (0, 0, 0));
 
         let air_after: usize = field
             .samples
@@ -2415,7 +2499,7 @@ mod tests {
             .filter(|s| s.density > 0.0)
             .count();
 
-        place_formations(&mut field, &config, Vec3::ZERO, 42, 55555);
+        place_formations(&mut field, &config, Vec3::ZERO, 42, 55555, (0, 0, 0));
 
         let solid_after: usize = field
             .samples
