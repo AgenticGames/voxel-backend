@@ -96,7 +96,7 @@ pub fn fluid_sim_loop(
         for key in &all_dirty {
             let boundary = build_boundary_levels(*key, &chunks, chunk_size);
             if let Some(grid) = chunks.get_mut(key) {
-                let mesh = mesh_fluid(grid, &boundary);
+                let mesh = mesh_fluid(grid, &boundary, &config);
                 grid.dirty = false;
 
                 if !mesh.positions.is_empty() {

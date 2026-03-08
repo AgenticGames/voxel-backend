@@ -52,6 +52,11 @@ pub struct FluidConfig {
     // New: flow animation / density threshold
     pub flow_anim_speed: f32,
     pub solid_threshold: f32,
+    // Mesh post-processing
+    pub mesh_smooth_iterations: u32,
+    pub mesh_smooth_strength: f32,
+    pub mesh_qef_refinement: bool,
+    pub mesh_recalc_normals: bool,
 }
 
 impl Default for FluidConfig {
@@ -77,6 +82,10 @@ impl Default for FluidConfig {
             tunnel_bend_threshold: 0.0,
             flow_anim_speed: 1.0,
             solid_threshold: 0.0,
+            mesh_smooth_iterations: 2,
+            mesh_smooth_strength: 0.3,
+            mesh_qef_refinement: true,
+            mesh_recalc_normals: true,
         }
     }
 }

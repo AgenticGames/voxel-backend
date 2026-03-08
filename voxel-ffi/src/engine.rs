@@ -1549,6 +1549,10 @@ fn ffi_config_to_fluid(c: &FfiEngineConfig) -> FluidConfig {
         tunnel_bend_threshold: c.fluid_tunnel_bend_threshold,
         flow_anim_speed: 1.0,
         solid_threshold: 0.0,
+        mesh_smooth_iterations: 2,
+        mesh_smooth_strength: 0.3,
+        mesh_qef_refinement: true,
+        mesh_recalc_normals: true,
     }
 }
 
