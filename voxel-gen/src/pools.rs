@@ -114,6 +114,27 @@ pub fn place_pools(
                             continue; // pillar top or formation surface
                         }
                     }
+
+                    // Horizontality check: require at least 3 of 4 horizontal neighbors
+                    // at the same Y to also be solid. True floors extend horizontally;
+                    // wall surfaces have air on the cave-interior side.
+                    let mut solid_horiz = 0u32;
+                    let horiz: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+                    for (dx, dz) in horiz {
+                        let nx = x as i32 + dx;
+                        let nz = z as i32 + dz;
+                        if nx >= 0 && nx < size as i32 && nz >= 0 && nz < size as i32 {
+                            if density.get(nx as usize, y, nz as usize).material.is_solid() {
+                                solid_horiz += 1;
+                            }
+                        } else {
+                            solid_horiz += 1; // boundary counts as solid (conservative)
+                        }
+                    }
+                    if solid_horiz < 3 {
+                        continue; // wall surface or ledge edge — skip
+                    }
+
                     floor_cells.push((x, y, z));
                 }
             }
@@ -377,8 +398,12 @@ pub fn place_pools(
             }
         }
 
-        eprintln!("[POOL]   CARVING pool: center=({},{},{}) radius={} basin_depth={} fluid={:?}",
-            center_x, floor_y, center_z, effective_radius, config.basin_depth, fluid_type);
+        // Log cluster Y range and chosen center for debugging
+        let cluster_min_y = cluster.cells.iter().map(|&(_, y, _)| y).min().unwrap_or(0);
+        let cluster_max_y = cluster.cells.iter().map(|&(_, y, _)| y).max().unwrap_or(0);
+        eprintln!("[POOL]   CARVING pool: center=({},{},{}) radius={} basin_depth={} fluid={:?} cluster_y_range={}..{} cells={}",
+            center_x, floor_y, center_z, effective_radius, config.basin_depth, fluid_type,
+            cluster_min_y, cluster_max_y, cluster.cells.len());
 
         // Carve basin: set voxels below floor to air within radius circle
         for dz in -(effective_radius as i32)..=(effective_radius as i32) {
@@ -415,6 +440,61 @@ pub fn place_pools(
                         sample.material = Material::Air;
                     }
                 }
+
+                // DEBUG: Basin floor — set voxel just below carved depth to Limestone
+                let basin_floor_y = floor_y.wrapping_sub(config.basin_depth);
+                if basin_floor_y > 0 && basin_floor_y < size {
+                    let sample = density.get_mut(gx, basin_floor_y, gz);
+                    sample.density = 1.0;
+                    sample.material = Material::Limestone;
+                }
+
+                // DEBUG: Below-basin foundation — one more layer below basin floor
+                let foundation_y = basin_floor_y.wrapping_sub(1);
+                if foundation_y > 0 && foundation_y < size {
+                    let sample = density.get_mut(gx, foundation_y, gz);
+                    if sample.material.is_solid() {
+                        sample.material = Material::Limestone;
+                    }
+                }
+            }
+        }
+
+        // DEBUG: Basin walls — set solid voxels adjacent to carved area to Limestone
+        for dz in -(effective_radius as i32)..=(effective_radius as i32) {
+            for dx in -(effective_radius as i32)..=(effective_radius as i32) {
+                if dx * dx + dz * dz > r2 {
+                    continue;
+                }
+                let gx = center_x as i32 + dx;
+                let gz = center_z as i32 + dz;
+                if gx < 0 || gx >= size as i32 || gz < 0 || gz >= size as i32 {
+                    continue;
+                }
+                let gx = gx as usize;
+                let gz = gz as usize;
+
+                // Check each carved cell's 6 neighbors for solid — set to Limestone
+                for d in 0..config.basin_depth {
+                    let gy = floor_y.wrapping_sub(d);
+                    if gy >= size || gy == 0 {
+                        break;
+                    }
+                    let wall_offsets: [(i32, i32, i32); 6] = [
+                        (-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1),
+                    ];
+                    for (wdx, wdy, wdz) in wall_offsets {
+                        let wx = gx as i32 + wdx;
+                        let wy = gy as i32 + wdy;
+                        let wz = gz as i32 + wdz;
+                        if wx >= 0 && wx < size as i32 && wy >= 0 && wy < size as i32 && wz >= 0 && wz < size as i32 {
+                            let ws = density.get_mut(wx as usize, wy as usize, wz as usize);
+                            if ws.material.is_solid() {
+                                ws.material = Material::Limestone;
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -441,13 +521,12 @@ pub fn place_pools(
                     if gy >= size {
                         break;
                     }
-                    if !density.get(gx, gy, gz).material.is_solid() {
-                        // Get the host rock material from nearby solid before mutating
-                        let host_mat = find_nearby_solid(density, gx, gy, gz, size);
-                        let sample = density.get_mut(gx, gy, gz);
+                    // DEBUG: Use Limestone directly for rim visibility
+                    let sample = density.get_mut(gx, gy, gz);
+                    if !sample.material.is_solid() {
                         sample.density = 1.0;
-                        sample.material = host_mat;
                     }
+                    sample.material = Material::Limestone;
                 }
             }
         }
@@ -603,11 +682,23 @@ fn cluster_floors(
             }
         }
 
+        // Y-range trimming: discard cells that climbed up cave walls.
+        // Keep only cells within 2*max_y_step of the cluster's minimum Y.
+        // This caps vertical span so wall-climbing BFS cells are removed.
+        let min_y = cells.iter().map(|&(_, y, _)| y).min().unwrap_or(0);
+        let max_allowed_y = min_y + 2 * max_y_step;
+        let pre_trim = cells.len();
+        cells.retain(|&(_, y, _)| y <= max_allowed_y);
+        if cells.len() < pre_trim {
+            eprintln!("[POOL]   cluster Y-trim: min_y={} max_allowed_y={} trimmed {} → {} cells",
+                min_y, max_allowed_y, pre_trim, cells.len());
+        }
+
         if cells.len() < min_area {
             continue;
         }
 
-        // Compute centroid
+        // Compute centroid from retained (trimmed) cells only
         let mut sum_x = 0.0f32;
         let mut sum_y = 0.0f32;
         let mut sum_z = 0.0f32;
@@ -629,27 +720,44 @@ fn cluster_floors(
     clusters
 }
 
-/// Find the cluster cell nearest to the XZ centroid.
-/// Returns (x, y, z) of the closest cell — guaranteed to be an actual floor cell.
+/// Find the cluster cell nearest to the XZ centroid, preferring lowest Y.
+/// Two-pass: (1) find min XZ dist², (2) among cells within threshold of that min, pick lowest Y.
+/// This ensures we select the actual cave floor, not a wall/ledge cell at the same XZ.
 fn find_nearest_to_centroid(
     cells: &[(usize, usize, usize)],
     centroid_x: f32,
     centroid_z: f32,
 ) -> (usize, usize, usize) {
+    // Pass 1: find minimum XZ distance²
+    let mut min_dist2 = f32::MAX;
+    for &(x, _y, z) in cells {
+        let dx = x as f32 - centroid_x;
+        let dz = z as f32 - centroid_z;
+        let dist2 = dx * dx + dz * dz;
+        if dist2 < min_dist2 {
+            min_dist2 = dist2;
+        }
+    }
+
+    // Pass 2: among cells within threshold of min_dist², pick lowest Y
+    let threshold = min_dist2 + 2.0;
     let mut best = cells[0];
-    let mut best_dist = f32::MAX;
+    let mut best_y = usize::MAX;
     for &(x, y, z) in cells {
         let dx = x as f32 - centroid_x;
         let dz = z as f32 - centroid_z;
-        let dist = dx * dx + dz * dz;
-        if dist < best_dist {
-            best_dist = dist;
+        let dist2 = dx * dx + dz * dz;
+        if dist2 <= threshold && y < best_y {
+            best_y = y;
             best = (x, y, z);
         }
     }
     best
 }
 
+// DEBUG: find_nearby_solid temporarily unused — rim uses Limestone directly for visibility.
+// Restore when removing debug Limestone overrides.
+#[allow(dead_code)]
 /// Find the material of a nearby solid voxel (for rim reinforcement).
 fn find_nearby_solid(density: &DensityField, x: usize, y: usize, z: usize, size: usize) -> Material {
     let offsets: [(i32, i32, i32); 6] = [
@@ -1098,17 +1206,19 @@ mod tests {
     }
 
     #[test]
-    fn test_find_nearest_to_centroid_exact() {
+    fn test_find_nearest_to_centroid_prefers_lowest_y() {
+        // Two-pass: among cells near centroid, lowest Y wins.
+        // (6,10,5) is at dist²=0, (7,8,5) is at dist²=1. Both within threshold=2.0.
+        // Lowest Y=8 → picks (7,8,5).
         let cells = vec![(5, 10, 5), (6, 10, 5), (7, 8, 5)];
-        // Centroid at (6.0, 5.0) — cell (6,10,5) is closest
         let result = find_nearest_to_centroid(&cells, 6.0, 5.0);
-        assert_eq!(result, (6, 10, 5));
+        assert_eq!(result, (7, 8, 5));
     }
 
     #[test]
     fn test_find_nearest_to_centroid_offset() {
+        // (10,3,10) is closest in XZ at dist²=0.5, and also has lowest Y=3
         let cells = vec![(2, 5, 2), (8, 7, 8), (10, 3, 10)];
-        // Centroid closer to (10,3,10)
         let result = find_nearest_to_centroid(&cells, 9.5, 9.5);
         assert_eq!(result, (10, 3, 10));
     }

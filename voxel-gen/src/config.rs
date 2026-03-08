@@ -789,7 +789,7 @@ impl Default for PoolConfig {
             placement_frequency: 0.08,
             placement_threshold: 0.75,
             pool_chance: 0.3,
-            min_area: 4,
+            min_area: 6,
             max_radius: 4,
             basin_depth: 2,
             rim_height: 1,
@@ -799,8 +799,8 @@ impl Default for PoolConfig {
             min_air_above: 3,
             max_cave_height: 20,
             min_floor_thickness: 2,
-            min_ground_depth: 2,
-            max_y_step: 2,
+            min_ground_depth: 4,
+            max_y_step: 1,
             footprint_y_tolerance: 2,
         }
     }
