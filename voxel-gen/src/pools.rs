@@ -62,6 +62,7 @@ pub struct FluidSeed {
 /// A cluster of adjacent floor cells at similar Y levels.
 struct FloorCluster {
     cells: Vec<(usize, usize, usize)>, // (x, y, z) in grid coords
+    min_y: usize,
     centroid_x: f32,
     centroid_y: f32,
     centroid_z: f32,
@@ -76,7 +77,6 @@ pub fn place_pools(
     chunk_seed: u64,
 ) -> (Vec<PoolDescriptor>, Vec<FluidSeed>) {
     if !config.enabled {
-        eprintln!("[POOL] disabled, skipping");
         return (Vec::new(), Vec::new());
     }
 
@@ -85,50 +85,14 @@ pub fn place_pools(
         return (Vec::new(), Vec::new());
     }
 
-    // Step 1: Detect floor surfaces — solid voxels with air above,
-    // filtered by ground depth to reject pillar tops and formation surfaces.
+    // Step 1: Detect floor surfaces — solid voxels with air above
     let mut floor_cells: Vec<(usize, usize, usize)> = Vec::new();
     for z in 1..size - 1 {
         for y in 1..size - 2 {
             for x in 1..size - 1 {
                 let sample = density.get(x, y, z);
                 let above = density.get(x, y + 1, z);
-                // Use density values (not material enum) to match formations logic.
-                // Floor = solid voxel (density > 0) with air above (density <= 0).
-                if sample.density > 0.0 && above.density <= 0.0 {
-                    // Wall exclusion: reject voxels that are predominantly wall surfaces.
-                    // Allow cells with up to 2 horizontal air neighbors (floor near a wall edge),
-                    // but reject cells with 3+ open sides (ledge/pillar, not a pool-viable floor).
-                    let air_sides =
-                        (x > 0 && density.get(x - 1, y, z).density <= 0.0) as u8
-                        + (x + 1 < size && density.get(x + 1, y, z).density <= 0.0) as u8
-                        + (z > 0 && density.get(x, y, z - 1).density <= 0.0) as u8
-                        + (z + 1 < size && density.get(x, y, z + 1).density <= 0.0) as u8;
-                    if air_sides >= 3 {
-                        continue; // ledge or pillar — skip
-                    }
-
-                    // Ground depth check: require min_ground_depth contiguous solid below
-                    if config.min_ground_depth > 0 {
-                        let mut solid_below = 0usize;
-                        for d in 1..=config.min_ground_depth {
-                            let check_y = y.wrapping_sub(d);
-                            if check_y == 0 || check_y >= size {
-                                // Hit grid bottom — counts as passing
-                                solid_below = config.min_ground_depth;
-                                break;
-                            }
-                            if density.get(x, check_y, z).density > 0.0 {
-                                solid_below += 1;
-                            } else {
-                                break; // air gap — not deep ground
-                            }
-                        }
-                        if solid_below < config.min_ground_depth {
-                            continue; // pillar top or formation surface
-                        }
-                    }
-
+                if sample.material.is_solid() && !above.material.is_solid() {
                     floor_cells.push((x, y, z));
                 }
             }
@@ -136,18 +100,11 @@ pub fn place_pools(
     }
 
     if floor_cells.is_empty() {
-        eprintln!("[POOL] chunk ({},{},{}) no floor cells found (size={})",
-            world_origin.x, world_origin.y, world_origin.z, size);
         return (Vec::new(), Vec::new());
     }
 
     // Step 2: Cluster adjacent floors via BFS flood-fill on XZ at similar Y
-    let clusters = cluster_floors(&floor_cells, size, config.min_area, config.max_y_step);
-    eprintln!("[POOL] chunk ({},{},{}) floors={} clusters={} (min_area={}, thresh={:.2}, chance={:.2}, basin_depth={}, max_radius={})",
-        world_origin.x, world_origin.y, world_origin.z,
-        floor_cells.len(), clusters.len(),
-        config.min_area, config.placement_threshold, config.pool_chance,
-        config.basin_depth, config.max_radius);
+    let clusters = cluster_floors(&floor_cells, size, config.min_area);
 
     if clusters.is_empty() {
         return (Vec::new(), Vec::new());
@@ -178,16 +135,12 @@ pub fn place_pools(
             world_cz as f64 * config.placement_frequency,
         );
         if noise_val < config.placement_threshold {
-            eprintln!("[POOL]   cluster cells={} noise={:.3} < thresh={:.2} → skip",
-                cluster.cells.len(), noise_val, config.placement_threshold);
             continue;
         }
 
         // Step 4: RNG filter
         let rng_roll = rng.gen::<f32>();
         if rng_roll >= config.pool_chance {
-            eprintln!("[POOL]   cluster cells={} rng={:.3} >= chance={:.2} → skip",
-                cluster.cells.len(), rng_roll, config.pool_chance);
             continue;
         }
 
@@ -207,197 +160,45 @@ pub fn place_pools(
         };
 
         // Step 5: Carve basin
-        // Compute effective radius from cluster area.
-        let area_radius = ((cluster.cells.len() as f32) / std::f32::consts::PI).sqrt() as usize;
-        let effective_radius = area_radius.min(config.max_radius).max(1);
+        // Compute effective radius from cluster XZ extent
+        let mut min_x = usize::MAX;
+        let mut max_x = 0usize;
+        let mut min_z = usize::MAX;
+        let mut max_z = 0usize;
+        for &(cx, _, cz) in &cluster.cells {
+            if cx < min_x { min_x = cx; }
+            if cx > max_x { max_x = cx; }
+            if cz < min_z { min_z = cz; }
+            if cz > max_z { max_z = cz; }
+        }
+        let extent_x = (max_x - min_x + 1) as f32;
+        let extent_z = (max_z - min_z + 1) as f32;
+        let half_extent = (extent_x.min(extent_z) / 2.0).floor() as usize;
+        let effective_radius = half_extent.min(config.max_radius).max(1);
 
-        // Pick center as the cluster cell closest to the XZ centroid.
-        // Use that cell's actual Y — it's a real floor cell at the cave bottom.
-        // (Median Y is wrong for bowl-shaped caverns where wall-climbing cells
-        // inflate the median to mid-air. The adaptive footprint validation
-        // handles undulating terrain around this center Y.)
-        let (center_x, floor_y, center_z) = find_nearest_to_centroid(
-            &cluster.cells, cluster.centroid_x, cluster.centroid_z,
-        );
-        let surface_y = floor_y + 1; // pool surface is at the air layer above floor
+        let center_x = (min_x + max_x) / 2;
+        let center_z = (min_z + max_z) / 2;
+        let floor_y = cluster.min_y;
+        let surface_y = floor_y + 1;
 
         let r2 = (effective_radius * effective_radius) as i32;
 
-        // Pool footprint validation: check that enough of the disc has floor near center Y.
-        // Scans within ±footprint_y_tolerance to accept undulating terrain.
-        {
-            let mut floor_count = 0u32;
-            let mut total_count = 0u32;
-            let tol = config.footprint_y_tolerance;
-            for dz in -(effective_radius as i32)..=(effective_radius as i32) {
-                for dx in -(effective_radius as i32)..=(effective_radius as i32) {
-                    if dx * dx + dz * dz > r2 {
-                        continue;
-                    }
-                    let gx = center_x as i32 + dx;
-                    let gz = center_z as i32 + dz;
-                    if gx < 0 || gx >= size as i32 || gz < 0 || gz >= size as i32 {
-                        continue;
-                    }
-                    total_count += 1;
-                    // Check if ANY Y in [median_y - tol, median_y + tol] has solid-below-air
-                    let y_lo = floor_y.saturating_sub(tol);
-                    let y_hi = (floor_y + tol).min(size.saturating_sub(2));
-                    let mut cell_ok = false;
-                    for check_y in y_lo..=y_hi {
-                        if check_y + 1 < size {
-                            let f = density.get(gx as usize, check_y, gz as usize);
-                            let a = density.get(gx as usize, check_y + 1, gz as usize);
-                            if f.material.is_solid() && !a.material.is_solid() {
-                                cell_ok = true;
-                                break;
-                            }
-                        }
-                    }
-                    if cell_ok {
-                        floor_count += 1;
-                    }
-                }
+        // Headroom check: single center-point
+        let mut has_headroom = true;
+        for dy in 1..=config.min_air_above {
+            let check_y = surface_y + dy;
+            if check_y >= size {
+                break;
             }
-            if total_count > 0 && (floor_count * 2) < total_count {
-                eprintln!("[POOL]   insufficient footprint floor={}/{} at center ({},{},{}) → skip",
-                    floor_count, total_count, center_x, floor_y, center_z);
-                continue;
-            }
-        }
-
-        // Verify headroom: sample multiple points around the center and accept
-        // if ANY point has sufficient air above. In curved worm tunnels, the
-        // geometric center may have low clearance while nearby points are fine.
-        let headroom_offsets: [(i32, i32); 5] = [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)];
-        let mut has_headroom = false;
-        for &(hdx, hdz) in &headroom_offsets {
-            let hx = center_x as i32 + hdx;
-            let hz = center_z as i32 + hdz;
-            if hx < 0 || hx >= size as i32 || hz < 0 || hz >= size as i32 {
-                continue;
-            }
-            let mut point_ok = true;
-            for dy in 1..=config.min_air_above {
-                let check_y = surface_y + dy;
-                if check_y >= size {
-                    break;
-                }
-                let sample = density.get(hx as usize, check_y, hz as usize);
-                if sample.material.is_solid() {
-                    point_ok = false;
-                    break;
-                }
-            }
-            if point_ok {
-                has_headroom = true;
+            let sample = density.get(center_x, check_y, center_z);
+            if sample.material.is_solid() {
+                has_headroom = false;
                 break;
             }
         }
         if !has_headroom {
-            eprintln!("[POOL]   cluster cells={} no headroom at center ({},{},{}) → skip",
-                cluster.cells.len(), center_x, surface_y, center_z);
             continue;
         }
-
-        // Cave ceiling check: scan upward to find a solid ceiling within max_cave_height.
-        // If no ceiling is found, this is open terrain (not inside a cave) → skip.
-        if config.max_cave_height > 0 {
-            let mut has_ceiling = false;
-            let ceiling_offsets: [(i32, i32); 5] = [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)];
-            for &(cdx, cdz) in &ceiling_offsets {
-                let cx_check = center_x as i32 + cdx;
-                let cz_check = center_z as i32 + cdz;
-                if cx_check < 0 || cx_check >= size as i32 || cz_check < 0 || cz_check >= size as i32 {
-                    continue;
-                }
-                let start_y = surface_y + config.min_air_above + 1;
-                for dy in 0..config.max_cave_height {
-                    let check_y = start_y + dy;
-                    if check_y >= size {
-                        break;
-                    }
-                    if density.get(cx_check as usize, check_y, cz_check as usize).material.is_solid() {
-                        has_ceiling = true;
-                        break;
-                    }
-                }
-                if has_ceiling {
-                    break;
-                }
-            }
-            if !has_ceiling {
-                eprintln!("[POOL]   cluster cells={} no ceiling within {} at center ({},{},{}) → skip",
-                    cluster.cells.len(), config.max_cave_height, center_x, surface_y, center_z);
-                continue;
-            }
-        }
-
-        // Validate: floor/air interface near center, scanning within ±footprint_y_tolerance
-        // to handle undulating terrain.
-        {
-            let tol = config.footprint_y_tolerance;
-            let y_lo = floor_y.saturating_sub(tol);
-            let y_hi = (floor_y + tol).min(size.saturating_sub(2));
-            let mut found_interface = false;
-            for check_y in y_lo..=y_hi {
-                if check_y + 1 < size {
-                    let f = density.get(center_x, check_y, center_z);
-                    let a = density.get(center_x, check_y + 1, center_z);
-                    if f.material.is_solid() && !a.material.is_solid() {
-                        found_interface = true;
-                        break;
-                    }
-                }
-            }
-            if !found_interface {
-                eprintln!("[POOL]   cluster cells={} no floor/air interface within ±{} of floor_y={} at center ({},{}) → skip",
-                    cluster.cells.len(), tol, floor_y, center_x, center_z);
-                continue;
-            }
-        }
-
-        // Floor thickness check: ensure enough solid below basin bottom to support the pool.
-        if config.min_floor_thickness > 0 && config.basin_depth > 0 {
-            let thickness_offsets: [(i32, i32); 5] = [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)];
-            let mut thin_count = 0u32;
-            let mut checked = 0u32;
-            for &(tdx, tdz) in &thickness_offsets {
-                let tx = center_x as i32 + tdx;
-                let tz = center_z as i32 + tdz;
-                if tx < 0 || tx >= size as i32 || tz < 0 || tz >= size as i32 {
-                    continue;
-                }
-                checked += 1;
-                let basin_bottom = floor_y.saturating_sub(config.basin_depth);
-                let mut solid_below = 0usize;
-                for d in 1..=config.min_floor_thickness {
-                    let check_y = basin_bottom.wrapping_sub(d);
-                    if check_y >= size || check_y == 0 {
-                        break;
-                    }
-                    if density.get(tx as usize, check_y, tz as usize).material.is_solid() {
-                        solid_below += 1;
-                    }
-                }
-                if solid_below < config.min_floor_thickness {
-                    thin_count += 1;
-                }
-            }
-            // Skip if majority of sample points have insufficient floor thickness
-            if checked > 0 && thin_count * 2 > checked {
-                eprintln!("[POOL]   cluster cells={} thin floor at center ({},{},{}) thin={}/{} → skip",
-                    cluster.cells.len(), center_x, floor_y, center_z, thin_count, checked);
-                continue;
-            }
-        }
-
-        // Log cluster Y range and chosen center for debugging
-        let cluster_min_y = cluster.cells.iter().map(|&(_, y, _)| y).min().unwrap_or(0);
-        let cluster_max_y = cluster.cells.iter().map(|&(_, y, _)| y).max().unwrap_or(0);
-        eprintln!("[POOL]   CARVING pool: center=({},{},{}) radius={} basin_depth={} fluid={:?} cluster_y_range={}..{} cells={}",
-            center_x, floor_y, center_z, effective_radius, config.basin_depth, fluid_type,
-            cluster_min_y, cluster_max_y, cluster.cells.len());
 
         // Carve basin: set voxels below floor to air within radius circle
         for dz in -(effective_radius as i32)..=(effective_radius as i32) {
@@ -434,61 +235,6 @@ pub fn place_pools(
                         sample.material = Material::Air;
                     }
                 }
-
-                // DEBUG: Basin floor — set voxel just below carved depth to Limestone
-                let basin_floor_y = floor_y.wrapping_sub(config.basin_depth);
-                if basin_floor_y > 0 && basin_floor_y < size {
-                    let sample = density.get_mut(gx, basin_floor_y, gz);
-                    sample.density = 1.0;
-                    sample.material = Material::Limestone;
-                }
-
-                // DEBUG: Below-basin foundation — one more layer below basin floor
-                let foundation_y = basin_floor_y.wrapping_sub(1);
-                if foundation_y > 0 && foundation_y < size {
-                    let sample = density.get_mut(gx, foundation_y, gz);
-                    if sample.material.is_solid() {
-                        sample.material = Material::Limestone;
-                    }
-                }
-            }
-        }
-
-        // DEBUG: Basin walls — set solid voxels adjacent to carved area to Limestone
-        for dz in -(effective_radius as i32)..=(effective_radius as i32) {
-            for dx in -(effective_radius as i32)..=(effective_radius as i32) {
-                if dx * dx + dz * dz > r2 {
-                    continue;
-                }
-                let gx = center_x as i32 + dx;
-                let gz = center_z as i32 + dz;
-                if gx < 0 || gx >= size as i32 || gz < 0 || gz >= size as i32 {
-                    continue;
-                }
-                let gx = gx as usize;
-                let gz = gz as usize;
-
-                // Check each carved cell's 6 neighbors for solid — set to Limestone
-                for d in 0..config.basin_depth {
-                    let gy = floor_y.wrapping_sub(d);
-                    if gy >= size || gy == 0 {
-                        break;
-                    }
-                    let wall_offsets: [(i32, i32, i32); 6] = [
-                        (-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1),
-                    ];
-                    for (wdx, wdy, wdz) in wall_offsets {
-                        let wx = gx as i32 + wdx;
-                        let wy = gy as i32 + wdy;
-                        let wz = gz as i32 + wdz;
-                        if wx >= 0 && wx < size as i32 && wy >= 0 && wy < size as i32 && wz >= 0 && wz < size as i32 {
-                            let ws = density.get_mut(wx as usize, wy as usize, wz as usize);
-                            if ws.material.is_solid() {
-                                ws.material = Material::Limestone;
-                            }
-                        }
-                    }
-                }
             }
         }
 
@@ -515,12 +261,10 @@ pub fn place_pools(
                     if gy >= size {
                         break;
                     }
-                    // DEBUG: Use Limestone directly for rim visibility
+                    let host_mat = find_nearby_solid(density, gx, gy, gz, size);
                     let sample = density.get_mut(gx, gy, gz);
-                    if !sample.material.is_solid() {
-                        sample.density = 1.0;
-                    }
-                    sample.material = Material::Limestone;
+                    sample.density = 1.0;
+                    sample.material = host_mat;
                 }
             }
         }
@@ -969,12 +713,10 @@ pub fn is_pool_contained(
 }
 
 /// BFS flood-fill to cluster adjacent floor cells on XZ at similar Y levels.
-/// `max_y_step` controls how many Y-levels apart adjacent cells can be and still merge.
 fn cluster_floors(
     floor_cells: &[(usize, usize, usize)],
     grid_size: usize,
     min_area: usize,
-    max_y_step: usize,
 ) -> Vec<FloorCluster> {
     // Build a lookup set for O(1) membership checks
     // Key: (x, z) -> y values at that position
@@ -1019,9 +761,9 @@ fn cluster_floors(
 
                 if let Some(ys) = floor_map.get(&(nx, nz)) {
                     for &ny in ys {
-                        // Similar Y level: within max_y_step voxels
+                        // Similar Y level: within 2 voxels
                         if !visited.contains(&(nx, ny, nz))
-                            && (ny as i32 - cy as i32).unsigned_abs() <= max_y_step as u32
+                            && (ny as i32 - cy as i32).unsigned_abs() <= 2
                         {
                             visited.insert((nx, ny, nz));
                             queue.push_back((nx, ny, nz));
@@ -1031,23 +773,11 @@ fn cluster_floors(
             }
         }
 
-        // Y-range trimming: discard cells that climbed up cave walls.
-        // Keep only cells within 2*max_y_step of the cluster's minimum Y.
-        // This caps vertical span so wall-climbing BFS cells are removed.
-        let min_y = cells.iter().map(|&(_, y, _)| y).min().unwrap_or(0);
-        let max_allowed_y = min_y + 2 * max_y_step;
-        let pre_trim = cells.len();
-        cells.retain(|&(_, y, _)| y <= max_allowed_y);
-        if cells.len() < pre_trim {
-            eprintln!("[POOL]   cluster Y-trim: min_y={} max_allowed_y={} trimmed {} → {} cells",
-                min_y, max_allowed_y, pre_trim, cells.len());
-        }
-
         if cells.len() < min_area {
             continue;
         }
 
-        // Compute centroid from retained (trimmed) cells only
+        let min_y = cells.iter().map(|&(_, y, _)| y).min().unwrap_or(0);
         let mut sum_x = 0.0f32;
         let mut sum_y = 0.0f32;
         let mut sum_z = 0.0f32;
@@ -1060,6 +790,7 @@ fn cluster_floors(
 
         clusters.push(FloorCluster {
             cells,
+            min_y,
             centroid_x: sum_x / n,
             centroid_y: sum_y / n,
             centroid_z: sum_z / n,
@@ -1069,44 +800,6 @@ fn cluster_floors(
     clusters
 }
 
-/// Find the cluster cell nearest to the XZ centroid, preferring lowest Y.
-/// Two-pass: (1) find min XZ dist², (2) among cells within threshold of that min, pick lowest Y.
-/// This ensures we select the actual cave floor, not a wall/ledge cell at the same XZ.
-fn find_nearest_to_centroid(
-    cells: &[(usize, usize, usize)],
-    centroid_x: f32,
-    centroid_z: f32,
-) -> (usize, usize, usize) {
-    // Pass 1: find minimum XZ distance²
-    let mut min_dist2 = f32::MAX;
-    for &(x, _y, z) in cells {
-        let dx = x as f32 - centroid_x;
-        let dz = z as f32 - centroid_z;
-        let dist2 = dx * dx + dz * dz;
-        if dist2 < min_dist2 {
-            min_dist2 = dist2;
-        }
-    }
-
-    // Pass 2: among cells within threshold of min_dist², pick lowest Y
-    let threshold = min_dist2 + 2.0;
-    let mut best = cells[0];
-    let mut best_y = usize::MAX;
-    for &(x, y, z) in cells {
-        let dx = x as f32 - centroid_x;
-        let dz = z as f32 - centroid_z;
-        let dist2 = dx * dx + dz * dz;
-        if dist2 <= threshold && y < best_y {
-            best_y = y;
-            best = (x, y, z);
-        }
-    }
-    best
-}
-
-// DEBUG: find_nearby_solid temporarily unused — rim uses Limestone directly for visibility.
-// Restore when removing debug Limestone overrides.
-#[allow(dead_code)]
 /// Find the material of a nearby solid voxel (for rim reinforcement).
 fn find_nearby_solid(density: &DensityField, x: usize, y: usize, z: usize, size: usize) -> Material {
     let offsets: [(i32, i32, i32); 6] = [
@@ -1285,7 +978,7 @@ mod tests {
     fn test_cluster_floors_basic() {
         // 3 adjacent floor cells should form one cluster
         let cells = vec![(5, 8, 5), (6, 8, 5), (7, 8, 5), (5, 8, 6), (6, 8, 6), (7, 8, 6)];
-        let clusters = cluster_floors(&cells, 17, 3, 1);
+        let clusters = cluster_floors(&cells, 17, 3);
         assert_eq!(clusters.len(), 1);
         assert_eq!(clusters[0].cells.len(), 6);
     }
@@ -1294,92 +987,19 @@ mod tests {
     fn test_cluster_floors_min_area_filter() {
         // 2 cells, min_area=3 → no clusters
         let cells = vec![(5, 8, 5), (6, 8, 5)];
-        let clusters = cluster_floors(&cells, 17, 3, 1);
+        let clusters = cluster_floors(&cells, 17, 3);
         assert!(clusters.is_empty());
     }
 
     #[test]
-    fn test_cluster_floors_y_step_connects_undulating() {
-        // Floor cells at Y=8, 9, 10, 9, 8 across X — undulating by ±1 per step.
-        // With max_y_step=1, they should form one cluster.
-        // With max_y_step=2, cells 2 steps apart should also connect.
+    fn test_cluster_floors_y_tolerance() {
+        // Floor cells at Y=8, 9, 10, 9, 8 — all within hardcoded Y tolerance of 2
         let cells = vec![
             (3, 8, 5), (4, 9, 5), (5, 10, 5), (6, 9, 5), (7, 8, 5),
         ];
-        // max_y_step=1: all connect because each neighbor differs by exactly 1
-        let clusters_1 = cluster_floors(&cells, 17, 2, 1);
-        assert_eq!(clusters_1.len(), 1, "max_y_step=1 should connect ±1 undulating floor");
-        assert_eq!(clusters_1[0].cells.len(), 5);
-
-        // Cells with a 2-step Y gap between adjacent XZ neighbors.
-        // Use enough cells at each Y level so they can form clusters individually.
-        let cells_gap = vec![
-            (3, 8, 5), (3, 8, 6),   // cluster A at Y=8
-            (4, 10, 5), (4, 10, 6), // cluster B at Y=10
-        ];
-        // max_y_step=1: gaps of 2 → two separate clusters
-        let clusters_tight = cluster_floors(&cells_gap, 17, 2, 1);
-        assert_eq!(clusters_tight.len(), 2, "max_y_step=1 should NOT connect 2-step gaps");
-
-        // max_y_step=2: gaps of 2 → single cluster
-        let clusters_wide = cluster_floors(&cells_gap, 17, 2, 2);
-        assert_eq!(clusters_wide.len(), 1, "max_y_step=2 should connect 2-step gaps");
-        assert_eq!(clusters_wide[0].cells.len(), 4);
-    }
-
-    #[test]
-    fn test_footprint_y_tolerance_accepts_undulating() {
-        // Build a density field with an undulating floor (Y varies between 7-9)
-        // and verify pools can place on it with footprint_y_tolerance=2.
-        let config = PoolConfig {
-            pool_chance: 1.0,
-            placement_threshold: -1.0,
-            min_area: 3,
-            water_pct: 1.0,
-            lava_pct: 0.0,
-            empty_pct: 0.0,
-            max_cave_height: 0,
-            min_floor_thickness: 0,
-            min_ground_depth: 0,
-            max_y_step: 2,
-            footprint_y_tolerance: 2,
-            ..Default::default()
-        };
-
-        let size = 17;
-        let mut density = DensityField::new(size);
-
-        // Fill everything solid
-        for z in 0..size {
-            for y in 0..size {
-                for x in 0..size {
-                    let sample = density.get_mut(x, y, z);
-                    sample.density = 1.0;
-                    sample.material = Material::Limestone;
-                }
-            }
-        }
-
-        // Carve air above an undulating floor (Y=7 at edges, Y=9 at center)
-        for z in 3..14 {
-            for x in 3..14 {
-                let dx = (x as f32 - 8.0).abs();
-                let dz = (z as f32 - 8.0).abs();
-                let dist = dx.max(dz);
-                let floor_y = if dist <= 2.0 { 9 } else if dist <= 4.0 { 8 } else { 7 };
-                for y in (floor_y + 1)..15 {
-                    let sample = density.get_mut(x, y, z);
-                    sample.density = -1.0;
-                    sample.material = Material::Air;
-                }
-            }
-        }
-
-        let (descriptors, _seeds) = place_pools(&mut density, &config, Vec3::ZERO, 42, 100);
-        assert!(
-            !descriptors.is_empty(),
-            "Pools should place on undulating terrain with footprint_y_tolerance=2"
-        );
+        let clusters = cluster_floors(&cells, 17, 2);
+        assert_eq!(clusters.len(), 1, "cells within Y tolerance of 2 should form one cluster");
+        assert_eq!(clusters[0].cells.len(), 5);
     }
 
     /// Diagnostic: Generate real cave density and check if pools are placed.
@@ -1479,107 +1099,6 @@ mod tests {
     }
 
     #[test]
-    fn test_pool_floor_y_matches_center() {
-        // Create a density field with a sloped floor: Y=5 at x<8, Y=10 at x>=8.
-        // The cluster center will be at x=8 where floor is Y=10.
-        // The bug was using min_y=5 which would place the pool inside the wall.
-        let config = PoolConfig {
-            pool_chance: 1.0,
-            placement_threshold: -1.0,
-            min_area: 2,
-            water_pct: 1.0,
-            lava_pct: 0.0,
-            empty_pct: 0.0,
-            basin_depth: 2,
-            max_radius: 3,
-            min_air_above: 1,
-            ..Default::default()
-        };
-
-        let size = 17;
-        let mut density = DensityField::new(size);
-
-        // Fill everything solid first
-        for z in 0..size {
-            for y in 0..size {
-                for x in 0..size {
-                    let sample = density.get_mut(x, y, z);
-                    sample.density = 1.0;
-                    sample.material = Material::Limestone;
-                }
-            }
-        }
-
-        // Carve a tunnel with a sloped floor:
-        // At x < 8, floor is at Y=5 (air from Y=6..12)
-        // At x >= 8, floor is at Y=10 (air from Y=11..12)
-        // The slope is within ±1 Y per step so BFS will still connect them
-        let floor_heights: Vec<(usize, usize)> = (3usize..14).map(|x| {
-            let floor_y = if x < 8 { 5 + (x.saturating_sub(3).min(5)) } else { 10 };
-            (x, floor_y)
-        }).collect();
-
-        for &(x, floor_y) in &floor_heights {
-            for z in 5..12 {
-                for y in (floor_y + 1)..13 {
-                    let sample = density.get_mut(x, y, z);
-                    sample.density = -1.0;
-                    sample.material = Material::Air;
-                }
-            }
-        }
-
-        let (descriptors, _seeds) = place_pools(&mut density, &config, Vec3::ZERO, 42, 100);
-
-        // If any pool is placed, its floor_y (in world space) should NOT be at Y=5
-        // (the old min_y). It should be at the actual floor level near the center.
-        for d in &descriptors {
-            let pool_floor_y = d.surface_y - 1.0; // surface_y = floor_y + 1
-            let pool_center_x = d.world_x as usize;
-
-            // Look up what the actual floor Y is at the pool center
-            let expected_floor_y = floor_heights.iter()
-                .find(|&&(x, _)| x == pool_center_x)
-                .map(|&(_, fy)| fy as f32);
-
-            if let Some(expected) = expected_floor_y {
-                let diff = (pool_floor_y - expected).abs();
-                assert!(
-                    diff <= 1.0,
-                    "Pool at x={} has floor_y={} but actual floor is at y={}. \
-                     Pool placed at wrong Y level (off by {} voxels).",
-                    pool_center_x, pool_floor_y, expected, diff
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_find_nearest_to_centroid_prefers_lowest_y() {
-        // Two-pass: among cells near centroid, lowest Y wins.
-        // (6,10,5) is at dist²=0, (7,8,5) is at dist²=1. Both within threshold=2.0.
-        // Lowest Y=8 → picks (7,8,5).
-        let cells = vec![(5, 10, 5), (6, 10, 5), (7, 8, 5)];
-        let result = find_nearest_to_centroid(&cells, 6.0, 5.0);
-        assert_eq!(result, (7, 8, 5));
-    }
-
-    #[test]
-    fn test_find_nearest_to_centroid_offset() {
-        // (10,3,10) is closest in XZ at dist²=0.5, and also has lowest Y=3
-        let cells = vec![(2, 5, 2), (8, 7, 8), (10, 3, 10)];
-        let result = find_nearest_to_centroid(&cells, 9.5, 9.5);
-        assert_eq!(result, (10, 3, 10));
-    }
-
-    #[test]
-    fn test_find_nearest_to_centroid_single() {
-        let cells = vec![(4, 6, 4)];
-        let result = find_nearest_to_centroid(&cells, 0.0, 0.0);
-        assert_eq!(result, (4, 6, 4));
-    }
-
-    #[test]
     fn test_pool_prefills_basin_volume() {
         // Verify that seeds span multiple Y levels (not just surface_y)
         let config = PoolConfig {
@@ -1624,56 +1143,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_ground_depth_rejects_pillar_tops() {
-        // Create a pillar 3 voxels tall with air below — should be rejected
-        // when min_ground_depth=4
-        let config = PoolConfig {
-            pool_chance: 1.0,
-            placement_threshold: -1.0,
-            min_area: 2,
-            water_pct: 1.0,
-            lava_pct: 0.0,
-            empty_pct: 0.0,
-            max_cave_height: 0,
-            min_floor_thickness: 0,
-            min_ground_depth: 4, // require 4 solid below
-            ..Default::default()
-        };
-
-        let size = 17;
-        let mut density = DensityField::new(size);
-
-        // Fill everything as air
-        for z in 0..size {
-            for y in 0..size {
-                for x in 0..size {
-                    let sample = density.get_mut(x, y, z);
-                    sample.density = -1.0;
-                    sample.material = Material::Air;
-                }
-            }
-        }
-
-        // Create a thin pillar: solid at y=5,6,7 (3 voxels tall), air below at y=4
-        // Top of pillar at y=7, air at y=8 — this is a "floor cell" at y=7
-        // But only 2 solid below (y=6, y=5) before hitting air at y=4
-        for z in 5..12 {
-            for x in 5..12 {
-                for y in 5..8 {
-                    let sample = density.get_mut(x, y, z);
-                    sample.density = 1.0;
-                    sample.material = Material::Limestone;
-                }
-            }
-        }
-
-        let (descriptors, _seeds) = place_pools(&mut density, &config, Vec3::ZERO, 42, 100);
-        assert!(
-            descriptors.is_empty(),
-            "Pools should NOT spawn on pillar tops with min_ground_depth=4 \
-             (pillar only 3 voxels tall). Got {} pools.",
-            descriptors.len()
-        );
-    }
 }
