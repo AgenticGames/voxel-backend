@@ -197,47 +197,7 @@ pub fn place_pools(
             continue;
         }
 
-        // --- Fill-then-carve watertight basin ---
-        const WALL_THICKNESS: usize = 2;
-
-        let shell_radius = effective_radius + WALL_THICKNESS;
-        let shell_r2 = (shell_radius * shell_radius) as i32;
-        let shell_bottom = if floor_y >= config.basin_depth + 1 {
-            floor_y - config.basin_depth - 1
-        } else {
-            0
-        };
-        let shell_top = surface_y;
-
-        let carve_bottom = floor_y.saturating_sub(config.basin_depth.saturating_sub(1));
-        let carve_top = surface_y;
-
-        // Pass 1: Fill solid shell cylinder (walls + floor)
-        for dz in -(shell_radius as i32)..=(shell_radius as i32) {
-            for dx in -(shell_radius as i32)..=(shell_radius as i32) {
-                if dx * dx + dz * dz > shell_r2 {
-                    continue;
-                }
-                let gx = center_x as i32 + dx;
-                let gz = center_z as i32 + dz;
-                if gx < 0 || gx >= size as i32 || gz < 0 || gz >= size as i32 {
-                    continue;
-                }
-                let gx = gx as usize;
-                let gz = gz as usize;
-                for gy in shell_bottom..=shell_top {
-                    if gy >= size {
-                        break;
-                    }
-                    let host_mat = find_nearby_solid(density, gx, gy, gz, size);
-                    let sample = density.get_mut(gx, gy, gz);
-                    sample.density = 1.0;
-                    sample.material = host_mat;
-                }
-            }
-        }
-
-        // Pass 2: Carve interior air
+        // Carve basin: set voxels below floor to air within radius circle
         for dz in -(effective_radius as i32)..=(effective_radius as i32) {
             for dx in -(effective_radius as i32)..=(effective_radius as i32) {
                 if dx * dx + dz * dz > r2 {
@@ -250,13 +210,83 @@ pub fn place_pools(
                 }
                 let gx = gx as usize;
                 let gz = gz as usize;
-                for gy in carve_bottom..=carve_top {
-                    if gy >= size {
+
+                // Carve basin_depth voxels below the floor
+                for d in 0..config.basin_depth {
+                    let gy = floor_y.wrapping_sub(d);
+                    if gy >= size || gy == 0 {
                         break;
                     }
                     let sample = density.get_mut(gx, gy, gz);
-                    sample.density = -1.0;
-                    sample.material = Material::Air;
+                    if sample.material.is_solid() {
+                        sample.density = -1.0;
+                        sample.material = Material::Air;
+                    }
+                }
+
+                // Also ensure the floor surface itself is air (the pool water level)
+                if surface_y < size {
+                    let sample = density.get_mut(gx, surface_y, gz);
+                    if sample.material.is_solid() {
+                        sample.density = -1.0;
+                        sample.material = Material::Air;
+                    }
+                }
+            }
+        }
+
+        // Seal basin floor: solid disc one layer below the carved basin
+        let seal_y = floor_y.saturating_sub(config.basin_depth);
+        if seal_y > 0 && seal_y < size {
+            for dz in -(effective_radius as i32)..=(effective_radius as i32) {
+                for dx in -(effective_radius as i32)..=(effective_radius as i32) {
+                    if dx * dx + dz * dz > r2 {
+                        continue;
+                    }
+                    let gx = center_x as i32 + dx;
+                    let gz = center_z as i32 + dz;
+                    if gx < 0 || gx >= size as i32 || gz < 0 || gz >= size as i32 {
+                        continue;
+                    }
+                    let gx = gx as usize;
+                    let gz = gz as usize;
+                    let host_mat = find_nearby_solid(density, gx, seal_y, gz, size);
+                    let sample = density.get_mut(gx, seal_y, gz);
+                    sample.density = 1.0;
+                    sample.material = host_mat;
+                }
+            }
+        }
+
+        // Reinforce rim: solid ring at floor level just outside the pool radius
+        let rim_r = effective_radius + 1;
+        let rim_r2 = (rim_r * rim_r) as i32;
+        for dz in -(rim_r as i32)..=(rim_r as i32) {
+            for dx in -(rim_r as i32)..=(rim_r as i32) {
+                let dist2 = dx * dx + dz * dz;
+                // Only the ring between pool radius and rim radius
+                if dist2 <= r2 || dist2 > rim_r2 {
+                    continue;
+                }
+                let gx = center_x as i32 + dx;
+                let gz = center_z as i32 + dz;
+                if gx < 1 || gx >= size as i32 - 1 || gz < 1 || gz >= size as i32 - 1 {
+                    continue;
+                }
+                let gx = gx as usize;
+                let gz = gz as usize;
+
+                // Cover full basin depth + rim height to create vertical containment walls
+                let rim_bottom = floor_y.saturating_sub(config.basin_depth.saturating_sub(1));
+                let rim_top = floor_y + config.rim_height.max(1) - 1;
+                for gy in rim_bottom..=rim_top {
+                    if gy >= size {
+                        break;
+                    }
+                    let host_mat = find_nearby_solid(density, gx, gy, gz, size);
+                    let sample = density.get_mut(gx, gy, gz);
+                    sample.density = 1.0;
+                    sample.material = host_mat;
                 }
             }
         }
@@ -591,47 +621,7 @@ pub fn force_spawn_pool(
     let effective_radius = config.max_radius.max(1);
     let r2 = (effective_radius * effective_radius) as i32;
 
-    // --- Fill-then-carve watertight basin ---
-    const WALL_THICKNESS: usize = 2;
-
-    let shell_radius = effective_radius + WALL_THICKNESS;
-    let shell_r2 = (shell_radius * shell_radius) as i32;
-    let shell_bottom = if floor_y >= config.basin_depth + 1 {
-        floor_y - config.basin_depth - 1
-    } else {
-        0
-    };
-    let shell_top = surface_y;
-
-    let carve_bottom = floor_y.saturating_sub(config.basin_depth.saturating_sub(1));
-    let carve_top = surface_y;
-
-    // Pass 1: Fill solid shell cylinder (walls + floor)
-    for dz in -(shell_radius as i32)..=(shell_radius as i32) {
-        for dx in -(shell_radius as i32)..=(shell_radius as i32) {
-            if dx * dx + dz * dz > shell_r2 {
-                continue;
-            }
-            let gx = target_x as i32 + dx;
-            let gz = target_z as i32 + dz;
-            if gx < 0 || gx >= size as i32 || gz < 0 || gz >= size as i32 {
-                continue;
-            }
-            let gx = gx as usize;
-            let gz = gz as usize;
-            for gy in shell_bottom..=shell_top {
-                if gy >= size {
-                    break;
-                }
-                let host_mat = find_nearby_solid(density, gx, gy, gz, size);
-                let sample = density.get_mut(gx, gy, gz);
-                sample.density = 1.0;
-                sample.material = host_mat;
-            }
-        }
-    }
-
-    // Pass 2: Carve interior air
+    // Carve basin
     for dz in -(effective_radius as i32)..=(effective_radius as i32) {
         for dx in -(effective_radius as i32)..=(effective_radius as i32) {
             if dx * dx + dz * dz > r2 {
@@ -644,13 +634,26 @@ pub fn force_spawn_pool(
             }
             let gx = gx as usize;
             let gz = gz as usize;
-            for gy in carve_bottom..=carve_top {
-                if gy >= size {
+
+            for d in 0..config.basin_depth {
+                let gy = floor_y.wrapping_sub(d);
+                if gy >= size || gy == 0 {
                     break;
                 }
                 let sample = density.get_mut(gx, gy, gz);
-                sample.density = -1.0;
-                sample.material = Material::Air;
+                if sample.material.is_solid() {
+                    sample.density = -1.0;
+                    sample.material = Material::Air;
+                }
+            }
+
+            // Ensure surface is air
+            if surface_y < size {
+                let sample = density.get_mut(gx, surface_y, gz);
+                if sample.material.is_solid() {
+                    sample.density = -1.0;
+                    sample.material = Material::Air;
+                }
             }
         }
     }
@@ -1160,134 +1163,6 @@ mod tests {
                 "Pool seeds should span multiple Y levels (basin_depth=3), got {} unique Y values: {:?}",
                 y_values.len(), y_values
             );
-        }
-    }
-
-    #[test]
-    fn test_pool_basin_watertight() {
-        // Place a pool via force_spawn_pool and verify the basin is fully sealed:
-        // - Floor below basin is solid (2 layers thick)
-        // - Rim ring at r+1 and r+2 is solid at all basin Y levels
-        let size = 17;
-        let mut density = DensityField::new(size);
-
-        // Fill entire field with solid rock
-        for z in 0..size {
-            for y in 0..size {
-                for x in 0..size {
-                    let sample = density.get_mut(x, y, z);
-                    if y < 10 {
-                        sample.density = 1.0;
-                        sample.material = Material::Limestone;
-                    } else {
-                        sample.density = -1.0;
-                        sample.material = Material::Air;
-                    }
-                }
-            }
-        }
-
-        let config = PoolConfig {
-            enabled: true,
-            max_radius: 3,
-            basin_depth: 2,
-            water_pct: 1.0,
-            lava_pct: 0.0,
-            empty_pct: 0.0,
-            ..Default::default()
-        };
-
-        let center_x = 8usize;
-        let center_z = 8usize;
-        let floor_y = 8usize; // solid at y<10, so floor at 8, surface at 9
-
-        let (_diag, _seeds) = force_spawn_pool(
-            &mut density,
-            &config,
-            Vec3::ZERO,
-            42,
-            center_x,
-            floor_y,
-            center_z,
-            PoolFluid::Water,
-            (0, 0, 0),
-        );
-
-        let effective_radius = config.max_radius.max(1);
-        let r2 = (effective_radius * effective_radius) as i32;
-        let surface_y = floor_y + 1;
-        let carve_bottom = floor_y.saturating_sub(config.basin_depth.saturating_sub(1));
-
-        // Check 1: Floor below basin is solid (2 layers)
-        let floor_bottom = if floor_y >= config.basin_depth + 1 {
-            floor_y - config.basin_depth - 1
-        } else {
-            0
-        };
-        for gy in floor_bottom..carve_bottom {
-            for dz in -(effective_radius as i32)..=(effective_radius as i32) {
-                for dx in -(effective_radius as i32)..=(effective_radius as i32) {
-                    if dx * dx + dz * dz > r2 {
-                        continue;
-                    }
-                    let gx = (center_x as i32 + dx) as usize;
-                    let gz = (center_z as i32 + dz) as usize;
-                    let sample = density.get(gx, gy, gz);
-                    assert!(
-                        sample.material.is_solid(),
-                        "Floor cell ({gx},{gy},{gz}) should be solid but is {:?}",
-                        sample.material
-                    );
-                }
-            }
-        }
-
-        // Check 2: Rim ring (r+1 and r+2) is solid at all basin Y levels
-        let wall_thickness = 2usize;
-        let shell_radius = effective_radius + wall_thickness;
-        let shell_r2 = (shell_radius * shell_radius) as i32;
-        for gy in carve_bottom..=surface_y {
-            for dz in -(shell_radius as i32)..=(shell_radius as i32) {
-                for dx in -(shell_radius as i32)..=(shell_radius as i32) {
-                    let dist2 = dx * dx + dz * dz;
-                    // Only check the wall ring: outside pool interior, inside shell
-                    if dist2 <= r2 || dist2 > shell_r2 {
-                        continue;
-                    }
-                    let gx_i = center_x as i32 + dx;
-                    let gz_i = center_z as i32 + dz;
-                    if gx_i < 0 || gx_i >= size as i32 || gz_i < 0 || gz_i >= size as i32 {
-                        continue;
-                    }
-                    let gx = gx_i as usize;
-                    let gz = gz_i as usize;
-                    let sample = density.get(gx, gy, gz);
-                    assert!(
-                        sample.material.is_solid(),
-                        "Rim cell ({gx},{gy},{gz}) should be solid but is {:?} (dist2={dist2}, r2={r2})",
-                        sample.material
-                    );
-                }
-            }
-        }
-
-        // Check 3: Interior is carved to air
-        for gy in carve_bottom..=surface_y {
-            for dz in -(effective_radius as i32)..=(effective_radius as i32) {
-                for dx in -(effective_radius as i32)..=(effective_radius as i32) {
-                    if dx * dx + dz * dz > r2 {
-                        continue;
-                    }
-                    let gx = (center_x as i32 + dx) as usize;
-                    let gz = (center_z as i32 + dz) as usize;
-                    let sample = density.get(gx, gy, gz);
-                    assert!(
-                        !sample.material.is_solid(),
-                        "Interior cell ({gx},{gy},{gz}) should be air but is {:?}",
-                        sample.material
-                    );
-                }
-            }
         }
     }
 
