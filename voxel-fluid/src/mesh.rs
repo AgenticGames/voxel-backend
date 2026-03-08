@@ -339,7 +339,7 @@ fn compute_flow_direction(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -
 pub fn dominant_fluid_type(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> FluidType {
     let mut lava_count = 0u32;
     // Index 0 unused; indices 1,3-8 are water-family types
-    let mut water_counts = [0u32; 9];
+    let mut water_counts = [0u32; 10];
     let size = grid.size;
 
     for cz in z..=(z + 1).min(size - 1) {

@@ -576,7 +576,7 @@ fn handle_request(
                         y: seed.ly,
                         z: seed.lz,
                         fluid_type: match seed.fluid_type {
-                            voxel_gen::pools::PoolFluid::Water => voxel_fluid::cell::FluidType::Water,
+                            voxel_gen::pools::PoolFluid::Water => voxel_fluid::cell::FluidType::WaterPool,
                             voxel_gen::pools::PoolFluid::Lava => voxel_fluid::cell::FluidType::Lava,
                         },
                         level: 1.0,

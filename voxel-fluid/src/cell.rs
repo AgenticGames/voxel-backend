@@ -1,5 +1,5 @@
 /// Fluid type: Water (6 debug-colored subtypes) or Lava.
-/// Values match UE rendering expectations: 1=Water, 2=Lava, 3-8=water subtypes.
+/// Values match UE rendering expectations: 1=Water, 2=Lava, 3-9=water subtypes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FluidType {
@@ -11,6 +11,7 @@ pub enum FluidType {
     WaterRiver = 6,
     WaterArtesian = 7,
     WaterHydrothermal = 8,
+    WaterPool = 9,
 }
 
 impl FluidType {
@@ -37,6 +38,7 @@ impl FluidType {
             6 => FluidType::WaterRiver,
             7 => FluidType::WaterArtesian,
             8 => FluidType::WaterHydrothermal,
+            9 => FluidType::WaterPool,
             _ => FluidType::Water,
         }
     }
@@ -391,6 +393,7 @@ mod tests {
         assert!(FluidType::WaterRiver.is_water());
         assert!(FluidType::WaterArtesian.is_water());
         assert!(FluidType::WaterHydrothermal.is_water());
+        assert!(FluidType::WaterPool.is_water());
         assert!(!FluidType::Lava.is_water());
 
         assert!(FluidType::Lava.is_lava());
@@ -401,6 +404,7 @@ mod tests {
         assert!(!FluidType::WaterRiver.is_lava());
         assert!(!FluidType::WaterArtesian.is_lava());
         assert!(!FluidType::WaterHydrothermal.is_lava());
+        assert!(!FluidType::WaterPool.is_lava());
     }
 
     #[test]
@@ -413,9 +417,10 @@ mod tests {
         assert_eq!(FluidType::from_u8(6), FluidType::WaterRiver);
         assert_eq!(FluidType::from_u8(7), FluidType::WaterArtesian);
         assert_eq!(FluidType::from_u8(8), FluidType::WaterHydrothermal);
+        assert_eq!(FluidType::from_u8(9), FluidType::WaterPool);
         // Unknown values default to Water
         assert_eq!(FluidType::from_u8(0), FluidType::Water);
-        assert_eq!(FluidType::from_u8(9), FluidType::Water);
+        assert_eq!(FluidType::from_u8(10), FluidType::Water);
         assert_eq!(FluidType::from_u8(255), FluidType::Water);
     }
 }

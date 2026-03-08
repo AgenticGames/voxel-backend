@@ -1986,8 +1986,31 @@ mod tests {
             }
             assert!(!result_ptr.is_null(), "Should have received a result");
 
+            // Poll results until we find the ChunkMesh (fluid meshes may arrive first)
+            let mut found_chunk = false;
             let result = &*result_ptr;
-            assert_eq!(result.result_type, FfiResultType::ChunkMesh);
+            if result.result_type == FfiResultType::ChunkMesh {
+                found_chunk = true;
+            } else {
+                voxel_free_result(result_ptr);
+                // Keep polling for the ChunkMesh
+                for _ in 0..200 {
+                    result_ptr = voxel_poll_result(engine);
+                    if !result_ptr.is_null() {
+                        let r = &*result_ptr;
+                        if r.result_type == FfiResultType::ChunkMesh {
+                            found_chunk = true;
+                            break;
+                        }
+                        voxel_free_result(result_ptr);
+                    } else {
+                        thread::sleep(Duration::from_millis(50));
+                    }
+                }
+            }
+            assert!(found_chunk, "Should have received a ChunkMesh result");
+
+            let result = &*result_ptr;
             assert_eq!(result.chunk.x, 0);
             assert_eq!(result.chunk.y, 0);
             assert_eq!(result.chunk.z, 0);

@@ -438,7 +438,8 @@ pub fn place_pools(
             fluid_type,
         });
 
-        // Step 7: Collect fluid seeds at the pool surface level within the basin
+        // Step 7: Pre-fill entire basin volume with fluid seeds
+        let basin_bottom_y = floor_y.saturating_sub(config.basin_depth.saturating_sub(1));
         for dz in -(effective_radius as i32)..=(effective_radius as i32) {
             for dx in -(effective_radius as i32)..=(effective_radius as i32) {
                 if dx * dx + dz * dz > r2 {
@@ -449,16 +450,19 @@ pub fn place_pools(
                 if gx < 0 || gx >= size as i32 || gz < 0 || gz >= size as i32 {
                     continue;
                 }
-                if surface_y >= size {
-                    continue;
+                // Fill every Y level from basin bottom to surface
+                for gy in basin_bottom_y..=surface_y {
+                    if gy >= size {
+                        continue;
+                    }
+                    fluid_seeds.push(FluidSeed {
+                        chunk: (chunk_cx, chunk_cy, chunk_cz),
+                        lx: gx as u8,
+                        ly: gy as u8,
+                        lz: gz as u8,
+                        fluid_type,
+                    });
                 }
-                fluid_seeds.push(FluidSeed {
-                    chunk: (chunk_cx, chunk_cy, chunk_cz),
-                    lx: gx as u8,
-                    ly: surface_y as u8,
-                    lz: gz as u8,
-                    fluid_type,
-                });
             }
         }
     }
@@ -1004,6 +1008,51 @@ mod tests {
         let cells = vec![(4, 6, 4)];
         let result = find_nearest_to_centroid(&cells, 0.0, 0.0);
         assert_eq!(result, (4, 6, 4));
+    }
+
+    #[test]
+    fn test_pool_prefills_basin_volume() {
+        // Verify that seeds span multiple Y levels (not just surface_y)
+        let config = PoolConfig {
+            pool_chance: 1.0,
+            placement_threshold: -1.0,
+            min_area: 2,
+            water_pct: 1.0,
+            lava_pct: 0.0,
+            empty_pct: 0.0,
+            basin_depth: 3,
+            max_cave_height: 0,
+            min_floor_thickness: 0,
+            ..Default::default()
+        };
+
+        let size = 17;
+        let mut density = DensityField::new(size);
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..size {
+                    let sample = density.get_mut(x, y, z);
+                    if y < size / 2 {
+                        sample.density = 1.0;
+                        sample.material = Material::Limestone;
+                    } else {
+                        sample.density = -1.0;
+                        sample.material = Material::Air;
+                    }
+                }
+            }
+        }
+
+        let (descriptors, seeds) = place_pools(&mut density, &config, Vec3::ZERO, 42, 100);
+        if !descriptors.is_empty() {
+            // Seeds should span multiple Y levels due to basin pre-fill
+            let y_values: std::collections::HashSet<u8> = seeds.iter().map(|s| s.ly).collect();
+            assert!(
+                y_values.len() > 1,
+                "Pool seeds should span multiple Y levels (basin_depth=3), got {} unique Y values: {:?}",
+                y_values.len(), y_values
+            );
+        }
     }
 
     #[test]
