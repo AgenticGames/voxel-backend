@@ -361,12 +361,13 @@ pub unsafe extern "C" fn voxel_update_fluid_config(
     engine: *mut c_void,
     flow_solid_threshold: u8,
     fractional_capacity: u8,
+    source_grace_ticks: u16,
 ) {
     if engine.is_null() {
         return;
     }
     let engine = &*(engine as *const VoxelEngine);
-    engine.update_fluid_config(flow_solid_threshold, fractional_capacity != 0);
+    engine.update_fluid_config(flow_solid_threshold, fractional_capacity != 0, source_grace_ticks);
 }
 
 /// Inject fluid at a UE world position.
@@ -2061,6 +2062,8 @@ mod tests {
             // Cauldron Inset Tuning
             formation_cauldron_wall_inset: 1.0,
             formation_cauldron_floor_inset: 1,
+            // Grace Period
+            fluid_source_grace_ticks: 50,
         }
     }
 

@@ -52,6 +52,9 @@ pub struct FluidCell {
     /// True for infinite sources (geological springs, lava vents).
     /// Non-source cells (e.g. cauldron water) drain when flowing.
     pub is_source: bool,
+    /// Grace period ticks remaining. While > 0, cell behaves like a source
+    /// (level is not deducted during flow). Decremented each tick.
+    pub grace_ticks: u16,
 }
 
 impl Default for FluidCell {
@@ -60,6 +63,7 @@ impl Default for FluidCell {
             level: 0.0,
             fluid_type: FluidType::Water,
             is_source: false,
+            grace_ticks: 0,
         }
     }
 }

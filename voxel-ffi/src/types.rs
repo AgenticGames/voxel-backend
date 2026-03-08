@@ -722,6 +722,8 @@ pub struct FfiEngineConfig {
     // ── Cauldron Inset Tuning ──
     pub formation_cauldron_wall_inset: f32,
     pub formation_cauldron_floor_inset: i32,
+    // ── Grace Period ──
+    pub fluid_source_grace_ticks: u16,
 }
 
 #[repr(C)]

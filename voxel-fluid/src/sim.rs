@@ -267,6 +267,7 @@ fn tick_chunk(
                 }
 
                 let is_source = cell.is_source();
+                let has_grace = cell.grace_ticks > 0;
                 let src_capacity = cell_cap[idx];
 
                 let flow_rate = if is_lava { config.lava_flow_rate } else { config.water_flow_rate };
@@ -282,7 +283,7 @@ fn tick_chunk(
                         if below_space > MIN_LEVEL {
                             let transfer = cell.level.min(below_space).min(flow_rate * 4.0);
                             if transfer > MIN_LEVEL {
-                                if !is_source {
+                                if !is_source && !has_grace {
                                     new_cells[idx].level -= transfer;
                                 }
                                 new_cells[below_idx].level += transfer;
@@ -304,7 +305,7 @@ fn tick_chunk(
                             if below_space > MIN_LEVEL {
                                 let transfer = new_cells[idx].level.min(below_space).min(flow_rate * 4.0);
                                 if transfer > MIN_LEVEL {
-                                    if !is_source {
+                                    if !is_source && !has_grace {
                                         new_cells[idx].level -= transfer;
                                     }
                                     cross_transfers.push(CrossChunkTransfer {
@@ -354,6 +355,23 @@ fn tick_chunk(
                             let nx = x as i32 + dx;
                             let ny = y as i32 + dy;
                             let nz = z as i32 + dz;
+
+                            // Bug #3 fix: check horizontal neighbor (dx,0,dz) is passable
+                            // to prevent water teleporting diagonally through solid walls.
+                            {
+                                let hx = x as i32 + dx;
+                                let hz = z as i32 + dz;
+                                if hx >= 0 && hx < size as i32 && hz >= 0 && hz < size as i32 {
+                                    let horiz_idx = if dx != 0 {
+                                        z * size * size + y * size + hx as usize
+                                    } else {
+                                        hz as usize * size * size + y * size + x
+                                    };
+                                    if cell_cap[horiz_idx] < MIN_LEVEL {
+                                        continue; // wall blocks diagonal path
+                                    }
+                                }
+                            }
 
                             if nx < 0 || nx >= size as i32 || nz < 0 || nz >= size as i32 {
                                 // Cross-chunk slope flow for X/Z boundary
@@ -410,12 +428,12 @@ fn tick_chunk(
                         candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
                         for (dst_space, ni, is_cross, dest_key, dest_x, dest_y, dest_z) in candidates {
-                            if new_cells[idx].level < MIN_LEVEL && !is_source {
+                            if new_cells[idx].level < MIN_LEVEL && !is_source && !has_grace {
                                 break;
                             }
                             let transfer = new_cells[idx].level.min(dst_space).min(flow_rate * 2.0);
                             if transfer > MIN_LEVEL {
-                                if !is_source {
+                                if !is_source && !has_grace {
                                     new_cells[idx].level -= transfer;
                                 }
                                 if is_cross {
@@ -465,7 +483,7 @@ fn tick_chunk(
                                         if diff > MIN_LEVEL {
                                             let transfer = (diff * horizontal_spread * src_capacity).min(flow_rate);
                                             if transfer > MIN_LEVEL {
-                                                if !is_source {
+                                                if !is_source && !has_grace {
                                                     new_cells[idx].level -= transfer;
                                                 }
                                                 cross_transfers.push(CrossChunkTransfer {
@@ -497,7 +515,7 @@ fn tick_chunk(
                         if diff > MIN_LEVEL {
                             let transfer = (diff * horizontal_spread * src_capacity).min(flow_rate);
                             if transfer > MIN_LEVEL {
-                                if !is_source {
+                                if !is_source && !has_grace {
                                     new_cells[idx].level -= transfer;
                                 }
                                 new_cells[ni].level += transfer;
@@ -545,7 +563,7 @@ fn tick_chunk(
                                     .min(above_space)
                                     .min(flow_rate)
                                     .min(new_cells[idx].level);
-                                if push > MIN_LEVEL && !is_source {
+                                if push > MIN_LEVEL && !is_source && !has_grace {
                                     new_cells[idx].level -= push;
                                     new_cells[ai].level += push;
                                     new_cells[ai].fluid_type = cell.fluid_type;
@@ -570,10 +588,44 @@ fn tick_chunk(
         }
     }
 
-    // Clamp fluid to cell capacity
-    for (idx, cell) in new_cells.iter_mut().enumerate() {
-        if cell.level > cell_cap[idx] {
-            cell.level = cell_cap[idx];
+    // Bug #2 fix: redistribute excess fluid to neighbors instead of silently clamping.
+    // Skip cells with grace ticks (they act as sources, overflow is expected).
+    for z in 0..size {
+        for y in 0..size {
+            for x in 0..size {
+                let idx = z * size * size + y * size + x;
+                if new_cells[idx].grace_ticks > 0 { continue; }
+                let cap = cell_cap[idx];
+                if new_cells[idx].level <= cap { continue; }
+                let excess = new_cells[idx].level - cap;
+                new_cells[idx].level = cap;
+                let mut remaining = excess;
+                let fluid_type = new_cells[idx].fluid_type;
+                for &(dx, dy, dz) in &[(0i32,1i32,0i32),(0,-1,0),(1,0,0),(-1,0,0),(0,0,1),(0,0,-1)] {
+                    if remaining < MIN_LEVEL { break; }
+                    let nx = x as i32 + dx;
+                    let ny = y as i32 + dy;
+                    let nz = z as i32 + dz;
+                    if nx < 0 || nx >= size as i32 || ny < 0 || ny >= size as i32
+                        || nz < 0 || nz >= size as i32 { continue; }
+                    let ni = nz as usize * size * size + ny as usize * size + nx as usize;
+                    let n_space = (cell_cap[ni] - new_cells[ni].level).max(0.0);
+                    if n_space > MIN_LEVEL {
+                        let push = remaining.min(n_space);
+                        new_cells[ni].level += push;
+                        new_cells[ni].fluid_type = fluid_type;
+                        remaining -= push;
+                    }
+                }
+                // Any remaining excess that couldn't be redistributed evaporates (rare)
+            }
+        }
+    }
+
+    // Decrement grace ticks
+    for cell in &mut new_cells {
+        if cell.grace_ticks > 0 {
+            cell.grace_ticks -= 1;
         }
     }
 
@@ -1382,5 +1434,125 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn grace_prevents_drain() {
+        // A cell with grace_ticks > 0 should not lose level when flowing down
+        let mut chunks = HashMap::new();
+        let key = (0, 0, 0);
+        let mut grid = make_chunk(16);
+        let cell = grid.get_mut(8, 8, 8);
+        cell.level = 1.0;
+        cell.fluid_type = FluidType::Water;
+        cell.is_source = false;
+        cell.grace_ticks = 10;
+        grid.has_fluid = true;
+        chunks.insert(key, grid);
+
+        let config = crate::FluidConfig::default();
+        let density_cache = empty_density_cache();
+        tick_fluid(&mut chunks, &density_cache, 16, false, &config);
+
+        let grid = &chunks[&key];
+        // Grace cell should still be at 1.0 (not drained)
+        assert!(
+            grid.get(8, 8, 8).level >= 0.99,
+            "Grace cell should not drain, got {}",
+            grid.get(8, 8, 8).level
+        );
+        // Water should have flowed downward (deposited below)
+        assert!(
+            grid.get(8, 7, 8).level > MIN_LEVEL,
+            "Water should still flow down from grace cell"
+        );
+        // Grace should have decremented
+        assert_eq!(grid.get(8, 8, 8).grace_ticks, 9);
+    }
+
+    #[test]
+    fn grace_expires_then_drains() {
+        // After grace expires (ticks=1), the cell should start draining on the next tick
+        let mut chunks = HashMap::new();
+        let key = (0, 0, 0);
+        let mut grid = make_chunk(16);
+        let cell = grid.get_mut(8, 8, 8);
+        cell.level = 1.0;
+        cell.fluid_type = FluidType::Water;
+        cell.is_source = false;
+        cell.grace_ticks = 1; // Will expire this tick
+        grid.has_fluid = true;
+        chunks.insert(key, grid);
+
+        let config = crate::FluidConfig::default();
+        let density_cache = empty_density_cache();
+
+        // First tick: grace still active (ticks=1 → 0)
+        tick_fluid(&mut chunks, &density_cache, 16, false, &config);
+        let level_after_1 = chunks[&key].get(8, 8, 8).level;
+        assert!(level_after_1 >= 0.99, "Grace still active on first tick, got {}", level_after_1);
+        assert_eq!(chunks[&key].get(8, 8, 8).grace_ticks, 0);
+
+        // Second tick: grace expired, should drain
+        tick_fluid(&mut chunks, &density_cache, 16, false, &config);
+        let level_after_2 = chunks[&key].get(8, 8, 8).level;
+        assert!(level_after_2 < level_after_1, "Cell should drain after grace expires, got {}", level_after_2);
+    }
+
+    #[test]
+    fn grace_does_not_propagate() {
+        // Grace ticks should NOT be copied to cells that receive flow
+        let mut chunks = HashMap::new();
+        let key = (0, 0, 0);
+        let mut grid = make_chunk(16);
+        let cell = grid.get_mut(8, 8, 8);
+        cell.level = 1.0;
+        cell.fluid_type = FluidType::Water;
+        cell.is_source = false;
+        cell.grace_ticks = 50;
+        grid.has_fluid = true;
+        chunks.insert(key, grid);
+
+        let config = crate::FluidConfig::default();
+        let density_cache = empty_density_cache();
+        tick_fluid(&mut chunks, &density_cache, 16, false, &config);
+
+        let grid = &chunks[&key];
+        // Cell below should have fluid but no grace
+        assert!(grid.get(8, 7, 8).level > MIN_LEVEL, "Water should flow down");
+        assert_eq!(grid.get(8, 7, 8).grace_ticks, 0, "Grace should not propagate to recipients");
+    }
+
+    #[test]
+    fn slope_blocked_by_wall() {
+        // Water at (8,8,8) with solid floor at (8,7,8) and solid wall at (9,8,8)
+        // should NOT flow diagonally to (9,7,8)
+        let mut chunks = HashMap::new();
+        let key = (0, 0, 0);
+        let mut grid = make_chunk(16);
+
+        // Place water
+        grid.get_mut(8, 8, 8).level = 0.5;
+        grid.get_mut(8, 8, 8).fluid_type = FluidType::Water;
+        grid.has_fluid = true;
+
+        // Solid floor below
+        grid.set_density(8, 7, 8, 1.0);
+        // Solid wall to the right
+        grid.set_density(9, 8, 8, 1.0);
+        // Target (9,7,8) is air — but blocked by wall
+        // (leave it as air, default)
+        chunks.insert(key, grid);
+
+        let config = crate::FluidConfig::default();
+        let density_cache = empty_density_cache();
+        tick_fluid(&mut chunks, &density_cache, 16, false, &config);
+
+        let grid = &chunks[&key];
+        assert!(
+            grid.get(9, 7, 8).level < MIN_LEVEL,
+            "Water should not flow diagonally through solid wall, got {} at (9,7,8)",
+            grid.get(9, 7, 8).level
+        );
     }
 }

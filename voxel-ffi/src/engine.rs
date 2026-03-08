@@ -902,10 +902,11 @@ impl VoxelEngine {
     }
 
     /// Hot-reload fluid configuration at runtime.
-    pub fn update_fluid_config(&self, flow_solid_threshold: u8, fractional_capacity: bool) {
+    pub fn update_fluid_config(&self, flow_solid_threshold: u8, fractional_capacity: bool, source_grace_ticks: u16) {
         let _ = self.fluid_event_tx.try_send(FluidEvent::UpdateFluidConfig {
             flow_solid_threshold,
             fractional_capacity,
+            source_grace_ticks,
         });
     }
 
@@ -1563,6 +1564,7 @@ fn ffi_config_to_fluid(c: &FfiEngineConfig) -> FluidConfig {
         solid_corner_threshold: if c.fluid_solid_corner_threshold > 0 { c.fluid_solid_corner_threshold } else { 6 },
         flow_solid_threshold: if c.fluid_flow_solid_threshold > 0 { c.fluid_flow_solid_threshold } else { 6 },
         fractional_capacity: c.fluid_fractional_capacity != 0,
+        source_grace_ticks: if c.fluid_source_grace_ticks > 0 { c.fluid_source_grace_ticks } else { 50 },
         water_pressure_rate: 0.3,
         lava_pressure_rate: 0.1,
         mesh_smooth_iterations: 2,

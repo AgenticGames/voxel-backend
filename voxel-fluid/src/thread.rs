@@ -202,14 +202,19 @@ fn handle_event(
                     if is_source {
                         cell.level = crate::cell::MAX_LEVEL;
                     }
+                    // Grant grace period to non-source fluid with near-full level
+                    if !is_source && level >= 0.99 {
+                        cell.grace_ticks = config.source_grace_ticks;
+                    }
                     grid.dirty = true;
                     grid.has_fluid = true;
                 }
             }
         }
-        FluidEvent::UpdateFluidConfig { flow_solid_threshold, fractional_capacity } => {
+        FluidEvent::UpdateFluidConfig { flow_solid_threshold, fractional_capacity, source_grace_ticks } => {
             config.flow_solid_threshold = flow_solid_threshold;
             config.fractional_capacity = fractional_capacity;
+            config.source_grace_ticks = source_grace_ticks;
             for grid in chunks.values_mut() {
                 grid.recompute_capacity(flow_solid_threshold as usize, fractional_capacity);
                 grid.dirty = true;
