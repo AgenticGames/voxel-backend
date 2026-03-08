@@ -874,6 +874,14 @@ pub enum WorkerRequest {
         world_z: f32,
         fluid_type: u8,
     },
+    MineAndFillFluid {
+        world_x: f32,
+        world_y: f32,
+        world_z: f32,
+        radius: f32,
+        fluid_type: u8,
+        world_scale: f32,
+    },
 }
 
 /// Results sent back from worker threads.

@@ -380,6 +380,22 @@ impl VoxelEngine {
         }
     }
 
+    /// Request mining a sphere and filling the bottom half with fluid.
+    /// Sent through the mine channel. Returns 1 on success, 0 if queue full.
+    pub fn mine_and_fill_fluid(&self, world_x: f32, world_y: f32, world_z: f32, radius: f32, fluid_type: u8, world_scale: f32) -> u32 {
+        match self.mine_tx.try_send(WorkerRequest::MineAndFillFluid {
+            world_x,
+            world_y,
+            world_z,
+            radius,
+            fluid_type,
+            world_scale,
+        }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
     /// Poll for a completed force-spawn pool result. Returns the JSON diagnostics string if ready.
     pub fn poll_force_spawn_complete(&self) -> Option<String> {
         let mut fc = self.force_spawn_complete.lock().ok()?;

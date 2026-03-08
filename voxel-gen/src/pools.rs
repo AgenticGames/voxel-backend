@@ -235,6 +235,29 @@ pub fn place_pools(
             }
         }
 
+        // Seal basin floor: solid disc one layer below the carved basin
+        let seal_y = floor_y.saturating_sub(config.basin_depth);
+        if seal_y > 0 && seal_y < size {
+            for dz in -(effective_radius as i32)..=(effective_radius as i32) {
+                for dx in -(effective_radius as i32)..=(effective_radius as i32) {
+                    if dx * dx + dz * dz > r2 {
+                        continue;
+                    }
+                    let gx = center_x as i32 + dx;
+                    let gz = center_z as i32 + dz;
+                    if gx < 0 || gx >= size as i32 || gz < 0 || gz >= size as i32 {
+                        continue;
+                    }
+                    let gx = gx as usize;
+                    let gz = gz as usize;
+                    let host_mat = find_nearby_solid(density, gx, seal_y, gz, size);
+                    let sample = density.get_mut(gx, seal_y, gz);
+                    sample.density = 1.0;
+                    sample.material = host_mat;
+                }
+            }
+        }
+
         // Reinforce rim: solid ring at floor level just outside the pool radius
         let rim_r = effective_radius + 1;
         let rim_r2 = (rim_r * rim_r) as i32;
@@ -253,8 +276,10 @@ pub fn place_pools(
                 let gx = gx as usize;
                 let gz = gz as usize;
 
-                for h in 0..config.rim_height {
-                    let gy = floor_y + h;
+                // Cover full basin depth + rim height to create vertical containment walls
+                let rim_bottom = floor_y.saturating_sub(config.basin_depth.saturating_sub(1));
+                let rim_top = floor_y + config.rim_height.max(1) - 1;
+                for gy in rim_bottom..=rim_top {
                     if gy >= size {
                         break;
                     }

@@ -913,6 +913,26 @@ pub unsafe extern "C" fn voxel_free_force_spawn_result(ptr: *mut c_char) {
     }
 }
 
+/// Request mining a sphere and filling the bottom half with fluid.
+/// fluid_type: 1=water, 2=lava. Coordinates are in UE world space.
+/// Returns 1 on success, 0 if queue full.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_mine_and_fill_fluid(
+    engine: *mut c_void,
+    world_x: f32,
+    world_y: f32,
+    world_z: f32,
+    radius: f32,
+    fluid_type: u8,
+    world_scale: f32,
+) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.mine_and_fill_fluid(world_x, world_y, world_z, radius, fluid_type, world_scale)
+}
+
 /// Request flattening a 2x2 terrace at a UE world position.
 /// Snaps to grid and uses depth-appropriate host rock.
 /// Returns 1 on success, 0 if queue full.

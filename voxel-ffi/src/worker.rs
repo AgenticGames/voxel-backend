@@ -913,6 +913,150 @@ fn handle_request(
                 let _ = incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
             }
         }
+        WorkerRequest::MineAndFillFluid { world_x, world_y, world_z, radius, fluid_type, world_scale: ws } => {
+            let cfg = config.read().unwrap().clone();
+
+            // Convert UE world position to Rust coordinates
+            let center = from_ue_world_pos(world_x, world_y, world_z, ws);
+            let rust_radius = radius / ws;
+
+            // Step 1: Mine the sphere (same as normal pick)
+            let mut s = store.write().unwrap();
+            let (meshes, mined) = s.mine_sphere(center, rust_radius, &cfg, ws);
+            drop(s);
+
+            // Collect dirty chunk keys for seam regeneration
+            let dirty_keys: Vec<(i32, i32, i32)> = meshes.iter().map(|(k, _)| *k).collect();
+
+            // Step 2: Fill bottom half with non-source fluid
+            {
+                let s = store.read().unwrap();
+                let eb = cfg.effective_bounds();
+                let vs = cfg.voxel_scale();
+                let r2 = rust_radius * rust_radius;
+                let ft = voxel_fluid::cell::FluidType::from_u8(fluid_type);
+
+                let min_cx = ((center.x - rust_radius) / eb).floor() as i32;
+                let max_cx = ((center.x + rust_radius) / eb).floor() as i32;
+                let min_cy = ((center.y - rust_radius) / eb).floor() as i32;
+                let max_cy = ((center.y + rust_radius) / eb).floor() as i32;
+                let min_cz = ((center.z - rust_radius) / eb).floor() as i32;
+                let max_cz = ((center.z + rust_radius) / eb).floor() as i32;
+
+                for cz in min_cz..=max_cz {
+                    for cy in min_cy..=max_cy {
+                        for cx in min_cx..=max_cx {
+                            let key = (cx, cy, cz);
+                            if let Some(density) = s.density_fields.get(&key) {
+                                let origin = glam::Vec3::new(cx as f32 * eb, cy as f32 * eb, cz as f32 * eb);
+                                let grid_center = (center - origin) / vs;
+                                let grid_radius = rust_radius / vs;
+                                let lo_x = ((grid_center.x - grid_radius).floor() as i32).max(0) as usize;
+                                let hi_x = ((grid_center.x + grid_radius).ceil() as usize + 1).min(density.size);
+                                let lo_y = ((grid_center.y - grid_radius).floor() as i32).max(0) as usize;
+                                let hi_y = ((grid_center.y + grid_radius).ceil() as usize + 1).min(density.size);
+                                let lo_z = ((grid_center.z - grid_radius).floor() as i32).max(0) as usize;
+                                let hi_z = ((grid_center.z + grid_radius).ceil() as usize + 1).min(density.size);
+
+                                for z in lo_z..hi_z {
+                                    for y in lo_y..hi_y {
+                                        for x in lo_x..hi_x {
+                                            let world_pos = origin + glam::Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
+                                            let dist2 = (world_pos - center).length_squared();
+                                            // Bottom half of sphere (Rust Y-up: below center) and cell is air
+                                            if dist2 <= r2 && world_pos.y < center.y && density.get(x, y, z).density <= 0.0 {
+                                                let _ = fluid_event_tx.send(FluidEvent::AddFluid {
+                                                    chunk: key,
+                                                    x: x as u8,
+                                                    y: y as u8,
+                                                    z: z as u8,
+                                                    fluid_type: ft,
+                                                    level: 1.0,
+                                                    is_source: false,
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Step 3: Send each dirty chunk mesh + crystal recompute
+            for (key, mesh) in meshes {
+                let crystal_data = {
+                    let s = store.read().unwrap();
+                    if let Some(density) = s.density_fields.get(&key) {
+                        let coord = voxel_core::chunk::ChunkCoord::new(key.0, key.1, key.2);
+                        let placements = voxel_gen::compute_crystals(coord, density, &cfg);
+                        let ue_crystals = crate::convert::convert_crystals_to_ue(
+                            &placements, cfg.voxel_scale(), ws,
+                        );
+                        drop(s);
+                        store.write().unwrap().crystal_placements.insert(key, placements);
+                        ue_crystals
+                    } else {
+                        drop(s);
+                        Vec::new()
+                    }
+                };
+                let _ = result_tx.send(WorkerResult::ChunkMesh {
+                    chunk: key,
+                    mesh,
+                    generation: 0,
+                    crystal_data,
+                });
+            }
+
+            // Step 4: Send mined material counts
+            let _ = result_tx.send(WorkerResult::MinedMaterials { mined });
+
+            // Step 5: Send terrain modifications to fluid thread + detect aquifer breaches
+            {
+                let mine_cx = (center.x / cfg.chunk_size as f32).floor() as i32;
+                let mine_cy = (center.y / cfg.chunk_size as f32).floor() as i32;
+                let mine_cz = (center.z / cfg.chunk_size as f32).floor() as i32;
+                let mine_lx = ((center.x - mine_cx as f32 * cfg.chunk_size as f32) as usize).min(cfg.chunk_size - 1);
+                let mine_ly = ((center.y - mine_cy as f32 * cfg.chunk_size as f32) as usize).min(cfg.chunk_size - 1);
+                let mine_lz = ((center.z - mine_cz as f32 * cfg.chunk_size as f32) as usize).min(cfg.chunk_size - 1);
+                let mined_cells = vec![(mine_lx, mine_ly, mine_lz)];
+
+                let s = store.read().unwrap();
+                for &key in &dirty_keys {
+                    if let Some(density) = s.density_fields.get(&key) {
+                        let densities: Vec<f32> = density.samples.iter().map(|s| s.density).collect();
+                        let _ = fluid_event_tx.send(FluidEvent::TerrainModified {
+                            chunk: key,
+                            densities,
+                        });
+
+                        let breaches = voxel_gen::springs::detect_aquifer_breaches(
+                            density, key, cfg.chunk_size,
+                            &cfg.water_table, &cfg.ore.host_rock, cfg.seed,
+                            &mined_cells,
+                        );
+                        for b in &breaches {
+                            let _ = fluid_event_tx.send(FluidEvent::AddFluid {
+                                chunk: key,
+                                x: b.lx,
+                                y: b.ly,
+                                z: b.lz,
+                                fluid_type: voxel_fluid::cell::FluidType::WaterBreach,
+                                level: b.level,
+                                is_source: true,
+                            });
+                        }
+                    }
+                }
+            }
+
+            // Step 6: Regenerate seams
+            for key in dirty_keys {
+                let _ = incremental_seam_pass(key, &cfg, store, result_tx, ws);
+            }
+        }
         WorkerRequest::Unload { chunk } => {
             let mut s = store.write().unwrap();
             s.unload(chunk);
