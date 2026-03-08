@@ -901,6 +901,14 @@ impl VoxelEngine {
         }
     }
 
+    /// Hot-reload fluid configuration at runtime.
+    pub fn update_fluid_config(&self, flow_solid_threshold: u8, fractional_capacity: bool) {
+        let _ = self.fluid_event_tx.try_send(FluidEvent::UpdateFluidConfig {
+            flow_solid_threshold,
+            fractional_capacity,
+        });
+    }
+
     // ── Profiler API ──
 
     /// Enable or disable the streaming profiler.
@@ -1553,6 +1561,8 @@ fn ffi_config_to_fluid(c: &FfiEngineConfig) -> FluidConfig {
         flow_anim_speed: 1.0,
         solid_threshold: 0.0,
         solid_corner_threshold: if c.fluid_solid_corner_threshold > 0 { c.fluid_solid_corner_threshold } else { 6 },
+        flow_solid_threshold: if c.fluid_flow_solid_threshold > 0 { c.fluid_flow_solid_threshold } else { 6 },
+        fractional_capacity: c.fluid_fractional_capacity != 0,
         water_pressure_rate: 0.3,
         lava_pressure_rate: 0.1,
         mesh_smooth_iterations: 2,

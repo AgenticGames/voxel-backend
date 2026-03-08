@@ -48,7 +48,8 @@ pub fn tick_fluid(
             let adj = (fk.0 + dx, fk.1 + dy, fk.2 + dz);
             if !chunks.contains_key(&adj) {
                 if let Some(cache) = chunk_densities.get(&adj) {
-                    let grid = ChunkFluidGrid::from_density_cache(cache);
+                    let mut grid = ChunkFluidGrid::from_density_cache(cache);
+                    grid.recompute_capacity(config.flow_solid_threshold as usize, config.fractional_capacity);
                     chunks.insert(adj, grid);
                 }
             }
@@ -82,7 +83,8 @@ pub fn tick_fluid(
         // If target chunk has no grid but density exists, create grid on demand
         if !chunks.contains_key(&xfer.dest_key) {
             if let Some(cache) = chunk_densities.get(&xfer.dest_key) {
-                let grid = ChunkFluidGrid::from_density_cache(cache);
+                let mut grid = ChunkFluidGrid::from_density_cache(cache);
+                grid.recompute_capacity(config.flow_solid_threshold as usize, config.fractional_capacity);
                 chunks.insert(xfer.dest_key, grid);
             } else {
                 continue; // no density data, can't create grid
@@ -210,6 +212,7 @@ fn tick_chunk(
     // Create new buffer + snapshot density/solid
     let mut new_cells = grid.cells.clone();
     let cell_solid = &grid.cell_solid;
+    let cell_cap = &grid.cell_cap;
     let mut changed = false;
     let mut cross_transfers: Vec<CrossChunkTransfer> = Vec::new();
 
@@ -264,7 +267,7 @@ fn tick_chunk(
                 }
 
                 let is_source = cell.is_source();
-                let src_capacity = if cell_solid[idx] { 0.0 } else { 1.0 };
+                let src_capacity = cell_cap[idx];
 
                 let flow_rate = if is_lava { config.lava_flow_rate } else { config.water_flow_rate };
                 let horizontal_spread = if is_lava { config.lava_spread_rate } else { config.water_spread_rate };
@@ -273,8 +276,8 @@ fn tick_chunk(
                 // Gravity: try to flow down (4x flow rate for fast pooling)
                 if y > 0 {
                     let below_idx = z * size * size + (y - 1) * size + x;
-                    if !cell_solid[below_idx] {
-                        let below_capacity = if cell_solid[below_idx] { 0.0 } else { 1.0 };
+                    if cell_cap[below_idx] > MIN_LEVEL {
+                        let below_capacity = cell_cap[below_idx];
                         let below_space = (below_capacity - new_cells[below_idx].level).max(0.0);
                         if below_space > MIN_LEVEL {
                             let transfer = cell.level.min(below_space).min(flow_rate * 4.0);
@@ -324,7 +327,7 @@ fn tick_chunk(
                 if new_cells[idx].level > MIN_LEVEL {
                     let slope_below_solid = if y > 0 {
                         let below_idx = z * size * size + (y - 1) * size + x;
-                        cell_solid[below_idx]
+                        cell_cap[below_idx] < MIN_LEVEL
                     } else {
                         // y==0: check chunk below
                         let below_key = (key.0, key.1 - 1, key.2);
@@ -372,10 +375,10 @@ fn tick_chunk(
                             if ny >= 0 && ny < size as i32 {
                                 // Within same chunk
                                 let ni = nz as usize * size * size + ny as usize * size + nx as usize;
-                                if cell_solid[ni] {
+                                if cell_cap[ni] < MIN_LEVEL {
                                     continue;
                                 }
-                                let dst_capacity = if cell_solid[ni] { 0.0 } else { 1.0 };
+                                let dst_capacity = cell_cap[ni];
                                 if dst_capacity < MIN_LEVEL {
                                     continue;
                                 }
@@ -482,10 +485,10 @@ fn tick_chunk(
                             continue;
                         }
                         let ni = nz as usize * size * size + ny as usize * size + nx as usize;
-                        if cell_solid[ni] {
+                        if cell_cap[ni] < MIN_LEVEL {
                             continue;
                         }
-                        let dst_capacity = if cell_solid[ni] { 0.0 } else { 1.0 };
+                        let dst_capacity = cell_cap[ni];
                         if dst_capacity < MIN_LEVEL {
                             continue;
                         }
@@ -513,14 +516,14 @@ fn tick_chunk(
                 if new_cells[idx].level > MIN_LEVEL && y + 1 < size {
                     let below_pressurized = if y > 0 {
                         let bi = z * size * size + (y - 1) * size + x;
-                        cell_solid[bi] || new_cells[bi].level >= 0.95
+                        cell_cap[bi] < MIN_LEVEL || new_cells[bi].level >= 0.95
                     } else {
                         true // chunk floor acts as pressure boundary
                     };
 
                     if below_pressurized {
                         let ai = z * size * size + (y + 1) * size + x;
-                        if !cell_solid[ai] {
+                        if cell_cap[ai] > MIN_LEVEL {
                             // Compare column weight with horizontal neighbors
                             let our_weight = fluid_weight[idx];
                             let mut max_neighbor_weight = 0.0f32;
@@ -529,7 +532,7 @@ fn tick_chunk(
                                 let nz = z as i32 + dz;
                                 if nx >= 0 && nx < size as i32 && nz >= 0 && nz < size as i32 {
                                     let ni = nz as usize * size * size + y * size + nx as usize;
-                                    if !cell_solid[ni] {
+                                    if cell_cap[ni] > MIN_LEVEL {
                                         max_neighbor_weight = max_neighbor_weight.max(fluid_weight[ni]);
                                     }
                                 }
@@ -567,6 +570,13 @@ fn tick_chunk(
         }
     }
 
+    // Clamp fluid to cell capacity
+    for (idx, cell) in new_cells.iter_mut().enumerate() {
+        if cell.level > cell_cap[idx] {
+            cell.level = cell_cap[idx];
+        }
+    }
+
     // Swap buffer
     if changed {
         if let Some(grid) = chunks.get_mut(&key) {
@@ -592,7 +602,7 @@ pub fn squeeze_excess_fluid(grid: &mut ChunkFluidGrid) {
         for y in 0..size {
             for x in 0..size {
                 let idx = z * size * size + y * size + x;
-                let capacity = if grid.cell_solid[idx] { 0.0 } else { 1.0 };
+                let capacity = grid.cell_cap[idx];
                 let level = grid.cells[idx].level;
 
                 if level <= capacity {
@@ -624,7 +634,7 @@ pub fn squeeze_excess_fluid(grid: &mut ChunkFluidGrid) {
                         continue;
                     }
                     let ni = nz as usize * size * size + ny as usize * size + nx as usize;
-                    let n_capacity = if grid.cell_solid[ni] { 0.0 } else { 1.0 };
+                    let n_capacity = grid.cell_cap[ni];
                     let n_space = (n_capacity - grid.cells[ni].level).max(0.0);
                     if n_space > MIN_LEVEL {
                         let push = remaining.min(n_space);

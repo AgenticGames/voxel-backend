@@ -54,6 +54,8 @@ pub struct FluidConfig {
     pub solid_threshold: f32,
     // Solid corner threshold for is_mostly_solid guard (1-8, default 6)
     pub solid_corner_threshold: u8,
+    pub flow_solid_threshold: u8,   // cells with N+ solid corners → capacity 0.0
+    pub fractional_capacity: bool,  // use air_corners/8 vs binary 0/1
     // Upward pressure equalization
     pub water_pressure_rate: f32,
     pub lava_pressure_rate: f32,
@@ -88,6 +90,8 @@ impl Default for FluidConfig {
             flow_anim_speed: 1.0,
             solid_threshold: 0.0,
             solid_corner_threshold: 6,
+            flow_solid_threshold: 6,
+            fractional_capacity: true,
             water_pressure_rate: 0.3,
             lava_pressure_rate: 0.1,
             mesh_smooth_iterations: 2,
@@ -133,6 +137,11 @@ pub enum FluidEvent {
         fluid_type: cell::FluidType,
         level: f32,
         is_source: bool,
+    },
+    /// Update fluid simulation config at runtime (flow threshold + fractional capacity).
+    UpdateFluidConfig {
+        flow_solid_threshold: u8,
+        fractional_capacity: bool,
     },
     /// Request a snapshot of all fluid cells (used by sleep system).
     /// Response sent via the dedicated reply channel.

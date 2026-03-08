@@ -355,6 +355,20 @@ pub unsafe extern "C" fn voxel_update_config(engine: *mut c_void, config: *const
     engine.update_config(&*config);
 }
 
+/// Hot-reload fluid config (flow_solid_threshold, fractional_capacity) at runtime.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_update_fluid_config(
+    engine: *mut c_void,
+    flow_solid_threshold: u8,
+    fractional_capacity: u8,
+) {
+    if engine.is_null() {
+        return;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.update_fluid_config(flow_solid_threshold, fractional_capacity != 0);
+}
+
 /// Inject fluid at a UE world position.
 /// fluid_type: 1=Water, 2=Lava. is_source: 1=infinite source, 0=finite.
 /// Returns 1 on success, 0 if queue full.
@@ -2042,6 +2056,8 @@ mod tests {
             fluid_sources_enabled: 1,
             // Fluid Tuning
             fluid_solid_corner_threshold: 6,
+            fluid_flow_solid_threshold: 6,
+            fluid_fractional_capacity: 1,
             // Cauldron Inset Tuning
             formation_cauldron_wall_inset: 1.0,
             formation_cauldron_floor_inset: 1,

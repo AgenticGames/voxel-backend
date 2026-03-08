@@ -21,6 +21,7 @@ pub fn fluid_sim_loop(
     result_tx: Sender<FluidResult>,
     config: FluidConfig,
 ) {
+    let mut config = config;
     let mut chunks: HashMap<(i32, i32, i32), ChunkFluidGrid> = HashMap::new();
     // Lightweight density-only storage for chunks without fluid
     let mut chunk_densities: HashMap<(i32, i32, i32), ChunkDensityCache> = HashMap::new();
@@ -35,7 +36,7 @@ pub fn fluid_sim_loop(
         // Drain all pending events
         loop {
             match event_rx.try_recv() {
-                Ok(event) => handle_event(event, &mut chunks, &mut chunk_densities, chunk_size, &config),
+                Ok(event) => handle_event(event, &mut chunks, &mut chunk_densities, chunk_size, &mut config),
                 Err(_) => break,
             }
         }
@@ -115,7 +116,7 @@ fn handle_event(
     chunks: &mut HashMap<(i32, i32, i32), ChunkFluidGrid>,
     chunk_densities: &mut HashMap<(i32, i32, i32), ChunkDensityCache>,
     chunk_size: usize,
-    config: &FluidConfig,
+    config: &mut FluidConfig,
 ) {
     match event {
         FluidEvent::DensityUpdate { chunk, densities } => {
@@ -133,7 +134,7 @@ fn handle_event(
         }
         FluidEvent::PlaceSources { chunk } => {
             // Only create grid if density exists and sources are actually placed
-            ensure_grid(chunks, chunk_densities, chunk, chunk_size);
+            ensure_grid(chunks, chunk_densities, chunk, chunk_size, config);
             if let Some(grid) = chunks.get_mut(&chunk) {
                 place_sources(grid, chunk, chunk_size, config);
             }
@@ -164,7 +165,7 @@ fn handle_event(
             let _ = reply_tx.send(snapshot);
         }
         FluidEvent::PlaceGeologicalSprings { chunk, springs } => {
-            ensure_grid(chunks, chunk_densities, chunk, chunk_size);
+            ensure_grid(chunks, chunk_densities, chunk, chunk_size, config);
             if let Some(grid) = chunks.get_mut(&chunk) {
                 for (lx, ly, lz, level, fluid_type_u8) in springs {
                     let xu = lx as usize;
@@ -185,7 +186,7 @@ fn handle_event(
             }
         }
         FluidEvent::AddFluid { chunk, x, y, z, fluid_type, level, is_source } => {
-            ensure_grid(chunks, chunk_densities, chunk, chunk_size);
+            ensure_grid(chunks, chunk_densities, chunk, chunk_size, config);
             if let Some(grid) = chunks.get_mut(&chunk) {
                 let xu = x as usize;
                 let yu = y as usize;
@@ -204,6 +205,14 @@ fn handle_event(
                     grid.dirty = true;
                     grid.has_fluid = true;
                 }
+            }
+        }
+        FluidEvent::UpdateFluidConfig { flow_solid_threshold, fractional_capacity } => {
+            config.flow_solid_threshold = flow_solid_threshold;
+            config.fractional_capacity = fractional_capacity;
+            for grid in chunks.values_mut() {
+                grid.recompute_capacity(flow_solid_threshold as usize, fractional_capacity);
+                grid.dirty = true;
             }
         }
     }
@@ -268,12 +277,15 @@ fn ensure_grid(
     chunk_densities: &HashMap<(i32, i32, i32), ChunkDensityCache>,
     chunk: (i32, i32, i32),
     chunk_size: usize,
+    config: &FluidConfig,
 ) {
     if chunks.contains_key(&chunk) {
         return;
     }
     let grid = if let Some(cache) = chunk_densities.get(&chunk) {
-        ChunkFluidGrid::from_density_cache(cache)
+        let mut grid = ChunkFluidGrid::from_density_cache(cache);
+        grid.recompute_capacity(config.flow_solid_threshold as usize, config.fractional_capacity);
+        grid
     } else {
         ChunkFluidGrid::new(chunk_size)
     };

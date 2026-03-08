@@ -152,6 +152,8 @@ pub struct ChunkFluidGrid {
     pub cell_corners: Vec<f32>,
     /// Precomputed: true if ALL 8 corner densities > 0 (fully solid cell).
     pub cell_solid: Vec<bool>,
+    /// Precomputed fractional capacity per cell (0.0 = blocked, 1.0 = fully open).
+    pub cell_cap: Vec<f32>,
     pub size: usize,
     pub dirty: bool,
     /// True if any cell has level > MIN_LEVEL. Used to skip empty chunks in sim.
@@ -166,6 +168,7 @@ impl ChunkFluidGrid {
             cell_density: vec![-1.0; total], // default to air (negative density)
             cell_corners: vec![-1.0; total * 8],
             cell_solid: vec![false; total],
+            cell_cap: vec![1.0; total],
             size,
             dirty: false,
             has_fluid: false,
@@ -179,11 +182,15 @@ impl ChunkFluidGrid {
         let cell_solid: Vec<bool> = (0..total)
             .map(|idx| (0..8).all(|c| cache.cell_corners[idx * 8 + c] > 0.0))
             .collect();
+        let cell_cap: Vec<f32> = (0..total)
+            .map(|idx| if cell_solid[idx] { 0.0 } else { 1.0 })
+            .collect();
         Self {
             cells: vec![FluidCell::default(); total],
             cell_density: cache.cell_density.clone(),
             cell_corners: cache.cell_corners.clone(),
             cell_solid,
+            cell_cap,
             size,
             dirty: false,
             has_fluid: false,
@@ -213,10 +220,10 @@ impl ChunkFluidGrid {
     }
 
     /// Returns the fluid capacity of a cell: how much fluid it can hold.
-    /// Binary: not fully solid → 1.0, fully solid → 0.0.
+    /// Uses precomputed fractional capacity from cell_cap.
     #[inline]
     pub fn cell_capacity(&self, x: usize, y: usize, z: usize) -> f32 {
-        if self.cell_solid[self.index(x, y, z)] { 0.0 } else { 1.0 }
+        self.cell_cap[self.index(x, y, z)]
     }
 
     /// Returns true if the cell is mostly solid (threshold+ of 8 corners have positive density).
@@ -230,6 +237,21 @@ impl ChunkFluidGrid {
         count >= threshold as usize
     }
 
+    /// Recompute fractional cell capacity from corner densities.
+    /// `threshold`: cells with this many+ solid corners get capacity 0.0.
+    /// `fractional`: if true, partial cells get air_corners/8; otherwise binary 0/1.
+    pub fn recompute_capacity(&mut self, threshold: usize, fractional: bool) {
+        let total = self.size * self.size * self.size;
+        for idx in 0..total {
+            let solid = (0..8).filter(|&c| self.cell_corners[idx * 8 + c] > 0.0).count();
+            self.cell_cap[idx] = if solid >= threshold {
+                0.0
+            } else if fractional {
+                (8 - solid) as f32 / 8.0
+            } else if self.cell_solid[idx] { 0.0 } else { 1.0 };
+        }
+    }
+
     /// Set density for a single cell (used in tests and terrain modification).
     /// Positive = solid, negative = air.
     #[inline]
@@ -241,6 +263,7 @@ impl ChunkFluidGrid {
             self.cell_corners[idx * 8 + c] = density;
         }
         self.cell_solid[idx] = density > 0.0; // all corners set to same value
+        self.cell_cap[idx] = if density > 0.0 { 0.0 } else { 1.0 };
     }
 
     /// Get the 8 corner densities for a cell (for meshing/shoreline clipping).
@@ -287,6 +310,7 @@ impl ChunkFluidGrid {
                     self.cell_density[cell_idx] = sum / 8.0;
                     // Fully solid only if ALL 8 corners are positive
                     self.cell_solid[cell_idx] = (0..8).all(|c| self.cell_corners[cell_idx * 8 + c] > 0.0);
+                    self.cell_cap[cell_idx] = if self.cell_solid[cell_idx] { 0.0 } else { 1.0 };
                 }
             }
         }
