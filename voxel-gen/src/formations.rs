@@ -503,7 +503,7 @@ pub fn place_formations(
             rim_stalagmite_count: rim_count,
             rim_stalagmite_scale: config.cauldron_rim_stalagmite_scale,
             floor_noise: config.cauldron_floor_noise,
-            material: sp.material,
+            material: Material::Limestone,
         });
         used_floor.insert((sp.x, sp.y, sp.z), true);
     }
@@ -1675,6 +1675,67 @@ fn write_cauldron(
                 let sample = density.get_mut(ix, iy, iz);
                 if carve_val < sample.density {
                     sample.density = carve_val;
+                }
+            }
+        }
+    }
+
+    // Phase 1.5: Seal basin shell — fill air below walls and floor so the cauldron
+    // is watertight even when placed on slopes or above pre-existing caves.
+
+    // Walls: outer ring extending downward from anchor to carve depth
+    for iz in min_z..max_z {
+        for ix in min_x..max_x {
+            let dx = ix as f32 - ax;
+            let dz = iz as f32 - az;
+            let dist_h = (dx * dx + dz * dz).sqrt();
+
+            // Same ring as the lip: between radius*0.85 and radius+1
+            if dist_h < radius * 0.85 || dist_h > radius + 1.0 {
+                continue;
+            }
+
+            // Wall extends down to the deepest carve at this radial distance
+            let rim_factor = (dist_h / radius).min(1.0);
+            let carve_depth_at_r = depth * (1.0 - rim_factor.powf(0.3).min(1.0));
+            let bottom_y = (ay - carve_depth_at_r).floor() as i32;
+            let wall_min_y = bottom_y.max(0) as usize;
+
+            for iy in wall_min_y..anchor_y {
+                let sample = density.get_mut(ix, iy, iz);
+                if sample.density < 0.5 {
+                    sample.density = 0.8;
+                    sample.material = Material::Limestone;
+                }
+            }
+        }
+    }
+
+    // Floor: 3-voxel-thick disc at the bottom of the carved basin
+    for iz in min_z..max_z {
+        for ix in min_x..max_x {
+            let dx = ix as f32 - ax;
+            let dz = iz as f32 - az;
+            let dist_h = (dx * dx + dz * dz).sqrt();
+
+            if dist_h >= radius {
+                continue;
+            }
+
+            let rim_factor = dist_h / radius;
+            let carve_depth_at_r = depth * (1.0 - rim_factor.powf(0.3).min(1.0));
+            let bottom_y = (ay - carve_depth_at_r).floor() as i32;
+
+            // 3 voxels thick: bottom_y, bottom_y-1, bottom_y-2
+            for offset in 0..3_i32 {
+                let iy = bottom_y - offset;
+                if iy < 0 || iy as usize >= size {
+                    continue;
+                }
+                let sample = density.get_mut(ix, iy as usize, iz);
+                if sample.density < 0.5 {
+                    sample.density = 0.8;
+                    sample.material = Material::Limestone;
                 }
             }
         }
