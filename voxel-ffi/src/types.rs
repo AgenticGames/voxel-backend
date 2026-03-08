@@ -712,6 +712,8 @@ pub struct FfiEngineConfig {
     pub artesian_aquifer_noise_threshold: f64,
     pub artesian_pressure_noise_freq: f64,
     pub artesian_max_per_chunk: u32,
+    // ── Fluid Sources Toggle ──
+    pub fluid_sources_enabled: u8,
 }
 
 #[repr(C)]

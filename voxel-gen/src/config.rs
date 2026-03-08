@@ -346,6 +346,9 @@ pub struct GenerationConfig {
     /// Density offset pushing ore surfaces outward (0.0-0.5).
     /// Makes ore deposits physically bulge from cave walls.
     pub ore_protrusion: f32,
+    /// Master toggle for fluid source generation.
+    /// When false, all fluid sources are suppressed except cauldron seeds (is_source == false).
+    pub fluid_sources_enabled: bool,
 }
 
 impl GenerationConfig {
@@ -411,6 +414,7 @@ impl Default for GenerationConfig {
             mesh_recalc_normals: 1,
             ore_detail_multiplier: 1,
             ore_protrusion: 0.0,
+            fluid_sources_enabled: true,
         }
     }
 }

@@ -498,78 +498,86 @@ fn handle_request(
                         chunk,
                         densities,
                     });
-                    let _ = fluid_event_tx.send(FluidEvent::PlaceSources { chunk });
+                    if cfg.fluid_sources_enabled {
+                        let _ = fluid_event_tx.send(FluidEvent::PlaceSources { chunk });
+                    }
 
-                    // Detect geological springs (spring lines + vadose drips)
-                    let mut geo_springs: Vec<(u8, u8, u8, f32, u8)> = Vec::new();
-                    {
-                        let springs = voxel_gen::springs::detect_spring_lines(
-                            density, chunk, cfg.chunk_size,
-                            &cfg.water_table, &cfg.ore.host_rock, cfg.seed,
-                        );
-                        for s in &springs {
-                            geo_springs.push((s.lx, s.ly, s.lz, s.level, spring_type_to_fluid_u8(&s.source_type)));
-                        }
-                        let drips = voxel_gen::springs::detect_vadose_drips(
-                            density, chunk, cfg.chunk_size,
-                            &cfg.water_table, cfg.seed,
-                        );
-                        for d in &drips {
-                            geo_springs.push((d.lx, d.ly, d.lz, d.level, spring_type_to_fluid_u8(&d.source_type)));
-                        }
-                        // Hydrothermal springs near heat sources
-                        let hydro = voxel_gen::springs::detect_hydrothermal_springs(
-                            density, chunk, cfg.chunk_size,
-                            &cfg.water_table, &cfg.hydrothermal, cfg.seed,
-                        );
-                        for h in &hydro {
-                            // Hydrothermal springs use SpringLine type but render as amber
-                            geo_springs.push((h.lx, h.ly, h.lz, h.level, 8)); // WaterHydrothermal
-                        }
-                        // Artesian springs from confined aquifer
-                        let artesian = voxel_gen::springs::detect_artesian_springs(
-                            density, chunk, cfg.chunk_size,
-                            &cfg.artesian, cfg.seed,
-                        );
-                        for a in &artesian {
-                            geo_springs.push((a.lx, a.ly, a.lz, a.level, spring_type_to_fluid_u8(&a.source_type)));
-                        }
-                        // River springs from carve_rivers (collected during region gen)
-                        for (rs_chunk, rs_desc) in &region_river_springs {
-                            if *rs_chunk == chunk {
-                                geo_springs.push((rs_desc.lx, rs_desc.ly, rs_desc.lz, rs_desc.level, spring_type_to_fluid_u8(&rs_desc.source_type)));
+                    if cfg.fluid_sources_enabled {
+                        // Detect geological springs (spring lines + vadose drips)
+                        let mut geo_springs: Vec<(u8, u8, u8, f32, u8)> = Vec::new();
+                        {
+                            let springs = voxel_gen::springs::detect_spring_lines(
+                                density, chunk, cfg.chunk_size,
+                                &cfg.water_table, &cfg.ore.host_rock, cfg.seed,
+                            );
+                            for s in &springs {
+                                geo_springs.push((s.lx, s.ly, s.lz, s.level, spring_type_to_fluid_u8(&s.source_type)));
+                            }
+                            let drips = voxel_gen::springs::detect_vadose_drips(
+                                density, chunk, cfg.chunk_size,
+                                &cfg.water_table, cfg.seed,
+                            );
+                            for d in &drips {
+                                geo_springs.push((d.lx, d.ly, d.lz, d.level, spring_type_to_fluid_u8(&d.source_type)));
+                            }
+                            // Hydrothermal springs near heat sources
+                            let hydro = voxel_gen::springs::detect_hydrothermal_springs(
+                                density, chunk, cfg.chunk_size,
+                                &cfg.water_table, &cfg.hydrothermal, cfg.seed,
+                            );
+                            for h in &hydro {
+                                // Hydrothermal springs use SpringLine type but render as amber
+                                geo_springs.push((h.lx, h.ly, h.lz, h.level, 8)); // WaterHydrothermal
+                            }
+                            // Artesian springs from confined aquifer
+                            let artesian = voxel_gen::springs::detect_artesian_springs(
+                                density, chunk, cfg.chunk_size,
+                                &cfg.artesian, cfg.seed,
+                            );
+                            for a in &artesian {
+                                geo_springs.push((a.lx, a.ly, a.lz, a.level, spring_type_to_fluid_u8(&a.source_type)));
+                            }
+                            // River springs from carve_rivers (collected during region gen)
+                            for (rs_chunk, rs_desc) in &region_river_springs {
+                                if *rs_chunk == chunk {
+                                    geo_springs.push((rs_desc.lx, rs_desc.ly, rs_desc.lz, rs_desc.level, spring_type_to_fluid_u8(&rs_desc.source_type)));
+                                }
                             }
                         }
-                    }
-                    if !geo_springs.is_empty() {
-                        let _ = fluid_event_tx.send(FluidEvent::PlaceGeologicalSprings {
-                            chunk,
-                            springs: geo_springs,
-                        });
-                    }
+                        if !geo_springs.is_empty() {
+                            let _ = fluid_event_tx.send(FluidEvent::PlaceGeologicalSprings {
+                                chunk,
+                                springs: geo_springs,
+                            });
+                        }
 
-                    // Detect pipe lava sources near kimberlite
-                    let pipe_lava = voxel_gen::springs::detect_pipe_lava(
-                        density, chunk, cfg.chunk_size,
-                        &cfg.pipe_lava, cfg.seed,
-                    );
-                    for lv in &pipe_lava {
-                        let _ = fluid_event_tx.send(FluidEvent::AddFluid {
-                            chunk,
-                            x: lv.lx,
-                            y: lv.ly,
-                            z: lv.lz,
-                            fluid_type: voxel_fluid::cell::FluidType::Lava,
-                            level: lv.level,
-                            is_source: true,
-                        });
+                        // Detect pipe lava sources near kimberlite
+                        let pipe_lava = voxel_gen::springs::detect_pipe_lava(
+                            density, chunk, cfg.chunk_size,
+                            &cfg.pipe_lava, cfg.seed,
+                        );
+                        for lv in &pipe_lava {
+                            let _ = fluid_event_tx.send(FluidEvent::AddFluid {
+                                chunk,
+                                x: lv.lx,
+                                y: lv.ly,
+                                z: lv.lz,
+                                fluid_type: voxel_fluid::cell::FluidType::Lava,
+                                level: lv.level,
+                                is_source: true,
+                            });
+                        }
                     }
                 }
             }
 
             // Inject pool fluid seeds into the fluid simulation
+            // When fluid_sources_enabled is off, only inject cauldron seeds (is_source == false)
             if was_slow_path {
                 for seed in &pool_fluid_seeds {
+                    if !cfg.fluid_sources_enabled && seed.is_source {
+                        continue; // skip infinite pool sources when toggle is off
+                    }
                     let _ = fluid_event_tx.send(FluidEvent::AddFluid {
                         chunk: seed.chunk,
                         x: seed.lx,
@@ -888,21 +896,23 @@ fn handle_request(
                         });
 
                         // Detect aquifer breaches near the mined area
-                        let breaches = voxel_gen::springs::detect_aquifer_breaches(
-                            density, key, cfg.chunk_size,
-                            &cfg.water_table, &cfg.ore.host_rock, cfg.seed,
-                            &mined_cells,
-                        );
-                        for b in &breaches {
-                            let _ = fluid_event_tx.send(FluidEvent::AddFluid {
-                                chunk: key,
-                                x: b.lx,
-                                y: b.ly,
-                                z: b.lz,
-                                fluid_type: voxel_fluid::cell::FluidType::WaterBreach,
-                                level: b.level,
-                                is_source: true,
-                            });
+                        if cfg.fluid_sources_enabled {
+                            let breaches = voxel_gen::springs::detect_aquifer_breaches(
+                                density, key, cfg.chunk_size,
+                                &cfg.water_table, &cfg.ore.host_rock, cfg.seed,
+                                &mined_cells,
+                            );
+                            for b in &breaches {
+                                let _ = fluid_event_tx.send(FluidEvent::AddFluid {
+                                    chunk: key,
+                                    x: b.lx,
+                                    y: b.ly,
+                                    z: b.lz,
+                                    fluid_type: voxel_fluid::cell::FluidType::WaterBreach,
+                                    level: b.level,
+                                    is_source: true,
+                                });
+                            }
                         }
                     }
                 }
@@ -1032,21 +1042,23 @@ fn handle_request(
                             densities,
                         });
 
-                        let breaches = voxel_gen::springs::detect_aquifer_breaches(
-                            density, key, cfg.chunk_size,
-                            &cfg.water_table, &cfg.ore.host_rock, cfg.seed,
-                            &mined_cells,
-                        );
-                        for b in &breaches {
-                            let _ = fluid_event_tx.send(FluidEvent::AddFluid {
-                                chunk: key,
-                                x: b.lx,
-                                y: b.ly,
-                                z: b.lz,
-                                fluid_type: voxel_fluid::cell::FluidType::WaterBreach,
-                                level: b.level,
-                                is_source: true,
-                            });
+                        if cfg.fluid_sources_enabled {
+                            let breaches = voxel_gen::springs::detect_aquifer_breaches(
+                                density, key, cfg.chunk_size,
+                                &cfg.water_table, &cfg.ore.host_rock, cfg.seed,
+                                &mined_cells,
+                            );
+                            for b in &breaches {
+                                let _ = fluid_event_tx.send(FluidEvent::AddFluid {
+                                    chunk: key,
+                                    x: b.lx,
+                                    y: b.ly,
+                                    z: b.lz,
+                                    fluid_type: voxel_fluid::cell::FluidType::WaterBreach,
+                                    level: b.level,
+                                    is_source: true,
+                                });
+                            }
                         }
                     }
                 }
@@ -1375,21 +1387,23 @@ fn handle_request(
                 }
             }
 
-            // Inject fluid seeds
-            for seed in &fluid_seeds {
-                let ft = match seed.fluid_type {
-                    voxel_gen::pools::PoolFluid::Water => voxel_fluid::cell::FluidType::WaterPool,
-                    voxel_gen::pools::PoolFluid::Lava => voxel_fluid::cell::FluidType::Lava,
-                };
-                let _ = fluid_event_tx.send(FluidEvent::AddFluid {
-                    chunk: seed.chunk,
-                    x: seed.lx,
-                    y: seed.ly,
-                    z: seed.lz,
-                    fluid_type: ft,
-                    level: 1.0,
-                    is_source: seed.is_source,
-                });
+            // Inject fluid seeds (skip when fluid sources disabled)
+            if cfg.fluid_sources_enabled {
+                for seed in &fluid_seeds {
+                    let ft = match seed.fluid_type {
+                        voxel_gen::pools::PoolFluid::Water => voxel_fluid::cell::FluidType::WaterPool,
+                        voxel_gen::pools::PoolFluid::Lava => voxel_fluid::cell::FluidType::Lava,
+                    };
+                    let _ = fluid_event_tx.send(FluidEvent::AddFluid {
+                        chunk: seed.chunk,
+                        x: seed.lx,
+                        y: seed.ly,
+                        z: seed.lz,
+                        fluid_type: ft,
+                        level: 1.0,
+                        is_source: seed.is_source,
+                    });
+                }
             }
 
             // Run incremental seam pass

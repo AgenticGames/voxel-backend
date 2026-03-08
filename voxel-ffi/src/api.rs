@@ -2038,6 +2038,8 @@ mod tests {
             artesian_aquifer_noise_threshold: 0.3,
             artesian_pressure_noise_freq: 0.02,
             artesian_max_per_chunk: 3,
+            // Fluid Sources Toggle
+            fluid_sources_enabled: 1,
         }
     }
 

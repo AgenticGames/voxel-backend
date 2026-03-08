@@ -1511,6 +1511,7 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
         mesh_recalc_normals: c.mesh_recalc_normals,
         ore_detail_multiplier: if c.ore_detail_multiplier > 0 { c.ore_detail_multiplier.min(4) } else { 1 },
         ore_protrusion: c.ore_protrusion.max(0.0).min(0.5),
+        fluid_sources_enabled: c.fluid_sources_enabled != 0,
     }
 }
 
