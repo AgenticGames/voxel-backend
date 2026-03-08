@@ -75,6 +75,7 @@ pub fn place_pools(
     world_origin: Vec3,
     global_seed: u64,
     chunk_seed: u64,
+    chunk_coord: (i32, i32, i32),
 ) -> (Vec<PoolDescriptor>, Vec<FluidSeed>) {
     if !config.enabled {
         return (Vec::new(), Vec::new());
@@ -117,11 +118,7 @@ pub fn place_pools(
     let mut descriptors = Vec::new();
     let mut fluid_seeds = Vec::new();
 
-    // Compute chunk coordinate from world origin and chunk size
-    let chunk_size = density.size - 1; // density grid is chunk_size + 1
-    let chunk_cx = (world_origin.x / chunk_size as f32).floor() as i32;
-    let chunk_cy = (world_origin.y / chunk_size as f32).floor() as i32;
-    let chunk_cz = (world_origin.z / chunk_size as f32).floor() as i32;
+    let (chunk_cx, chunk_cy, chunk_cz) = chunk_coord;
 
     for cluster in &clusters {
         // Step 3: Noise filter at cluster centroid (world-space)
@@ -843,6 +840,7 @@ mod tests {
             Vec3::ZERO,
             42,
             42,
+            (0, 0, 0),
         );
         assert!(descriptors.is_empty());
         assert!(seeds.is_empty());
@@ -885,8 +883,8 @@ mod tests {
             }
         }
 
-        let (r1, s1) = place_pools(&mut density1, &config, Vec3::ZERO, 42, 100);
-        let (r2, s2) = place_pools(&mut density2, &config, Vec3::ZERO, 42, 100);
+        let (r1, s1) = place_pools(&mut density1, &config, Vec3::ZERO, 42, 100, (0, 0, 0));
+        let (r2, s2) = place_pools(&mut density2, &config, Vec3::ZERO, 42, 100, (0, 0, 0));
 
         assert_eq!(r1.len(), r2.len(), "Pool count should be deterministic");
         assert_eq!(s1.len(), s2.len(), "Seed count should be deterministic");
@@ -929,7 +927,7 @@ mod tests {
             }
         }
 
-        let (descriptors, seeds) = place_pools(&mut density, &config, Vec3::ZERO, 42, 100);
+        let (descriptors, seeds) = place_pools(&mut density, &config, Vec3::ZERO, 42, 100, (0, 0, 0));
         assert!(descriptors.is_empty(), "empty_pct=1.0 should produce no pools");
         assert!(seeds.is_empty(), "empty_pct=1.0 should produce no seeds");
     }
@@ -965,7 +963,7 @@ mod tests {
             }
         }
 
-        let (descriptors, seeds) = place_pools(&mut density, &config, Vec3::ZERO, 42, 100);
+        let (descriptors, seeds) = place_pools(&mut density, &config, Vec3::ZERO, 42, 100, (0, 0, 0));
         for d in &descriptors {
             assert_eq!(d.fluid_type, PoolFluid::Water, "water_pct=1.0 should produce only water pools");
         }
@@ -1131,7 +1129,7 @@ mod tests {
             }
         }
 
-        let (descriptors, seeds) = place_pools(&mut density, &config, Vec3::ZERO, 42, 100);
+        let (descriptors, seeds) = place_pools(&mut density, &config, Vec3::ZERO, 42, 100, (0, 0, 0));
         if !descriptors.is_empty() {
             // Seeds should span multiple Y levels due to basin pre-fill
             let y_values: std::collections::HashSet<u8> = seeds.iter().map(|s| s.ly).collect();

@@ -102,6 +102,7 @@ pub fn generate_density(coord: ChunkCoord, config: &GenerationConfig) -> (Densit
         world_origin,
         config.seed,
         c_seed,
+        (coord.x, coord.y, coord.z),
     );
 
     // Step 4: Place cave formations (stalactites, stalagmites, columns, flowstone)

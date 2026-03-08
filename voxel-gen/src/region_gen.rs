@@ -240,6 +240,7 @@ pub fn generate_region_densities(
                     coord.world_origin_bounds(eb),
                     config.seed,
                     c_seed,
+                    (cx, cy, cz),
                 );
                 all_pool_descriptors.append(&mut pools);
                 all_fluid_seeds.append(&mut seeds);
