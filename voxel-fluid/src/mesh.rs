@@ -364,14 +364,18 @@ pub fn dominant_fluid_type(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) 
     if lava_count > total_water {
         FluidType::Lava
     } else {
-        // Return the most common water subtype
-        let mut best_idx = 1u8; // default to Water
+        // Prefer proper subtypes (3-9) over generic Water (1)
+        let mut best_idx = 0u8;
         let mut best_count = 0u32;
-        for i in 0..water_counts.len() {
+        for i in 3..water_counts.len() {
             if water_counts[i] > best_count {
                 best_count = water_counts[i];
                 best_idx = i as u8;
             }
+        }
+        // Fall back to generic Water only if no subtype found
+        if best_count == 0 {
+            best_idx = 1;
         }
         FluidType::from_u8(best_idx)
     }
@@ -630,6 +634,33 @@ mod tests {
             "Boundary levels should change the mesh at the shared edge (with={}, without={})",
             mesh_with_boundary.positions.len(),
             mesh_without_boundary.positions.len()
+        );
+    }
+
+    #[test]
+    fn test_dominant_type_prefers_subtype_over_generic() {
+        // Mix of generic Water(1) and WaterRiver(6) cells — dominant should prefer WaterRiver
+        let mut grid = ChunkFluidGrid::new(16);
+        // Place 4 generic Water cells
+        for x in 6..8 {
+            for y in 6..8 {
+                let cell = grid.get_mut(x, y, 6);
+                cell.level = 1.0;
+                cell.fluid_type = FluidType::Water;
+            }
+        }
+        // Place 2 WaterRiver cells in the same 2x2x2 neighborhood
+        for x in 6..8 {
+            let cell = grid.get_mut(x, 6, 7);
+            cell.level = 1.0;
+            cell.fluid_type = FluidType::WaterRiver;
+        }
+        // Query at (6,6,6) — 2x2x2 cube covers both types
+        let result = dominant_fluid_type(&grid, 6, 6, 6);
+        assert_eq!(
+            result,
+            FluidType::WaterRiver,
+            "Should prefer WaterRiver subtype over generic Water even when Water has more cells"
         );
     }
 }
