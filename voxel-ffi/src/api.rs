@@ -355,19 +355,21 @@ pub unsafe extern "C" fn voxel_update_config(engine: *mut c_void, config: *const
     engine.update_config(&*config);
 }
 
-/// Hot-reload fluid config (flow_solid_threshold, fractional_capacity) at runtime.
+/// Hot-reload fluid config at runtime.
+/// flow_solid_threshold and fractional_capacity kept in C signature for UE ABI
+/// compatibility but are ignored — binary cell classification is always used.
 #[no_mangle]
 pub unsafe extern "C" fn voxel_update_fluid_config(
     engine: *mut c_void,
-    flow_solid_threshold: u8,
-    fractional_capacity: u8,
+    _flow_solid_threshold: u8,
+    _fractional_capacity: u8,
     source_grace_ticks: u16,
 ) {
     if engine.is_null() {
         return;
     }
     let engine = &*(engine as *const VoxelEngine);
-    engine.update_fluid_config(flow_solid_threshold, fractional_capacity != 0, source_grace_ticks);
+    engine.update_fluid_config(source_grace_ticks);
 }
 
 /// Inject fluid at a UE world position.

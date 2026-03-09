@@ -54,8 +54,6 @@ pub struct FluidConfig {
     pub solid_threshold: f32,
     // Solid corner threshold for is_mostly_solid guard (1-8, default 6)
     pub solid_corner_threshold: u8,
-    pub flow_solid_threshold: u8,   // cells with N+ solid corners → capacity 0.0
-    pub fractional_capacity: bool,  // use air_corners/8 vs binary 0/1
     // Grace period for non-source fluid (e.g. cauldron water)
     pub source_grace_ticks: u16,    // ticks of source-like behavior (default 50 = 5s at 10Hz)
     // Upward pressure equalization
@@ -92,8 +90,6 @@ impl Default for FluidConfig {
             flow_anim_speed: 1.0,
             solid_threshold: 0.0,
             solid_corner_threshold: 6,
-            flow_solid_threshold: 6,
-            fractional_capacity: true,
             source_grace_ticks: 50,
             water_pressure_rate: 0.3,
             lava_pressure_rate: 0.1,
@@ -141,17 +137,8 @@ pub enum FluidEvent {
         level: f32,
         is_source: bool,
     },
-    /// Register a sentinel trigger zone for cauldron leak diagnostics.
-    AddSentinel {
-        chunk: (i32, i32, i32),
-        x: u8,
-        y: u8,
-        z: u8,
-    },
-    /// Update fluid simulation config at runtime (flow threshold + fractional capacity + grace).
+    /// Update fluid simulation config at runtime (grace period).
     UpdateFluidConfig {
-        flow_solid_threshold: u8,
-        fractional_capacity: bool,
         source_grace_ticks: u16,
     },
     /// Request a snapshot of all fluid cells (used by sleep system).

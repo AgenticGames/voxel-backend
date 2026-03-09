@@ -49,7 +49,7 @@ pub fn tick_fluid(
             if !chunks.contains_key(&adj) {
                 if let Some(cache) = chunk_densities.get(&adj) {
                     let mut grid = ChunkFluidGrid::from_density_cache(cache);
-                    grid.recompute_capacity(config.flow_solid_threshold as usize, config.fractional_capacity);
+                    grid.recompute_capacity();
                     chunks.insert(adj, grid);
                 }
             }
@@ -84,7 +84,7 @@ pub fn tick_fluid(
         if !chunks.contains_key(&xfer.dest_key) {
             if let Some(cache) = chunk_densities.get(&xfer.dest_key) {
                 let mut grid = ChunkFluidGrid::from_density_cache(cache);
-                grid.recompute_capacity(config.flow_solid_threshold as usize, config.fractional_capacity);
+                grid.recompute_capacity();
                 chunks.insert(xfer.dest_key, grid);
             } else {
                 continue; // no density data, can't create grid
@@ -1966,11 +1966,8 @@ mod tests {
         }
         grid.update_density(&densities);
         let config = crate::FluidConfig::default();
-        // Use production defaults: flow_solid_threshold=6, fractional_capacity=true
-        grid.recompute_capacity(
-            config.flow_solid_threshold as usize,
-            config.fractional_capacity,
-        );
+        // Binary classification: center density > 0 = solid, <= 0 = air
+        grid.recompute_capacity();
 
         // Fill bottom half of air space with water (y=3..7)
         for z in 0..size {
@@ -2155,10 +2152,10 @@ mod tests {
         }
     }
 
-    /// Calls grid.update_density then grid.recompute_capacity with production defaults.
-    fn apply_density(grid: &mut ChunkFluidGrid, densities: &[f32], config: &crate::FluidConfig) {
+    /// Calls grid.update_density then grid.recompute_capacity (binary classification).
+    fn apply_density(grid: &mut ChunkFluidGrid, densities: &[f32], _config: &crate::FluidConfig) {
         grid.update_density(densities);
-        grid.recompute_capacity(config.flow_solid_threshold as usize, config.fractional_capacity);
+        grid.recompute_capacity();
     }
 
     /// Mining simulation: sets density grid points to -1.0 around mined cells,
@@ -2401,7 +2398,9 @@ mod tests {
     }
 
     #[test]
-    fn bowl_fractional_boundary_conservation() {
+    fn bowl_binary_boundary_conservation() {
+        // Tests that binary cell classification (center density > 0 = solid)
+        // correctly contains water even with gradual SDF transitions at boundaries.
         let size = 16;
         let stride = size + 1;
         let mut densities = vec![1.0f32; stride * stride * stride];
@@ -2430,19 +2429,16 @@ mod tests {
         let mut grid = ChunkFluidGrid::new(size);
         apply_density(&mut grid, &densities, &config);
 
-        // Verify fractional cells exist
-        let mut frac_count = 0;
+        // With binary classification, all capacities should be 0.0 or 1.0
         for z in 0..size {
             for y in 0..size {
                 for x in 0..size {
                     let cap = grid.cell_capacity(x, y, z);
-                    if cap > 0.01 && cap < 0.99 {
-                        frac_count += 1;
-                    }
+                    assert!(cap == 0.0 || cap == 1.0,
+                        "Binary capacity violated at ({},{},{}): cap={}", x, y, z, cap);
                 }
             }
         }
-        assert!(frac_count > 0, "Should have fractional-capacity boundary cells, got {}", frac_count);
 
         // Fill air cells to capacity
         fill_air_to_capacity(&mut grid, 0..size);
@@ -2456,7 +2452,7 @@ mod tests {
         }
         let final_w = total_water(&chunks);
         let loss_pct = ((initial - final_w) / initial * 100.0).abs();
-        assert!(loss_pct < 2.0, "Fractional conservation ±2%: initial={:.2}, final={:.2}, loss={:.2}%", initial, final_w, loss_pct);
+        assert!(loss_pct < 1.0, "Binary boundary conservation: initial={:.2}, final={:.2}, loss={:.2}%", initial, final_w, loss_pct);
     }
 
     #[test]
@@ -3480,11 +3476,13 @@ mod tests {
             }
         }
         // Cross-chunk transfers have inherent losses from transfer clamping.
-        // With a fully-filled lower chunk, cross-chunk transfers to boundary cells
-        // cause squeeze loss. Allow wider tolerance for this known limitation.
+        // With binary cell classification, boundary cells may gain full capacity
+        // (center density ≤ 0 → cap=1.0) where they previously had fractional
+        // capacity. Water spreads into these boundary cells outside the sampled
+        // range. Allow wider tolerance for this known limitation.
         let total_remaining = lower_w + upper_w;
         let loss_pct = ((initial - total_remaining) / initial * 100.0).abs();
-        assert!(loss_pct < 10.0,
+        assert!(loss_pct < 15.0,
             "Cross-chunk conservation: lower={:.2}, upper={:.2}, total={:.2}, initial={:.2}, loss={:.1}%",
             lower_w, upper_w, total_remaining, initial, loss_pct);
     }

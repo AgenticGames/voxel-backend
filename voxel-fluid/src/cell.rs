@@ -143,8 +143,8 @@ impl ChunkDensityCache {
 /// Per-chunk fluid grid: 16^3 cells with continuous density data.
 ///
 /// Replaces the old binary solid_mask with density values from the terrain's
-/// DensityField. This allows partial-volume fluid simulation where cells
-/// partially occupied by terrain have reduced fluid capacity.
+/// DensityField. Uses binary cell classification: center density > 0 = solid
+/// (cap 0.0), center density <= 0 = air (cap 1.0). No fractional capacity.
 pub struct ChunkFluidGrid {
     pub cells: Vec<FluidCell>,
     /// Density at each cell center (average of 8 corners). 16^3 = 4096 values.
@@ -186,8 +186,9 @@ impl ChunkFluidGrid {
         let cell_solid: Vec<bool> = (0..total)
             .map(|idx| (0..8).all(|c| cache.cell_corners[idx * 8 + c] > 0.0))
             .collect();
+        // Binary classification: center density > 0 = solid, <= 0 = air
         let cell_cap: Vec<f32> = (0..total)
-            .map(|idx| if cell_solid[idx] { 0.0 } else { 1.0 })
+            .map(|idx| if cache.cell_density[idx] > 0.0 { 0.0 } else { 1.0 })
             .collect();
         Self {
             cells: vec![FluidCell::default(); total],
@@ -241,18 +242,12 @@ impl ChunkFluidGrid {
         count >= threshold as usize
     }
 
-    /// Recompute fractional cell capacity from corner densities.
-    /// `threshold`: cells with this many+ solid corners get capacity 0.0.
-    /// `fractional`: if true, partial cells get air_corners/8; otherwise binary 0/1.
-    pub fn recompute_capacity(&mut self, threshold: usize, fractional: bool) {
+    /// Recompute cell capacity using binary classification based on center density.
+    /// Center density > 0 = solid (cap 0.0), <= 0 = air (cap 1.0).
+    pub fn recompute_capacity(&mut self) {
         let total = self.size * self.size * self.size;
         for idx in 0..total {
-            let solid = (0..8).filter(|&c| self.cell_corners[idx * 8 + c] > 0.0).count();
-            self.cell_cap[idx] = if solid >= threshold {
-                0.0
-            } else if fractional {
-                (8 - solid) as f32 / 8.0
-            } else if self.cell_solid[idx] { 0.0 } else { 1.0 };
+            self.cell_cap[idx] = if self.cell_density[idx] > 0.0 { 0.0 } else { 1.0 };
         }
     }
 
@@ -314,7 +309,8 @@ impl ChunkFluidGrid {
                     self.cell_density[cell_idx] = sum / 8.0;
                     // Fully solid only if ALL 8 corners are positive
                     self.cell_solid[cell_idx] = (0..8).all(|c| self.cell_corners[cell_idx * 8 + c] > 0.0);
-                    self.cell_cap[cell_idx] = if self.cell_solid[cell_idx] { 0.0 } else { 1.0 };
+                    // Binary classification: center density > 0 = solid, <= 0 = air
+                    self.cell_cap[cell_idx] = if self.cell_density[cell_idx] > 0.0 { 0.0 } else { 1.0 };
                 }
             }
         }

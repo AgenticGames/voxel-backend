@@ -716,9 +716,9 @@ pub struct FfiEngineConfig {
     pub fluid_sources_enabled: u8,
     // ── Fluid Tuning ──
     pub fluid_solid_corner_threshold: u8,
-    // ── Fluid Flow Capacity ──
+    // ── Fluid Flow Capacity (DEPRECATED — binary classification always used, kept for ABI) ──
     pub fluid_flow_solid_threshold: u8,
-    pub fluid_fractional_capacity: u8,  // 0=false, 1=true
+    pub fluid_fractional_capacity: u8,
     // ── Cauldron Inset Tuning ──
     pub formation_cauldron_wall_inset: f32,
     pub formation_cauldron_floor_inset: i32,

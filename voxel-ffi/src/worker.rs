@@ -575,16 +575,6 @@ fn handle_request(
             // When fluid_sources_enabled is off, only inject cauldron seeds (is_source == false)
             if was_slow_path {
                 for seed in &pool_fluid_seeds {
-                    if seed.is_sentinel {
-                        // Sentinel trigger zone — register for leak diagnostics
-                        let _ = fluid_event_tx.send(FluidEvent::AddSentinel {
-                            chunk: seed.chunk,
-                            x: seed.lx,
-                            y: seed.ly,
-                            z: seed.lz,
-                        });
-                        continue;
-                    }
                     if !cfg.fluid_sources_enabled && seed.is_source {
                         continue; // skip infinite pool sources when toggle is off
                     }
@@ -1399,15 +1389,6 @@ fn handle_request(
 
             // Inject fluid seeds (skip when fluid sources disabled)
             for seed in &fluid_seeds {
-                if seed.is_sentinel {
-                    let _ = fluid_event_tx.send(FluidEvent::AddSentinel {
-                        chunk: seed.chunk,
-                        x: seed.lx,
-                        y: seed.ly,
-                        z: seed.lz,
-                    });
-                    continue;
-                }
                 if !cfg.fluid_sources_enabled {
                     continue; // skip fluid when sources disabled
                 }

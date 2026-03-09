@@ -27,10 +27,6 @@ pub fn fluid_sim_loop(
     let mut chunk_densities: HashMap<(i32, i32, i32), ChunkDensityCache> = HashMap::new();
     let chunk_size = config.chunk_size;
 
-    // Sentinel trigger zones for cauldron leak diagnostics
-    let mut sentinel_positions: HashMap<(i32, i32, i32), Vec<(u8, u8, u8)>> = HashMap::new();
-    let mut sentinel_alerted: HashSet<(i32, i32, i32, u8, u8, u8)> = HashSet::new();
-
     let tick_interval = Duration::from_secs_f32(1.0 / config.tick_rate);
     let mut last_tick = Instant::now();
     let mut tick_count: u64 = 0;
@@ -40,7 +36,7 @@ pub fn fluid_sim_loop(
         // Drain all pending events
         loop {
             match event_rx.try_recv() {
-                Ok(event) => handle_event(event, &mut chunks, &mut chunk_densities, chunk_size, &mut config, &mut sentinel_positions),
+                Ok(event) => handle_event(event, &mut chunks, &mut chunk_densities, chunk_size, &mut config),
                 Err(_) => break,
             }
         }
@@ -112,38 +108,6 @@ pub fn fluid_sim_loop(
                 }
             }
         }
-
-        // Sentinel breach check — every 10 ticks (~1s at 10Hz)
-        if tick_count % 10 == 0 && !sentinel_positions.is_empty() {
-            for (chunk_key, positions) in &sentinel_positions {
-                if let Some(grid) = chunks.get(chunk_key) {
-                    for &(sx, sy, sz) in positions {
-                        let xu = sx as usize;
-                        let yu = sy as usize;
-                        let zu = sz as usize;
-                        if xu >= chunk_size || yu >= chunk_size || zu >= chunk_size {
-                            continue;
-                        }
-                        let cell = grid.get(xu, yu, zu);
-                        if cell.level > crate::cell::MIN_LEVEL {
-                            let alert_key = (chunk_key.0, chunk_key.1, chunk_key.2, sx, sy, sz);
-                            if !sentinel_alerted.contains(&alert_key) {
-                                sentinel_alerted.insert(alert_key);
-                                let capacity = grid.cell_capacity(xu, yu, zu);
-                                eprintln!(
-                                    "SENTINEL BREACH: chunk({},{},{}) local({},{},{}) level={:.4} type={:?} tick={} | \
-                                     is_source={} grace_ticks={} capacity={:.3}",
-                                    chunk_key.0, chunk_key.1, chunk_key.2,
-                                    sx, sy, sz,
-                                    cell.level, cell.fluid_type, tick_count,
-                                    cell.is_source, cell.grace_ticks, capacity
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -153,7 +117,6 @@ fn handle_event(
     chunk_densities: &mut HashMap<(i32, i32, i32), ChunkDensityCache>,
     chunk_size: usize,
     config: &mut FluidConfig,
-    sentinel_positions: &mut HashMap<(i32, i32, i32), Vec<(u8, u8, u8)>>,
 ) {
     match event {
         FluidEvent::DensityUpdate { chunk, densities } => {
@@ -171,7 +134,7 @@ fn handle_event(
         }
         FluidEvent::PlaceSources { chunk } => {
             // Only create grid if density exists and sources are actually placed
-            ensure_grid(chunks, chunk_densities, chunk, chunk_size, config);
+            ensure_grid(chunks, chunk_densities, chunk, chunk_size);
             if let Some(grid) = chunks.get_mut(&chunk) {
                 place_sources(grid, chunk, chunk_size, config);
             }
@@ -202,7 +165,7 @@ fn handle_event(
             let _ = reply_tx.send(snapshot);
         }
         FluidEvent::PlaceGeologicalSprings { chunk, springs } => {
-            ensure_grid(chunks, chunk_densities, chunk, chunk_size, config);
+            ensure_grid(chunks, chunk_densities, chunk, chunk_size);
             if let Some(grid) = chunks.get_mut(&chunk) {
                 for (lx, ly, lz, level, fluid_type_u8) in springs {
                     let xu = lx as usize;
@@ -223,7 +186,7 @@ fn handle_event(
             }
         }
         FluidEvent::AddFluid { chunk, x, y, z, fluid_type, level, is_source } => {
-            ensure_grid(chunks, chunk_densities, chunk, chunk_size, config);
+            ensure_grid(chunks, chunk_densities, chunk, chunk_size);
             if let Some(grid) = chunks.get_mut(&chunk) {
                 let xu = x as usize;
                 let yu = y as usize;
@@ -248,16 +211,15 @@ fn handle_event(
                 }
             }
         }
-        FluidEvent::AddSentinel { chunk, x, y, z } => {
-            sentinel_positions.entry(chunk).or_default().push((x, y, z));
-        }
-        FluidEvent::UpdateFluidConfig { flow_solid_threshold, fractional_capacity, source_grace_ticks } => {
-            config.flow_solid_threshold = flow_solid_threshold;
-            config.fractional_capacity = fractional_capacity;
+        FluidEvent::UpdateFluidConfig { source_grace_ticks } => {
             config.source_grace_ticks = source_grace_ticks;
-            for grid in chunks.values_mut() {
-                grid.recompute_capacity(flow_solid_threshold as usize, fractional_capacity);
-                grid.dirty = true;
+            // Recompute capacity with binary classification for all loaded chunks
+            let keys: Vec<_> = chunks.keys().copied().collect();
+            for chunk_key in keys {
+                if let Some(grid) = chunks.get_mut(&chunk_key) {
+                    grid.recompute_capacity();
+                    grid.dirty = true;
+                }
             }
         }
     }
@@ -322,15 +284,12 @@ fn ensure_grid(
     chunk_densities: &HashMap<(i32, i32, i32), ChunkDensityCache>,
     chunk: (i32, i32, i32),
     chunk_size: usize,
-    config: &FluidConfig,
 ) {
     if chunks.contains_key(&chunk) {
         return;
     }
     let grid = if let Some(cache) = chunk_densities.get(&chunk) {
-        let mut grid = ChunkFluidGrid::from_density_cache(cache);
-        grid.recompute_capacity(config.flow_solid_threshold as usize, config.fractional_capacity);
-        grid
+        ChunkFluidGrid::from_density_cache(cache)
     } else {
         ChunkFluidGrid::new(chunk_size)
     };
