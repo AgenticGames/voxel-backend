@@ -228,6 +228,21 @@ pub fn default_vein_size(ore: Material) -> (u32, u32) {
     }
 }
 
+/// Vein sizes for sleep hydrothermal deposits (thinner than world-gen defaults).
+/// Hydrothermal veins precipitate from fluids on cave walls — thin stringers, not ore bodies.
+pub fn sleep_vein_size(ore: Material) -> (u32, u32) {
+    match ore {
+        Material::Iron => (2, 5),
+        Material::Copper => (2, 4),
+        Material::Tin | Material::Quartz => (1, 3),
+        Material::Gold => (1, 2),
+        Material::Sulfide => (1, 3),
+        Material::Malachite => (1, 3),
+        Material::Pyrite => (1, 3),
+        _ => (1, 3),
+    }
+}
+
 /// Default vein bias for a given ore type.
 pub fn default_vein_bias(ore: Material, rng: &mut ChaCha8Rng) -> VeinBias {
     match ore {

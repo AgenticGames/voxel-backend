@@ -543,9 +543,9 @@ pub fn execute_sleep(
             // Recompute census each iteration (world evolved)
             let iter_census = compute_resource_census(density_fields, fluid_snapshot, &all_chunks, chunk_size);
 
-            // Phase 1 accumulation (time_factor = 25.0)
+            // Phase 1 accumulation (time_factor = 41.3: 1.24Ma remaining / 3 iters / 10Ka base)
             if config.phase1_enabled {
-                let scaled = scale_reaction_config(&config.reaction, 25.0);
+                let scaled = scale_reaction_config(&config.reaction, 41.3);
                 let r = apply_reaction(
                     &scaled, density_fields, fluid_snapshot,
                     &all_chunks, chunk_size, &mut iter_rng, &iter_census,
@@ -559,9 +559,9 @@ pub fn execute_sleep(
                 }
             }
 
-            // Phase 2 accumulation (time_factor = 2.3)
+            // Phase 2 accumulation (time_factor = 3.83: 1.15Ma remaining / 3 iters / 100Ka base)
             if config.phase2_enabled {
-                let scaled = scale_aureole_config(&config.aureole, 2.3);
+                let scaled = scale_aureole_config(&config.aureole, 3.83);
                 let r = apply_aureole(
                     &scaled, &config.groundwater, density_fields, fluid_snapshot,
                     &heat_map, &all_chunks, chunk_size, &mut iter_rng, &iter_census,

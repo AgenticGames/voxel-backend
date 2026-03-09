@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use voxel_core::stress::StressConfig;
 
 fn default_true() -> bool { true }
-fn default_accumulation_iterations() -> u32 { 5 }
+fn default_accumulation_iterations() -> u32 { 3 }
 fn default_heat_source_search_radius() -> u32 { 8 }
 fn default_enrichment_cluster_min() -> u32 { 2 }
 fn default_enrichment_cluster_max() -> u32 { 6 }
@@ -77,7 +77,7 @@ impl Default for SleepConfig {
             time_budget_ms: 8000,
             sleep_count: 1,
             accumulation_enabled: true,
-            accumulation_iterations: 5,
+            accumulation_iterations: 3,
             nest_positions: Vec::new(),
             // Legacy defaults
             metamorphism: MetamorphismConfig::default(),
@@ -227,7 +227,7 @@ impl Default for AureoleConfig {
             mid_limestone_to_marble_prob: 0.50,
             mid_sandstone_to_granite_prob: 0.25,
             outer_limestone_to_marble_prob: 0.20,
-            outer_slate_to_marble_prob: 0.30,
+            outer_slate_to_marble_prob: 0.08,
             water_erosion_prob: 0.05,
             water_erosion_enabled: true,
             metamorphism_enabled: true,
@@ -261,6 +261,8 @@ pub struct VeinConfig {
     pub hypothermal_max: u32,   // 0..hypothermal_max = high-temp zone
     pub mesothermal_max: u32,   // hypothermal_max..mesothermal_max = mid-temp
     // epithermal = mesothermal_max..vein_max_distance
+    /// Epithermal rarity: probability that Gold/Sulfide actually deposits (0.0-1.0)
+    pub epithermal_rarity: f32,
     // Formation growth
     pub crystal_growth_enabled: bool,
     pub crystal_growth_prob: f32,
@@ -287,7 +289,8 @@ impl Default for VeinConfig {
             vein_enabled: true,
             heat_source_search_radius: 8,
             hypothermal_max: 4,
-            mesothermal_max: 10,
+            mesothermal_max: 14,
+            epithermal_rarity: 0.30,
             crystal_growth_enabled: true,
             crystal_growth_prob: 0.30,
             crystal_growth_max_per_chunk: 4,

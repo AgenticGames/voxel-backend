@@ -17,7 +17,7 @@ use crate::collapse::{apply_collapse, CollapseResult};
 use crate::config::{DeepTimeConfig, GroundwaterConfig};
 use crate::groundwater::{ambient_moisture, is_fracture_site};
 use crate::manifest::ChangeManifest;
-use crate::util::{FACE_OFFSETS, sample_material, count_neighbors, has_material_within_radius, grow_vein, default_vein_bias, VeinGrowthParams, VeinBias};
+use crate::util::{FACE_OFFSETS, sample_material, count_neighbors, has_material_within_radius, grow_vein, default_vein_bias, sleep_vein_size, VeinGrowthParams, VeinBias};
 use crate::{Bottleneck, PhaseDiagnostics, ResourceCensus, TransformEntry};
 
 /// Result of the deep time phase.
@@ -165,10 +165,11 @@ pub fn apply_deeptime(
                                     && rng.gen::<f32>() < config.enrichment_prob
                                 {
                                     let bias = default_vein_bias(ore, rng);
+                                    let (sv_min, sv_max) = sleep_vein_size(ore);
                                     let params = VeinGrowthParams {
                                         ore,
-                                        min_size: config.enrichment_cluster_min,
-                                        max_size: config.enrichment_cluster_max,
+                                        min_size: sv_min,
+                                        max_size: sv_max,
                                         bias,
                                     };
                                     let cluster = grow_vein(density_fields, (wx, above_y, wz), &params, chunk_size, rng);
@@ -307,10 +308,11 @@ pub fn apply_deeptime(
                             && rng.gen::<f32>() < eff_prob
                         {
                             let bias = default_vein_bias(ore, rng);
+                            let (sv_min, sv_max) = sleep_vein_size(ore);
                             let params = VeinGrowthParams {
                                 ore,
-                                min_size: config.enrichment_cluster_min,
-                                max_size: config.enrichment_cluster_max,
+                                min_size: sv_min,
+                                max_size: sv_max,
                                 bias,
                             };
                             let cluster = grow_vein(density_fields, (wx, wy, wz), &params, chunk_size, rng);

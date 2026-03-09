@@ -18,7 +18,7 @@ use crate::aureole::HeatMap;
 use crate::config::{VeinConfig, GroundwaterConfig};
 use crate::groundwater::ambient_moisture;
 use crate::manifest::ChangeManifest;
-use crate::util::{FACE_OFFSETS, sample_material, count_neighbors, aperture_multiplier, find_air_from_solid, grow_vein, default_vein_size, default_vein_bias, VeinGrowthParams};
+use crate::util::{FACE_OFFSETS, sample_material, count_neighbors, aperture_multiplier, find_air_from_solid, grow_vein, sleep_vein_size, default_vein_bias, VeinGrowthParams};
 use crate::{Bottleneck, PhaseDiagnostics, ResourceCensus, TransformEntry};
 
 /// Result of the veins phase.
@@ -147,7 +147,18 @@ pub fn apply_veins(
                         } else { 1.0 };
                         if is_host_rock(mat) && rng.gen::<f32>() < eff_prob {
                             let ore = select_ore_by_distance(config, dist, rng);
-                            let (min_sz, max_sz) = default_vein_size(ore);
+
+                            // Epithermal rarity: precious metals deposit less frequently
+                            let rarity_factor = if dist >= config.mesothermal_max {
+                                config.epithermal_rarity
+                            } else {
+                                1.0
+                            };
+                            if rng.gen::<f32>() >= rarity_factor {
+                                continue; // fluid too dilute for precious metals
+                            }
+
+                            let (min_sz, max_sz) = sleep_vein_size(ore);
                             let bias = default_vein_bias(ore, rng);
                             let params = VeinGrowthParams { ore, min_size: min_sz, max_size: max_sz, bias };
                             let vein_positions = grow_vein(density_fields, (nx, ny, nz), &params, chunk_size, rng);

@@ -3,7 +3,7 @@
 //! Contact metamorphism around heat sources (lava, kimberlite).
 //! Water erosion along fluid pathways.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
 use voxel_core::density::DensityField;
@@ -142,17 +142,49 @@ pub fn apply_aureole(
     });
 
     if config.metamorphism_enabled && !heat_map.is_empty() {
-        // For each heat source, scan within aureole_radius using Chebyshev distance
+        // Compute heat strength: count nearby heat sources within radius 3
+        // Larger clusters sustain wider aureoles; isolated cells dissipate heat fast
+        let heat_positions: HashSet<(i32, i32, i32)> = heat_map.iter().map(|h| h.pos).collect();
+        let heat_strength: Vec<u32> = heat_map.iter().map(|h| {
+            let (hx, hy, hz) = h.pos;
+            let mut count = 0u32;
+            for dx in -3i32..=3 {
+                for dy in -3i32..=3 {
+                    for dz in -3i32..=3 {
+                        if dx == 0 && dy == 0 && dz == 0 { continue; }
+                        if heat_positions.contains(&(hx + dx, hy + dy, hz + dz)) {
+                            count += 1;
+                        }
+                    }
+                }
+            }
+            count
+        }).collect();
+
+        // For each heat source, scan within effective radius using Chebyshev distance
         // Use a set to avoid duplicate transformations
         let mut transformed: std::collections::HashSet<(i32, i32, i32)> = std::collections::HashSet::new();
 
-        for heat in heat_map {
+        for (hi, heat) in heat_map.iter().enumerate() {
             let (hx, hy, hz) = heat.pos;
-            for dx in -radius..=radius {
-                for dy in -radius..=radius {
-                    for dz in -radius..=radius {
+            // Scale effective aureole radius by local heat clustering
+            let neighbors = heat_strength[hi];
+            let effective_radius: i32 = if neighbors >= 31 {
+                radius // massive intrusion — full config radius
+            } else if neighbors >= 16 {
+                6
+            } else if neighbors >= 6 {
+                5
+            } else if neighbors >= 1 {
+                3
+            } else {
+                2 // isolated cell, heat dissipates fast
+            };
+            for dx in -effective_radius..=effective_radius {
+                for dy in -effective_radius..=effective_radius {
+                    for dz in -effective_radius..=effective_radius {
                         let dist = dx.abs().max(dy.abs()).max(dz.abs());
-                        if dist == 0 || dist > radius {
+                        if dist == 0 || dist > effective_radius {
                             continue;
                         }
 
