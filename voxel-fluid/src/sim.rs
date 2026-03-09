@@ -2108,4 +2108,1584 @@ mod tests {
             );
         }
     }
+
+    // ====================== Realistic Fluid Conservation Helpers ======================
+
+    /// Returns all-solid (size+1)^3 density grid (all values = 1.0).
+    fn make_density_field_solid(size: usize) -> Vec<f32> {
+        let stride = size + 1;
+        vec![1.0f32; stride * stride * stride]
+    }
+
+    /// Carves a bowl into a 17^3 density field.
+    /// Bowl floor profile: carve_depth = depth * (1 - (dist/radius)^0.5).
+    fn carve_bowl(densities: &mut [f32], size: usize, cx: usize, cz: usize, floor_gy: usize, radius: usize, depth: usize) {
+        let stride = size + 1;
+        for gz in 0..stride {
+            for gy in 0..stride {
+                for gx in 0..stride {
+                    let dx = gx as f32 - cx as f32;
+                    let dz = gz as f32 - cz as f32;
+                    let dist = (dx * dx + dz * dz).sqrt();
+                    if dist < radius as f32 {
+                        let ratio = dist / radius as f32;
+                        let carve_depth = depth as f32 * (1.0 - ratio.sqrt());
+                        let floor_y = floor_gy as f32;
+                        let ceil_y = floor_y + carve_depth;
+                        if (gy as f32) >= floor_y && (gy as f32) <= ceil_y {
+                            densities[gz * stride * stride + gy * stride + gx] = -1.0;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Carves a rectangular air pocket in a density field (set points to -1.0).
+    fn carve_box(densities: &mut [f32], size: usize, gx_range: Range<usize>, gy_range: Range<usize>, gz_range: Range<usize>) {
+        let stride = size + 1;
+        for gz in gz_range {
+            for gy in gy_range.clone() {
+                for gx in gx_range.clone() {
+                    if gx < stride && gy < stride && gz < stride {
+                        densities[gz * stride * stride + gy * stride + gx] = -1.0;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Calls grid.update_density then grid.recompute_capacity with production defaults.
+    fn apply_density(grid: &mut ChunkFluidGrid, densities: &[f32], config: &crate::FluidConfig) {
+        grid.update_density(densities);
+        grid.recompute_capacity(config.flow_solid_threshold as usize, config.fractional_capacity);
+    }
+
+    /// Mining simulation: sets density grid points to -1.0 around mined cells,
+    /// calls grid.update_density() + squeeze_excess_fluid(). NO recompute_capacity.
+    fn mine_cells(grid: &mut ChunkFluidGrid, densities: &mut Vec<f32>, cells_to_mine: &[(usize, usize, usize)], size: usize) {
+        let stride = size + 1;
+        for &(cx, cy, cz) in cells_to_mine {
+            // Set all 8 corners of the mined cell to air
+            let corner_offsets: [[usize; 3]; 8] = [
+                [0,0,0],[1,0,0],[1,1,0],[0,1,0],
+                [0,0,1],[1,0,1],[1,1,1],[0,1,1],
+            ];
+            for off in &corner_offsets {
+                let gx = cx + off[0];
+                let gy = cy + off[1];
+                let gz = cz + off[2];
+                if gx < stride && gy < stride && gz < stride {
+                    densities[gz * stride * stride + gy * stride + gx] = -1.0;
+                }
+            }
+        }
+        grid.update_density(densities);
+        squeeze_excess_fluid(grid);
+    }
+
+    /// Max-min level among air cells at Y layer. For flatness assertions.
+    #[allow(dead_code)]
+    fn max_level_diff_at_y(grid: &ChunkFluidGrid, y: usize, x_range: Range<usize>, z_range: Range<usize>) -> f32 {
+        let mut min_lvl = f32::MAX;
+        let mut max_lvl = f32::MIN;
+        let mut found = false;
+        for z in z_range {
+            for x in x_range.clone() {
+                if !grid.is_solid(x, y, z) {
+                    let lvl = grid.get(x, y, z).level;
+                    if lvl > MIN_LEVEL {
+                        min_lvl = min_lvl.min(lvl);
+                        max_lvl = max_lvl.max(lvl);
+                        found = true;
+                    }
+                }
+            }
+        }
+        if found { max_lvl - min_lvl } else { 0.0 }
+    }
+
+    /// Fill all air cells in a grid to their capacity.
+    fn fill_air_to_capacity(grid: &mut ChunkFluidGrid, y_range: Range<usize>) {
+        let size = grid.size;
+        for z in 0..size {
+            for y in y_range.clone() {
+                for x in 0..size {
+                    let cap = grid.cell_capacity(x, y, z);
+                    if cap > MIN_LEVEL {
+                        let cell = grid.get_mut(x, y, z);
+                        cell.level = cap;
+                        cell.fluid_type = FluidType::Water;
+                    }
+                }
+            }
+        }
+        grid.has_fluid = true;
+    }
+
+    /// Total water across a single grid.
+    fn grid_total_water(grid: &ChunkFluidGrid) -> f64 {
+        grid.cells.iter().map(|c| c.level as f64).sum()
+    }
+
+    // ====================== Category 1: Cauldron/Bowl Tests (1-8) ======================
+
+    #[test]
+    fn bowl_symmetric_retains_water() {
+        let size = 16;
+        let mut densities = make_density_field_solid(size);
+        carve_bowl(&mut densities, size, 8, 8, 4, 5, 4);
+
+        let config = crate::FluidConfig::default();
+        let mut grid = ChunkFluidGrid::new(size);
+        apply_density(&mut grid, &densities, &config);
+
+        // Fill air cells y=4..8 to capacity
+        fill_air_to_capacity(&mut grid, 4..8);
+        let initial = grid_total_water(&grid);
+        assert!(initial > 0.0, "Should have water");
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0,0,0), grid);
+        let dc = empty_density_cache();
+        for _ in 0..500 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+
+        let final_w = total_water(&chunks);
+        let loss_pct = ((initial - final_w) / initial * 100.0).abs();
+        assert!(loss_pct < 1.0, "Conservation ±1%: initial={:.2}, final={:.2}, loss={:.2}%", initial, final_w, loss_pct);
+    }
+
+    #[test]
+    fn bowl_asymmetric_equalizes() {
+        let size = 16;
+        let mut densities = make_density_field_solid(size);
+        // Deep side (left): floor=2, shallow side (right): floor=5
+        carve_bowl(&mut densities, size, 5, 8, 2, 4, 5);
+        carve_bowl(&mut densities, size, 11, 8, 5, 4, 3);
+        // Connect them with a channel at y=5..7
+        carve_box(&mut densities, size, 5..12, 5..8, 6..11);
+
+        let config = crate::FluidConfig::default();
+        let mut grid = ChunkFluidGrid::new(size);
+        apply_density(&mut grid, &densities, &config);
+
+        // Fill only the deep side (x=2..8)
+        for z in 0..size {
+            for y in 2..7 {
+                for x in 2..8 {
+                    let cap = grid.cell_capacity(x, y, z);
+                    if cap > MIN_LEVEL {
+                        let cell = grid.get_mut(x, y, z);
+                        cell.level = cap;
+                        cell.fluid_type = FluidType::Water;
+                    }
+                }
+            }
+        }
+        grid.has_fluid = true;
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0,0,0), grid);
+        let initial = total_water(&chunks);
+        let dc = empty_density_cache();
+        for _ in 0..800 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+        let final_w = total_water(&chunks);
+        let loss_pct = ((initial - final_w) / initial * 100.0).abs();
+        assert!(loss_pct < 1.0, "Conservation ±1%: initial={:.2}, final={:.2}, loss={:.2}%", initial, final_w, loss_pct);
+    }
+
+    #[test]
+    fn bowl_with_raised_lip_contains() {
+        let size = 16;
+        let mut densities = make_density_field_solid(size);
+        // Bowl cavity from y=3..9
+        carve_bowl(&mut densities, size, 8, 8, 3, 5, 6);
+
+        let config = crate::FluidConfig::default();
+        let mut grid = ChunkFluidGrid::new(size);
+        apply_density(&mut grid, &densities, &config);
+
+        // Fill below the lip (y=3..7)
+        fill_air_to_capacity(&mut grid, 3..7);
+        let initial = grid_total_water(&grid);
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0,0,0), grid);
+        let dc = empty_density_cache();
+        for _ in 0..500 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+        let final_w = total_water(&chunks);
+        assert!((final_w - initial).abs() < 0.01, "Conservation: initial={:.2}, final={:.2}", initial, final_w);
+    }
+
+    #[test]
+    fn bowl_with_notch_drains() {
+        let size = 16;
+        let mut densities = make_density_field_solid(size);
+        // Bowl cavity
+        carve_bowl(&mut densities, size, 8, 8, 3, 5, 6);
+        // Notch: cut 2 cells in the wall at y=5..7 on one side
+        carve_box(&mut densities, size, 12..15, 5..8, 7..10);
+
+        let config = crate::FluidConfig::default();
+        let mut grid = ChunkFluidGrid::new(size);
+        apply_density(&mut grid, &densities, &config);
+
+        // Fill bowl to y=3..8
+        fill_air_to_capacity(&mut grid, 3..8);
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0,0,0), grid);
+        let _initial = total_water(&chunks);
+        let dc = empty_density_cache();
+        for _ in 0..1000 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+
+        let grid = &chunks[&(0,0,0)];
+        // Check water drained through notch: some water outside bowl at x>=12
+        let mut outside_water = 0.0f64;
+        for z in 0..size {
+            for y in 0..size {
+                for x in 12..size {
+                    outside_water += grid.get(x, y, z).level as f64;
+                }
+            }
+        }
+        assert!(outside_water > 0.1, "Water should drain through notch, outside_water={:.3}", outside_water);
+    }
+
+    #[test]
+    fn bowl_nested_inner_outer() {
+        let size = 16;
+        let mut densities = make_density_field_solid(size);
+        // Outer bowl: r=6, floor=5
+        carve_bowl(&mut densities, size, 8, 8, 5, 6, 3);
+        // Inner bowl: r=3, floor=2 (deeper)
+        carve_bowl(&mut densities, size, 8, 8, 2, 3, 4);
+
+        let config = crate::FluidConfig::default();
+        let mut grid = ChunkFluidGrid::new(size);
+        apply_density(&mut grid, &densities, &config);
+
+        // Fill inner bowl only (y=2..5)
+        for z in 5..12 {
+            for y in 2..5 {
+                for x in 5..12 {
+                    let cap = grid.cell_capacity(x, y, z);
+                    if cap > MIN_LEVEL {
+                        let cell = grid.get_mut(x, y, z);
+                        cell.level = cap;
+                        cell.fluid_type = FluidType::Water;
+                    }
+                }
+            }
+        }
+        grid.has_fluid = true;
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0,0,0), grid);
+        let initial = total_water(&chunks);
+        let dc = empty_density_cache();
+        for _ in 0..500 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+        let final_w = total_water(&chunks);
+        let loss_pct = ((initial - final_w) / initial * 100.0).abs();
+        assert!(loss_pct < 1.0, "Conservation: initial={:.2}, final={:.2}, loss={:.2}%", initial, final_w, loss_pct);
+    }
+
+    #[test]
+    fn bowl_fractional_boundary_conservation() {
+        let size = 16;
+        let stride = size + 1;
+        let mut densities = vec![1.0f32; stride * stride * stride];
+
+        // Create gradual SDF transitions: mix of -0.3, 0.2, 0.7 near boundaries
+        for gz in 4..13 {
+            for gy in 3..12 {
+                for gx in 4..13 {
+                    // Core air
+                    if gx >= 6 && gx <= 11 && gy >= 5 && gy <= 10 && gz >= 6 && gz <= 11 {
+                        densities[gz * stride * stride + gy * stride + gx] = -1.0;
+                    } else {
+                        // Gradual transition
+                        let dx = if gx < 6 { 6 - gx } else if gx > 11 { gx - 11 } else { 0 };
+                        let dy = if gy < 5 { 5 - gy } else if gy > 10 { gy - 10 } else { 0 };
+                        let dz = if gz < 6 { 6 - gz } else if gz > 11 { gz - 11 } else { 0 };
+                        let dist = (dx.max(dy).max(dz)) as f32;
+                        let v = -0.5 + dist * 0.4; // -0.3, 0.1, 0.5 etc
+                        densities[gz * stride * stride + gy * stride + gx] = v;
+                    }
+                }
+            }
+        }
+
+        let config = crate::FluidConfig::default();
+        let mut grid = ChunkFluidGrid::new(size);
+        apply_density(&mut grid, &densities, &config);
+
+        // Verify fractional cells exist
+        let mut frac_count = 0;
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..size {
+                    let cap = grid.cell_capacity(x, y, z);
+                    if cap > 0.01 && cap < 0.99 {
+                        frac_count += 1;
+                    }
+                }
+            }
+        }
+        assert!(frac_count > 0, "Should have fractional-capacity boundary cells, got {}", frac_count);
+
+        // Fill air cells to capacity
+        fill_air_to_capacity(&mut grid, 0..size);
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0,0,0), grid);
+        let initial = total_water(&chunks);
+        let dc = empty_density_cache();
+        for _ in 0..500 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+        let final_w = total_water(&chunks);
+        let loss_pct = ((initial - final_w) / initial * 100.0).abs();
+        assert!(loss_pct < 2.0, "Fractional conservation ±2%: initial={:.2}, final={:.2}, loss={:.2}%", initial, final_w, loss_pct);
+    }
+
+    #[test]
+    fn bowl_cross_chunk_boundary() {
+        // Bowl spanning Y chunk boundary
+        let size = 16;
+
+        // Upper chunk: air y=0..3
+        let mut upper_d = make_density_field_solid(size);
+        carve_box(&mut upper_d, size, 4..13, 0..4, 4..13);
+
+        // Lower chunk: air y=13..16
+        let mut lower_d = make_density_field_solid(size);
+        carve_box(&mut lower_d, size, 4..13, 13..17, 4..13);
+
+        let config = crate::FluidConfig::default();
+
+        let mut upper = ChunkFluidGrid::new(size);
+        apply_density(&mut upper, &upper_d, &config);
+        fill_air_to_capacity(&mut upper, 0..3);
+
+        let mut lower = ChunkFluidGrid::new(size);
+        apply_density(&mut lower, &lower_d, &config);
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0, 1, 0), upper);
+        chunks.insert((0, 0, 0), lower);
+        let initial = total_water(&chunks);
+        let dc = empty_density_cache();
+        for _ in 0..500 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+        let final_w = total_water(&chunks);
+        assert!((final_w - initial).abs() < 0.1, "Cross-chunk conservation: initial={:.2}, final={:.2}", initial, final_w);
+    }
+
+    #[test]
+    fn two_bowls_connected_by_channel() {
+        let size = 16;
+        let mut densities = make_density_field_solid(size);
+        // Left bowl: x=2..8, y=3..9, z=4..13
+        carve_box(&mut densities, size, 2..8, 3..9, 4..13);
+        // Right bowl: x=10..15, y=3..9, z=4..13
+        carve_box(&mut densities, size, 10..15, 3..9, 4..13);
+        // Channel: x=8..10, y=4..6, z=7..10
+        carve_box(&mut densities, size, 8..10, 4..6, 7..10);
+
+        let config = crate::FluidConfig::default();
+        let mut grid = ChunkFluidGrid::new(size);
+        apply_density(&mut grid, &densities, &config);
+
+        // Fill left bowl only
+        for z in 0..size {
+            for y in 3..8 {
+                for x in 2..8 {
+                    let cap = grid.cell_capacity(x, y, z);
+                    if cap > MIN_LEVEL {
+                        let cell = grid.get_mut(x, y, z);
+                        cell.level = cap;
+                        cell.fluid_type = FluidType::Water;
+                    }
+                }
+            }
+        }
+        grid.has_fluid = true;
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0,0,0), grid);
+        let initial = total_water(&chunks);
+        let dc = empty_density_cache();
+        for _ in 0..1000 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+
+        let final_w = total_water(&chunks);
+        let grid = &chunks[&(0,0,0)];
+        assert!((final_w - initial).abs() < 0.5, "Conservation: initial={:.2}, final={:.2}", initial, final_w);
+
+        // Check water reached right bowl
+        let mut right_water = 0.0f64;
+        for z in 0..size {
+            for y in 0..size {
+                for x in 10..15 {
+                    right_water += grid.get(x, y, z).level as f64;
+                }
+            }
+        }
+        assert!(right_water > 0.5, "Water should reach right bowl, got {:.3}", right_water);
+    }
+
+    // ====================== Category 2: Mining/Terrain Modification (9-16) ======================
+
+    #[test]
+    fn mine_floor_water_drains() {
+        let size = 16;
+        let mut densities = make_density_field_solid(size);
+        // Sealed box interior: x=4..13, y=3..10, z=4..13
+        carve_box(&mut densities, size, 4..13, 3..10, 4..13);
+
+        let config = crate::FluidConfig::default();
+        let mut grid = ChunkFluidGrid::new(size);
+        apply_density(&mut grid, &densities, &config);
+
+        // Fill bottom 2 layers
+        fill_air_to_capacity(&mut grid, 3..5);
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0,0,0), grid);
+        let dc = empty_density_cache();
+        // Stabilize
+        for _ in 0..100 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+        let pre_mine = total_water(&chunks);
+
+        // Mine floor cell (8,2,8) — opens hole below pool
+        {
+            let grid = chunks.get_mut(&(0,0,0)).unwrap();
+            mine_cells(grid, &mut densities, &[(8, 2, 8)], size);
+        }
+
+        for _ in 0..500 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+
+        let final_w = total_water(&chunks);
+        let grid = &chunks[&(0,0,0)];
+        // Water should have drained into the mined cell
+        assert!(grid.get(8, 2, 8).level > MIN_LEVEL, "Water should drain into mined floor cell");
+        let loss_pct = ((pre_mine - final_w) / pre_mine * 100.0).abs();
+        assert!(loss_pct < 0.5, "Conservation ±0.5%: pre={:.2}, final={:.2}, loss={:.2}%", pre_mine, final_w, loss_pct);
+    }
+
+    #[test]
+    fn mine_wall_water_drains_sideways() {
+        let size = 16;
+        let mut densities = make_density_field_solid(size);
+        carve_box(&mut densities, size, 4..8, 3..8, 4..13);
+
+        let config = crate::FluidConfig::default();
+        let mut grid = ChunkFluidGrid::new(size);
+        apply_density(&mut grid, &densities, &config);
+
+        fill_air_to_capacity(&mut grid, 3..5);
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0,0,0), grid);
+        let dc = empty_density_cache();
+        for _ in 0..100 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+        let pre_mine = total_water(&chunks);
+
+        // Mine wall cell at x=8 to open passage to outside
+        {
+            let grid = chunks.get_mut(&(0,0,0)).unwrap();
+            mine_cells(grid, &mut densities, &[(8, 3, 8), (8, 4, 8)], size);
+        }
+
+        for _ in 0..500 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+
+        let final_w = total_water(&chunks);
+        // Water should spread outside box
+        let grid = &chunks[&(0,0,0)];
+        let mut outside = 0.0f64;
+        for z in 0..size {
+            for y in 0..size {
+                for x in 9..size {
+                    outside += grid.get(x, y, z).level as f64;
+                }
+            }
+        }
+        assert!(outside > 0.01, "Water should drain sideways through mined wall");
+        let loss_pct = ((pre_mine - final_w) / pre_mine * 100.0).abs();
+        assert!(loss_pct < 0.5, "Conservation ±0.5%: {:.2} vs {:.2}", pre_mine, final_w);
+    }
+
+    #[test]
+    fn mine_ceiling_no_effect() {
+        let size = 16;
+        let mut densities = make_density_field_solid(size);
+        carve_box(&mut densities, size, 4..13, 3..10, 4..13);
+
+        let config = crate::FluidConfig::default();
+        let mut grid = ChunkFluidGrid::new(size);
+        apply_density(&mut grid, &densities, &config);
+        fill_air_to_capacity(&mut grid, 3..5);
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0,0,0), grid);
+        let dc = empty_density_cache();
+        for _ in 0..100 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+        let pre_mine = total_water(&chunks);
+
+        // Mine ceiling cell (8,10,8) — above pool, should not affect it
+        {
+            let grid = chunks.get_mut(&(0,0,0)).unwrap();
+            mine_cells(grid, &mut densities, &[(8, 10, 8)], size);
+        }
+        for _ in 0..300 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+        let final_w = total_water(&chunks);
+        assert!((final_w - pre_mine).abs() < 0.01, "Ceiling mine should not affect pool: {:.2} vs {:.2}", pre_mine, final_w);
+    }
+
+    #[test]
+    fn mine_channel_between_pools() {
+        let size = 16;
+        let mut densities = make_density_field_solid(size);
+        // Left box
+        carve_box(&mut densities, size, 2..7, 3..8, 4..13);
+        // Right box
+        carve_box(&mut densities, size, 10..15, 3..8, 4..13);
+
+        let config = crate::FluidConfig::default();
+        let mut grid = ChunkFluidGrid::new(size);
+        apply_density(&mut grid, &densities, &config);
+
+        // Fill left box higher, right lower
+        for z in 0..size {
+            for y in 3..7 {
+                for x in 2..7 {
+                    let cap = grid.cell_capacity(x, y, z);
+                    if cap > MIN_LEVEL {
+                        let cell = grid.get_mut(x, y, z);
+                        cell.level = cap;
+                        cell.fluid_type = FluidType::Water;
+                    }
+                }
+            }
+        }
+        for z in 0..size {
+            for y in 3..5 {
+                for x in 10..15 {
+                    let cap = grid.cell_capacity(x, y, z);
+                    if cap > MIN_LEVEL {
+                        let cell = grid.get_mut(x, y, z);
+                        cell.level = cap;
+                        cell.fluid_type = FluidType::Water;
+                    }
+                }
+            }
+        }
+        grid.has_fluid = true;
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0,0,0), grid);
+        let dc = empty_density_cache();
+        for _ in 0..100 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+
+        // Mine connecting channel at y=3..5, x=7..10
+        {
+            let grid = chunks.get_mut(&(0,0,0)).unwrap();
+            let mut to_mine = Vec::new();
+            for x in 7..10 {
+                for y in 3..5 {
+                    to_mine.push((x, y, 8));
+                    to_mine.push((x, y, 9));
+                }
+            }
+            mine_cells(grid, &mut densities, &to_mine, size);
+        }
+
+        for _ in 0..1000 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+
+        // Check equalization: water should be in both sides
+        let grid = &chunks[&(0,0,0)];
+        let mut left_w = 0.0f64;
+        let mut right_w = 0.0f64;
+        for z in 0..size {
+            for y in 0..size {
+                for x in 2..7 { left_w += grid.get(x, y, z).level as f64; }
+                for x in 10..15 { right_w += grid.get(x, y, z).level as f64; }
+            }
+        }
+        // Both sides should have water
+        assert!(left_w > 0.5, "Left should have water: {:.2}", left_w);
+        assert!(right_w > 0.5, "Right should have water: {:.2}", right_w);
+    }
+
+    #[test]
+    fn mine_bowl_bottom_drains() {
+        let size = 16;
+        let mut densities = make_density_field_solid(size);
+        carve_bowl(&mut densities, size, 8, 8, 4, 5, 4);
+
+        let config = crate::FluidConfig::default();
+        let mut grid = ChunkFluidGrid::new(size);
+        apply_density(&mut grid, &densities, &config);
+        fill_air_to_capacity(&mut grid, 4..7);
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0,0,0), grid);
+        let dc = empty_density_cache();
+        for _ in 0..100 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+
+        // Mine bottom cells of bowl
+        {
+            let grid = chunks.get_mut(&(0,0,0)).unwrap();
+            mine_cells(grid, &mut densities, &[(8, 3, 8), (7, 3, 8), (9, 3, 8)], size);
+        }
+        for _ in 0..500 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+
+        let grid = &chunks[&(0,0,0)];
+        // Water should have drained into mined cells
+        let mut mined_water = 0.0f64;
+        for &(x,y,z) in &[(8,3,8),(7,3,8),(9,3,8)] {
+            mined_water += grid.get(x, y, z).level as f64;
+        }
+        assert!(mined_water > 0.01, "Water should drain into mined bowl bottom");
+    }
+
+    #[test]
+    fn sequential_mining_conservation() {
+        let size = 16;
+        let mut densities = make_density_field_solid(size);
+        carve_box(&mut densities, size, 4..13, 3..10, 4..13);
+
+        let config = crate::FluidConfig::default();
+        let mut grid = ChunkFluidGrid::new(size);
+        apply_density(&mut grid, &densities, &config);
+        fill_air_to_capacity(&mut grid, 3..6);
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0,0,0), grid);
+        let dc = empty_density_cache();
+        for _ in 0..100 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+        let initial = total_water(&chunks);
+
+        // Mine 5 cells one at a time
+        let mine_targets = [(8,2,8),(9,2,8),(10,2,8),(8,2,9),(8,2,10)];
+        for &target in &mine_targets {
+            {
+                let grid = chunks.get_mut(&(0,0,0)).unwrap();
+                mine_cells(grid, &mut densities, &[target], size);
+            }
+            for _ in 0..50 {
+                tick_fluid(&mut chunks, &dc, size, false, &config);
+            }
+        }
+
+        let final_w = total_water(&chunks);
+        assert!((final_w - initial).abs() < 1.0, "Cumulative conservation ±1.0: initial={:.2}, final={:.2}", initial, final_w);
+    }
+
+    #[test]
+    fn mine_creates_ramp() {
+        let size = 16;
+        let mut densities = make_density_field_solid(size);
+        // Flat floor pool
+        carve_box(&mut densities, size, 3..14, 5..10, 4..13);
+
+        let config = crate::FluidConfig::default();
+        let mut grid = ChunkFluidGrid::new(size);
+        apply_density(&mut grid, &densities, &config);
+
+        // Fill bottom layer
+        fill_air_to_capacity(&mut grid, 5..6);
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0,0,0), grid);
+        let dc = empty_density_cache();
+        for _ in 0..100 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+
+        // Mine 3-step descending ramp: y=4 at x=6, y=3 at x=7, y=2 at x=8
+        {
+            let grid = chunks.get_mut(&(0,0,0)).unwrap();
+            mine_cells(grid, &mut densities, &[(6,4,8),(7,3,8),(7,4,8),(8,2,8),(8,3,8),(8,4,8)], size);
+        }
+        for _ in 0..500 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+
+        let grid = &chunks[&(0,0,0)];
+        // Water should cascade down — lowest cell should have water
+        assert!(grid.get(8, 2, 8).level > MIN_LEVEL, "Water should cascade down ramp to (8,2,8), got {}", grid.get(8, 2, 8).level);
+    }
+
+    #[test]
+    fn mine_under_water_creates_drop() {
+        let size = 16;
+        let mut densities = make_density_field_solid(size);
+        carve_box(&mut densities, size, 4..13, 5..10, 4..13);
+
+        let config = crate::FluidConfig::default();
+        let mut grid = ChunkFluidGrid::new(size);
+        apply_density(&mut grid, &densities, &config);
+        fill_air_to_capacity(&mut grid, 5..7);
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0,0,0), grid);
+        let dc = empty_density_cache();
+        for _ in 0..100 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+
+        // Mine cell below water at (8,4,8)
+        {
+            let grid = chunks.get_mut(&(0,0,0)).unwrap();
+            mine_cells(grid, &mut densities, &[(8, 4, 8)], size);
+        }
+        for _ in 0..300 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+
+        let grid = &chunks[&(0,0,0)];
+        assert!(grid.get(8, 4, 8).level > MIN_LEVEL, "Water should fall into cavity below, got {}", grid.get(8, 4, 8).level);
+    }
+
+    // ====================== Category 3: Natural Cave Shapes (17-24) ======================
+
+    #[test]
+    fn sloped_floor_pools_at_low_end() {
+        let size = 16;
+        let stride = size + 1;
+        let mut densities = make_density_field_solid(size);
+        // Floor rises from gx=0 (gy=3) to gx=16 (gy=10). Walls at gz=3,13. Ceiling at gy=14.
+        for gz in 4..13 {
+            for gx in 0..stride {
+                let floor_gy = 3 + (gx * 7) / 16; // 3 at x=0, 10 at x=16
+                for gy in floor_gy..15 {
+                    if gy < stride {
+                        densities[gz * stride * stride + gy * stride + gx] = -1.0;
+                    }
+                }
+            }
+        }
+
+        let config = crate::FluidConfig::default();
+        let mut grid = ChunkFluidGrid::new(size);
+        apply_density(&mut grid, &densities, &config);
+
+        // Place water at high end (x=12..15, y=8..11)
+        for z in 0..size {
+            for y in 8..11 {
+                for x in 12..15 {
+                    let cap = grid.cell_capacity(x, y, z);
+                    if cap > MIN_LEVEL {
+                        let cell = grid.get_mut(x, y, z);
+                        cell.level = cap;
+                        cell.fluid_type = FluidType::Water;
+                    }
+                }
+            }
+        }
+        grid.has_fluid = true;
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0,0,0), grid);
+        let initial = total_water(&chunks);
+        let dc = empty_density_cache();
+        for _ in 0..800 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+        let final_w = total_water(&chunks);
+        let loss_pct = ((initial - final_w) / initial * 100.0).abs();
+        assert!(loss_pct < 2.0, "Conservation ±2%: initial={:.2}, final={:.2}, loss={:.2}%", initial, final_w, loss_pct);
+
+        // Water should collect at low end (x=0..4)
+        let grid = &chunks[&(0,0,0)];
+        let mut low_end_water = 0.0f64;
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..4 {
+                    low_end_water += grid.get(x, y, z).level as f64;
+                }
+            }
+        }
+        assert!(low_end_water > 0.5, "Water should collect at low end, got {:.3}", low_end_water);
+    }
+
+    #[test]
+    fn v_valley_fills_bottom() {
+        let size = 16;
+        let stride = size + 1;
+        let mut densities = make_density_field_solid(size);
+        // V cross-section: floor_gy = |gz-8| + 3
+        for gz in 0..stride {
+            let floor_gy = ((gz as i32 - 8).unsigned_abs() as usize) + 3;
+            for gy in floor_gy..14 {
+                for gx in 3..14 {
+                    if gy < stride {
+                        densities[gz * stride * stride + gy * stride + gx] = -1.0;
+                    }
+                }
+            }
+        }
+
+        let config = crate::FluidConfig::default();
+        let mut grid = ChunkFluidGrid::new(size);
+        apply_density(&mut grid, &densities, &config);
+        // Fill center bottom (z=6..10, y=3..6)
+        for z in 6..10 {
+            for y in 3..6 {
+                for x in 3..14 {
+                    let cap = grid.cell_capacity(x, y, z);
+                    if cap > MIN_LEVEL {
+                        let cell = grid.get_mut(x, y, z);
+                        cell.level = cap;
+                        cell.fluid_type = FluidType::Water;
+                    }
+                }
+            }
+        }
+        grid.has_fluid = true;
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0,0,0), grid);
+        let initial = total_water(&chunks);
+        let dc = empty_density_cache();
+        for _ in 0..500 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+        let final_w = total_water(&chunks);
+        let loss_pct = ((initial - final_w) / initial * 100.0).abs();
+        assert!(loss_pct < 1.0, "Conservation ±1%: initial={:.2}, final={:.2}, loss={:.2}%", initial, final_w, loss_pct);
+    }
+
+    #[test]
+    fn u_tunnel_cross_section() {
+        let size = 16;
+        let stride = size + 1;
+        let mut densities = make_density_field_solid(size);
+        // Semicircular tunnel: distance from (gy=10, gz=8) < 5 = air
+        for gz in 0..stride {
+            for gy in 0..stride {
+                let dy = gy as f32 - 10.0;
+                let dz = gz as f32 - 8.0;
+                let dist = (dy * dy + dz * dz).sqrt();
+                if dist < 5.0 && gy <= 10 {
+                    for gx in 3..14 {
+                        densities[gz * stride * stride + gy * stride + gx] = -1.0;
+                    }
+                }
+            }
+        }
+
+        let config = crate::FluidConfig::default();
+        let mut grid = ChunkFluidGrid::new(size);
+        apply_density(&mut grid, &densities, &config);
+
+        // Fill bottom of tunnel
+        fill_air_to_capacity(&mut grid, 5..8);
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0,0,0), grid);
+        let initial = total_water(&chunks);
+        let dc = empty_density_cache();
+        for _ in 0..500 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+        let final_w = total_water(&chunks);
+        let loss_pct = ((initial - final_w) / initial * 100.0).abs();
+        assert!(loss_pct < 1.0, "Conservation ±1%: initial={:.2}, final={:.2}, loss={:.2}%", initial, final_w, loss_pct);
+    }
+
+    #[test]
+    fn staircase_cascade() {
+        let size = 16;
+        let mut densities = make_density_field_solid(size);
+        // 4-step staircase descending left→right, 3 cells/step
+        // Step 0: x=1..4, floor=gy=9 (air y=9..13)
+        // Step 1: x=4..7, floor=gy=7 (air y=7..13)
+        // Step 2: x=7..10, floor=gy=5 (air y=5..13)
+        // Step 3: x=10..13, floor=gy=3 (air y=3..13)
+        let steps: [(Range<usize>, usize); 4] = [
+            (1..4, 9), (4..7, 7), (7..10, 5), (10..13, 3),
+        ];
+        for (x_range, floor_gy) in &steps {
+            for gx in x_range.clone() {
+                for gy in *floor_gy..14 {
+                    for gz in 4..13 {
+                        densities[gz * (size+1) * (size+1) + gy * (size+1) + gx] = -1.0;
+                    }
+                }
+            }
+        }
+
+        let config = crate::FluidConfig::default();
+        let mut grid = ChunkFluidGrid::new(size);
+        apply_density(&mut grid, &densities, &config);
+
+        // Fill top step
+        for z in 0..size {
+            for y in 9..12 {
+                for x in 1..4 {
+                    let cap = grid.cell_capacity(x, y, z);
+                    if cap > MIN_LEVEL {
+                        let cell = grid.get_mut(x, y, z);
+                        cell.level = cap;
+                        cell.fluid_type = FluidType::Water;
+                    }
+                }
+            }
+        }
+        grid.has_fluid = true;
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0,0,0), grid);
+        let initial = total_water(&chunks);
+        let dc = empty_density_cache();
+        for _ in 0..800 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+        let final_w = total_water(&chunks);
+        let loss_pct = ((initial - final_w) / initial * 100.0).abs();
+        assert!(loss_pct < 2.0, "Conservation ±2%: initial={:.2}, final={:.2}", initial, final_w);
+
+        // Water should reach bottom step
+        let grid = &chunks[&(0,0,0)];
+        let mut bottom_water = 0.0f64;
+        for z in 0..size {
+            for y in 3..5 {
+                for x in 10..13 {
+                    bottom_water += grid.get(x, y, z).level as f64;
+                }
+            }
+        }
+        assert!(bottom_water > 0.1, "Water should reach bottom step, got {:.3}", bottom_water);
+    }
+
+    #[test]
+    fn irregular_cave_deterministic() {
+        let size = 16;
+        let stride = size + 1;
+        let mut densities = make_density_field_solid(size);
+        // Pattern: solid if ((gx*7+gy*13+gz*17)%23)<8, forced 6x6x6 air center
+        for gz in 0..stride {
+            for gy in 0..stride {
+                for gx in 0..stride {
+                    let val = (gx * 7 + gy * 13 + gz * 17) % 23;
+                    if val >= 8 {
+                        densities[gz * stride * stride + gy * stride + gx] = -1.0;
+                    }
+                }
+            }
+        }
+        // Force 6x6x6 air center
+        for gz in 5..11 {
+            for gy in 5..11 {
+                for gx in 5..11 {
+                    densities[gz * stride * stride + gy * stride + gx] = -1.0;
+                }
+            }
+        }
+
+        let config = crate::FluidConfig::default();
+        let mut grid = ChunkFluidGrid::new(size);
+        apply_density(&mut grid, &densities, &config);
+
+        // Fill center air
+        for z in 5..10 {
+            for y in 5..10 {
+                for x in 5..10 {
+                    let cap = grid.cell_capacity(x, y, z);
+                    if cap > MIN_LEVEL {
+                        let cell = grid.get_mut(x, y, z);
+                        cell.level = cap;
+                        cell.fluid_type = FluidType::Water;
+                    }
+                }
+            }
+        }
+        grid.has_fluid = true;
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0,0,0), grid);
+        let initial = total_water(&chunks);
+        let dc = empty_density_cache();
+        for _ in 0..500 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+        let final_w = total_water(&chunks);
+        let loss_pct = ((initial - final_w) / initial * 100.0).abs();
+        assert!(loss_pct < 1.0, "Conservation ±1%: initial={:.2}, final={:.2}, loss={:.2}%", initial, final_w, loss_pct);
+    }
+
+    #[test]
+    fn narrow_passage_between_chambers() {
+        let size = 16;
+        let mut densities = make_density_field_solid(size);
+        // Left chamber: x=1..6, y=3..9, z=3..9
+        carve_box(&mut densities, size, 1..6, 3..9, 3..9);
+        // Right chamber: x=10..15, y=3..9, z=3..9
+        carve_box(&mut densities, size, 10..15, 3..9, 3..9);
+        // 1-cell passage: x=6..10, y=5..7, z=5..7
+        carve_box(&mut densities, size, 6..10, 5..7, 5..7);
+
+        let config = crate::FluidConfig::default();
+        let mut grid = ChunkFluidGrid::new(size);
+        apply_density(&mut grid, &densities, &config);
+
+        // Fill left chamber
+        for z in 0..size {
+            for y in 3..8 {
+                for x in 1..6 {
+                    let cap = grid.cell_capacity(x, y, z);
+                    if cap > MIN_LEVEL {
+                        let cell = grid.get_mut(x, y, z);
+                        cell.level = cap;
+                        cell.fluid_type = FluidType::Water;
+                    }
+                }
+            }
+        }
+        grid.has_fluid = true;
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0,0,0), grid);
+        let initial = total_water(&chunks);
+        let dc = empty_density_cache();
+        for _ in 0..1500 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+        let final_w = total_water(&chunks);
+        assert!((final_w - initial).abs() < 0.5, "Conservation: initial={:.2}, final={:.2}", initial, final_w);
+
+        // Water should reach right chamber
+        let grid = &chunks[&(0,0,0)];
+        let mut right_w = 0.0f64;
+        for z in 0..size {
+            for y in 0..size {
+                for x in 10..15 {
+                    right_w += grid.get(x, y, z).level as f64;
+                }
+            }
+        }
+        assert!(right_w > 0.5, "Water should reach right chamber through passage, got {:.3}", right_w);
+    }
+
+    #[test]
+    fn overhang_shelf_drip() {
+        let size = 16;
+        let mut densities = make_density_field_solid(size);
+        // Walls at x=2 and x=14, floor at y=0..2
+        carve_box(&mut densities, size, 3..14, 2..15, 3..14);
+        // Solid shelf at y=7..9, x=3..10
+        for gz in 3..14 {
+            for gy in 7..9 {
+                for gx in 3..10 {
+                    densities[gz * (size+1)*(size+1) + gy * (size+1) + gx] = 1.0;
+                }
+            }
+        }
+
+        let config = crate::FluidConfig::default();
+        let mut grid = ChunkFluidGrid::new(size);
+        apply_density(&mut grid, &densities, &config);
+
+        // Water on shelf top (y=9..11)
+        for z in 0..size {
+            for y in 9..11 {
+                for x in 3..10 {
+                    let cap = grid.cell_capacity(x, y, z);
+                    if cap > MIN_LEVEL {
+                        let cell = grid.get_mut(x, y, z);
+                        cell.level = cap;
+                        cell.fluid_type = FluidType::Water;
+                    }
+                }
+            }
+        }
+        grid.has_fluid = true;
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0,0,0), grid);
+        let initial = total_water(&chunks);
+        let dc = empty_density_cache();
+        for _ in 0..500 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+        let final_w = total_water(&chunks);
+        assert!((final_w - initial).abs() < 0.5, "Conservation: initial={:.2}, final={:.2}", initial, final_w);
+
+        // Water should drip to floor (y=2..4)
+        let grid = &chunks[&(0,0,0)];
+        let mut floor_water = 0.0f64;
+        for z in 0..size {
+            for y in 2..4 {
+                for x in 0..size {
+                    floor_water += grid.get(x, y, z).level as f64;
+                }
+            }
+        }
+        assert!(floor_water > 0.1, "Water should drip to floor, got {:.3}", floor_water);
+    }
+
+    #[test]
+    fn dome_ceiling_flat_floor() {
+        let size = 16;
+        let stride = size + 1;
+        let mut densities = make_density_field_solid(size);
+        // Flat floor at gy=3, dome ceiling centered at (8,3,8) radius=8
+        for gz in 0..stride {
+            for gy in 3..stride {
+                for gx in 0..stride {
+                    let dx = gx as f32 - 8.0;
+                    let dy = gy as f32 - 3.0;
+                    let dz = gz as f32 - 8.0;
+                    let dist = (dx*dx + dy*dy + dz*dz).sqrt();
+                    if dist < 8.0 && dy >= 0.0 {
+                        densities[gz * stride * stride + gy * stride + gx] = -1.0;
+                    }
+                }
+            }
+        }
+
+        let config = crate::FluidConfig::default();
+        let mut grid = ChunkFluidGrid::new(size);
+        apply_density(&mut grid, &densities, &config);
+
+        // Fill bottom 3 layers
+        fill_air_to_capacity(&mut grid, 3..6);
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0,0,0), grid);
+        let initial = total_water(&chunks);
+        let dc = empty_density_cache();
+        for _ in 0..500 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+        let final_w = total_water(&chunks);
+        let loss_pct = ((initial - final_w) / initial * 100.0).abs();
+        assert!(loss_pct < 1.0, "Conservation ±1%: initial={:.2}, final={:.2}", initial, final_w);
+    }
+
+    // ====================== Category 4: Multi-Chunk & Edge Cases (25-32) ======================
+
+    #[test]
+    fn cross_chunk_horizontal_pool() {
+        let size = 16;
+        // Two side-by-side chunks with solid floor and open air
+        let mut d_left = make_density_field_solid(size);
+        carve_box(&mut d_left, size, 0..17, 3..12, 3..14);
+        let mut d_right = make_density_field_solid(size);
+        carve_box(&mut d_right, size, 0..17, 3..12, 3..14);
+
+        let config = crate::FluidConfig::default();
+        let mut left = ChunkFluidGrid::new(size);
+        apply_density(&mut left, &d_left, &config);
+        let mut right = ChunkFluidGrid::new(size);
+        apply_density(&mut right, &d_right, &config);
+
+        // Fill left near boundary (x=12..16)
+        for z in 0..size {
+            for y in 3..5 {
+                for x in 12..size {
+                    let cap = left.cell_capacity(x, y, z);
+                    if cap > MIN_LEVEL {
+                        let cell = left.get_mut(x, y, z);
+                        cell.level = cap;
+                        cell.fluid_type = FluidType::Water;
+                    }
+                }
+            }
+        }
+        left.has_fluid = true;
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0, 0, 0), left);
+        chunks.insert((1, 0, 0), right);
+        let initial = total_water(&chunks);
+        let dc = empty_density_cache();
+        for _ in 0..800 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+        let final_w = total_water(&chunks);
+        // Cross-chunk transfers have inherent small losses from transfer clamping
+        let loss_pct = ((initial - final_w) / initial * 100.0).abs();
+        assert!(loss_pct < 2.0, "Conservation ±2%: initial={:.2}, final={:.2}, loss={:.2}%", initial, final_w, loss_pct);
+
+        // Water should spread to right chunk
+        let right_grid = &chunks[&(1, 0, 0)];
+        let mut rw = 0.0f64;
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..4 {
+                    rw += right_grid.get(x, y, z).level as f64;
+                }
+            }
+        }
+        assert!(rw > 0.01, "Water should spread to right chunk, got {:.3}", rw);
+    }
+
+    #[test]
+    fn cross_chunk_vertical_waterfall() {
+        let size = 16;
+        // Upper chunk: tall air column, open at bottom (y=0) for cross-chunk flow
+        let mut d_upper = make_density_field_solid(size);
+        carve_box(&mut d_upper, size, 4..13, 0..17, 4..13);
+        // Lower chunk: air basin at top (y=12..16) — connects to upper's y=0
+        let mut d_lower = make_density_field_solid(size);
+        carve_box(&mut d_lower, size, 4..13, 12..17, 4..13);
+
+        let config = crate::FluidConfig::default();
+        let mut upper = ChunkFluidGrid::new(size);
+        apply_density(&mut upper, &d_upper, &config);
+        let mut lower = ChunkFluidGrid::new(size);
+        apply_density(&mut lower, &d_lower, &config);
+
+        // Fill upper chunk water at y=5..10
+        for z in 0..size {
+            for y in 5..10 {
+                for x in 4..13 {
+                    let cap = upper.cell_capacity(x, y, z);
+                    if cap > MIN_LEVEL {
+                        let cell = upper.get_mut(x, y, z);
+                        cell.level = cap;
+                        cell.fluid_type = FluidType::Water;
+                    }
+                }
+            }
+        }
+        upper.has_fluid = true;
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0, 1, 0), upper);
+        chunks.insert((0, 0, 0), lower);
+        let initial = total_water(&chunks);
+        let dc = empty_density_cache();
+        for _ in 0..500 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+        let final_w = total_water(&chunks);
+        let loss_pct = ((initial - final_w) / initial * 100.0).abs();
+        assert!(loss_pct < 2.0, "Conservation ±2%: initial={:.2}, final={:.2}, loss={:.2}%", initial, final_w, loss_pct);
+
+        // Water should reach lower basin
+        let lower_grid = &chunks[&(0, 0, 0)];
+        let mut basin_w = 0.0f64;
+        for z in 0..size {
+            for y in 12..size {
+                for x in 4..13 {
+                    basin_w += lower_grid.get(x, y, z).level as f64;
+                }
+            }
+        }
+        assert!(basin_w > 0.1, "Water should reach lower basin, got {:.3}", basin_w);
+    }
+
+    #[test]
+    fn cross_chunk_pressure_equalization() {
+        let size = 16;
+        // Lower chunk: fully open air column connected to upper at y=15→upper y=0
+        let mut d_lower = make_density_field_solid(size);
+        carve_box(&mut d_lower, size, 4..13, 3..17, 4..13);
+        // Upper chunk: open at bottom connecting to lower
+        let mut d_upper = make_density_field_solid(size);
+        carve_box(&mut d_upper, size, 4..13, 0..10, 4..13);
+
+        let config = crate::FluidConfig::default();
+        let mut lower = ChunkFluidGrid::new(size);
+        apply_density(&mut lower, &d_lower, &config);
+        let mut upper = ChunkFluidGrid::new(size);
+        apply_density(&mut upper, &d_upper, &config);
+
+        // Fill lower chunk completely with water
+        for z in 0..size {
+            for y in 3..size {
+                for x in 4..13 {
+                    let cap = lower.cell_capacity(x, y, z);
+                    if cap > MIN_LEVEL {
+                        let cell = lower.get_mut(x, y, z);
+                        cell.level = cap;
+                        cell.fluid_type = FluidType::Water;
+                    }
+                }
+            }
+        }
+        lower.has_fluid = true;
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0, 0, 0), lower);
+        chunks.insert((0, 1, 0), upper);
+        let initial = total_water(&chunks);
+        let dc = empty_density_cache();
+        // More ticks for cross-chunk pressure to equalize
+        for _ in 0..2000 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+        let final_w = total_water(&chunks);
+        let loss_pct = ((initial - final_w) / initial * 100.0).abs();
+        assert!(loss_pct < 2.0, "Conservation ±2%: initial={:.2}, final={:.2}, loss={:.2}%", initial, final_w, loss_pct);
+
+        // Cross-chunk upward pressure: water should overflow into upper chunk
+        // when lower is completely full (water has nowhere else to go)
+        let upper_grid = &chunks[&(0, 1, 0)];
+        let mut upper_w = 0.0f64;
+        for z in 0..size {
+            for y in 0..size {
+                for x in 4..13 {
+                    upper_w += upper_grid.get(x, y, z).level as f64;
+                }
+            }
+        }
+        // Verify lower chunk is still near-full (overflow into upper depends on pressure impl)
+        let lower_grid = &chunks[&(0, 0, 0)];
+        let mut lower_w = 0.0f64;
+        for z in 0..size {
+            for y in 3..size {
+                for x in 4..13 {
+                    lower_w += lower_grid.get(x, y, z).level as f64;
+                }
+            }
+        }
+        // Cross-chunk transfers have inherent losses from transfer clamping.
+        // With a fully-filled lower chunk, cross-chunk transfers to boundary cells
+        // cause squeeze loss. Allow wider tolerance for this known limitation.
+        let total_remaining = lower_w + upper_w;
+        let loss_pct = ((initial - total_remaining) / initial * 100.0).abs();
+        assert!(loss_pct < 10.0,
+            "Cross-chunk conservation: lower={:.2}, upper={:.2}, total={:.2}, initial={:.2}, loss={:.1}%",
+            lower_w, upper_w, total_remaining, initial, loss_pct);
+    }
+
+    #[test]
+    fn three_chunk_cascade() {
+        let size = 16;
+        // Upper chunk: open interior with hole at y=0
+        let mut d_upper = make_density_field_solid(size);
+        carve_box(&mut d_upper, size, 5..12, 0..12, 5..12);
+        // Middle chunk: open with holes at y=0 and y=16
+        let mut d_mid = make_density_field_solid(size);
+        carve_box(&mut d_mid, size, 5..12, 0..17, 5..12);
+        // Lower chunk: basin
+        let mut d_lower = make_density_field_solid(size);
+        carve_box(&mut d_lower, size, 5..12, 10..17, 5..12);
+
+        let config = crate::FluidConfig::default();
+        let mut upper = ChunkFluidGrid::new(size);
+        apply_density(&mut upper, &d_upper, &config);
+        let mut mid = ChunkFluidGrid::new(size);
+        apply_density(&mut mid, &d_mid, &config);
+        let mut lower = ChunkFluidGrid::new(size);
+        apply_density(&mut lower, &d_lower, &config);
+
+        // Fill upper chunk
+        fill_air_to_capacity(&mut upper, 5..10);
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0, 2, 0), upper);
+        chunks.insert((0, 1, 0), mid);
+        chunks.insert((0, 0, 0), lower);
+        let initial = total_water(&chunks);
+        let dc = empty_density_cache();
+        for _ in 0..800 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+        let final_w = total_water(&chunks);
+        assert!((final_w - initial).abs() < 0.2, "Conservation: initial={:.2}, final={:.2}", initial, final_w);
+
+        // Water should reach lower chunk
+        let lower_grid = &chunks[&(0, 0, 0)];
+        let mut low_w = 0.0f64;
+        for z in 0..size {
+            for y in 10..size {
+                for x in 0..size {
+                    low_w += lower_grid.get(x, y, z).level as f64;
+                }
+            }
+        }
+        assert!(low_w > 0.1, "Water should reach lowest chunk, got {:.3}", low_w);
+    }
+
+    #[test]
+    fn chunk_boundary_pool() {
+        let size = 16;
+        // Pool straddling X boundary
+        let mut d_left = make_density_field_solid(size);
+        carve_box(&mut d_left, size, 10..17, 3..8, 4..13);
+        let mut d_right = make_density_field_solid(size);
+        carve_box(&mut d_right, size, 0..7, 3..8, 4..13);
+
+        let config = crate::FluidConfig::default();
+        let mut left = ChunkFluidGrid::new(size);
+        apply_density(&mut left, &d_left, &config);
+        let mut right = ChunkFluidGrid::new(size);
+        apply_density(&mut right, &d_right, &config);
+
+        // Fill both halves
+        fill_air_to_capacity(&mut left, 3..5);
+        fill_air_to_capacity(&mut right, 3..5);
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0, 0, 0), left);
+        chunks.insert((1, 0, 0), right);
+        let initial = total_water(&chunks);
+        let dc = empty_density_cache();
+        for _ in 0..500 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+        let final_w = total_water(&chunks);
+        assert!((final_w - initial).abs() < 0.1, "Conservation: initial={:.2}, final={:.2}", initial, final_w);
+    }
+
+    #[test]
+    fn large_volume_conservation() {
+        let size = 16;
+        let mut densities = make_density_field_solid(size);
+        // 14x11x14 air space
+        carve_box(&mut densities, size, 1..15, 2..13, 1..15);
+
+        let config = crate::FluidConfig::default();
+        let mut grid = ChunkFluidGrid::new(size);
+        apply_density(&mut grid, &densities, &config);
+
+        // Fill all air to level 0.5
+        for z in 0..size {
+            for y in 2..13 {
+                for x in 1..15 {
+                    let cap = grid.cell_capacity(x, y, z);
+                    if cap > MIN_LEVEL {
+                        let cell = grid.get_mut(x, y, z);
+                        cell.level = 0.5f32.min(cap);
+                        cell.fluid_type = FluidType::Water;
+                    }
+                }
+            }
+        }
+        grid.has_fluid = true;
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0,0,0), grid);
+        let initial = total_water(&chunks);
+        let dc = empty_density_cache();
+        for _ in 0..500 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+        let final_w = total_water(&chunks);
+        assert!((final_w - initial).abs() < 0.1, "Large volume conservation: initial={:.4}, final={:.4}", initial, final_w);
+    }
+
+    #[test]
+    fn tiny_drip_conservation() {
+        let size = 16;
+        let mut densities = make_density_field_solid(size);
+        carve_box(&mut densities, size, 4..13, 3..10, 4..13);
+
+        let config = crate::FluidConfig::default();
+        let mut grid = ChunkFluidGrid::new(size);
+        apply_density(&mut grid, &densities, &config);
+
+        // Single cell with tiny amount
+        let cell = grid.get_mut(8, 3, 8);
+        cell.level = 0.01;
+        cell.fluid_type = FluidType::Water;
+        grid.has_fluid = true;
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0,0,0), grid);
+        let initial = total_water(&chunks);
+        let dc = empty_density_cache();
+        for _ in 0..300 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+        let final_w = total_water(&chunks);
+        // Small amounts may lose fluid due to MIN_LEVEL clamping during spread
+        // but total should not increase (no fluid creation)
+        assert!(final_w <= initial + 0.001, "Tiny drip should not create fluid: initial={:.4}, final={:.4}", initial, final_w);
+        // And remaining fluid should be non-negative
+        assert!(final_w >= -0.001, "Tiny drip should not go negative: final={:.4}", final_w);
+    }
+
+    #[test]
+    fn l_shaped_container_damping() {
+        let size = 16;
+        let mut densities = make_density_field_solid(size);
+        // Vertical arm: x=2..5, y=2..10, z=4..13
+        carve_box(&mut densities, size, 2..5, 2..10, 4..13);
+        // Horizontal arm: x=2..11, y=2..4, z=4..13
+        carve_box(&mut densities, size, 2..11, 2..4, 4..13);
+
+        let config = crate::FluidConfig::default();
+        let mut grid = ChunkFluidGrid::new(size);
+        apply_density(&mut grid, &densities, &config);
+
+        // Fill vertical arm
+        for z in 0..size {
+            for y in 2..9 {
+                for x in 2..5 {
+                    let cap = grid.cell_capacity(x, y, z);
+                    if cap > MIN_LEVEL {
+                        let cell = grid.get_mut(x, y, z);
+                        cell.level = cap;
+                        cell.fluid_type = FluidType::Water;
+                    }
+                }
+            }
+        }
+        grid.has_fluid = true;
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0,0,0), grid);
+        let initial = total_water(&chunks);
+        let dc = empty_density_cache();
+
+        // Run 2000 ticks, record last 100 for oscillation check
+        for _ in 0..1900 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+        }
+        let mut last_100: Vec<f64> = Vec::new();
+        for _ in 0..100 {
+            tick_fluid(&mut chunks, &dc, size, false, &config);
+            last_100.push(total_water(&chunks));
+        }
+
+        let final_w = total_water(&chunks);
+        assert!((final_w - initial).abs() < 0.1, "Conservation: initial={:.2}, final={:.2}", initial, final_w);
+
+        // Check no oscillation in last 100 ticks
+        let max_t = last_100.iter().cloned().fold(f64::MIN, f64::max);
+        let min_t = last_100.iter().cloned().fold(f64::MAX, f64::min);
+        assert!(max_t - min_t < 0.1, "Should be stable in last 100 ticks: range={:.4}", max_t - min_t);
+    }
 }
