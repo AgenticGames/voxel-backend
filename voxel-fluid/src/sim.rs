@@ -876,12 +876,15 @@ pub fn equalize_horizontal(
                 continue;
             }
 
-            // Average level, capped by each cell's individual capacity
+            // Damped equalization: blend toward the average rather than snapping.
+            // This preserves flow gradients toward drains while still leveling pools.
             let avg_fill = total_water / total_cap;
+            const EQ_DAMPING: f32 = 0.3; // blend 30% toward average each tick
 
             for &pos in &region {
                 let (chunk_key, lx, ly, lz, old_level, cap) = water_cells[&pos];
-                let new_level = (avg_fill * cap).min(cap);
+                let target = (avg_fill * cap).min(cap);
+                let new_level = old_level + EQ_DAMPING * (target - old_level);
                 if (new_level - old_level).abs() > MIN_LEVEL {
                     if let Some(grid) = chunks.get_mut(&chunk_key) {
                         let cell = grid.get_mut(lx, ly, lz);
