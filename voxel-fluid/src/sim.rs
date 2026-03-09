@@ -350,8 +350,9 @@ fn tick_chunk(
                             (0, -1, -1),
                         ];
 
-                        // Gather candidates: (available_space, target_index_or_cross_chunk_info)
-                        let mut candidates: Vec<(f32, usize, bool, (i32, i32, i32), usize, usize, usize)> = Vec::new();
+                        // Gather candidates: (channel_score, available_space, target_index_or_cross_chunk_info)
+                        // Channel score: prefer cells that already have water (self-reinforcing streams)
+                        let mut candidates: Vec<(f32, f32, usize, bool, (i32, i32, i32), usize, usize, usize)> = Vec::new();
 
                         for (dx, dy, dz) in slope_offsets {
                             let nx = x as i32 + dx;
@@ -382,9 +383,11 @@ fn tick_chunk(
                                         let cap = nbr_grid.cell_capacity(tx, ty, tz);
                                         if cap >= MIN_LEVEL {
                                             let bi = tz * size * size + ty * size + tx;
-                                            let dst_space = (cap - nbr_grid.cells[bi].level).max(0.0);
+                                            let existing = nbr_grid.cells[bi].level;
+                                            let dst_space = (cap - existing).max(0.0);
                                             if dst_space > MIN_LEVEL {
-                                                candidates.push((dst_space, 0, true, dest_key, tx, ty, tz));
+                                                let score = existing * 10.0 + dst_space;
+                                                candidates.push((score, dst_space, 0, true, dest_key, tx, ty, tz));
                                             }
                                         }
                                     }
@@ -404,7 +407,10 @@ fn tick_chunk(
                                 }
                                 let dst_space = (dst_capacity - new_cells[ni].level).max(0.0);
                                 if dst_space > MIN_LEVEL {
-                                    candidates.push((dst_space, ni, false, key, 0, 0, 0));
+                                    // Use old state for channel score (not biased by iteration order)
+                                    let existing = grid.cells[ni].level;
+                                    let score = existing * 10.0 + dst_space;
+                                    candidates.push((score, dst_space, ni, false, key, 0, 0, 0));
                                 }
                             } else if ny < 0 {
                                 // Cross-chunk: target is in chunk below at y=size-1
@@ -418,20 +424,23 @@ fn tick_chunk(
                                         continue;
                                     }
                                     let bi = tz * size * size + ty * size + tx;
-                                    let dst_space = (cap - below_grid.cells[bi].level).max(0.0);
+                                    let existing = below_grid.cells[bi].level;
+                                    let dst_space = (cap - existing).max(0.0);
                                     if dst_space > MIN_LEVEL {
-                                        candidates.push((dst_space, 0, true, below_key, tx, ty, tz));
+                                        let score = existing * 10.0 + dst_space;
+                                        candidates.push((score, dst_space, 0, true, below_key, tx, ty, tz));
                                     }
                                 }
                             }
                         }
 
-                        // Sort by available space descending (prefer emptier targets)
+                        // Sort by channel score descending: prefer cells with existing water
+                        // (self-reinforcing streams), then available space as tiebreaker
                         candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
                         // Orphan puddles get boosted slope flow (8x vs 4x)
                         let slope_mult = if cell.level < ORPHAN_THRESHOLD && cell.stagnant_ticks > 0 { 8.0 } else { 4.0 };
-                        for (dst_space, ni, is_cross, dest_key, dest_x, dest_y, dest_z) in candidates {
+                        for (_score, dst_space, ni, is_cross, dest_key, dest_x, dest_y, dest_z) in candidates {
                             if new_cells[idx].level < MIN_LEVEL && !is_source && !has_grace {
                                 break;
                             }
