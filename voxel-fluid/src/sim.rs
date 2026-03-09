@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::cell::{ChunkDensityCache, ChunkFluidGrid, FluidType, MIN_LEVEL, SOURCE_LEVEL};
+use crate::cell::{ChunkDensityCache, ChunkFluidGrid, FluidType, MIN_LEVEL, ORPHAN_EVAP_TICKS, ORPHAN_THRESHOLD, SOURCE_LEVEL};
 use crate::FluidConfig;
 
 /// A pending fluid transfer across a chunk boundary.
@@ -429,11 +429,13 @@ fn tick_chunk(
                         // Sort by available space descending (prefer emptier targets)
                         candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
+                        // Orphan puddles get boosted slope flow (8x vs 4x)
+                        let slope_mult = if cell.level < ORPHAN_THRESHOLD && cell.stagnant_ticks > 0 { 8.0 } else { 4.0 };
                         for (dst_space, ni, is_cross, dest_key, dest_x, dest_y, dest_z) in candidates {
                             if new_cells[idx].level < MIN_LEVEL && !is_source && !has_grace {
                                 break;
                             }
-                            let transfer = new_cells[idx].level.min(dst_space).min(flow_rate * 4.0);
+                            let transfer = new_cells[idx].level.min(dst_space).min(flow_rate * slope_mult);
                             if transfer > MIN_LEVEL {
                                 if !is_source && !has_grace {
                                     new_cells[idx].level -= transfer;
@@ -458,7 +460,9 @@ fn tick_chunk(
                 }
 
                 // Horizontal spread using fill-fraction equalization
-                if new_cells[idx].level > MIN_LEVEL {
+                // Skip for orphan puddles — force them downhill only
+                let is_orphan = cell.level < ORPHAN_THRESHOLD && cell.stagnant_ticks > 0;
+                if new_cells[idx].level > MIN_LEVEL && !is_orphan {
                     let neighbors: [(i32, i32, i32); 4] = [
                         (x as i32 + 1, y as i32, z as i32),
                         (x as i32 - 1, y as i32, z as i32),
@@ -685,6 +689,60 @@ fn tick_chunk(
         for cell in &mut new_cells {
             if cell.grace_ticks > 0 {
                 cell.grace_ticks -= 1;
+            }
+        }
+
+        // Orphan puddle tracking + evaporation (only on last substep, like grace)
+        let old_cells = &chunks.get(&key).unwrap().cells;
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..size {
+                    let idx = z * size * size + y * size + x;
+                    let old_level = old_cells[idx].level;
+                    let new_level = new_cells[idx].level;
+                    let cell_changed = (new_level - old_level).abs() > MIN_LEVEL;
+
+                    // Check if any neighbor has substantial water (pool edge, not orphan)
+                    let mut has_pool_neighbor = false;
+                    if new_level > MIN_LEVEL && new_level < ORPHAN_THRESHOLD && !cell_changed {
+                        let offsets: [(i32,i32,i32); 6] = [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)];
+                        for &(dx,dy,dz) in &offsets {
+                            let nx = x as i32 + dx;
+                            let ny = y as i32 + dy;
+                            let nz = z as i32 + dz;
+                            if nx >= 0 && nx < size as i32 && ny >= 0 && ny < size as i32
+                                && nz >= 0 && nz < size as i32
+                            {
+                                let ni = nz as usize * size * size + ny as usize * size + nx as usize;
+                                if new_cells[ni].level >= ORPHAN_THRESHOLD {
+                                    has_pool_neighbor = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if new_level > MIN_LEVEL && new_level < ORPHAN_THRESHOLD
+                        && !cell_changed && !has_pool_neighbor
+                    {
+                        new_cells[idx].stagnant_ticks = new_cells[idx].stagnant_ticks.saturating_add(1);
+                    } else {
+                        new_cells[idx].stagnant_ticks = 0;
+                    }
+
+                    // Evaporate truly stuck puddles
+                    if new_cells[idx].stagnant_ticks >= ORPHAN_EVAP_TICKS
+                        && !new_cells[idx].is_source
+                        && new_cells[idx].grace_ticks == 0
+                    {
+                        new_cells[idx].level *= 0.85; // 15% decay per tick
+                        if new_cells[idx].level < MIN_LEVEL {
+                            new_cells[idx].level = 0.0;
+                            new_cells[idx].stagnant_ticks = 0;
+                        }
+                        changed = true;
+                    }
+                }
             }
         }
     }

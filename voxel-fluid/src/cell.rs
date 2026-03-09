@@ -55,6 +55,9 @@ pub struct FluidCell {
     /// Grace period ticks remaining. While > 0, cell behaves like a source
     /// (level is not deducted during flow). Decremented each tick.
     pub grace_ticks: u16,
+    /// Ticks of stagnation for orphan puddle detection. Incremented when
+    /// level < ORPHAN_THRESHOLD and no flow occurred. Reset on movement.
+    pub stagnant_ticks: u8,
 }
 
 impl Default for FluidCell {
@@ -64,6 +67,7 @@ impl Default for FluidCell {
             fluid_type: FluidType::Water,
             is_source: false,
             grace_ticks: 0,
+            stagnant_ticks: 0,
         }
     }
 }
@@ -80,6 +84,10 @@ impl FluidCell {
 
 /// Minimum fluid level to consider non-empty.
 pub const MIN_LEVEL: f32 = 0.001;
+/// Orphan puddle threshold: cells below this level get boosted slope flow.
+pub const ORPHAN_THRESHOLD: f32 = 0.15;
+/// Ticks of stagnation before orphan puddles start evaporating.
+pub const ORPHAN_EVAP_TICKS: u8 = 35;
 /// Level at which a cell is considered a full source block.
 pub const SOURCE_LEVEL: f32 = 1.0;
 /// Maximum fluid level.
