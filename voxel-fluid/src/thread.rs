@@ -7,7 +7,7 @@ use crossbeam_channel::{Receiver, Sender};
 
 use crate::cell::{ChunkDensityCache, ChunkFluidGrid};
 use crate::mesh::{mesh_fluid, BoundaryLevels};
-use crate::sim::{detect_solidification, regen_sources, squeeze_excess_fluid, tick_fluid};
+use crate::sim::{detect_solidification, equalize_horizontal, regen_sources, squeeze_excess_fluid, tick_fluid};
 use crate::sources::place_sources;
 use crate::{FluidConfig, FluidEvent, FluidResult, FluidSnapshot};
 
@@ -57,11 +57,21 @@ pub fn fluid_sim_loop(
         // Regenerate sources
         regen_sources(&mut chunks);
 
-        // Tick water every tick, lava every N ticks
+        // Tick water every tick with multiple substeps, lava every N ticks (single step)
         let is_lava_tick = tick_count % lava_divisor == 0;
-        let dirty_water = tick_fluid(&mut chunks, &chunk_densities, chunk_size, false, &config);
+        let substeps = config.water_substeps.max(1) as usize;
+        let mut dirty_water = HashSet::new();
+        for i in 0..substeps {
+            let decrement_grace = i == substeps - 1; // only on last substep
+            let dirty = tick_fluid(&mut chunks, &chunk_densities, chunk_size, false, &config, decrement_grace);
+            dirty_water.extend(dirty);
+        }
+        // Column equalization post-pass: instant long-range leveling
+        let dirty_eq = equalize_horizontal(&mut chunks, chunk_size, false);
+        dirty_water.extend(dirty_eq);
+
         let dirty_lava = if is_lava_tick {
-            tick_fluid(&mut chunks, &chunk_densities, chunk_size, true, &config)
+            tick_fluid(&mut chunks, &chunk_densities, chunk_size, true, &config, true)
         } else {
             HashSet::new()
         };
