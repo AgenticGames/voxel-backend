@@ -61,14 +61,15 @@ pub fn fluid_sim_loop(
         let is_lava_tick = tick_count % lava_divisor == 0;
         let substeps = config.water_substeps.max(1) as usize;
         let mut dirty_water = HashSet::new();
+        // Equalize first: set flat baseline, then slope flow gets the final word
+        // to create gradients toward drains (prevents equalization from undoing drainage)
+        let dirty_eq = equalize_horizontal(&mut chunks, chunk_size, false);
+        dirty_water.extend(dirty_eq);
         for i in 0..substeps {
             let decrement_grace = i == substeps - 1; // only on last substep
             let dirty = tick_fluid(&mut chunks, &chunk_densities, chunk_size, false, &config, decrement_grace);
             dirty_water.extend(dirty);
         }
-        // Column equalization post-pass: instant long-range leveling
-        let dirty_eq = equalize_horizontal(&mut chunks, chunk_size, false);
-        dirty_water.extend(dirty_eq);
 
         let dirty_lava = if is_lava_tick {
             tick_fluid(&mut chunks, &chunk_densities, chunk_size, true, &config, true)
