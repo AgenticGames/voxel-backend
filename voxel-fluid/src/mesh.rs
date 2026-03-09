@@ -112,52 +112,58 @@ fn has_fluid_above(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> bool 
     grid.grid_point_density(x, y + 1, z) <= 0.0 && grid.get(x, y + 1, z).level >= ISO_LEVEL
 }
 
-/// Check if any horizontal neighbor (±x, ±z) is non-solid with real fluid.
-/// Used to detect wall-adjacent and flat-surface cells that should be extended.
+/// How many cells the fluid mesh "skirt" extends from the water's edge.
+/// Creates a 45° downward-angled apron that gives the water edge visible depth
+/// and closes gaps where water meets rock at angles.
+const SKIRT_DEPTH: usize = 2;
+
+/// Find the manhattan distance to the nearest real fluid cell, searching
+/// horizontally and upward (not downward) within SKIRT_DEPTH cells.
+/// Returns None if no fluid found. The upward-only vertical search ensures
+/// the skirt extends downward from the water surface, not upward.
 #[inline]
-fn has_fluid_neighbor_horizontal(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> bool {
+fn nearest_fluid_distance(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> Option<usize> {
     let size = grid.size;
-    for &(dx, dz) in &[(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
-        let nx = x as i32 + dx;
-        let nz = z as i32 + dz;
-        if nx >= 0 && nx < size as i32 && nz >= 0 && nz < size as i32 {
-            let nx = nx as usize;
-            let nz = nz as usize;
-            if grid.grid_point_density(nx, y, nz) <= 0.0 && grid.get(nx, y, nz).level >= ISO_LEVEL {
-                return true;
+    let r = SKIRT_DEPTH as i32;
+    let mut best: Option<usize> = None;
+
+    for dy in 0..=r {
+        for dz in -r..=r {
+            for dx in -r..=r {
+                let dist = (dx.unsigned_abs() + dy as u32 + dz.unsigned_abs()) as usize;
+                if dist == 0 || dist > SKIRT_DEPTH {
+                    continue;
+                }
+                if let Some(b) = best {
+                    if dist >= b {
+                        continue;
+                    }
+                }
+
+                let nx = x as i32 + dx;
+                let ny = y as i32 + dy; // only upward
+                let nz = z as i32 + dz;
+                if nx < 0 || nx >= size as i32 || ny < 0 || ny >= size as i32
+                    || nz < 0 || nz >= size as i32
+                {
+                    continue;
+                }
+
+                let nu = nx as usize;
+                let nv = ny as usize;
+                let nw = nz as usize;
+                if grid.grid_point_density(nu, nv, nw) <= 0.0
+                    && grid.get(nu, nv, nw).level >= ISO_LEVEL
+                {
+                    if dist == 1 {
+                        return Some(1);
+                    }
+                    best = Some(dist);
+                }
             }
         }
     }
-    false
-}
-
-/// Check if any horizontal neighbor (±x, ±z) is solid rock.
-/// Out-of-bounds neighbors are treated as solid (chunk edge).
-#[inline]
-fn has_solid_neighbor_horizontal(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> bool {
-    let size = grid.size;
-    for &(dx, dz) in &[(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
-        let nx = x as i32 + dx;
-        let nz = z as i32 + dz;
-        // Out of bounds = treat as solid (chunk edge)
-        if nx < 0 || nx >= size as i32 || nz < 0 || nz >= size as i32 {
-            return true;
-        }
-        if grid.grid_point_density(nx as usize, y, nz as usize) > 0.0 {
-            return true;
-        }
-    }
-    false
-}
-
-/// Check if a cell qualifies for wall extension: low fluid, next to solid wall,
-/// with fluid in a horizontal neighbor.
-#[inline]
-fn is_wall_extended(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> bool {
-    let level = grid.get(x, y, z).level;
-    level < ISO_LEVEL
-        && has_solid_neighbor_horizontal(grid, x, y, z)
-        && has_fluid_neighbor_horizontal(grid, x, y, z)
+    best
 }
 
 /// Sample the scalar field for MC meshing.
@@ -165,10 +171,8 @@ fn is_wall_extended(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> bool
 /// so no isosurface forms at rock/fluid boundaries — only at fluid/air boundaries.
 /// Floor extension: non-solid cells with low fluid sitting on solid rock (or at chunk
 /// bottom boundary) with fluid above get boosted to 1.0 to close the visual gap.
-/// Wall extension: non-solid cells with low fluid next to solid walls with fluid in a
-/// horizontal neighbor get boosted to 1.0 to close wall gaps.
-/// Flat surface fix: cells with some fluid (> MIN_LEVEL but < ISO_LEVEL) next to real
-/// fluid get boosted to ISO_LEVEL to close holes in flat pool surfaces.
+/// Skirt extension: non-solid cells within SKIRT_DEPTH cells of real fluid get boosted
+/// with distance decay, creating a 2-voxel 45° downward-angled apron at water edges.
 /// Out-of-bounds coordinates return BOUNDARY_FIELD to close mesh at chunk edges.
 #[inline]
 fn sample_field(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary: &BoundaryLevels) -> f32 {
@@ -194,19 +198,15 @@ fn sample_field(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary: &
             return 1.0;
         }
 
-        // Wall extension: low-fluid cell next to solid wall with fluid in a horizontal neighbor
-        if level < ISO_LEVEL && has_solid_neighbor_horizontal(grid, x, y, z)
-            && has_fluid_neighbor_horizontal(grid, x, y, z)
-        {
-            return 1.0;
-        }
-
-        // Flat surface gap fix: cell with some fluid (but < ISO_LEVEL) next to real
-        // fluid on the same Y level — boost to threshold to close holes without bumps
-        if level > MIN_LEVEL && level < ISO_LEVEL
-            && has_fluid_neighbor_horizontal(grid, x, y, z)
-        {
-            return ISO_LEVEL;
+        // Skirt extension: extend fluid mesh up to SKIRT_DEPTH cells from the water's
+        // edge, with field values decaying by distance to create a ~45° downward slope.
+        // dist=1: 2*ISO_LEVEL (well above threshold — mesh extends here)
+        // dist=2: ISO_LEVEL (at threshold — mesh tapers off here)
+        if level < ISO_LEVEL {
+            if let Some(dist) = nearest_fluid_distance(grid, x, y, z) {
+                let boost = ISO_LEVEL * (SKIRT_DEPTH + 1 - dist) as f32;
+                return boost.max(level);
+            }
         }
 
         level
@@ -214,10 +214,9 @@ fn sample_field(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary: &
 }
 
 /// Returns true if any in-bounds corner of the unit cube at (x,y,z) has real fluid,
-/// or if any corner is a floor extension cell (non-solid, low fluid, on solid rock
-/// with fluid above). Used to skip cubes in pure rock/air regions — without this,
-/// treating solid as "inside" would generate phantom water surfaces on every cave wall.
-/// Out-of-bounds corners are treated as having no fluid.
+/// or if any corner is a floor/skirt extension cell. Used to skip cubes in pure
+/// rock/air regions — without this, treating solid as "inside" would generate phantom
+/// water surfaces on every cave wall. Out-of-bounds corners are treated as having no fluid.
 #[inline]
 fn cube_has_fluid(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary: &BoundaryLevels) -> bool {
     let size = grid.size;
@@ -252,8 +251,8 @@ fn cube_has_fluid(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary:
                     if level < ISO_LEVEL && (cy == 0 || grid.grid_point_density(cx, cy - 1, cz) > 0.0) && has_fluid_above(grid, cx, cy, cz) {
                         return true;
                     }
-                    // Wall extension: low-fluid cell next to solid wall with fluid in horizontal neighbor
-                    if is_wall_extended(grid, cx, cy, cz) {
+                    // Skirt extension: cell within SKIRT_DEPTH of real fluid
+                    if nearest_fluid_distance(grid, cx, cy, cz).is_some() {
                         return true;
                     }
                 }
@@ -695,35 +694,47 @@ fn compute_flow_direction(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -
 
 /// Determine the dominant fluid type among non-empty neighboring cells.
 /// When water-family wins over lava, returns the most common water subtype.
+/// Searches the local 2x2x2 cube first, then expands up to SKIRT_DEPTH cells
+/// to find the correct type for skirt-extended cells that have no local fluid.
 pub fn dominant_fluid_type(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> FluidType {
-    let mut lava_count = 0u32;
-    // Index 0 unused; indices 1,3-8 are water-family types
-    let mut water_counts = [0u32; 10];
-    let size = grid.size;
+    // Try progressively wider search radii until fluid is found
+    for expand in 0..=SKIRT_DEPTH {
+        let mut lava_count = 0u32;
+        let mut water_counts = [0u32; 10];
+        let size = grid.size;
 
-    for cz in z..=(z + 1).min(size - 1) {
-        for cy in y..=(y + 1).min(size - 1) {
-            for cx in x..=(x + 1).min(size - 1) {
-                let cell = grid.get(cx, cy, cz);
-                if cell.level >= MIN_LEVEL {
-                    if cell.fluid_type.is_lava() {
-                        lava_count += 1;
-                    } else {
-                        let idx = cell.fluid_type as u8 as usize;
-                        if idx < water_counts.len() {
-                            water_counts[idx] += 1;
+        let x0 = x.saturating_sub(expand);
+        let y0 = y.saturating_sub(expand);
+        let z0 = z.saturating_sub(expand);
+        let x1 = (x + 1 + expand).min(size - 1);
+        let y1 = (y + 1 + expand).min(size - 1);
+        let z1 = (z + 1 + expand).min(size - 1);
+
+        for cz in z0..=z1 {
+            for cy in y0..=y1 {
+                for cx in x0..=x1 {
+                    let cell = grid.get(cx, cy, cz);
+                    if cell.level >= MIN_LEVEL {
+                        if cell.fluid_type.is_lava() {
+                            lava_count += 1;
+                        } else {
+                            let idx = cell.fluid_type as u8 as usize;
+                            if idx < water_counts.len() {
+                                water_counts[idx] += 1;
+                            }
                         }
                     }
                 }
             }
         }
-    }
 
-    let total_water: u32 = water_counts.iter().sum();
-    if lava_count > total_water {
-        FluidType::Lava
-    } else {
-        // Prefer proper subtypes (3-9) over generic Water (1)
+        let total_water: u32 = water_counts.iter().sum();
+        if lava_count == 0 && total_water == 0 {
+            continue; // widen search
+        }
+        if lava_count > total_water {
+            return FluidType::Lava;
+        }
         let mut best_idx = 0u8;
         let mut best_count = 0u32;
         for i in 3..water_counts.len() {
@@ -732,12 +743,12 @@ pub fn dominant_fluid_type(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) 
                 best_idx = i as u8;
             }
         }
-        // Fall back to generic Water only if no subtype found
         if best_count == 0 {
             best_idx = 1;
         }
-        FluidType::from_u8(best_idx)
+        return FluidType::from_u8(best_idx);
     }
+    FluidType::Water // ultimate fallback
 }
 
 #[cfg(test)]
@@ -880,11 +891,12 @@ mod tests {
         let mesh = mesh_fluid(&grid, &no_boundary(), &default_config());
         assert!(!mesh.positions.is_empty(), "Should produce fluid mesh");
 
-        // The minimum Y of vertices should be near the solid/fluid boundary (y≈3-4).
+        // The minimum Y of vertices should be near the solid/fluid boundary (y≈2-4).
+        // The skirt extends the mesh ~2 cells below the fluid body's bottom face.
         let min_y = mesh.positions.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
         assert!(
-            min_y >= 2.9,
-            "Mesh should not extend deep into solid rock, min_y = {:.2}",
+            min_y >= 1.5,
+            "Mesh should not extend far below solid rock, min_y = {:.2}",
             min_y
         );
     }
@@ -957,14 +969,12 @@ mod tests {
         }
         let mesh = mesh_fluid(&grid, &no_boundary(), &default_config());
         assert!(!mesh.positions.is_empty(), "Should produce fluid mesh");
-        // The mesh should not generate phantom water on the wall face.
-        // Solid wall cells return 1.0 ("inside"), same as fluid cells,
-        // so no isosurface forms at the wall/fluid boundary.
-        // Vertices can approach x=4 (the boundary) but should not go into x<3.
+        // The skirt extends the mesh ~2 cells past the fluid edge toward the wall.
+        // Fluid starts at x=4, skirt can reach ~x=2 with smoothing.
         let min_x = mesh.positions.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min);
         assert!(
-            min_x >= 3.0,
-            "Mesh should not extend deep into solid wall, min_x = {:.2}",
+            min_x >= 1.5,
+            "Mesh should not extend far past skirt range, min_x = {:.2}",
             min_x
         );
     }
