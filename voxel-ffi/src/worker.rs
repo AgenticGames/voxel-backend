@@ -575,6 +575,16 @@ fn handle_request(
             // When fluid_sources_enabled is off, only inject cauldron seeds (is_source == false)
             if was_slow_path {
                 for seed in &pool_fluid_seeds {
+                    if seed.is_sentinel {
+                        // Sentinel trigger zone — register for leak diagnostics
+                        let _ = fluid_event_tx.send(FluidEvent::AddSentinel {
+                            chunk: seed.chunk,
+                            x: seed.lx,
+                            y: seed.ly,
+                            z: seed.lz,
+                        });
+                        continue;
+                    }
                     if !cfg.fluid_sources_enabled && seed.is_source {
                         continue; // skip infinite pool sources when toggle is off
                     }
@@ -1388,22 +1398,32 @@ fn handle_request(
             }
 
             // Inject fluid seeds (skip when fluid sources disabled)
-            if cfg.fluid_sources_enabled {
-                for seed in &fluid_seeds {
-                    let ft = match seed.fluid_type {
-                        voxel_gen::pools::PoolFluid::Water => voxel_fluid::cell::FluidType::WaterPool,
-                        voxel_gen::pools::PoolFluid::Lava => voxel_fluid::cell::FluidType::Lava,
-                    };
-                    let _ = fluid_event_tx.send(FluidEvent::AddFluid {
+            for seed in &fluid_seeds {
+                if seed.is_sentinel {
+                    let _ = fluid_event_tx.send(FluidEvent::AddSentinel {
                         chunk: seed.chunk,
                         x: seed.lx,
                         y: seed.ly,
                         z: seed.lz,
-                        fluid_type: ft,
-                        level: 1.0,
-                        is_source: seed.is_source,
                     });
+                    continue;
                 }
+                if !cfg.fluid_sources_enabled {
+                    continue; // skip fluid when sources disabled
+                }
+                let ft = match seed.fluid_type {
+                    voxel_gen::pools::PoolFluid::Water => voxel_fluid::cell::FluidType::WaterPool,
+                    voxel_gen::pools::PoolFluid::Lava => voxel_fluid::cell::FluidType::Lava,
+                };
+                let _ = fluid_event_tx.send(FluidEvent::AddFluid {
+                    chunk: seed.chunk,
+                    x: seed.lx,
+                    y: seed.ly,
+                    z: seed.lz,
+                    fluid_type: ft,
+                    level: 1.0,
+                    is_source: seed.is_source,
+                });
             }
 
             // Run incremental seam pass

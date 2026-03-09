@@ -141,6 +141,13 @@ pub enum FluidEvent {
         level: f32,
         is_source: bool,
     },
+    /// Register a sentinel trigger zone for cauldron leak diagnostics.
+    AddSentinel {
+        chunk: (i32, i32, i32),
+        x: u8,
+        y: u8,
+        z: u8,
+    },
     /// Update fluid simulation config at runtime (flow threshold + fractional capacity + grace).
     UpdateFluidConfig {
         flow_solid_threshold: u8,

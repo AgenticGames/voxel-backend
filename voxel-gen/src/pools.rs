@@ -59,6 +59,8 @@ pub struct FluidSeed {
     pub fluid_type: PoolFluid,
     /// True for infinite sources (pools), false for finite fill (cauldrons)
     pub is_source: bool,
+    /// Diagnostic sentinel — trigger zone marker for leak detection (not actual fluid)
+    pub is_sentinel: bool,
 }
 
 /// A cluster of adjacent floor cells at similar Y levels.
@@ -328,6 +330,7 @@ pub fn place_pools(
                         lz: gz as u8,
                         fluid_type,
                         is_source: true,
+                        is_sentinel: false,
                     });
                 }
             }
@@ -685,6 +688,7 @@ pub fn force_spawn_pool(
                     lz: gz as u8,
                     fluid_type,
                     is_source: true,
+                    is_sentinel: false,
                 });
             }
         }

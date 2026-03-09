@@ -820,6 +820,86 @@ fn generate_cauldron_fluid_seeds(
                     lz: gz as u8,
                     fluid_type,
                     is_source: false,
+                    is_sentinel: false,
+                });
+            }
+        }
+    }
+
+    // --- Sentinel trigger zones for cauldron leak diagnostics ---
+    // Floor gap sentinels: cells between the actual basin floor and the fluid fill start.
+    // If water appears here, it leaked downward through the floor boundary.
+    let cx = anchor_x as i32;
+    let cz = anchor_z as i32;
+    let fill_r = fill_radius.ceil() as i32;
+    for dz in -fill_r..=fill_r {
+        for dx in -fill_r..=fill_r {
+            let dist_h = ((dx * dx + dz * dz) as f32).sqrt();
+            if dist_h >= fill_radius {
+                continue;
+            }
+            let gx = cx + dx;
+            let gz = cz + dz;
+            if gx < 0 || gx >= size as i32 || gz < 0 || gz >= size as i32 {
+                continue;
+            }
+
+            let rim_factor = dist_h / radius;
+            let carve_depth_at_r = depth * (1.0 - rim_factor.powf(0.3).min(1.0));
+            let bottom_y = (ay - carve_depth_at_r).floor() as i32;
+
+            // Floor gap: from bottom_y + lip_ceil (carved floor) up to min_y (fluid start)
+            let sentinel_min_y = (bottom_y + lip_ceil).max(0);
+            let fluid_min_y = (bottom_y + floor_inset + lip_ceil).max(0);
+            for sy in sentinel_min_y..fluid_min_y {
+                if sy >= size as i32 { continue; }
+                seeds.push(FluidSeed {
+                    chunk: chunk_coord,
+                    lx: gx as u8,
+                    ly: sy as u8,
+                    lz: gz as u8,
+                    fluid_type,
+                    is_source: false,
+                    is_sentinel: true,
+                });
+            }
+        }
+    }
+
+    // Wall gap sentinels: cells between fill_radius and full radius at fluid Y levels.
+    // If water appears here, it leaked laterally through the wall boundary.
+    let full_r = radius.ceil() as i32;
+    let fill_r_sq = (fill_radius * fill_radius) as i32;
+    let full_r_sq = (radius * radius) as i32;
+    for dz in -full_r..=full_r {
+        for dx in -full_r..=full_r {
+            let dist_sq = dx * dx + dz * dz;
+            // Between fill_radius (exclusive) and full radius (exclusive)
+            if dist_sq <= fill_r_sq || dist_sq >= full_r_sq {
+                continue;
+            }
+            let gx = cx + dx;
+            let gz = cz + dz;
+            if gx < 0 || gx >= size as i32 || gz < 0 || gz >= size as i32 {
+                continue;
+            }
+
+            // Use anchor_y column for Y range (approximate)
+            let rim_factor = (dist_sq as f32).sqrt() / radius;
+            let carve_depth_at_r = depth * (1.0 - rim_factor.powf(0.3).min(1.0));
+            let bottom_y = (ay - carve_depth_at_r).floor() as i32;
+            let wall_min_y = (bottom_y + floor_inset + lip_ceil).max(0);
+            let wall_max_y = anchor_y as i32 + lip_ceil;
+            for sy in wall_min_y..wall_max_y {
+                if sy >= size as i32 { continue; }
+                seeds.push(FluidSeed {
+                    chunk: chunk_coord,
+                    lx: gx as u8,
+                    ly: sy as u8,
+                    lz: gz as u8,
+                    fluid_type,
+                    is_source: false,
+                    is_sentinel: true,
                 });
             }
         }
@@ -2560,7 +2640,11 @@ mod tests {
 
         let lip_ceil = 1i32; // ceil(0.8) = 1
 
-        for seed in &seeds {
+        // Verify sentinel seeds were generated
+        let sentinel_count = seeds.iter().filter(|s| s.is_sentinel).count();
+        assert!(sentinel_count > 0, "Should generate sentinel trigger zones");
+
+        for seed in seeds.iter().filter(|s| !s.is_sentinel) {
             let dx = seed.lx as f32 - anchor_x as f32;
             let dz = seed.lz as f32 - anchor_z as f32;
             let dist_h = (dx * dx + dz * dz).sqrt();
