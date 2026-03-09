@@ -112,63 +112,11 @@ fn has_fluid_above(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> bool 
     grid.grid_point_density(x, y + 1, z) <= 0.0 && grid.get(x, y + 1, z).level >= ISO_LEVEL
 }
 
-/// Check if any horizontal neighbor (±x, ±z) is non-solid with real fluid.
-/// Used to detect wall-adjacent and flat-surface cells that should be extended.
-#[inline]
-fn has_fluid_neighbor_horizontal(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> bool {
-    let size = grid.size;
-    for &(dx, dz) in &[(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
-        let nx = x as i32 + dx;
-        let nz = z as i32 + dz;
-        if nx >= 0 && nx < size as i32 && nz >= 0 && nz < size as i32 {
-            let nx = nx as usize;
-            let nz = nz as usize;
-            if grid.grid_point_density(nx, y, nz) <= 0.0 && grid.get(nx, y, nz).level >= ISO_LEVEL {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// Check if any horizontal neighbor (±x, ±z) is solid rock.
-/// Out-of-bounds neighbors are treated as solid (chunk edge).
-#[inline]
-fn has_solid_neighbor_horizontal(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> bool {
-    let size = grid.size;
-    for &(dx, dz) in &[(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
-        let nx = x as i32 + dx;
-        let nz = z as i32 + dz;
-        // Out of bounds = treat as solid (chunk edge)
-        if nx < 0 || nx >= size as i32 || nz < 0 || nz >= size as i32 {
-            return true;
-        }
-        if grid.grid_point_density(nx as usize, y, nz as usize) > 0.0 {
-            return true;
-        }
-    }
-    false
-}
-
-/// Check if a cell qualifies for wall extension: low fluid, next to solid wall,
-/// with fluid in a horizontal neighbor.
-#[inline]
-fn is_wall_extended(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> bool {
-    let level = grid.get(x, y, z).level;
-    level < ISO_LEVEL
-        && has_solid_neighbor_horizontal(grid, x, y, z)
-        && has_fluid_neighbor_horizontal(grid, x, y, z)
-}
-
 /// Sample the scalar field for MC meshing.
 /// Returns fluid level for air cells. Solid cells return 1.0 (treated as "inside")
 /// so no isosurface forms at rock/fluid boundaries — only at fluid/air boundaries.
 /// Floor extension: non-solid cells with low fluid sitting on solid rock (or at chunk
 /// bottom boundary) with fluid above get boosted to 1.0 to close the visual gap.
-/// Wall extension: non-solid cells with low fluid next to solid walls with fluid in a
-/// horizontal neighbor get boosted to 1.0 to close wall gaps.
-/// Flat surface fix: cells with some fluid (> MIN_LEVEL but < ISO_LEVEL) next to real
-/// fluid get boosted to ISO_LEVEL to close holes in flat pool surfaces.
 /// Out-of-bounds coordinates return BOUNDARY_FIELD to close mesh at chunk edges.
 #[inline]
 fn sample_field(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary: &BoundaryLevels) -> f32 {
@@ -188,28 +136,12 @@ fn sample_field(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary: &
         1.0 // inside — prevents surface at rock/fluid boundary
     } else {
         let level = grid.get(x, y, z).level;
-
         // Floor extension: low-fluid cell on solid rock (or chunk bottom) with fluid above
         if level < ISO_LEVEL && (y == 0 || grid.grid_point_density(x, y - 1, z) > 0.0) && has_fluid_above(grid, x, y, z) {
-            return 1.0;
+            1.0 // boost to close floor gap
+        } else {
+            level
         }
-
-        // Wall extension: low-fluid cell next to solid wall with fluid in a horizontal neighbor
-        if level < ISO_LEVEL && has_solid_neighbor_horizontal(grid, x, y, z)
-            && has_fluid_neighbor_horizontal(grid, x, y, z)
-        {
-            return 1.0;
-        }
-
-        // Flat surface gap fix: cell with some fluid (but < ISO_LEVEL) next to real
-        // fluid on the same Y level — boost to threshold to close holes without bumps
-        if level > MIN_LEVEL && level < ISO_LEVEL
-            && has_fluid_neighbor_horizontal(grid, x, y, z)
-        {
-            return ISO_LEVEL;
-        }
-
-        level
     }
 }
 
@@ -250,10 +182,6 @@ fn cube_has_fluid(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary:
                     }
                     // Floor extension: low-fluid cell on solid rock (or chunk bottom) with fluid above
                     if level < ISO_LEVEL && (cy == 0 || grid.grid_point_density(cx, cy - 1, cz) > 0.0) && has_fluid_above(grid, cx, cy, cz) {
-                        return true;
-                    }
-                    // Wall extension: low-fluid cell next to solid wall with fluid in horizontal neighbor
-                    if is_wall_extended(grid, cx, cy, cz) {
                         return true;
                     }
                 }
