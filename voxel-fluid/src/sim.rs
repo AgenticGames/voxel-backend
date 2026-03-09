@@ -896,8 +896,11 @@ pub fn equalize_horizontal(
 ) -> HashSet<(i32, i32, i32)> {
     let mut dirty = HashSet::new();
 
-    // Build global index: collect all water cells with level > MIN_LEVEL
+    // Build global index: collect water cells deep enough to need equalization.
+    // Thin films (< 30% fill) are excluded so gravity/slope flow can channel them
+    // into streams instead of equalization spreading them into wide sheets.
     // Key: (world_x, world_y, world_z) → (chunk_key, local_x, local_y, local_z, level, capacity)
+    const EQ_MIN_FILL: f32 = 0.3;
     let mut water_cells: HashMap<(i32, i32, i32), ((i32, i32, i32), usize, usize, usize, f32, f32)> = HashMap::new();
 
     // Determine the Y range across all chunks
@@ -925,6 +928,10 @@ pub fn equalize_horizontal(
                     }
                     let cap = grid.cell_capacity(x, y, z);
                     if cap < MIN_LEVEL {
+                        continue;
+                    }
+                    // Skip thin films — let slope flow channel them first
+                    if cell.level / cap < EQ_MIN_FILL {
                         continue;
                     }
                     let wx = chunk_key.0 * chunk_size as i32 + x as i32;
