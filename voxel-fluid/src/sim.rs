@@ -775,14 +775,17 @@ fn tick_chunk(
                     let idx = z * size * size + y * size + x;
                     let level = new_cells[idx].level;
 
-                    // Only entrain small, stagnant, non-source cells
-                    if level < MIN_LEVEL || level >= ORPHAN_THRESHOLD { continue; }
+                    // Entrain low-to-moderate water toward stronger nearby flow
+                    // Cap at 0.5 to protect deep pools from sideways disruption
+                    // Require stagnant_ticks > 0 so fresh arrivals cascade normally
+                    if level < MIN_LEVEL || level >= 0.5 { continue; }
                     if new_cells[idx].is_source || new_cells[idx].grace_ticks > 0 { continue; }
-                    if drain_delta[idx] > MIN_LEVEL { continue; } // already flowing
+                    if new_cells[idx].stagnant_ticks == 0 { continue; }
 
-                    // Find neighbor with largest drain delta
-                    let offsets: [(i32,i32,i32); 6] = [
-                        (0,-1,0),(0,1,0),(1,0,0),(-1,0,0),(0,0,1),(0,0,-1)
+                    // Find horizontal neighbor with largest drain delta
+                    // (vertical entrainment skipped — gravity/slope flow handles that)
+                    let offsets: [(i32,i32,i32); 4] = [
+                        (1,0,0),(-1,0,0),(0,0,1),(0,0,-1)
                     ];
                     let mut best_ni = 0usize;
                     let mut best_drain = 0.0f32;
@@ -800,7 +803,11 @@ fn tick_chunk(
                         }
                     }
 
-                    if best_drain >= entrain_threshold {
+                    // Skip if already flowing at >= 30% of the best neighbor's rate
+                    if best_drain < entrain_threshold { continue; }
+                    if drain_delta[idx] > best_drain * 0.3 { continue; }
+
+                    {
                         let space = (cell_cap[best_ni] - new_cells[best_ni].level).max(0.0);
                         let transfer = level.min(space).min(entrain_rate);
                         if transfer > MIN_LEVEL {
