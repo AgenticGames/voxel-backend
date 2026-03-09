@@ -590,7 +590,52 @@ fn tick_chunk(
         }
     }
 
-    // Clean up tiny residual amounts (including negative from overdrain) and track has_fluid
+    // Consolidate thin films: push sub-MIN_LEVEL water to a neighbor before zeroing.
+    // This prevents silent water loss on slopes where thin films drop below MIN_LEVEL.
+    for z in 0..size {
+        for y in 0..size {
+            for x in 0..size {
+                let idx = z * size * size + y * size + x;
+                let level = new_cells[idx].level;
+                if level <= 0.0 || level >= MIN_LEVEL {
+                    continue; // skip empty or substantial cells
+                }
+                // Try to push tiny amount to a neighbor that has water
+                let fluid_type = new_cells[idx].fluid_type;
+                let mut pushed = false;
+                // Prefer downward, then horizontal, then up
+                let consolidate_offsets: [(i32, i32, i32); 6] = [
+                    (0, -1, 0),
+                    (1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1),
+                    (0, 1, 0),
+                ];
+                for &(dx, dy, dz) in &consolidate_offsets {
+                    let nx = x as i32 + dx;
+                    let ny = y as i32 + dy;
+                    let nz = z as i32 + dz;
+                    if nx < 0 || nx >= size as i32 || ny < 0 || ny >= size as i32
+                        || nz < 0 || nz >= size as i32 { continue; }
+                    let ni = nz as usize * size * size + ny as usize * size + nx as usize;
+                    if new_cells[ni].level >= MIN_LEVEL && cell_cap[ni] > MIN_LEVEL {
+                        let space = cell_cap[ni] - new_cells[ni].level;
+                        if space > 0.0 {
+                            let push = level.min(space);
+                            new_cells[ni].level += push;
+                            new_cells[ni].fluid_type = fluid_type;
+                            new_cells[idx].level = 0.0;
+                            pushed = true;
+                            break;
+                        }
+                    }
+                }
+                if !pushed {
+                    new_cells[idx].level = 0.0; // no neighbor to absorb, evaporate
+                }
+            }
+        }
+    }
+
+    // Clean up negative from overdrain and track has_fluid
     let mut any_fluid = false;
     for cell in &mut new_cells {
         if cell.level < MIN_LEVEL {
@@ -815,6 +860,73 @@ pub fn equalize_horizontal(
 
             if region.len() < 2 {
                 continue; // single cell, nothing to equalize
+            }
+
+            // Check if any cell in this region has a downward drain path.
+            // If so, skip equalization — let gravity/slope flow handle drainage
+            // naturally. Equalizing a draining region pulls water AWAY from
+            // the drain edge, fighting gravity every tick.
+            let mut has_drain = false;
+            for &pos in &region {
+                let (chunk_key, lx, ly, lz, _, _) = water_cells[&pos];
+                if let Some(grid) = chunks.get(&chunk_key) {
+                    let size = grid.size;
+                    // Check gravity path: cell directly below
+                    if ly > 0 {
+                        if grid.cell_capacity(lx, ly - 1, lz) > MIN_LEVEL {
+                            has_drain = true;
+                            break;
+                        }
+                    } else {
+                        // Cross-chunk: check chunk below at y=size-1
+                        let below_key = (chunk_key.0, chunk_key.1 - 1, chunk_key.2);
+                        if let Some(below_grid) = chunks.get(&below_key) {
+                            if below_grid.cell_capacity(lx, below_grid.size - 1, lz) > MIN_LEVEL {
+                                has_drain = true;
+                                break;
+                            }
+                        }
+                    }
+                    // Check slope paths: 4 diagonal-down neighbors with wall passability
+                    if !has_drain {
+                        let slope_offsets: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+                        for &(dx, dz) in &slope_offsets {
+                            let hx = lx as i32 + dx;
+                            let hz = lz as i32 + dz;
+                            // Horizontal cell must be passable (wall check)
+                            if hx >= 0 && hx < size as i32 && hz >= 0 && hz < size as i32 {
+                                if grid.cell_capacity(hx as usize, ly, hz as usize) < MIN_LEVEL {
+                                    continue; // wall blocks slope path
+                                }
+                            }
+                            // Diagonal-down target
+                            let sy = ly as i32 - 1;
+                            if sy >= 0 && hx >= 0 && hx < size as i32 && hz >= 0 && hz < size as i32 {
+                                if grid.cell_capacity(hx as usize, sy as usize, hz as usize) > MIN_LEVEL {
+                                    has_drain = true;
+                                    break;
+                                }
+                            }
+                            // Cross-chunk diagonal-down (y boundary)
+                            if sy < 0 {
+                                let below_key = (chunk_key.0, chunk_key.1 - 1, chunk_key.2);
+                                if hx >= 0 && hx < size as i32 && hz >= 0 && hz < size as i32 {
+                                    if let Some(below_grid) = chunks.get(&below_key) {
+                                        if below_grid.cell_capacity(hx as usize, below_grid.size - 1, hz as usize) > MIN_LEVEL {
+                                            has_drain = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if has_drain { break; }
+            }
+
+            if has_drain {
+                continue; // Skip equalization for this region — let gravity handle it
             }
 
             // Compute total water and cell count, then average
