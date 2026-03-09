@@ -745,6 +745,65 @@ fn tick_chunk(
                 }
             }
         }
+
+        // --- Flow entrainment pass ---
+        // Fast-moving water drags adjacent stagnant water via viscous coupling.
+        // Drain delta (how much a cell lost this tick) is the flow signal.
+        let flow_rate = if is_lava_tick { config.lava_flow_rate } else { config.water_flow_rate };
+        let entrain_threshold = flow_rate * 0.5;
+        let entrain_rate = flow_rate * 2.0;
+
+        // Pre-compute drain deltas (positive = cell lost water this tick)
+        let old_cells = &chunks.get(&key).unwrap().cells;
+        let mut drain_delta = vec![0.0f32; total];
+        for idx in 0..total {
+            drain_delta[idx] = (old_cells[idx].level - new_cells[idx].level).max(0.0);
+        }
+
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..size {
+                    let idx = z * size * size + y * size + x;
+                    let level = new_cells[idx].level;
+
+                    // Only entrain small, stagnant, non-source cells
+                    if level < MIN_LEVEL || level >= ORPHAN_THRESHOLD { continue; }
+                    if new_cells[idx].is_source || new_cells[idx].grace_ticks > 0 { continue; }
+                    if drain_delta[idx] > MIN_LEVEL { continue; } // already flowing
+
+                    // Find neighbor with largest drain delta
+                    let offsets: [(i32,i32,i32); 6] = [
+                        (0,-1,0),(0,1,0),(1,0,0),(-1,0,0),(0,0,1),(0,0,-1)
+                    ];
+                    let mut best_ni = 0usize;
+                    let mut best_drain = 0.0f32;
+                    for &(dx, dy, dz) in &offsets {
+                        let nx = x as i32 + dx;
+                        let ny = y as i32 + dy;
+                        let nz = z as i32 + dz;
+                        if nx < 0 || nx >= size as i32 || ny < 0 || ny >= size as i32
+                            || nz < 0 || nz >= size as i32 { continue; }
+                        let ni = nz as usize * size * size + ny as usize * size + nx as usize;
+                        if cell_cap[ni] < MIN_LEVEL { continue; } // solid
+                        if drain_delta[ni] > best_drain {
+                            best_drain = drain_delta[ni];
+                            best_ni = ni;
+                        }
+                    }
+
+                    if best_drain >= entrain_threshold {
+                        let space = (cell_cap[best_ni] - new_cells[best_ni].level).max(0.0);
+                        let transfer = level.min(space).min(entrain_rate);
+                        if transfer > MIN_LEVEL {
+                            new_cells[idx].level -= transfer;
+                            new_cells[best_ni].level += transfer;
+                            new_cells[best_ni].fluid_type = new_cells[idx].fluid_type;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Swap buffer
