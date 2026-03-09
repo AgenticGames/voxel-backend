@@ -15,7 +15,7 @@ use voxel_fluid::FluidSnapshot;
 use crate::config::ReactionConfig;
 use crate::manifest::ChangeManifest;
 use crate::util::{FACE_OFFSETS, sample_material, count_neighbors};
-use crate::TransformEntry;
+use crate::{Bottleneck, PhaseDiagnostics, ResourceCensus, TransformEntry};
 
 /// Result of the reaction phase.
 #[derive(Debug, Default)]
@@ -26,6 +26,7 @@ pub struct ReactionResult {
     pub manifest: ChangeManifest,
     pub glimpse_chunk: Option<(i32, i32, i32)>,
     pub transform_log: Vec<TransformEntry>,
+    pub diagnostics: PhaseDiagnostics,
 }
 
 /// Execute Phase 1: acid dissolution, copper oxidation, basalt crust.
@@ -36,6 +37,7 @@ pub fn apply_reaction(
     chunks: &[(i32, i32, i32)],
     chunk_size: usize,
     rng: &mut ChaCha8Rng,
+    census: &ResourceCensus,
 ) -> ReactionResult {
     let field_size = chunk_size + 1;
     let mut result = ReactionResult::default();
@@ -52,6 +54,7 @@ pub fn apply_reaction(
     }
 
     let mut candidates: Vec<Candidate> = Vec::new();
+    let mut theoretical_max = 0u32;
 
     // --- Acid Dissolution: BFS through limestone from exposed pyrite ---
     if config.acid_dissolution_enabled {
@@ -92,6 +95,7 @@ pub fn apply_reaction(
         // Step 2: BFS from each pyrite site through connected limestone
         let max_depth = config.acid_dissolution_radius as i32;
         let mut dissolved_set: HashSet<(i32, i32, i32)> = HashSet::new();
+        let mut acid_bfs_visited: HashSet<(i32, i32, i32)> = HashSet::new();
 
         for &(px, py, pz) in &pyrite_sites {
             // Start BFS from limestone neighbors of this pyrite
@@ -114,6 +118,8 @@ pub fn apply_reaction(
                 if depth > max_depth {
                     continue;
                 }
+
+                acid_bfs_visited.insert((wx, wy, wz));
 
                 // Roll probability for dissolution
                 if rng.gen::<f32>() < config.acid_dissolution_prob {
@@ -154,6 +160,8 @@ pub fn apply_reaction(
                 });
             }
         }
+
+        theoretical_max += acid_bfs_visited.len() as u32;
     }
 
     // --- Copper Oxidation: copper + air neighbor → malachite ---
@@ -181,6 +189,9 @@ pub fn apply_reaction(
                             density_fields, wx, wy, wz, chunk_size,
                             |m| !m.is_solid(),
                         );
+                        if air_count >= 1 {
+                            theoretical_max += 1;
+                        }
                         if air_count >= 1 && rng.gen::<f32>() < config.copper_oxidation_prob {
                             candidates.push(Candidate {
                                 chunk_key, lx, ly, lz,
@@ -232,6 +243,7 @@ pub fn apply_reaction(
                 }
                 if let Some(mat) = sample_material(density_fields, nx, ny, nz, chunk_size) {
                     if mat.is_solid() && mat != Material::Basalt && mat != Material::Kimberlite {
+                        theoretical_max += 1;
                         if rng.gen::<f32>() < config.basalt_crust_prob {
                             crust_set.insert((nx, ny, nz));
                         }
@@ -324,6 +336,7 @@ pub fn apply_reaction(
         // Step 2: BFS from each sulfide site through connected limestone
         let base_radius = config.sulfide_acid_radius;
         let mut sulfide_dissolved_set: HashSet<(i32, i32, i32)> = HashSet::new();
+        let mut sulfide_bfs_visited: HashSet<(i32, i32, i32)> = HashSet::new();
 
         for &(sx, sy, sz, has_water) in &sulfide_sites {
             let effective_radius = if has_water {
@@ -352,6 +365,8 @@ pub fn apply_reaction(
                     continue;
                 }
 
+                sulfide_bfs_visited.insert((wx, wy, wz));
+
                 if rng.gen::<f32>() < config.sulfide_acid_prob {
                     sulfide_dissolved_set.insert((wx, wy, wz));
                 }
@@ -373,6 +388,8 @@ pub fn apply_reaction(
                 }
             }
         }
+
+        theoretical_max += sulfide_bfs_visited.len() as u32;
 
         // Convert sulfide dissolved positions to candidates
         for &(wx, wy, wz) in &sulfide_dissolved_set {
@@ -396,8 +413,10 @@ pub fn apply_reaction(
     let mut oxidation_count = 0u32;
     let mut basalt_count = 0u32;
     let mut sulfide_acid_count = 0u32;
+    let mut conversions: std::collections::BTreeMap<(u8, u8), u32> = std::collections::BTreeMap::new();
 
     for c in &candidates {
+        *conversions.entry((c.old_material as u8, c.new_material as u8)).or_insert(0) += 1;
         if let Some(df) = density_fields.get_mut(&c.chunk_key) {
             let sample = df.get_mut(c.lx, c.ly, c.lz);
             sample.material = c.new_material;
@@ -453,5 +472,71 @@ pub fn apply_reaction(
         });
     }
 
+    // --- Diagnostics ---
+    let actual_output = candidates.len() as u32;
+    result.diagnostics = PhaseDiagnostics {
+        conversions,
+        theoretical_max,
+        actual_output,
+        bottlenecks: compute_reaction_bottlenecks(census),
+    };
+
     result
+}
+
+pub(crate) fn compute_reaction_bottlenecks(census: &ResourceCensus) -> Vec<Bottleneck> {
+    use voxel_core::material::Material;
+    let mut bottlenecks = Vec::new();
+
+    let exposed_pyrite = census.exposed_ore.get(&(Material::Pyrite as u8)).copied().unwrap_or(0);
+    let exposed_sulfide = census.exposed_ore.get(&(Material::Sulfide as u8)).copied().unwrap_or(0);
+    let exposed_copper = census.exposed_ore.get(&(Material::Copper as u8)).copied().unwrap_or(0);
+
+    if exposed_pyrite == 0 && exposed_sulfide == 0 {
+        bottlenecks.push(Bottleneck {
+            severity: 1.0,
+            description: "No exposed pyrite or sulfide \u{2014} acid dissolution cannot start".into(),
+        });
+    } else if exposed_pyrite + exposed_sulfide < 5 {
+        bottlenecks.push(Bottleneck {
+            severity: 0.7,
+            description: format!(
+                "Only {} exposed pyrite + {} sulfide cells \u{2014} mine more to expose acid sources",
+                exposed_pyrite, exposed_sulfide
+            ),
+        });
+    }
+
+    if census.water.cell_count == 0 {
+        bottlenecks.push(Bottleneck {
+            severity: 0.5,
+            description: "No water detected \u{2014} sulfide acid gets 2\u{00d7} radius with water contact".into(),
+        });
+    }
+
+    if exposed_copper == 0 {
+        bottlenecks.push(Bottleneck {
+            severity: 0.4,
+            description: "No exposed copper \u{2014} oxidation to malachite needs air-adjacent copper".into(),
+        });
+    } else if exposed_copper < 5 {
+        bottlenecks.push(Bottleneck {
+            severity: 0.2,
+            description: format!(
+                "Only {} exposed copper cells \u{2014} mine more to expose copper for oxidation",
+                exposed_copper
+            ),
+        });
+    }
+
+    if census.lava.cell_count == 0 {
+        bottlenecks.push(Bottleneck {
+            severity: 0.3,
+            description: "No lava detected \u{2014} basalt crust formation needs active lava".into(),
+        });
+    }
+
+    bottlenecks.sort_by(|a, b| b.severity.partial_cmp(&a.severity).unwrap_or(std::cmp::Ordering::Equal));
+    bottlenecks.truncate(3);
+    bottlenecks
 }

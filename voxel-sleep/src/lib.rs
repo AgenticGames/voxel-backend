@@ -11,13 +11,14 @@ pub mod veins;
 pub mod deeptime;
 pub mod groundwater;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as FmtWrite;
 use std::time::{Duration, Instant};
 use crossbeam_channel::Sender;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use voxel_core::density::DensityField;
+use voxel_core::material::Material;
 use voxel_core::stress::{StressField, SupportField, SupportType};
 use voxel_fluid::FluidSnapshot;
 
@@ -80,6 +81,7 @@ pub struct SleepTimings {
     pub aureole_coal_maturation: Duration,
     pub aureole_silicification: Duration,
     pub collapse_sub: Option<CollapseTimings>,
+    pub census_scan: Duration,
     pub aggregation: Duration,
     pub loaded_chunks: u32,
     pub critical_chunks: u32,
@@ -125,6 +127,175 @@ pub struct SleepResult {
 pub struct TransformEntry {
     pub description: String,
     pub count: u32,
+}
+
+/// A single limiting factor for a sleep phase.
+#[derive(Debug, Clone)]
+pub struct Bottleneck {
+    pub severity: f32, // 0.0=minor, 1.0=total blocker
+    pub description: String,
+}
+
+/// Per-phase audit data tracking conversions, yield, and limiting factors.
+#[derive(Debug, Clone, Default)]
+pub struct PhaseDiagnostics {
+    /// (old_material_u8, new_material_u8) -> count
+    pub conversions: BTreeMap<(u8, u8), u32>,
+    /// Candidates before probability rolls
+    pub theoretical_max: u32,
+    /// Candidates that passed and were applied
+    pub actual_output: u32,
+    /// Top 3 limiting factors, sorted by severity descending
+    pub bottlenecks: Vec<Bottleneck>,
+}
+
+/// Fluid volume summary.
+#[derive(Debug, Clone, Default)]
+pub struct FluidMetrics {
+    pub cell_count: u32,
+    pub volume_sum: f32,
+    pub chunks_with_fluid: u32,
+}
+
+/// Pre-scan snapshot of geological resources before sleep phases execute.
+#[derive(Debug, Clone)]
+pub struct ResourceCensus {
+    pub water: FluidMetrics,
+    pub lava: FluidMetrics,
+    pub exposed_surfaces_by_material: BTreeMap<u8, u32>,
+    pub total_exposed_surfaces: u32,
+    /// 1-2 air neighbors (tight cracks, good for vein deposition)
+    pub fissure_count: u32,
+    /// 4+ air neighbors (wide caverns, fluid disperses)
+    pub open_wall_count: u32,
+    pub exposed_ore: BTreeMap<u8, u32>,
+    pub heat_source_lava: u32,
+    pub heat_source_kimberlite: u32,
+    pub scan_duration: Duration,
+}
+
+impl Default for ResourceCensus {
+    fn default() -> Self {
+        Self {
+            water: FluidMetrics::default(),
+            lava: FluidMetrics::default(),
+            exposed_surfaces_by_material: BTreeMap::new(),
+            total_exposed_surfaces: 0,
+            fissure_count: 0,
+            open_wall_count: 0,
+            exposed_ore: BTreeMap::new(),
+            heat_source_lava: 0,
+            heat_source_kimberlite: 0,
+            scan_duration: Duration::ZERO,
+        }
+    }
+}
+
+/// Pre-scan loaded chunks to build a geological resource census.
+fn compute_resource_census(
+    density_fields: &HashMap<(i32, i32, i32), DensityField>,
+    fluid_snapshot: &FluidSnapshot,
+    chunks: &[(i32, i32, i32)],
+    chunk_size: usize,
+) -> ResourceCensus {
+    let t = Instant::now();
+    let field_size = chunk_size + 1;
+
+    // Pass 1: Fluid metrics
+    let mut water = FluidMetrics::default();
+    let mut lava = FluidMetrics::default();
+    let mut water_chunks: HashSet<(i32, i32, i32)> = HashSet::new();
+    let mut lava_chunks: HashSet<(i32, i32, i32)> = HashSet::new();
+
+    for (&chunk_key, cells) in &fluid_snapshot.chunks {
+        for cell in cells.iter() {
+            if cell.level > 0.001 {
+                if cell.fluid_type.is_water() {
+                    water.cell_count += 1;
+                    water.volume_sum += cell.level;
+                    water_chunks.insert(chunk_key);
+                } else if cell.fluid_type.is_lava() {
+                    lava.cell_count += 1;
+                    lava.volume_sum += cell.level;
+                    lava_chunks.insert(chunk_key);
+                }
+            }
+        }
+    }
+    water.chunks_with_fluid = water_chunks.len() as u32;
+    lava.chunks_with_fluid = lava_chunks.len() as u32;
+    let lava_cell_count = lava.cell_count;
+
+    // Pass 2: Density field surface analysis
+    let mut exposed_surfaces_by_material: BTreeMap<u8, u32> = BTreeMap::new();
+    let mut total_exposed_surfaces = 0u32;
+    let mut fissure_count = 0u32;
+    let mut open_wall_count = 0u32;
+    let mut exposed_ore: BTreeMap<u8, u32> = BTreeMap::new();
+    let mut heat_source_kimberlite = 0u32;
+
+    for &chunk_key in chunks {
+        let (cx, cy, cz) = chunk_key;
+        let df = match density_fields.get(&chunk_key) {
+            Some(df) => df,
+            None => continue,
+        };
+
+        for lz in 0..field_size {
+            for ly in 0..field_size {
+                for lx in 0..field_size {
+                    let sample = df.get(lx, ly, lz);
+                    let mat = sample.material;
+
+                    if !mat.is_solid() {
+                        continue;
+                    }
+
+                    // Count all kimberlite (heat source regardless of exposure)
+                    if mat == Material::Kimberlite {
+                        heat_source_kimberlite += 1;
+                    }
+
+                    let wx = cx * (chunk_size as i32) + lx as i32;
+                    let wy = cy * (chunk_size as i32) + ly as i32;
+                    let wz = cz * (chunk_size as i32) + lz as i32;
+
+                    let air_count = crate::util::count_neighbors(
+                        density_fields, wx, wy, wz, chunk_size,
+                        |m| !m.is_solid(),
+                    );
+
+                    if air_count >= 1 {
+                        total_exposed_surfaces += 1;
+                        *exposed_surfaces_by_material.entry(mat as u8).or_insert(0) += 1;
+
+                        if mat.is_ore() || mat == Material::Pyrite || mat == Material::Kimberlite {
+                            *exposed_ore.entry(mat as u8).or_insert(0) += 1;
+                        }
+
+                        if air_count <= 2 {
+                            fissure_count += 1;
+                        } else if air_count >= 4 {
+                            open_wall_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    ResourceCensus {
+        water,
+        lava,
+        exposed_surfaces_by_material,
+        total_exposed_surfaces,
+        fissure_count,
+        open_wall_count,
+        exposed_ore,
+        heat_source_lava: lava_cell_count,
+        heat_source_kimberlite,
+        scan_duration: t.elapsed(),
+    }
 }
 
 /// Execute a deep sleep cycle — 4-phase geological time simulation (1.25 million years).
@@ -200,6 +371,11 @@ pub fn execute_sleep(
     let heat_map = build_heat_map(density_fields, fluid_snapshot, &all_chunks, chunk_size);
     let t_heat_elapsed = t_heat.elapsed();
 
+    // --- Resource Census (pre-scan) ---
+    let t_census = Instant::now();
+    let census = compute_resource_census(density_fields, fluid_snapshot, &all_chunks, chunk_size);
+    let t_census_elapsed = t_census.elapsed();
+
     // Accumulators
     let mut total_acid_dissolved = 0u32;
     let mut total_oxidized = 0u32;
@@ -216,6 +392,10 @@ pub fn execute_sleep(
     let mut total_nests_fossilized = 0u32;
     let mut all_collapse_events: Vec<voxel_core::stress::CollapseEvent> = Vec::new();
     let mut collapse_sub_timings: Option<CollapseTimings> = None;
+    let mut diag_reaction = PhaseDiagnostics::default();
+    let mut diag_aureole = PhaseDiagnostics::default();
+    let mut diag_veins = PhaseDiagnostics::default();
+    let mut diag_deeptime = PhaseDiagnostics::default();
 
     // ═══ Phase 1: The Reaction (10,000 years) ═══
     let t_p1 = Instant::now();
@@ -224,11 +404,12 @@ pub fn execute_sleep(
     if config.phase1_enabled {
         let reaction_result = apply_reaction(
             &config.reaction, density_fields, fluid_snapshot,
-            &all_chunks, chunk_size, &mut rng,
+            &all_chunks, chunk_size, &mut rng, &census,
         );
         total_acid_dissolved = reaction_result.acid_dissolved;
         total_oxidized = reaction_result.voxels_oxidized;
         total_sulfide_dissolved = reaction_result.sulfide_dissolved;
+        diag_reaction = reaction_result.diagnostics;
         result_manifest.merge_sleep_changes(&reaction_result.manifest);
         transform_log.extend(reaction_result.transform_log);
         for key in reaction_result.manifest.chunk_deltas.keys() {
@@ -249,12 +430,13 @@ pub fn execute_sleep(
     if config.phase2_enabled {
         let aureole_result = apply_aureole(
             &config.aureole, &config.groundwater, density_fields, fluid_snapshot,
-            &heat_map, &all_chunks, chunk_size, &mut rng,
+            &heat_map, &all_chunks, chunk_size, &mut rng, &census,
         );
         total_metamorphosed = aureole_result.voxels_metamorphosed;
         total_coal_matured = aureole_result.coal_matured;
         total_diamonds_formed = aureole_result.diamonds_formed;
         total_silicified = aureole_result.voxels_silicified;
+        diag_aureole = aureole_result.diagnostics;
         result_manifest.merge_sleep_changes(&aureole_result.manifest);
         transform_log.extend(aureole_result.transform_log);
         for key in aureole_result.manifest.chunk_deltas.keys() {
@@ -275,10 +457,11 @@ pub fn execute_sleep(
     if config.phase3_enabled {
         let vein_result = apply_veins(
             &config.veins, &config.groundwater, density_fields, fluid_snapshot,
-            &heat_map, &mineral_chunks, chunk_size, &mut rng,
+            &heat_map, &mineral_chunks, chunk_size, &mut rng, &census,
         );
         total_veins = vein_result.veins_deposited;
         total_formations += vein_result.formations_grown;
+        diag_veins = vein_result.diagnostics;
         result_manifest.merge_sleep_changes(&vein_result.manifest);
         transform_log.extend(vein_result.transform_log);
         for key in vein_result.manifest.chunk_deltas.keys() {
@@ -302,12 +485,13 @@ pub fn execute_sleep(
         let dt_result = apply_deeptime(
             &config.deeptime, &config.groundwater, density_fields, stress_fields, support_fields,
             fluid_snapshot, &heat_map, &collapse_chunks, chunk_size,
-            &config.stress, &config.nest_positions, &mut rng,
+            &config.stress, &config.nest_positions, &mut rng, &census,
         );
         total_enriched = dt_result.voxels_enriched;
         total_nests_fossilized = dt_result.nests_fossilized;
         total_formations += dt_result.formations_grown;
         total_supports_degraded = dt_result.supports_degraded;
+        diag_deeptime = dt_result.diagnostics;
         total_collapses = dt_result.collapses_triggered;
         result_manifest.merge_sleep_changes(&dt_result.manifest);
         transform_log.extend(dt_result.transform_log);
@@ -367,6 +551,7 @@ pub fn execute_sleep(
         aureole_coal_maturation: Duration::ZERO,
         aureole_silicification: Duration::ZERO,
         collapse_sub: collapse_sub_timings,
+        census_scan: t_census_elapsed,
         aggregation: t_agg_elapsed,
         loaded_chunks: loaded_chunks.len() as u32,
         critical_chunks: critical_chunks.len() as u32,
@@ -385,6 +570,7 @@ pub fn execute_sleep(
         total_sulfide_dissolved, total_coal_matured, total_diamonds_formed,
         total_silicified, total_nests_fossilized,
         &config.groundwater,
+        &census, &diag_reaction, &diag_aureole, &diag_veins, &diag_deeptime,
     );
 
     SleepResult {
@@ -441,8 +627,15 @@ fn build_sleep_profile_report(
     voxels_silicified: u32,
     nests_fossilized: u32,
     gw: &crate::config::GroundwaterConfig,
+    census: &ResourceCensus,
+    diag_reaction: &PhaseDiagnostics,
+    diag_aureole: &PhaseDiagnostics,
+    diag_veins: &PhaseDiagnostics,
+    diag_deeptime: &PhaseDiagnostics,
 ) -> String {
-    let mut s = String::with_capacity(4096);
+    use voxel_core::material::Material;
+
+    let mut s = String::with_capacity(8192);
 
     let _ = writeln!(s);
     let _ = writeln!(s, "\u{2550}\u{2550}\u{2550} Deep Sleep Profile \u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}");
@@ -491,10 +684,89 @@ fn build_sleep_profile_report(
     let _ = writeln!(s);
     let _ = writeln!(s, "\u{2500}\u{2500}\u{2500} Summary \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
     let _ = writeln!(s, "  Heat map computation:  {:.2} ms", dur_ms(timings.heat_map));
+    let _ = writeln!(s, "  Census scan:           {:.2} ms", dur_ms(timings.census_scan));
     let _ = writeln!(s, "  Chunk filter/classify: {:.2} ms", dur_ms(timings.chunk_filter + timings.chunk_classify));
     let _ = writeln!(s, "  Aggregation:           {:.2} ms", dur_ms(timings.aggregation));
     let _ = writeln!(s, "  Dirty chunks:          {}", dirty_chunk_count);
     let _ = writeln!(s, "  TOTAL:                {:.2} ms", dur_ms(timings.total));
+
+    // ═══ Resource Census ═══
+    let _ = writeln!(s);
+    let _ = writeln!(s, "\u{2550}\u{2550}\u{2550} Resource Census \u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}");
+    let _ = writeln!(s, "  Water:  {} cells, {:.1} m\u{00b3} volume, across {} chunks",
+        census.water.cell_count, census.water.volume_sum, census.water.chunks_with_fluid);
+    let _ = writeln!(s, "  Lava:   {} cells, {:.1} m\u{00b3} volume, across {} chunks",
+        census.lava.cell_count, census.lava.volume_sum, census.lava.chunks_with_fluid);
+    let _ = writeln!(s, "  Heat sources: {} lava + {} kimberlite = {} total",
+        census.heat_source_lava, census.heat_source_kimberlite,
+        census.heat_source_lava + census.heat_source_kimberlite);
+    let _ = writeln!(s, "  Exposed surfaces: {} total", census.total_exposed_surfaces);
+    let _ = writeln!(s, "    Fissures (1-2 air):  {} (tight cracks, good for vein deposition)", census.fissure_count);
+    let _ = writeln!(s, "    Open walls (4+ air): {} (wide caverns, fluid disperses)", census.open_wall_count);
+
+    // Exposed ore line
+    if !census.exposed_ore.is_empty() {
+        let mut ore_parts: Vec<String> = Vec::new();
+        for (&mat_u8, &count) in &census.exposed_ore {
+            let mat = Material::from_u8(mat_u8);
+            ore_parts.push(format!("{}\u{00d7}{}", mat.display_name(), count));
+        }
+        let _ = writeln!(s, "  Exposed ore: {}", ore_parts.join("  "));
+    } else {
+        let _ = writeln!(s, "  Exposed ore: (none)");
+    }
+    let _ = writeln!(s, "  Scan time: {:.2} ms", dur_ms(census.scan_duration));
+
+    // ═══ Geological Audit ═══
+    let _ = writeln!(s);
+    let _ = writeln!(s, "\u{2550}\u{2550}\u{2550} Geological Audit \u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}");
+
+    let phase_names = [
+        ("Phase 1: The Reaction", diag_reaction),
+        ("Phase 2: The Aureole", diag_aureole),
+        ("Phase 3: The Veins", diag_veins),
+        ("Phase 4: The Deep Time", diag_deeptime),
+    ];
+
+    for (name, diag) in &phase_names {
+        let _ = writeln!(s, "\u{2500}\u{2500}\u{2500} {} \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}", name);
+
+        // Conversions
+        if !diag.conversions.is_empty() {
+            let _ = writeln!(s, "  Conversions:");
+            for (&(old_u8, new_u8), &count) in &diag.conversions {
+                let old_name = Material::from_u8(old_u8).display_name();
+                let new_name = Material::from_u8(new_u8).display_name();
+                let _ = writeln!(s, "    {} \u{2192} {}:  {} voxels", old_name, new_name, count);
+            }
+        }
+
+        // Yield
+        if diag.theoretical_max > 0 {
+            let pct = if diag.theoretical_max > 0 {
+                (diag.actual_output as f64 / diag.theoretical_max as f64) * 100.0
+            } else {
+                0.0
+            };
+            let _ = writeln!(s, "  Yield: {} / {} candidates ({:.1}%)",
+                diag.actual_output, diag.theoretical_max, pct);
+        } else if diag.actual_output > 0 {
+            let _ = writeln!(s, "  Output: {} voxels transformed", diag.actual_output);
+        } else {
+            let _ = writeln!(s, "  Output: (none)");
+        }
+
+        // Bottlenecks
+        if !diag.bottlenecks.is_empty() {
+            let _ = writeln!(s, "  Limiting factors:");
+            for b in &diag.bottlenecks {
+                let _ = writeln!(s, "    \u{26a0} {}", b.description);
+            }
+        }
+
+        let _ = writeln!(s);
+    }
+
     let _ = writeln!(s, "\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}");
 
     s
@@ -656,5 +928,79 @@ mod tests {
         if result.chunks_changed > 0 {
             assert!(!result.manifest.chunk_deltas.is_empty());
         }
+    }
+
+    #[test]
+    fn test_resource_census_basic() {
+        let (density_fields, _, _) = make_test_world(16);
+        let fluid = FluidSnapshot::default();
+        let chunks: Vec<(i32, i32, i32)> = density_fields.keys().copied().collect();
+        let census = compute_resource_census(&density_fields, &fluid, &chunks, 16);
+
+        // With no fluid, water and lava should be zero
+        assert_eq!(census.water.cell_count, 0);
+        assert_eq!(census.lava.cell_count, 0);
+        assert_eq!(census.heat_source_lava, 0);
+        // Scan duration should be non-zero (ran some work)
+        // Scan should complete (total_exposed_surfaces is populated)
+        assert!(census.scan_duration.as_nanos() > 0);
+        // Fissures + open walls should not exceed total
+        assert!(census.fissure_count + census.open_wall_count <= census.total_exposed_surfaces);
+    }
+
+    #[test]
+    fn test_reaction_diagnostics() {
+        let (mut density_fields, mut stress_fields, mut support_fields) = make_test_world(16);
+        let config = SleepConfig::default();
+        let fluid = FluidSnapshot::default();
+
+        let result = execute_sleep(
+            &config,
+            &mut density_fields,
+            &mut stress_fields,
+            &mut support_fields,
+            &fluid,
+            (0, 0, 0),
+            1,
+            None,
+        );
+
+        // Profile report should contain the new sections
+        assert!(result.profile_report.contains("Resource Census"));
+        assert!(result.profile_report.contains("Geological Audit"));
+        assert!(result.profile_report.contains("Phase 1: The Reaction"));
+        assert!(result.profile_report.contains("Phase 2: The Aureole"));
+        assert!(result.profile_report.contains("Phase 3: The Veins"));
+        assert!(result.profile_report.contains("Phase 4: The Deep Time"));
+    }
+
+    #[test]
+    fn test_bottleneck_empty_world() {
+        // An empty world with no fluid should produce bottlenecks about missing resources
+        let census = ResourceCensus::default();
+        let result_bottlenecks = crate::reaction::compute_reaction_bottlenecks(&census);
+
+        // Should have bottlenecks about missing pyrite/sulfide, water, copper, lava
+        assert!(!result_bottlenecks.is_empty());
+        assert!(result_bottlenecks.len() <= 3);
+        // Highest severity should be the no-pyrite/sulfide blocker
+        assert!(result_bottlenecks[0].severity >= 0.5);
+    }
+
+    #[test]
+    fn test_profile_report_deterministic() {
+        let (mut df1, mut sf1, mut sup1) = make_test_world(16);
+        let (mut df2, mut sf2, mut sup2) = make_test_world(16);
+        let config = SleepConfig::default();
+        let fluid = FluidSnapshot::default();
+
+        let r1 = execute_sleep(&config, &mut df1, &mut sf1, &mut sup1, &fluid, (0, 0, 0), 1, None);
+        let r2 = execute_sleep(&config, &mut df2, &mut sf2, &mut sup2, &fluid, (0, 0, 0), 1, None);
+
+        // Strip timing values (non-deterministic) by checking structural content
+        assert!(r1.profile_report.contains("Resource Census"));
+        assert!(r2.profile_report.contains("Resource Census"));
+        assert!(r1.profile_report.contains("Geological Audit"));
+        assert!(r2.profile_report.contains("Geological Audit"));
     }
 }

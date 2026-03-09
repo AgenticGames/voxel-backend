@@ -19,7 +19,7 @@ use crate::config::{VeinConfig, GroundwaterConfig};
 use crate::groundwater::ambient_moisture;
 use crate::manifest::ChangeManifest;
 use crate::util::{FACE_OFFSETS, sample_material, count_neighbors, aperture_multiplier};
-use crate::TransformEntry;
+use crate::{Bottleneck, PhaseDiagnostics, ResourceCensus, TransformEntry};
 
 /// Result of the veins phase.
 #[derive(Debug, Default)]
@@ -29,6 +29,7 @@ pub struct VeinResult {
     pub manifest: ChangeManifest,
     pub glimpse_chunk: Option<(i32, i32, i32)>,
     pub transform_log: Vec<TransformEntry>,
+    pub diagnostics: PhaseDiagnostics,
 }
 
 /// Select ore type by BFS distance from heat source (temperature zonation).
@@ -67,6 +68,7 @@ pub fn apply_veins(
     chunks: &[(i32, i32, i32)],
     chunk_size: usize,
     rng: &mut ChaCha8Rng,
+    census: &ResourceCensus,
 ) -> VeinResult {
     let mut result = VeinResult::default();
     let field_size = chunk_size + 1;
@@ -80,6 +82,7 @@ pub fn apply_veins(
     }
 
     let mut vein_candidates: Vec<VeinCandidate> = Vec::new();
+    let mut theoretical_max = 0u32;
 
     // --- Hydrothermal Vein Deposition ---
     if config.vein_enabled && !heat_map.is_empty() {
@@ -123,6 +126,9 @@ pub fn apply_veins(
                     }
 
                     if let Some(mat) = sample_material(density_fields, nx, ny, nz, chunk_size) {
+                        if is_host_rock(mat) {
+                            theoretical_max += 1;
+                        }
                         let air_n = count_neighbors(density_fields, ax, ay, az, chunk_size, |m| !m.is_solid());
                         let eff_prob = config.vein_deposition_prob * if config.aperture_scaling_enabled {
                             aperture_multiplier(air_n)
@@ -166,7 +172,9 @@ pub fn apply_veins(
     }
 
     // Apply vein candidates
+    let mut conversions: std::collections::BTreeMap<(u8, u8), u32> = std::collections::BTreeMap::new();
     for c in &vein_candidates {
+        *conversions.entry((c.old_material as u8, c.new_material as u8)).or_insert(0) += 1;
         if let Some(df) = density_fields.get_mut(&c.chunk_key) {
             let sample = df.get_mut(c.lx, c.ly, c.lz);
             sample.material = c.new_material;
@@ -361,6 +369,7 @@ pub fn apply_veins(
     let mut flowstone_total = 0u32;
 
     for g in &growth_candidates {
+        *conversions.entry((Material::Air as u8, g.new_material as u8)).or_insert(0) += 1;
         let new_density = rng.gen_range(config.growth_density_min..=config.growth_density_max);
         if let Some(df) = density_fields.get_mut(&g.chunk_key) {
             let sample = df.get_mut(g.lx, g.ly, g.lz);
@@ -424,5 +433,66 @@ pub fn apply_veins(
         });
     }
 
+    // --- Diagnostics ---
+    let actual_output = result.veins_deposited + formation_total;
+    result.diagnostics = PhaseDiagnostics {
+        conversions,
+        theoretical_max,
+        actual_output,
+        bottlenecks: compute_veins_bottlenecks(census, heat_map),
+    };
+
     result
+}
+
+fn compute_veins_bottlenecks(census: &ResourceCensus, heat_map: &HeatMap) -> Vec<Bottleneck> {
+    let mut bottlenecks = Vec::new();
+
+    let total_heat = census.heat_source_lava + census.heat_source_kimberlite;
+    if total_heat == 0 {
+        bottlenecks.push(Bottleneck {
+            severity: 1.0,
+            description: "No heat sources \u{2014} hydrothermal veins require lava or kimberlite".into(),
+        });
+    } else if heat_map.is_empty() {
+        bottlenecks.push(Bottleneck {
+            severity: 0.9,
+            description: "Heat sources have no air pathways \u{2014} mine tunnels toward heat sources".into(),
+        });
+    }
+
+    if census.fissure_count > census.open_wall_count * 3 && census.fissure_count > 20 {
+        bottlenecks.push(Bottleneck {
+            severity: 0.4,
+            description: format!(
+                "{} fissures vs {} open walls \u{2014} mostly tight cracks, wider tunnels deposit more ore",
+                census.fissure_count, census.open_wall_count
+            ),
+        });
+    }
+
+    // Check host rock availability near air
+    let host_exposed: u32 = [
+        Material::Sandstone as u8, Material::Limestone as u8,
+        Material::Granite as u8, Material::Basalt as u8,
+        Material::Slate as u8, Material::Marble as u8,
+    ].iter().map(|m| census.exposed_surfaces_by_material.get(m).copied().unwrap_or(0)).sum();
+
+    if host_exposed == 0 {
+        bottlenecks.push(Bottleneck {
+            severity: 0.8,
+            description: "No exposed host rock adjacent to air \u{2014} mine into rock to create deposition surfaces".into(),
+        });
+    }
+
+    if census.water.cell_count == 0 {
+        bottlenecks.push(Bottleneck {
+            severity: 0.3,
+            description: "No water \u{2014} flowstone formation requires active water flow".into(),
+        });
+    }
+
+    bottlenecks.sort_by(|a, b| b.severity.partial_cmp(&a.severity).unwrap_or(std::cmp::Ordering::Equal));
+    bottlenecks.truncate(3);
+    bottlenecks
 }

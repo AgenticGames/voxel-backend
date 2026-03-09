@@ -18,7 +18,7 @@ use crate::config::{DeepTimeConfig, GroundwaterConfig};
 use crate::groundwater::{ambient_moisture, is_fracture_site};
 use crate::manifest::ChangeManifest;
 use crate::util::{FACE_OFFSETS, sample_material, count_neighbors, has_material_within_radius};
-use crate::TransformEntry;
+use crate::{Bottleneck, PhaseDiagnostics, ResourceCensus, TransformEntry};
 
 /// Result of the deep time phase.
 #[derive(Debug)]
@@ -33,6 +33,7 @@ pub struct DeepTimeResult {
     pub manifest: ChangeManifest,
     pub glimpse_chunk: Option<(i32, i32, i32)>,
     pub transform_log: Vec<TransformEntry>,
+    pub diagnostics: PhaseDiagnostics,
 }
 
 impl Default for DeepTimeResult {
@@ -48,6 +49,7 @@ impl Default for DeepTimeResult {
             manifest: ChangeManifest::default(),
             glimpse_chunk: None,
             transform_log: Vec::new(),
+            diagnostics: PhaseDiagnostics::default(),
         }
     }
 }
@@ -83,6 +85,7 @@ pub fn apply_deeptime(
     stress_config: &voxel_core::stress::StressConfig,
     nest_positions: &[(i32, i32, i32)],
     rng: &mut ChaCha8Rng,
+    census: &ResourceCensus,
 ) -> DeepTimeResult {
     let mut result = DeepTimeResult::default();
     let field_size = chunk_size + 1;
@@ -97,6 +100,7 @@ pub fn apply_deeptime(
     }
 
     let mut candidates: Vec<Candidate> = Vec::new();
+    let mut theoretical_max = 0u32;
 
     // --- Supergene Enrichment ---
     if config.enrichment_enabled && !fluid_snapshot.chunks.is_empty() {
@@ -130,6 +134,8 @@ pub fn apply_deeptime(
                             if !is_host_rock(above_mat) {
                                 continue;
                             }
+
+                            theoretical_max += 1;
 
                             // Check if ore exists within search radius
                             let mut found_ore: Option<Material> = None;
@@ -233,6 +239,8 @@ pub fn apply_deeptime(
                         if moisture <= 0.0 {
                             continue;
                         }
+
+                        theoretical_max += 1;
 
                         // Search radius for nearby ore — concentrate if found
                         let mut found_ore: Option<Material> = None;
@@ -339,6 +347,8 @@ pub fn apply_deeptime(
                             continue;
                         }
 
+                        theoretical_max += 1;
+
                         // Try to grow into adjacent host rock
                         if rng.gen::<f32>() >= config.vein_thickening_prob {
                             continue;
@@ -400,6 +410,9 @@ pub fn apply_deeptime(
 
                         // Stalactite growth: only under limestone ceiling (calcite precipitation)
                         if let Some(above_mat) = sample_material(density_fields, wx, wy + 1, wz, chunk_size) {
+                            if above_mat == Material::Limestone {
+                                theoretical_max += 1;
+                            }
                             if above_mat == Material::Limestone
                                 && rng.gen::<f32>() < config.stalactite_growth_prob * groundwater.flowstone_power * groundwater.soft_rock_mult
                             {
@@ -583,8 +596,10 @@ pub fn apply_deeptime(
     let mut thickening_count = 0u32;
     let mut formation_count = 0u32;
     let mut fossilization_count = 0u32;
+    let mut conversions: std::collections::BTreeMap<(u8, u8), u32> = std::collections::BTreeMap::new();
 
     for c in &candidates {
+        *conversions.entry((c.old_material as u8, c.new_material as u8)).or_insert(0) += 1;
         if let Some(df) = density_fields.get_mut(&c.chunk_key) {
             let sample = df.get_mut(c.lx, c.ly, c.lz);
             sample.material = c.new_material;
@@ -694,5 +709,62 @@ pub fn apply_deeptime(
         });
     }
 
+    // --- Diagnostics ---
+    let actual_output = candidates.len() as u32;
+    result.diagnostics = PhaseDiagnostics {
+        conversions,
+        theoretical_max,
+        actual_output,
+        bottlenecks: compute_deeptime_bottlenecks(census, nest_positions),
+    };
+
     result
+}
+
+fn compute_deeptime_bottlenecks(census: &ResourceCensus, nest_positions: &[(i32, i32, i32)]) -> Vec<Bottleneck> {
+    let mut bottlenecks = Vec::new();
+
+    if census.water.cell_count == 0 {
+        bottlenecks.push(Bottleneck {
+            severity: 0.8,
+            description: "No water \u{2014} supergene enrichment needs water percolating through rock".into(),
+        });
+    } else if census.water.cell_count < 10 {
+        bottlenecks.push(Bottleneck {
+            severity: 0.5,
+            description: format!(
+                "Only {} water cells \u{2014} more water above rock increases enrichment yield",
+                census.water.cell_count
+            ),
+        });
+    }
+
+    // Check surface ore for vein thickening
+    let surface_ore: u32 = census.exposed_ore.values().sum();
+    if surface_ore == 0 {
+        bottlenecks.push(Bottleneck {
+            severity: 0.6,
+            description: "No exposed ore voxels \u{2014} vein thickening needs air-adjacent ore".into(),
+        });
+    }
+
+    // Check limestone ceilings for formations
+    let exposed_limestone = census.exposed_surfaces_by_material.get(&(Material::Limestone as u8)).copied().unwrap_or(0);
+    if exposed_limestone == 0 {
+        bottlenecks.push(Bottleneck {
+            severity: 0.4,
+            description: "No exposed limestone \u{2014} stalactite/column formation requires limestone ceilings".into(),
+        });
+    }
+
+    if nest_positions.is_empty() {
+        bottlenecks.push(Bottleneck {
+            severity: 0.2,
+            description: "No spider nests \u{2014} nest fossilization has no targets".into(),
+        });
+    }
+
+    bottlenecks.sort_by(|a, b| b.severity.partial_cmp(&a.severity).unwrap_or(std::cmp::Ordering::Equal));
+    bottlenecks.truncate(3);
+    bottlenecks
 }

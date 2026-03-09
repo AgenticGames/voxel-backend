@@ -16,7 +16,7 @@ use crate::config::{AureoleConfig, GroundwaterConfig};
 use crate::groundwater::ambient_moisture;
 use crate::manifest::ChangeManifest;
 use crate::util::{FACE_OFFSETS, sample_material};
-use crate::TransformEntry;
+use crate::{Bottleneck, PhaseDiagnostics, ResourceCensus, TransformEntry};
 
 /// Type of heat source for coal maturation decisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +46,7 @@ pub struct AureoleResult {
     pub manifest: ChangeManifest,
     pub glimpse_chunk: Option<(i32, i32, i32)>,
     pub transform_log: Vec<TransformEntry>,
+    pub diagnostics: PhaseDiagnostics,
 }
 
 /// Build a heat map: collect all lava cell positions from fluid snapshot
@@ -114,6 +115,7 @@ pub fn apply_aureole(
     _chunks: &[(i32, i32, i32)],
     chunk_size: usize,
     rng: &mut ChaCha8Rng,
+    census: &ResourceCensus,
 ) -> AureoleResult {
     let mut result = AureoleResult::default();
 
@@ -126,6 +128,7 @@ pub fn apply_aureole(
     }
 
     let mut candidates: Vec<Candidate> = Vec::new();
+    let mut theoretical_max = 0u32;
     let radius = config.aureole_radius as i32;
 
     // --- Contact Metamorphism + Coal Maturation + Silicification ---
@@ -165,6 +168,11 @@ pub fn apply_aureole(
                             Some(m) => m,
                             None => continue,
                         };
+
+                        // Count transformable materials as theoretical candidates
+                        if matches!(mat, Material::Limestone | Material::Sandstone | Material::Slate | Material::Coal) {
+                            theoretical_max += 1;
+                        }
 
                         let new_mat = match dist {
                             // Contact zone (0-2)
@@ -295,6 +303,9 @@ pub fn apply_aureole(
                             let ny = wy + dy;
                             let nz = wz + dz;
                             if let Some(mat) = sample_material(density_fields, nx, ny, nz, chunk_size) {
+                                if mat == Material::Limestone || mat == Material::Sandstone {
+                                    theoretical_max += 1;
+                                }
                                 if (mat == Material::Limestone || mat == Material::Sandstone)
                                     && rng.gen::<f32>() < config.water_erosion_prob
                                 {
@@ -379,7 +390,9 @@ pub fn apply_aureole(
     }
 
     // --- Apply all candidates ---
+    let mut conversions: std::collections::BTreeMap<(u8, u8), u32> = std::collections::BTreeMap::new();
     for c in &candidates {
+        *conversions.entry((c.old_material as u8, c.new_material as u8)).or_insert(0) += 1;
         if let Some(df) = density_fields.get_mut(&c.chunk_key) {
             let sample = df.get_mut(c.lx, c.ly, c.lz);
             sample.material = c.new_material;
@@ -447,5 +460,62 @@ pub fn apply_aureole(
         });
     }
 
+    // --- Diagnostics ---
+    let actual_output = candidates.len() as u32;
+    result.diagnostics = PhaseDiagnostics {
+        conversions,
+        theoretical_max,
+        actual_output,
+        bottlenecks: compute_aureole_bottlenecks(census, heat_map),
+    };
+
     result
+}
+
+fn compute_aureole_bottlenecks(census: &ResourceCensus, heat_map: &HeatMap) -> Vec<Bottleneck> {
+    let mut bottlenecks = Vec::new();
+
+    if heat_map.is_empty() {
+        bottlenecks.push(Bottleneck {
+            severity: 1.0,
+            description: "No heat sources \u{2014} metamorphism requires lava or kimberlite".into(),
+        });
+    } else if heat_map.len() < 5 {
+        bottlenecks.push(Bottleneck {
+            severity: 0.6,
+            description: format!(
+                "Only {} heat sources \u{2014} more lava/kimberlite increases aureole coverage",
+                heat_map.len()
+            ),
+        });
+    }
+
+    let exposed_limestone = census.exposed_surfaces_by_material.get(&(Material::Limestone as u8)).copied().unwrap_or(0);
+    let exposed_sandstone = census.exposed_surfaces_by_material.get(&(Material::Sandstone as u8)).copied().unwrap_or(0);
+    let target_rock = exposed_limestone + exposed_sandstone;
+    if target_rock == 0 {
+        bottlenecks.push(Bottleneck {
+            severity: 0.8,
+            description: "No exposed limestone or sandstone \u{2014} metamorphism targets are scarce".into(),
+        });
+    }
+
+    let exposed_coal = census.exposed_surfaces_by_material.get(&(Material::Coal as u8)).copied().unwrap_or(0);
+    if exposed_coal == 0 && !heat_map.is_empty() {
+        bottlenecks.push(Bottleneck {
+            severity: 0.3,
+            description: "No coal near heat sources \u{2014} coal maturation to graphite/diamond needs proximity".into(),
+        });
+    }
+
+    if census.water.cell_count == 0 {
+        bottlenecks.push(Bottleneck {
+            severity: 0.5,
+            description: "No water detected \u{2014} silicification and erosion need moisture".into(),
+        });
+    }
+
+    bottlenecks.sort_by(|a, b| b.severity.partial_cmp(&a.severity).unwrap_or(std::cmp::Ordering::Equal));
+    bottlenecks.truncate(3);
+    bottlenecks
 }
