@@ -1,6 +1,14 @@
 use serde::{Deserialize, Serialize};
 use voxel_core::stress::StressConfig;
 
+fn default_true() -> bool { true }
+fn default_accumulation_iterations() -> u32 { 5 }
+fn default_heat_source_search_radius() -> u32 { 8 }
+fn default_enrichment_cluster_min() -> u32 { 2 }
+fn default_enrichment_cluster_max() -> u32 { 6 }
+fn default_vein_thickening_growth_min() -> u32 { 2 }
+fn default_vein_thickening_growth_max() -> u32 { 5 }
+
 /// Top-level sleep configuration — 4-phase geological time simulation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SleepConfig {
@@ -27,6 +35,12 @@ pub struct SleepConfig {
     pub time_budget_ms: u32,
     /// Sleep cycle number (for deterministic RNG seeding)
     pub sleep_count: u32,
+    /// Enable accumulation pass after Phase 4 (re-runs Phase 1-3 with scaled params)
+    #[serde(default = "default_true")]
+    pub accumulation_enabled: bool,
+    /// Number of accumulation iterations (each represents a fraction of remaining time)
+    #[serde(default = "default_accumulation_iterations")]
+    pub accumulation_iterations: u32,
     /// Spider nest world positions (set by FFI before sleep starts)
     #[serde(skip)]
     pub nest_positions: Vec<(i32, i32, i32)>,
@@ -62,6 +76,8 @@ impl Default for SleepConfig {
             phase4_enabled: true,
             time_budget_ms: 8000,
             sleep_count: 1,
+            accumulation_enabled: true,
+            accumulation_iterations: 5,
             nest_positions: Vec::new(),
             // Legacy defaults
             metamorphism: MetamorphismConfig::default(),
@@ -238,6 +254,9 @@ pub struct VeinConfig {
     pub max_vein_voxels_per_source: u32,
     pub vein_max_distance: u32,
     pub vein_enabled: bool,
+    /// BFS search radius through solid rock to find air from submerged heat sources
+    #[serde(default = "default_heat_source_search_radius")]
+    pub heat_source_search_radius: u32,
     // Temperature zone boundaries (BFS distance from heat)
     pub hypothermal_max: u32,   // 0..hypothermal_max = high-temp zone
     pub mesothermal_max: u32,   // hypothermal_max..mesothermal_max = mid-temp
@@ -262,10 +281,11 @@ pub struct VeinConfig {
 impl Default for VeinConfig {
     fn default() -> Self {
         Self {
-            vein_deposition_prob: 0.25,
-            max_vein_voxels_per_source: 12,
-            vein_max_distance: 16,
+            vein_deposition_prob: 0.50,
+            max_vein_voxels_per_source: 80,
+            vein_max_distance: 20,
             vein_enabled: true,
+            heat_source_search_radius: 8,
             hypothermal_max: 4,
             mesothermal_max: 10,
             crystal_growth_enabled: true,
@@ -296,10 +316,22 @@ pub struct DeepTimeConfig {
     pub max_enrichment_per_chunk: u32,
     pub enrichment_search_radius: i32,
     pub enrichment_enabled: bool,
+    /// Minimum cluster size when enrichment triggers grow_vein()
+    #[serde(default = "default_enrichment_cluster_min")]
+    pub enrichment_cluster_min: u32,
+    /// Maximum cluster size when enrichment triggers grow_vein()
+    #[serde(default = "default_enrichment_cluster_max")]
+    pub enrichment_cluster_max: u32,
     // Vein thickening
     pub vein_thickening_prob: f32,
     pub vein_thickening_max_per_chunk: u32,
     pub vein_thickening_enabled: bool,
+    /// Minimum growth size per thickening trigger
+    #[serde(default = "default_vein_thickening_growth_min")]
+    pub vein_thickening_growth_min: u32,
+    /// Maximum growth size per thickening trigger
+    #[serde(default = "default_vein_thickening_growth_max")]
+    pub vein_thickening_growth_max: u32,
     // Mature formations
     pub mature_formations_enabled: bool,
     pub stalactite_growth_prob: f32,
@@ -313,13 +345,17 @@ pub struct DeepTimeConfig {
 impl Default for DeepTimeConfig {
     fn default() -> Self {
         Self {
-            enrichment_prob: 0.15,
-            max_enrichment_per_chunk: 8,
+            enrichment_prob: 0.35,
+            max_enrichment_per_chunk: 40,
             enrichment_search_radius: 5,
             enrichment_enabled: true,
-            vein_thickening_prob: 0.10,
-            vein_thickening_max_per_chunk: 4,
+            enrichment_cluster_min: 2,
+            enrichment_cluster_max: 6,
+            vein_thickening_prob: 0.30,
+            vein_thickening_max_per_chunk: 20,
             vein_thickening_enabled: true,
+            vein_thickening_growth_min: 2,
+            vein_thickening_growth_max: 5,
             mature_formations_enabled: true,
             stalactite_growth_prob: 0.10,
             column_formation_prob: 0.05,

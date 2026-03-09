@@ -36,7 +36,7 @@ pub use manifest::ChangeManifest;
 /// Progress report during sleep processing.
 #[derive(Debug, Clone)]
 pub struct SleepProgress {
-    /// 0=reaction, 1=aureole, 2=veins, 3=deeptime, 4=done
+    /// 0=reaction, 1=aureole, 2=veins, 3=deeptime, 4=accumulation, 5=done
     pub phase: u8,
     /// Phase display name
     pub phase_name: &'static str,
@@ -82,6 +82,8 @@ pub struct SleepTimings {
     pub aureole_silicification: Duration,
     pub collapse_sub: Option<CollapseTimings>,
     pub census_scan: Duration,
+    pub accumulation: Duration,
+    pub accumulation_iterations: u32,
     pub aggregation: Duration,
     pub loaded_chunks: u32,
     pub critical_chunks: u32,
@@ -516,9 +518,117 @@ pub fn execute_sleep(
     }
     let t_p4_elapsed = t_p4.elapsed();
 
+    // ═══ Accumulation Pass (re-runs Phase 1-3 with scaled params) ═══
+    let t_accum = Instant::now();
+    let mut accum_acid = 0u32;
+    let mut accum_oxidized = 0u32;
+    let mut accum_sulfide = 0u32;
+    let mut accum_metamorphosed = 0u32;
+    let mut accum_eroded = 0u32;
+    let mut accum_coal_matured = 0u32;
+    let mut accum_diamonds = 0u32;
+    let mut accum_silicified = 0u32;
+    let mut accum_veins = 0u32;
+    let mut accum_formations = 0u32;
+    let mut accum_iterations_run = 0u32;
+
+    if config.accumulation_enabled {
+        let n = config.accumulation_iterations;
+        send_progress(progress_tx, 4, "Accumulation", 1_250_000, 0.0, 0, total_chunks, None, 0, String::new());
+
+        for iter in 0..n {
+            let iter_seed = sleep_count as u64 * 7919 + 42 + 1000 + iter as u64 * 1013;
+            let mut iter_rng = ChaCha8Rng::seed_from_u64(iter_seed);
+
+            // Recompute census each iteration (world evolved)
+            let iter_census = compute_resource_census(density_fields, fluid_snapshot, &all_chunks, chunk_size);
+
+            // Phase 1 accumulation (time_factor = 25.0)
+            if config.phase1_enabled {
+                let scaled = scale_reaction_config(&config.reaction, 25.0);
+                let r = apply_reaction(
+                    &scaled, density_fields, fluid_snapshot,
+                    &all_chunks, chunk_size, &mut iter_rng, &iter_census,
+                );
+                accum_acid += r.acid_dissolved;
+                accum_oxidized += r.voxels_oxidized;
+                accum_sulfide += r.sulfide_dissolved;
+                result_manifest.merge_sleep_changes(&r.manifest);
+                for key in r.manifest.chunk_deltas.keys() {
+                    all_dirty.insert(*key);
+                }
+            }
+
+            // Phase 2 accumulation (time_factor = 2.3)
+            if config.phase2_enabled {
+                let scaled = scale_aureole_config(&config.aureole, 2.3);
+                let r = apply_aureole(
+                    &scaled, &config.groundwater, density_fields, fluid_snapshot,
+                    &heat_map, &all_chunks, chunk_size, &mut iter_rng, &iter_census,
+                );
+                accum_metamorphosed += r.voxels_metamorphosed;
+                accum_eroded += r.channels_eroded;
+                accum_coal_matured += r.coal_matured;
+                accum_diamonds += r.diamonds_formed;
+                accum_silicified += r.voxels_silicified;
+                result_manifest.merge_sleep_changes(&r.manifest);
+                for key in r.manifest.chunk_deltas.keys() {
+                    all_dirty.insert(*key);
+                }
+            }
+
+            // Phase 3 accumulation (factor < 1.0 — multiple passes provide the extra volume)
+            if config.phase3_enabled {
+                let r = apply_veins(
+                    &config.veins, &config.groundwater, density_fields, fluid_snapshot,
+                    &heat_map, &mineral_chunks, chunk_size, &mut iter_rng, &iter_census,
+                );
+                accum_veins += r.veins_deposited;
+                accum_formations += r.formations_grown;
+                result_manifest.merge_sleep_changes(&r.manifest);
+                for key in r.manifest.chunk_deltas.keys() {
+                    all_dirty.insert(*key);
+                }
+            }
+
+            accum_iterations_run += 1;
+            send_progress(progress_tx, 4, "Accumulation", 1_250_000,
+                (iter + 1) as f32 / n as f32, (iter + 1) * total_chunks, n * total_chunks, None, 0,
+                format!("Iteration {}/{}", iter + 1, n));
+        }
+
+        // Merge accumulation totals into grand totals
+        total_acid_dissolved += accum_acid;
+        total_oxidized += accum_oxidized;
+        total_sulfide_dissolved += accum_sulfide;
+        total_metamorphosed += accum_metamorphosed;
+        total_coal_matured += accum_coal_matured;
+        total_diamonds_formed += accum_diamonds;
+        total_silicified += accum_silicified;
+        total_veins += accum_veins;
+        total_formations += accum_formations;
+    }
+    let t_accum_elapsed = t_accum.elapsed();
+
     // --- Done ---
     let t_agg = Instant::now();
-    send_progress(progress_tx, 4, "Complete", 1_250_000, 1.0, total_chunks, total_chunks, None, 0, String::new());
+    send_progress(progress_tx, 5, "Complete", 1_250_000, 1.0, total_chunks, total_chunks, None, 0, String::new());
+
+    // Add accumulation summary to transform log
+    if accum_iterations_run > 0 {
+        let accum_total = accum_acid + accum_oxidized + accum_sulfide
+            + accum_metamorphosed + accum_veins + accum_formations
+            + accum_coal_matured + accum_diamonds + accum_silicified;
+        if accum_total > 0 {
+            transform_log.push(TransformEntry {
+                description: format!(
+                    "Accumulation \u{2014} {} iterations (~1,240,000 years): {} acid, {} metamorphosed, {} veins, {} formations",
+                    accum_iterations_run, accum_acid + accum_sulfide, accum_metamorphosed, accum_veins, accum_formations
+                ),
+                count: accum_total,
+            });
+        }
+    }
 
     transform_log.retain(|e| e.count > 0);
     result_manifest.sleep_count = sleep_count;
@@ -552,6 +662,8 @@ pub fn execute_sleep(
         aureole_silicification: Duration::ZERO,
         collapse_sub: collapse_sub_timings,
         census_scan: t_census_elapsed,
+        accumulation: t_accum_elapsed,
+        accumulation_iterations: accum_iterations_run,
         aggregation: t_agg_elapsed,
         loaded_chunks: loaded_chunks.len() as u32,
         critical_chunks: critical_chunks.len() as u32,
@@ -571,6 +683,8 @@ pub fn execute_sleep(
         total_silicified, total_nests_fossilized,
         &config.groundwater,
         &census, &diag_reaction, &diag_aureole, &diag_veins, &diag_deeptime,
+        accum_iterations_run, accum_acid + accum_sulfide, accum_oxidized,
+        accum_metamorphosed, accum_eroded, accum_veins, accum_formations,
     );
 
     SleepResult {
@@ -632,6 +746,13 @@ fn build_sleep_profile_report(
     diag_aureole: &PhaseDiagnostics,
     diag_veins: &PhaseDiagnostics,
     diag_deeptime: &PhaseDiagnostics,
+    accum_iterations: u32,
+    accum_acid_dissolved: u32,
+    accum_oxidized: u32,
+    accum_metamorphosed: u32,
+    accum_eroded: u32,
+    accum_veins: u32,
+    accum_formations: u32,
 ) -> String {
     use voxel_core::material::Material;
 
@@ -680,6 +801,20 @@ fn build_sleep_profile_report(
         let _ = writeln!(s, "    Collapse cascade:    {:.2} ms  ({} collapses)", dur_ms(ct.collapse_cascade), collapses_triggered);
     }
     let _ = writeln!(s, "  Phase 4 total:       {:.2} ms", dur_ms(timings.deeptime));
+
+    // ═══ Accumulation Pass ═══
+    if accum_iterations > 0 {
+        let _ = writeln!(s);
+        let _ = writeln!(s, "\u{2550}\u{2550}\u{2550} Accumulation Pass ({} iterations, ~1,240,000 years) \u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}",
+            accum_iterations);
+        let _ = writeln!(s, "  Phase 1 (\u{00d7}25 scaled): {} acid dissolved, {} oxidized",
+            accum_acid_dissolved, accum_oxidized);
+        let _ = writeln!(s, "  Phase 2 (\u{00d7}2.3 scaled): {} metamorphosed, {} eroded",
+            accum_metamorphosed, accum_eroded);
+        let _ = writeln!(s, "  Phase 3 ({} passes): {} vein voxels deposited, {} formations",
+            accum_iterations, accum_veins, accum_formations);
+        let _ = writeln!(s, "  Accumulation time:   {:.2} ms", dur_ms(timings.accumulation));
+    }
 
     let _ = writeln!(s);
     let _ = writeln!(s, "\u{2500}\u{2500}\u{2500} Summary \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
@@ -770,6 +905,38 @@ fn build_sleep_profile_report(
     let _ = writeln!(s, "\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}");
 
     s
+}
+
+/// Create a scaled ReactionConfig for accumulation passes (factor multiplies probabilities).
+fn scale_reaction_config(base: &crate::config::ReactionConfig, factor: f32) -> crate::config::ReactionConfig {
+    crate::config::ReactionConfig {
+        acid_dissolution_prob: (base.acid_dissolution_prob * factor).min(1.0),
+        copper_oxidation_prob: (base.copper_oxidation_prob * factor).min(1.0),
+        basalt_crust_prob: (base.basalt_crust_prob * factor).min(1.0),
+        sulfide_acid_prob: (base.sulfide_acid_prob * factor).min(1.0),
+        acid_dissolution_radius: (base.acid_dissolution_radius as f32 * factor.sqrt()).max(1.0) as u32,
+        sulfide_acid_radius: (base.sulfide_acid_radius as f32 * factor.sqrt()).max(1.0) as u32,
+        ..base.clone()
+    }
+}
+
+/// Create a scaled AureoleConfig for accumulation passes (factor multiplies probabilities).
+fn scale_aureole_config(base: &crate::config::AureoleConfig, factor: f32) -> crate::config::AureoleConfig {
+    crate::config::AureoleConfig {
+        contact_limestone_to_marble_prob: (base.contact_limestone_to_marble_prob * factor).min(1.0),
+        contact_sandstone_to_granite_prob: (base.contact_sandstone_to_granite_prob * factor).min(1.0),
+        mid_limestone_to_marble_prob: (base.mid_limestone_to_marble_prob * factor).min(1.0),
+        mid_sandstone_to_granite_prob: (base.mid_sandstone_to_granite_prob * factor).min(1.0),
+        outer_limestone_to_marble_prob: (base.outer_limestone_to_marble_prob * factor).min(1.0),
+        outer_slate_to_marble_prob: (base.outer_slate_to_marble_prob * factor).min(1.0),
+        water_erosion_prob: (base.water_erosion_prob * factor).min(1.0),
+        coal_to_graphite_prob: (base.coal_to_graphite_prob * factor).min(1.0),
+        coal_to_graphite_mid_prob: (base.coal_to_graphite_mid_prob * factor).min(1.0),
+        graphite_to_diamond_prob: (base.graphite_to_diamond_prob * factor).min(1.0),
+        silicification_limestone_prob: (base.silicification_limestone_prob * factor).min(1.0),
+        silicification_sandstone_prob: (base.silicification_sandstone_prob * factor).min(1.0),
+        ..base.clone()
+    }
 }
 
 /// Send a progress update if a channel is provided.

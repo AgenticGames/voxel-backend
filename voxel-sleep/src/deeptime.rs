@@ -17,7 +17,7 @@ use crate::collapse::{apply_collapse, CollapseResult};
 use crate::config::{DeepTimeConfig, GroundwaterConfig};
 use crate::groundwater::{ambient_moisture, is_fracture_site};
 use crate::manifest::ChangeManifest;
-use crate::util::{FACE_OFFSETS, sample_material, count_neighbors, has_material_within_radius};
+use crate::util::{FACE_OFFSETS, sample_material, count_neighbors, has_material_within_radius, grow_vein, default_vein_bias, VeinGrowthParams, VeinBias};
 use crate::{Bottleneck, PhaseDiagnostics, ResourceCensus, TransformEntry};
 
 /// Result of the deep time phase.
@@ -164,17 +164,30 @@ pub fn apply_deeptime(
                                 if *count < config.max_enrichment_per_chunk
                                     && rng.gen::<f32>() < config.enrichment_prob
                                 {
-                                    let (ck2, elx, ely, elz) = world_to_chunk_local(wx, above_y, wz, chunk_size);
-                                    if let Some(df) = density_fields.get(&ck2) {
-                                        let sample = df.get(elx, ely, elz);
-                                        candidates.push(Candidate {
-                                            chunk_key: ck2, lx: elx, ly: ely, lz: elz,
-                                            old_material: above_mat,
-                                            old_density: sample.density,
-                                            new_material: ore,
-                                            change_type: 0,
-                                        });
-                                        *count += 1;
+                                    let bias = default_vein_bias(ore, rng);
+                                    let params = VeinGrowthParams {
+                                        ore,
+                                        min_size: config.enrichment_cluster_min,
+                                        max_size: config.enrichment_cluster_max,
+                                        bias,
+                                    };
+                                    let cluster = grow_vein(density_fields, (wx, above_y, wz), &params, chunk_size, rng);
+                                    for &pos in &cluster {
+                                        if *count >= config.max_enrichment_per_chunk {
+                                            break;
+                                        }
+                                        let (ck2, elx, ely, elz) = world_to_chunk_local(pos.0, pos.1, pos.2, chunk_size);
+                                        if let Some(df) = density_fields.get(&ck2) {
+                                            let sample = df.get(elx, ely, elz);
+                                            candidates.push(Candidate {
+                                                chunk_key: ck2, lx: elx, ly: ely, lz: elz,
+                                                old_material: sample.material,
+                                                old_density: sample.density,
+                                                new_material: ore,
+                                                change_type: 0,
+                                            });
+                                            *count += 1;
+                                        }
                                     }
                                 }
                             }
@@ -293,15 +306,32 @@ pub fn apply_deeptime(
                         if *count < config.max_enrichment_per_chunk
                             && rng.gen::<f32>() < eff_prob
                         {
-                            candidates.push(Candidate {
-                                chunk_key, lx, ly, lz,
-                                old_material: mat,
-                                old_density: sample.density,
-                                new_material: ore,
-                                change_type: 0,
-                            });
-                            *count += 1;
-                            ambient_enrichment_count += 1;
+                            let bias = default_vein_bias(ore, rng);
+                            let params = VeinGrowthParams {
+                                ore,
+                                min_size: config.enrichment_cluster_min,
+                                max_size: config.enrichment_cluster_max,
+                                bias,
+                            };
+                            let cluster = grow_vein(density_fields, (wx, wy, wz), &params, chunk_size, rng);
+                            for &pos in &cluster {
+                                if *count >= config.max_enrichment_per_chunk {
+                                    break;
+                                }
+                                let (ck2, elx, ely, elz) = world_to_chunk_local(pos.0, pos.1, pos.2, chunk_size);
+                                if let Some(df) = density_fields.get(&ck2) {
+                                    let esample = df.get(elx, ely, elz);
+                                    candidates.push(Candidate {
+                                        chunk_key: ck2, lx: elx, ly: ely, lz: elz,
+                                        old_material: esample.material,
+                                        old_density: esample.density,
+                                        new_material: ore,
+                                        change_type: 0,
+                                    });
+                                    *count += 1;
+                                    ambient_enrichment_count += 1;
+                                }
+                            }
                         }
                     }
                 }
@@ -354,29 +384,47 @@ pub fn apply_deeptime(
                             continue;
                         }
 
+                        // Find first host-rock neighbor to seed vein growth from
+                        let mut growth_seed: Option<(i32, i32, i32)> = None;
                         for &(dx, dy, dz) in &FACE_OFFSETS {
                             let nx = wx + dx;
                             let ny = wy + dy;
                             let nz = wz + dz;
                             if let Some(mat) = sample_material(density_fields, nx, ny, nz, chunk_size) {
                                 if is_host_rock(mat) {
-                                    let (ck, _, _, _) = world_to_chunk_local(nx, ny, nz, chunk_size);
-                                    let count = thickening_per_chunk.entry(ck).or_insert(0);
-                                    if *count < config.vein_thickening_max_per_chunk {
-                                        let (ck2, tlx, tly, tlz) = world_to_chunk_local(nx, ny, nz, chunk_size);
-                                        if let Some(tdf) = density_fields.get(&ck2) {
-                                            let tsample = tdf.get(tlx, tly, tlz);
-                                            candidates.push(Candidate {
-                                                chunk_key: ck2, lx: tlx, ly: tly, lz: tlz,
-                                                old_material: mat,
-                                                old_density: tsample.density,
-                                                new_material: sample.material, // Same ore type
-                                                change_type: 1,
-                                            });
-                                            *count += 1;
-                                        }
+                                    growth_seed = Some((nx, ny, nz));
+                                    break;
+                                }
+                            }
+                        }
+
+                        if let Some(seed_pos) = growth_seed {
+                            let (ck, _, _, _) = world_to_chunk_local(seed_pos.0, seed_pos.1, seed_pos.2, chunk_size);
+                            let count = thickening_per_chunk.entry(ck).or_insert(0);
+                            if *count < config.vein_thickening_max_per_chunk {
+                                let params = VeinGrowthParams {
+                                    ore: sample.material,
+                                    min_size: config.vein_thickening_growth_min,
+                                    max_size: config.vein_thickening_growth_max,
+                                    bias: VeinBias::Compact,
+                                };
+                                let growth = grow_vein(density_fields, seed_pos, &params, chunk_size, rng);
+                                for &pos in &growth {
+                                    if *count >= config.vein_thickening_max_per_chunk {
+                                        break;
                                     }
-                                    break; // Only thicken in one direction per ore voxel
+                                    let (ck2, tlx, tly, tlz) = world_to_chunk_local(pos.0, pos.1, pos.2, chunk_size);
+                                    if let Some(tdf) = density_fields.get(&ck2) {
+                                        let tsample = tdf.get(tlx, tly, tlz);
+                                        candidates.push(Candidate {
+                                            chunk_key: ck2, lx: tlx, ly: tly, lz: tlz,
+                                            old_material: tsample.material,
+                                            old_density: tsample.density,
+                                            new_material: sample.material,
+                                            change_type: 1,
+                                        });
+                                        *count += 1;
+                                    }
                                 }
                             }
                         }

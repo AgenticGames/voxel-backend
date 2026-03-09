@@ -18,7 +18,7 @@ use crate::aureole::HeatMap;
 use crate::config::{VeinConfig, GroundwaterConfig};
 use crate::groundwater::ambient_moisture;
 use crate::manifest::ChangeManifest;
-use crate::util::{FACE_OFFSETS, sample_material, count_neighbors, aperture_multiplier};
+use crate::util::{FACE_OFFSETS, sample_material, count_neighbors, aperture_multiplier, find_air_from_solid, grow_vein, default_vein_size, default_vein_bias, VeinGrowthParams};
 use crate::{Bottleneck, PhaseDiagnostics, ResourceCensus, TransformEntry};
 
 /// Result of the veins phase.
@@ -97,15 +97,27 @@ pub fn apply_veins(
             let mut visited: HashSet<(i32, i32, i32)> = HashSet::new();
             let mut source_deposited = 0u32;
 
-            // Start BFS from neighbors of the heat source that are air
+            // Try direct air neighbors first (fast path for exposed lava/kimberlite)
             for &(dx, dy, dz) in &FACE_OFFSETS {
                 let nx = hx + dx;
                 let ny = hy + dy;
                 let nz = hz + dz;
                 if let Some(mat) = sample_material(density_fields, nx, ny, nz, chunk_size) {
-                    if !mat.is_solid() && !visited.contains(&(nx, ny, nz)) {
-                        visited.insert((nx, ny, nz));
+                    if !mat.is_solid() && visited.insert((nx, ny, nz)) {
                         queue.push_back(((nx, ny, nz), 1));
+                    }
+                }
+            }
+
+            // Fallback: search through solid rock to find air (submerged lava in solid bowls)
+            if queue.is_empty() {
+                let air_seeds = find_air_from_solid(
+                    density_fields, (hx, hy, hz),
+                    config.heat_source_search_radius, chunk_size,
+                );
+                for (pos, dist) in air_seeds {
+                    if visited.insert(pos) {
+                        queue.push_back((pos, dist));
                     }
                 }
             }
@@ -135,17 +147,31 @@ pub fn apply_veins(
                         } else { 1.0 };
                         if is_host_rock(mat) && rng.gen::<f32>() < eff_prob {
                             let ore = select_ore_by_distance(config, dist, rng);
-                            let (ck, lx, ly, lz) = world_to_chunk_local(nx, ny, nz, chunk_size);
-                            if let Some(df) = density_fields.get(&ck) {
-                                let sample = df.get(lx, ly, lz);
-                                vein_candidates.push(VeinCandidate {
-                                    chunk_key: ck, lx, ly, lz,
-                                    old_material: mat,
-                                    old_density: sample.density,
-                                    new_material: ore,
-                                });
-                                global_deposited.insert((nx, ny, nz));
-                                source_deposited += 1;
+                            let (min_sz, max_sz) = default_vein_size(ore);
+                            let bias = default_vein_bias(ore, rng);
+                            let params = VeinGrowthParams { ore, min_size: min_sz, max_size: max_sz, bias };
+                            let vein_positions = grow_vein(density_fields, (nx, ny, nz), &params, chunk_size, rng);
+
+                            for &vpos in &vein_positions {
+                                if global_deposited.contains(&vpos) {
+                                    continue;
+                                }
+                                if source_deposited >= max_per_source {
+                                    break;
+                                }
+                                let (ck, lx, ly, lz) = world_to_chunk_local(vpos.0, vpos.1, vpos.2, chunk_size);
+                                if let Some(df) = density_fields.get(&ck) {
+                                    let sample = df.get(lx, ly, lz);
+                                    let old_mat = sample.material;
+                                    vein_candidates.push(VeinCandidate {
+                                        chunk_key: ck, lx, ly, lz,
+                                        old_material: old_mat,
+                                        old_density: sample.density,
+                                        new_material: ore,
+                                    });
+                                    global_deposited.insert(vpos);
+                                    source_deposited += 1;
+                                }
                             }
                         }
                     }
