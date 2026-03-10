@@ -180,10 +180,10 @@ pub struct ReactionConfig {
 impl Default for ReactionConfig {
     fn default() -> Self {
         Self {
-            acid_dissolution_prob: 0.45,
+            acid_dissolution_prob: 0.20,
             acid_dissolution_radius: 3,
             acid_dissolution_enabled: true,
-            acid_max_dissolved_per_source: 65,
+            acid_max_dissolved_per_source: 30,
             copper_oxidation_prob: 0.15,
             copper_oxidation_enabled: true,
             basalt_crust_prob: 0.70,
@@ -312,14 +312,14 @@ pub struct VeinConfig {
 impl Default for VeinConfig {
     fn default() -> Self {
         Self {
-            vein_deposition_prob: 0.35,
-            max_vein_voxels_per_source: 20,
-            vein_max_distance: 22,
+            vein_deposition_prob: 0.65,
+            max_vein_voxels_per_source: 80,
+            vein_max_distance: 26,
             vein_enabled: true,
             heat_source_search_radius: 8,
-            hypothermal_max: 4,
+            hypothermal_max: 8,
             mesothermal_max: 14,
-            epithermal_rarity: 0.30,
+            epithermal_rarity: 0.55,
             crystal_growth_enabled: true,
             crystal_growth_prob: 0.30,
             crystal_growth_max_per_chunk: 4,
@@ -333,7 +333,7 @@ impl Default for VeinConfig {
             growth_density_max: 0.6,
             aperture_scaling_enabled: true,
             host_rock_ore_enabled: true,
-            slate_pyrite_codeposit_prob: 0.50,
+            slate_pyrite_codeposit_prob: 0.80,
             slate_quartz_vein_prob: 0.30,
         }
     }

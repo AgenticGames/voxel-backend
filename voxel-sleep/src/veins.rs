@@ -58,21 +58,30 @@ fn select_ore_by_distance_and_host(
             },
             Material::Slate | Material::Hornfels => {
                 if distance < config.hypothermal_max {
+                    // High-T: Iron dominant, Tin/Copper significant, Pyrite gangue
                     let r = rng.gen::<f32>();
-                    if r < 0.40 { return Material::Quartz; }
-                    else if r < 0.70 { return Material::Pyrite; }
-                    else { return Material::Tin; }
-                } else if distance < config.mesothermal_max {
-                    let r = rng.gen::<f32>();
-                    if r < 0.25 { return Material::Gold; }
-                    else if r < 0.60 { return Material::Pyrite; }
-                    else if r < 0.85 { return Material::Iron; }
+                    if r < 0.05 { return Material::Quartz; }
+                    else if r < 0.20 { return Material::Pyrite; }
+                    else if r < 0.40 { return Material::Tin; }
+                    else if r < 0.70 { return Material::Iron; }
                     else { return Material::Copper; }
-                } else {
+                } else if distance < config.mesothermal_max {
+                    // Mid-T: Iron/Sulfide dominant, Pyrite gangue
                     let r = rng.gen::<f32>();
-                    if r < 0.50 { return Material::Gold; }
-                    else if r < 0.80 { return Material::Pyrite; }
-                    else { return Material::Sulfide; }
+                    if r < 0.05 { return Material::Gold; }
+                    else if r < 0.25 { return Material::Pyrite; }
+                    else if r < 0.50 { return Material::Iron; }
+                    else if r < 0.65 { return Material::Copper; }
+                    else if r < 0.90 { return Material::Sulfide; }
+                    else { return Material::Tin; }
+                } else {
+                    // Low-T epithermal: Sulfide dominant, Iron/Pyrite secondary
+                    let r = rng.gen::<f32>();
+                    if r < 0.10 { return Material::Gold; }
+                    else if r < 0.30 { return Material::Pyrite; }
+                    else if r < 0.60 { return Material::Sulfide; }
+                    else if r < 0.80 { return Material::Iron; }
+                    else { return Material::Copper; }
                 }
             },
             _ => {},

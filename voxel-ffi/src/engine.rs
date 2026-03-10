@@ -1674,10 +1674,10 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
             ..Default::default()
         },
         reaction: ReactionConfig {
-            acid_dissolution_prob: if c.sleep_acid_dissolution_prob > 0.0 { c.sleep_acid_dissolution_prob } else { 0.45 },
+            acid_dissolution_prob: if c.sleep_acid_dissolution_prob > 0.0 { c.sleep_acid_dissolution_prob } else { 0.20 },
             copper_oxidation_prob: if c.sleep_copper_oxidation_prob > 0.0 { c.sleep_copper_oxidation_prob } else { 0.15 },
             basalt_crust_prob: if c.sleep_basalt_crust_prob > 0.0 { c.sleep_basalt_crust_prob } else { 0.70 },
-            acid_max_dissolved_per_source: if c.sleep_acid_max_dissolved_per_source > 0 { c.sleep_acid_max_dissolved_per_source } else { 65 },
+            acid_max_dissolved_per_source: if c.sleep_acid_max_dissolved_per_source > 0 { c.sleep_acid_max_dissolved_per_source } else { 30 },
             ..Default::default()
         },
         aureole: AureoleConfig {
@@ -1688,9 +1688,9 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
             ..Default::default()
         },
         veins: VeinConfig {
-            vein_deposition_prob: if c.sleep_vein_deposition_prob > 0.0 { c.sleep_vein_deposition_prob } else { 0.35 },
-            vein_max_distance: if c.sleep_vein_max_distance > 0 { c.sleep_vein_max_distance } else { 16 },
-            max_vein_voxels_per_source: if c.sleep_vein_max_per_source > 0 { c.sleep_vein_max_per_source } else { 20 },
+            vein_deposition_prob: if c.sleep_vein_deposition_prob > 0.0 { c.sleep_vein_deposition_prob } else { 0.65 },
+            vein_max_distance: if c.sleep_vein_max_distance > 0 { c.sleep_vein_max_distance } else { 26 },
+            max_vein_voxels_per_source: if c.sleep_vein_max_per_source > 0 { c.sleep_vein_max_per_source } else { 80 },
             flowstone_prob: if c.sleep_flowstone_prob > 0.0 { c.sleep_flowstone_prob } else { 0.10 },
             ..Default::default()
         },

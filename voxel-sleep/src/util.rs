@@ -232,13 +232,14 @@ pub fn default_vein_size(ore: Material) -> (u32, u32) {
 /// Sized to be noticeable discoveries while still smaller than world-gen ore bodies.
 pub fn sleep_vein_size(ore: Material) -> (u32, u32) {
     match ore {
-        Material::Iron => (3, 8),
-        Material::Copper => (3, 6),
-        Material::Tin | Material::Quartz => (2, 5),
+        Material::Iron => (10, 25),
+        Material::Copper => (5, 12),
+        Material::Tin => (6, 16),
+        Material::Quartz => (2, 5),
         Material::Gold => (1, 3),
-        Material::Sulfide => (2, 4),
+        Material::Sulfide => (5, 12),
         Material::Malachite => (2, 5),
-        Material::Pyrite => (2, 4),
+        Material::Pyrite => (4, 10),
         _ => (2, 4),
     }
 }

@@ -54,14 +54,14 @@ fn mat_name(id: u8) -> &'static str {
 
 fn make_ue_config() -> SleepConfig {
     let mut cfg = SleepConfig::default();
-    cfg.veins.vein_deposition_prob = 0.35;
-    cfg.veins.vein_max_distance = 22;
-    cfg.veins.max_vein_voxels_per_source = 20;
+    cfg.veins.vein_deposition_prob = 0.65;
+    cfg.veins.vein_max_distance = 26;
+    cfg.veins.max_vein_voxels_per_source = 80;
     cfg.deeptime.enrichment_prob = 0.25;
     cfg.deeptime.vein_thickening_prob = 0.20;
     cfg.reaction.copper_oxidation_prob = 0.15;
-    cfg.reaction.acid_dissolution_prob = 0.45;
-    cfg.reaction.acid_max_dissolved_per_source = 65;
+    cfg.reaction.acid_dissolution_prob = 0.20;
+    cfg.reaction.acid_max_dissolved_per_source = 30;
     cfg.stress.propagation_radius = 4;
     cfg.stress.max_collapse_volume = 50;
     // Collapse OFF — isolate geological effects from structural destruction
