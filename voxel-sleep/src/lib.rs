@@ -943,7 +943,6 @@ fn scale_aureole_config(base: &crate::config::AureoleConfig, factor: f32) -> cra
         mid_limestone_to_marble_prob: (base.mid_limestone_to_marble_prob * factor).min(1.0),
         mid_sandstone_to_granite_prob: (base.mid_sandstone_to_granite_prob * factor).min(1.0),
         outer_limestone_to_marble_prob: (base.outer_limestone_to_marble_prob * factor).min(1.0),
-        outer_slate_to_marble_prob: (base.outer_slate_to_marble_prob * factor).min(1.0),
         water_erosion_prob: (base.water_erosion_prob * factor).min(1.0),
         coal_to_graphite_prob: (base.coal_to_graphite_prob * factor).min(1.0),
         coal_to_graphite_mid_prob: (base.coal_to_graphite_mid_prob * factor).min(1.0),

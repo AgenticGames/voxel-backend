@@ -213,7 +213,6 @@ pub struct AureoleConfig {
     pub mid_sandstone_to_granite_prob: f32,
     // Outer aureole (6-8 voxels from heat)
     pub outer_limestone_to_marble_prob: f32,
-    pub outer_slate_to_marble_prob: f32,
     // Water erosion
     pub water_erosion_prob: f32,
     pub water_erosion_enabled: bool,
@@ -246,7 +245,6 @@ impl Default for AureoleConfig {
             mid_limestone_to_marble_prob: 0.50,
             mid_sandstone_to_granite_prob: 0.25,
             outer_limestone_to_marble_prob: 0.20,
-            outer_slate_to_marble_prob: 0.08,
             water_erosion_prob: 0.05,
             water_erosion_enabled: true,
             metamorphism_enabled: true,
@@ -379,7 +377,8 @@ pub struct DeepTimeConfig {
     pub corpse_fossilization: CorpseFossilizationConfig,
     // Slate aquitard (blocks vertical water flow)
     pub slate_aquitard_enabled: bool,
-    pub slate_aquitard_scan_depth: i32,
+    pub slate_zone_top: f64,
+    pub slate_zone_bottom: f64,
     pub slate_aquitard_factor: f32,
     pub slate_aquitard_concentration: f32,
 }
@@ -405,7 +404,8 @@ impl Default for DeepTimeConfig {
             nest_fossilization: NestFossilizationConfig::default(),
             corpse_fossilization: CorpseFossilizationConfig::default(),
             slate_aquitard_enabled: true,
-            slate_aquitard_scan_depth: 8,
+            slate_zone_top: 130.0,
+            slate_zone_bottom: -100.0,
             slate_aquitard_factor: 0.05,
             slate_aquitard_concentration: 2.0,
         }

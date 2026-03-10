@@ -458,6 +458,7 @@ pub fn apply_veins(
                         let wz = cz * (cs as i32) + z as i32;
 
                         // Check air neighbors for flowstone deposition
+                        // Flowstone = calcite precipitation → requires carbonate host rock nearby
                         for &(dx, dy, dz) in &FACE_OFFSETS {
                             let nx = wx + dx;
                             let ny = wy + dy;
@@ -465,6 +466,15 @@ pub fn apply_veins(
 
                             if let Some(mat) = sample_material(density_fields, nx, ny, nz, chunk_size) {
                                 if mat == Material::Air && rng.gen::<f32>() < config.flowstone_prob {
+                                    // Verify at least one solid neighbor of target air is carbonate
+                                    let has_carbonate = FACE_OFFSETS.iter().any(|&(dx2, dy2, dz2)| {
+                                        if let Some(nm) = sample_material(density_fields, nx + dx2, ny + dy2, nz + dz2, chunk_size) {
+                                            matches!(nm, Material::Limestone | Material::Sandstone | Material::Marble)
+                                        } else {
+                                            false
+                                        }
+                                    });
+                                    if !has_carbonate { continue; }
                                     let (ck, _, _, _) = world_to_chunk_local(nx, ny, nz, chunk_size);
                                     let count = flowstone_per_chunk.entry(ck).or_insert(0);
                                     if *count < config.flowstone_max_per_chunk {

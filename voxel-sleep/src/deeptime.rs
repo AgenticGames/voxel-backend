@@ -56,38 +56,12 @@ impl Default for DeepTimeResult {
     }
 }
 
-/// Check if a Slate or Hornfels barrier exists within scan_depth below a position.
-fn has_slate_barrier_below(
-    density_fields: &HashMap<(i32,i32,i32), DensityField>,
-    wx: i32, wy: i32, wz: i32,
-    scan_depth: i32,
-    chunk_size: usize,
-) -> bool {
-    for dy in 1..=scan_depth {
-        if let Some(mat) = sample_material(density_fields, wx, wy - dy, wz, chunk_size) {
-            if matches!(mat, Material::Slate | Material::Hornfels) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// Check if a Slate or Hornfels barrier exists within scan_depth above a position.
-fn has_slate_barrier_above(
-    density_fields: &HashMap<(i32,i32,i32), DensityField>,
-    wx: i32, wy: i32, wz: i32,
-    scan_depth: i32,
-    chunk_size: usize,
-) -> bool {
-    for dy in 1..=scan_depth {
-        if let Some(mat) = sample_material(density_fields, wx, wy + dy, wz, chunk_size) {
-            if matches!(mat, Material::Slate | Material::Hornfels) {
-                return true;
-            }
-        }
-    }
-    false
+/// O(1) slate zone relation: 1 = above slate (wet), -1 = below slate (dry), 0 = within slate.
+fn slate_zone_relation(wy: i32, config: &DeepTimeConfig) -> i32 {
+    let y = wy as f64;
+    if y >= config.slate_zone_top { 1 }
+    else if y <= config.slate_zone_bottom { -1 }
+    else { 0 }
 }
 
 /// Check if material is an ore (deposited by veins or natural).
@@ -288,14 +262,12 @@ pub fn apply_deeptime(
                         }
 
                         let moisture = ambient_moisture(groundwater, wy, mat, true);
-                        // Slate aquitard effect
+                        // Slate aquitard effect (O(1) depth-zone lookup)
                         let moisture = if config.slate_aquitard_enabled {
-                            if has_slate_barrier_above(density_fields, wx, wy, wz, config.slate_aquitard_scan_depth, chunk_size) {
-                                moisture * config.slate_aquitard_concentration // water pools above slate
-                            } else if has_slate_barrier_below(density_fields, wx, wy, wz, config.slate_aquitard_scan_depth, chunk_size) {
-                                moisture * config.slate_aquitard_factor // nearly dry below slate
-                            } else {
-                                moisture
+                            match slate_zone_relation(wy, config) {
+                                1 => moisture * config.slate_aquitard_concentration, // above slate → wet
+                                -1 => moisture * config.slate_aquitard_factor,       // below slate → dry
+                                _ => moisture,                                        // within slate zone
                             }
                         } else {
                             moisture
@@ -513,8 +485,8 @@ pub fn apply_deeptime(
                             if above_mat == Material::Limestone {
                                 theoretical_max += 1;
                             }
-                            // Skip formation if Slate aquitard blocks water from above
-                            if config.slate_aquitard_enabled && has_slate_barrier_above(density_fields, wx, wy, wz, config.slate_aquitard_scan_depth, chunk_size) {
+                            // Skip formation if below slate zone (no water percolation)
+                            if config.slate_aquitard_enabled && slate_zone_relation(wy, config) == -1 {
                                 continue;
                             }
                             if above_mat == Material::Limestone

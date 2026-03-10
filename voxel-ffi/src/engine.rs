@@ -1697,6 +1697,8 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
             enrichment_prob: if c.sleep_enrichment_prob > 0.0 { c.sleep_enrichment_prob } else { 0.25 },
             vein_thickening_prob: if c.sleep_vein_thickening_prob > 0.0 { c.sleep_vein_thickening_prob } else { 0.20 },
             stalactite_growth_prob: if c.sleep_stalactite_growth_prob > 0.0 { c.sleep_stalactite_growth_prob } else { 0.10 },
+            slate_zone_top: c.host_slate_depth,
+            slate_zone_bottom: c.host_granite_depth,
             collapse: new_collapse,
             ..Default::default()
         },
