@@ -183,7 +183,7 @@ impl Default for ReactionConfig {
             acid_dissolution_prob: 0.45,
             acid_dissolution_radius: 3,
             acid_dissolution_enabled: true,
-            acid_max_dissolved_per_source: 80,
+            acid_max_dissolved_per_source: 65,
             copper_oxidation_prob: 0.15,
             copper_oxidation_enabled: true,
             basalt_crust_prob: 0.70,

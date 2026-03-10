@@ -1677,7 +1677,7 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
             acid_dissolution_prob: if c.sleep_acid_dissolution_prob > 0.0 { c.sleep_acid_dissolution_prob } else { 0.45 },
             copper_oxidation_prob: if c.sleep_copper_oxidation_prob > 0.0 { c.sleep_copper_oxidation_prob } else { 0.15 },
             basalt_crust_prob: if c.sleep_basalt_crust_prob > 0.0 { c.sleep_basalt_crust_prob } else { 0.70 },
-            acid_max_dissolved_per_source: if c.sleep_acid_max_dissolved_per_source > 0 { c.sleep_acid_max_dissolved_per_source } else { 80 },
+            acid_max_dissolved_per_source: if c.sleep_acid_max_dissolved_per_source > 0 { c.sleep_acid_max_dissolved_per_source } else { 65 },
             ..Default::default()
         },
         aureole: AureoleConfig {

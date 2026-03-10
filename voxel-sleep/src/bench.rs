@@ -61,7 +61,7 @@ fn make_ue_config() -> SleepConfig {
     cfg.deeptime.vein_thickening_prob = 0.20;
     cfg.reaction.copper_oxidation_prob = 0.15;
     cfg.reaction.acid_dissolution_prob = 0.45;
-    cfg.reaction.acid_max_dissolved_per_source = 80;
+    cfg.reaction.acid_max_dissolved_per_source = 65;
     cfg.stress.propagation_radius = 4;
     cfg.stress.max_collapse_volume = 50;
     // Collapse OFF — isolate geological effects from structural destruction

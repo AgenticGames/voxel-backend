@@ -2013,7 +2013,7 @@ mod tests {
             sleep_acid_dissolution_prob: 0.45,
             sleep_copper_oxidation_prob: 0.50,
             sleep_basalt_crust_prob: 0.70,
-            sleep_acid_max_dissolved_per_source: 80,
+            sleep_acid_max_dissolved_per_source: 65,
             sleep_aureole_radius: 8,
             sleep_contact_marble_prob: 0.80,
             sleep_water_erosion_prob: 0.05,
