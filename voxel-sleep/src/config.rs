@@ -174,7 +174,7 @@ impl Default for ReactionConfig {
             acid_dissolution_prob: 0.60,
             acid_dissolution_radius: 3,
             acid_dissolution_enabled: true,
-            copper_oxidation_prob: 0.50,
+            copper_oxidation_prob: 0.15,
             copper_oxidation_enabled: true,
             basalt_crust_prob: 0.70,
             basalt_crust_enabled: true,
@@ -283,9 +283,9 @@ pub struct VeinConfig {
 impl Default for VeinConfig {
     fn default() -> Self {
         Self {
-            vein_deposition_prob: 0.50,
-            max_vein_voxels_per_source: 80,
-            vein_max_distance: 20,
+            vein_deposition_prob: 0.35,
+            max_vein_voxels_per_source: 20,
+            vein_max_distance: 16,
             vein_enabled: true,
             heat_source_search_radius: 8,
             hypothermal_max: 4,
@@ -348,13 +348,13 @@ pub struct DeepTimeConfig {
 impl Default for DeepTimeConfig {
     fn default() -> Self {
         Self {
-            enrichment_prob: 0.35,
+            enrichment_prob: 0.25,
             max_enrichment_per_chunk: 40,
             enrichment_search_radius: 5,
             enrichment_enabled: true,
             enrichment_cluster_min: 2,
             enrichment_cluster_max: 6,
-            vein_thickening_prob: 0.30,
+            vein_thickening_prob: 0.20,
             vein_thickening_max_per_chunk: 20,
             vein_thickening_enabled: true,
             vein_thickening_growth_min: 2,
@@ -522,10 +522,10 @@ impl Default for CollapseConfig {
                 0.85,  // SteelStrut
                 0.95,  // CrystalStrut
             ],
-            stress_multiplier: 1.5,
-            max_cascade_iterations: 8,
-            rubble_fill_ratio: 0.40,
-            min_stress_for_cascade: 0.7,
+            stress_multiplier: 0.8,
+            max_cascade_iterations: 3,
+            rubble_fill_ratio: 0.65,
+            min_stress_for_cascade: 0.95,
             rubble_material_match: true,
             support_stress_penalty: 1.0,
             collapse_enabled: true,

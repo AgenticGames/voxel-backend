@@ -1609,12 +1609,12 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
             CollapseConfig::default().strut_survival
         },
         stress_multiplier: if c.sleep_new_stress_multiplier > 0.0 { c.sleep_new_stress_multiplier }
-            else if c.sleep_stress_multiplier > 0.0 { c.sleep_stress_multiplier } else { 1.5 },
-        max_cascade_iterations: 8, // not exposed in new UI
+            else if c.sleep_stress_multiplier > 0.0 { c.sleep_stress_multiplier } else { 0.8 },
+        max_cascade_iterations: 3, // not exposed in new UI
         rubble_fill_ratio: if c.sleep_new_rubble_fill_ratio > 0.0 { c.sleep_new_rubble_fill_ratio }
-            else if c.sleep_rubble_fill_ratio > 0.0 { c.sleep_rubble_fill_ratio } else { 0.40 },
+            else if c.sleep_rubble_fill_ratio > 0.0 { c.sleep_rubble_fill_ratio } else { 0.65 },
         min_stress_for_cascade: if c.sleep_new_min_stress_cascade > 0.0 { c.sleep_new_min_stress_cascade }
-            else if c.sleep_min_stress_for_cascade > 0.0 { c.sleep_min_stress_for_cascade } else { 0.7 },
+            else if c.sleep_min_stress_for_cascade > 0.0 { c.sleep_min_stress_for_cascade } else { 0.95 },
         rubble_material_match: true,
         support_stress_penalty: if c.sleep_support_stress_penalty > 0.0 { c.sleep_support_stress_penalty } else { 1.0 },
         collapse_enabled: c.sleep_new_collapse_enabled != 0,
@@ -1626,10 +1626,10 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
         } else {
             CollapseConfig::default().strut_survival
         },
-        stress_multiplier: if c.sleep_stress_multiplier > 0.0 { c.sleep_stress_multiplier } else { 1.5 },
-        max_cascade_iterations: if c.sleep_max_cascade_iterations > 0 { c.sleep_max_cascade_iterations } else { 8 },
-        rubble_fill_ratio: if c.sleep_rubble_fill_ratio > 0.0 { c.sleep_rubble_fill_ratio } else { 0.40 },
-        min_stress_for_cascade: if c.sleep_min_stress_for_cascade > 0.0 { c.sleep_min_stress_for_cascade } else { 0.7 },
+        stress_multiplier: if c.sleep_stress_multiplier > 0.0 { c.sleep_stress_multiplier } else { 0.8 },
+        max_cascade_iterations: if c.sleep_max_cascade_iterations > 0 { c.sleep_max_cascade_iterations } else { 3 },
+        rubble_fill_ratio: if c.sleep_rubble_fill_ratio > 0.0 { c.sleep_rubble_fill_ratio } else { 0.65 },
+        min_stress_for_cascade: if c.sleep_min_stress_for_cascade > 0.0 { c.sleep_min_stress_for_cascade } else { 0.95 },
         rubble_material_match: c.sleep_rubble_material_match != 0,
         support_stress_penalty: if c.sleep_support_stress_penalty > 0.0 { c.sleep_support_stress_penalty } else { 1.0 },
         collapse_enabled: c.sleep_collapse_sub_enabled != 0,
@@ -1661,7 +1661,7 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
         },
         reaction: ReactionConfig {
             acid_dissolution_prob: if c.sleep_acid_dissolution_prob > 0.0 { c.sleep_acid_dissolution_prob } else { 0.60 },
-            copper_oxidation_prob: if c.sleep_copper_oxidation_prob > 0.0 { c.sleep_copper_oxidation_prob } else { 0.50 },
+            copper_oxidation_prob: if c.sleep_copper_oxidation_prob > 0.0 { c.sleep_copper_oxidation_prob } else { 0.15 },
             basalt_crust_prob: if c.sleep_basalt_crust_prob > 0.0 { c.sleep_basalt_crust_prob } else { 0.70 },
             ..Default::default()
         },
@@ -1673,15 +1673,15 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
             ..Default::default()
         },
         veins: VeinConfig {
-            vein_deposition_prob: if c.sleep_vein_deposition_prob > 0.0 { c.sleep_vein_deposition_prob } else { 0.25 },
+            vein_deposition_prob: if c.sleep_vein_deposition_prob > 0.0 { c.sleep_vein_deposition_prob } else { 0.35 },
             vein_max_distance: if c.sleep_vein_max_distance > 0 { c.sleep_vein_max_distance } else { 16 },
-            max_vein_voxels_per_source: if c.sleep_vein_max_per_source > 0 { c.sleep_vein_max_per_source } else { 12 },
+            max_vein_voxels_per_source: if c.sleep_vein_max_per_source > 0 { c.sleep_vein_max_per_source } else { 20 },
             flowstone_prob: if c.sleep_flowstone_prob > 0.0 { c.sleep_flowstone_prob } else { 0.10 },
             ..Default::default()
         },
         deeptime: DeepTimeConfig {
-            enrichment_prob: if c.sleep_enrichment_prob > 0.0 { c.sleep_enrichment_prob } else { 0.15 },
-            vein_thickening_prob: if c.sleep_vein_thickening_prob > 0.0 { c.sleep_vein_thickening_prob } else { 0.10 },
+            enrichment_prob: if c.sleep_enrichment_prob > 0.0 { c.sleep_enrichment_prob } else { 0.25 },
+            vein_thickening_prob: if c.sleep_vein_thickening_prob > 0.0 { c.sleep_vein_thickening_prob } else { 0.20 },
             stalactite_growth_prob: if c.sleep_stalactite_growth_prob > 0.0 { c.sleep_stalactite_growth_prob } else { 0.10 },
             collapse: new_collapse,
             ..Default::default()
@@ -1732,7 +1732,12 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
             growth_density_max: if c.sleep_growth_density_max > 0.0 { c.sleep_growth_density_max } else { 0.6 },
         },
         collapse: legacy_collapse,
-        stress: voxel_core::stress::StressConfig::default(),
+        stress: {
+            let mut sc = voxel_core::stress::StressConfig::default();
+            sc.propagation_radius = 4;
+            sc.max_collapse_volume = 50;
+            sc
+        },
     }
 }
 

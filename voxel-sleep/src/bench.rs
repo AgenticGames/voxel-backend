@@ -51,12 +51,23 @@ fn mat_name(id: u8) -> &'static str {
 /// Build a SleepConfig that matches what the FFI layer sends to UE.
 fn make_ue_config() -> SleepConfig {
     let mut cfg = SleepConfig::default();
-    cfg.veins.vein_deposition_prob = 0.25;
+    // Vein overrides
+    cfg.veins.vein_deposition_prob = 0.35;
     cfg.veins.vein_max_distance = 16;
-    cfg.veins.max_vein_voxels_per_source = 12;
-    cfg.deeptime.enrichment_prob = 0.15;
-    cfg.deeptime.vein_thickening_prob = 0.10;
-    // accumulation_iterations stays at Rust default (3) now that engine.rs is fixed
+    cfg.veins.max_vein_voxels_per_source = 20;
+    // DeepTime overrides
+    cfg.deeptime.enrichment_prob = 0.25;
+    cfg.deeptime.vein_thickening_prob = 0.20;
+    // Collapse overrides (match FFI)
+    cfg.deeptime.collapse.stress_multiplier = 0.8;
+    cfg.deeptime.collapse.max_cascade_iterations = 3;
+    cfg.deeptime.collapse.rubble_fill_ratio = 0.65;
+    cfg.deeptime.collapse.min_stress_for_cascade = 0.95;
+    // Reaction overrides (match FFI)
+    cfg.reaction.copper_oxidation_prob = 0.15;
+    // Stress config: tame collapse for sleep
+    cfg.stress.propagation_radius = 4;
+    cfg.stress.max_collapse_volume = 50;
     cfg
 }
 
@@ -132,9 +143,10 @@ fn make_realistic_world(seed: u64) -> (
     FluidSnapshot,
 ) {
     let grid_size = 17; // chunk_size(16) + 1
+    // Use deep coords (y=-5..-3) for lava/ore-rich terrain
     let mut coords = Vec::new();
     for cx in 0..3i32 {
-        for cy in 0..3i32 {
+        for cy in -5..-2i32 {
             for cz in 0..3i32 {
                 coords.push((cx, cy, cz));
             }
@@ -183,6 +195,12 @@ fn make_realistic_world(seed: u64) -> (
             };
         }
     }
+
+    // Report fluid seed stats
+    let water_count = fluid_seeds.iter().filter(|s| matches!(s.fluid_type, voxel_gen::pools::PoolFluid::Water)).count();
+    let lava_count = fluid_seeds.iter().filter(|s| matches!(s.fluid_type, voxel_gen::pools::PoolFluid::Lava)).count();
+    eprintln!("  World: {} chunks, {} fluid seeds ({} water, {} lava)",
+        density_fields.len(), fluid_seeds.len(), water_count, lava_count);
 
     (density_fields, stress_fields, support_fields, fluid)
 }
@@ -334,7 +352,7 @@ fn bench_sleep_statistics() {
             &mut stress,
             &mut support,
             &fluid,
-            (1, 1, 1),
+            (1, -4, 1),
             i,
             None,
         );
@@ -544,7 +562,7 @@ fn bench_epithermal_rarity_sweep() {
             let mut cfg = make_ue_config();
             cfg.veins.epithermal_rarity = rarity;
 
-            execute_sleep(&cfg, &mut density, &mut stress, &mut support, &fluid, (1,1,1), run, None);
+            execute_sleep(&cfg, &mut density, &mut stress, &mut support, &fluid, (1,-4,1), run, None);
             let after = count_materials(&density);
             let delta = material_delta(&before_census, &after);
 
@@ -607,7 +625,7 @@ fn bench_vein_size_comparison() {
         let mut support = template_support.clone();
         let cfg = make_ue_config();
 
-        execute_sleep(&cfg, &mut density, &mut stress, &mut support, &fluid, (1,1,1), run, None);
+        execute_sleep(&cfg, &mut density, &mut stress, &mut support, &fluid, (1,-4,1), run, None);
         let after = count_materials(&density);
         let delta = material_delta(&before_census, &after);
 
