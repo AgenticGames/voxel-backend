@@ -23,6 +23,7 @@ pub struct ReactionResult {
     pub acid_dissolved: u32,
     pub sulfide_dissolved: u32,
     pub voxels_oxidized: u32,
+    pub gypsum_deposited: u32,
     pub manifest: ChangeManifest,
     pub glimpse_chunk: Option<(i32, i32, i32)>,
     pub transform_log: Vec<TransformEntry>,
@@ -343,7 +344,7 @@ pub fn apply_reaction(
             if !has_water {
                 continue;
             }
-            let effective_radius = (base_radius as f32 * config.sulfide_water_amplification) as i32;
+            let effective_radius = (base_radius as f32 * config.sulfide_water_amplification * config.limestone_acid_radius_boost) as i32;
 
             let mut queue: VecDeque<((i32, i32, i32), i32)> = VecDeque::new();
             let mut visited: HashSet<(i32, i32, i32)> = HashSet::new();
@@ -407,6 +408,36 @@ pub fn apply_reaction(
             }
         }
 
+        // Gypsum deposition: CaCO₃ + H₂SO₄ → CaSO₄·2H₂O (gypsum forms on void walls)
+        if config.gypsum_enabled {
+            let dissolved_positions: Vec<(i32, i32, i32)> = sulfide_dissolved_set.iter().copied().collect();
+            for &(wx, wy, wz) in &dissolved_positions {
+                // Check face-adjacent voxels of the new void
+                for &(dx, dy, dz) in &FACE_OFFSETS {
+                    let nx = wx + dx;
+                    let ny = wy + dy;
+                    let nz = wz + dz;
+                    if sulfide_dissolved_set.contains(&(nx, ny, nz)) { continue; }
+                    if let Some(mat) = sample_material(density_fields, nx, ny, nz, chunk_size) {
+                        if mat == Material::Limestone && rng.gen::<f32>() < config.gypsum_deposition_prob {
+                            let (gck, glx, gly, glz) = world_to_chunk_local(nx, ny, nz, chunk_size);
+                            if let Some(df) = density_fields.get(&gck) {
+                                let gsample = df.get(glx, gly, glz);
+                                candidates.push(Candidate {
+                                    chunk_key: gck, lx: glx, ly: gly, lz: glz,
+                                    old_material: gsample.material,
+                                    old_density: gsample.density,
+                                    new_material: Material::Gypsum,
+                                    new_density: gsample.density,
+                                    change_type: 4, // gypsum deposition
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Drain water near sulfide sites (acid consumes water: 0.1 per BFS step)
         let cs = fluid_snapshot.chunk_size;
         for &(sx, sy, sz, has_water) in &sulfide_sites {
@@ -439,6 +470,7 @@ pub fn apply_reaction(
     let mut oxidation_count = 0u32;
     let mut basalt_count = 0u32;
     let mut sulfide_acid_count = 0u32;
+    let mut gypsum_count = 0u32;
     let mut conversions: std::collections::BTreeMap<(u8, u8), u32> = std::collections::BTreeMap::new();
 
     for c in &candidates {
@@ -464,6 +496,7 @@ pub fn apply_reaction(
             1 => oxidation_count += 1,
             2 => basalt_count += 1,
             3 => sulfide_acid_count += 1,
+            4 => gypsum_count += 1,
             _ => {}
         }
     }
@@ -471,6 +504,7 @@ pub fn apply_reaction(
     result.acid_dissolved = acid_count;
     result.sulfide_dissolved = sulfide_acid_count;
     result.voxels_oxidized = oxidation_count + basalt_count;
+    result.gypsum_deposited = gypsum_count;
 
     // Build transform log
     if acid_count > 0 {
@@ -495,6 +529,12 @@ pub fn apply_reaction(
         result.transform_log.push(TransformEntry {
             description: format!("The Reaction \u{2014} 10,000 years: Sulfide acid dissolved {} limestone voxels", sulfide_acid_count),
             count: sulfide_acid_count,
+        });
+    }
+    if gypsum_count > 0 {
+        result.transform_log.push(TransformEntry {
+            description: format!("The Reaction \u{2014} 10,000 years: {} gypsum crusts deposited on acid-dissolved walls", gypsum_count),
+            count: gypsum_count,
         });
     }
 

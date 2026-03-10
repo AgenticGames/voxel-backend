@@ -40,6 +40,14 @@ pub enum Material {
 
     // Hydrated silica
     Opal = 21,
+
+    // Metamorphic / skarn zone
+    Hornfels = 22,
+    Garnet = 23,
+    Diopside = 24,
+
+    // Evaporite
+    Gypsum = 25,
 }
 
 impl Material {
@@ -66,6 +74,10 @@ impl Material {
             19 => Material::Coal,
             20 => Material::Graphite,
             21 => Material::Opal,
+            22 => Material::Hornfels,
+            23 => Material::Garnet,
+            24 => Material::Diopside,
+            25 => Material::Gypsum,
             _ => Material::Air,
         }
     }
@@ -103,15 +115,17 @@ impl Material {
                 | Material::Basalt
                 | Material::Slate
                 | Material::Marble
+                | Material::Hornfels
         )
     }
 
     pub fn is_soft_rock(self) -> bool {
-        matches!(self, Material::Limestone | Material::Sandstone)
+        matches!(self, Material::Limestone | Material::Sandstone | Material::Gypsum)
     }
 
     pub fn is_hard_rock(self) -> bool {
-        matches!(self, Material::Granite | Material::Basalt | Material::Slate | Material::Marble)
+        matches!(self, Material::Granite | Material::Basalt | Material::Slate | Material::Marble
+            | Material::Hornfels | Material::Garnet | Material::Diopside)
     }
 
     pub fn is_geode_shell(self) -> bool {
@@ -125,7 +139,8 @@ impl Material {
 
     /// Impermeable materials block water flow, creating geological contacts.
     pub fn is_impermeable(self) -> bool {
-        matches!(self, Material::Granite | Material::Basalt | Material::Slate | Material::Marble)
+        matches!(self, Material::Granite | Material::Basalt | Material::Slate | Material::Marble
+            | Material::Hornfels | Material::Garnet | Material::Diopside)
     }
 
     /// Porosity value (0.0 = impervious, 1.0 = highly porous).
@@ -138,6 +153,10 @@ impl Material {
             Material::Marble => 0.3,
             Material::Granite => 0.2,
             Material::Basalt => 0.1,
+            Material::Hornfels => 0.05,
+            Material::Garnet => 0.05,
+            Material::Diopside => 0.1,
+            Material::Gypsum => 0.7,
             _ => 0.0,
         }
     }
@@ -172,6 +191,10 @@ impl Material {
             Material::Coal => "Coal",
             Material::Graphite => "Graphite",
             Material::Opal => "Opal",
+            Material::Hornfels => "Hornfels",
+            Material::Garnet => "Garnet",
+            Material::Diopside => "Diopside",
+            Material::Gypsum => "Gypsum",
         }
     }
 
@@ -199,6 +222,10 @@ impl Material {
             Material::Coal => 0x2C2C2C,
             Material::Graphite => 0x474747,
             Material::Opal => 0xE0F0FF,
+            Material::Hornfels => 0x3D3229,
+            Material::Garnet => 0x8B2500,
+            Material::Diopside => 0x2E8B57,
+            Material::Gypsum => 0xF5F0E8,
         }
     }
 
@@ -226,6 +253,10 @@ impl Material {
             Material::Coal,
             Material::Graphite,
             Material::Opal,
+            Material::Hornfels,
+            Material::Garnet,
+            Material::Diopside,
+            Material::Gypsum,
         ]
     }
 }

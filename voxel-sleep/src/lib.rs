@@ -112,6 +112,7 @@ pub struct SleepResult {
     pub nests_fossilized: u32,
     pub channels_eroded: u32,
     pub corpses_fossilized: u32,
+    pub gypsum_deposited: u32,
     pub dirty_chunks: Vec<(i32, i32, i32)>,
     pub collapse_events: Vec<voxel_core::stress::CollapseEvent>,
     /// Detailed log of transformations for UI display
@@ -396,6 +397,7 @@ pub fn execute_sleep(
     let mut total_nests_fossilized = 0u32;
     let mut total_channels_eroded = 0u32;
     let mut total_corpses_fossilized = 0u32;
+    let mut total_gypsum_deposited = 0u32;
     let mut all_collapse_events: Vec<voxel_core::stress::CollapseEvent> = Vec::new();
     let mut collapse_sub_timings: Option<CollapseTimings> = None;
     let mut diag_reaction = PhaseDiagnostics::default();
@@ -415,6 +417,7 @@ pub fn execute_sleep(
         total_acid_dissolved = reaction_result.acid_dissolved;
         total_oxidized = reaction_result.voxels_oxidized;
         total_sulfide_dissolved = reaction_result.sulfide_dissolved;
+        total_gypsum_deposited += reaction_result.gypsum_deposited;
         diag_reaction = reaction_result.diagnostics;
         result_manifest.merge_sleep_changes(&reaction_result.manifest);
         transform_log.extend(reaction_result.transform_log);
@@ -560,6 +563,7 @@ pub fn execute_sleep(
                 accum_acid += r.acid_dissolved;
                 accum_oxidized += r.voxels_oxidized;
                 accum_sulfide += r.sulfide_dissolved;
+                total_gypsum_deposited += r.gypsum_deposited;
                 result_manifest.merge_sleep_changes(&r.manifest);
                 for key in r.manifest.chunk_deltas.keys() {
                     all_dirty.insert(*key);
@@ -713,6 +717,7 @@ pub fn execute_sleep(
         nests_fossilized: total_nests_fossilized,
         channels_eroded: total_channels_eroded,
         corpses_fossilized: total_corpses_fossilized,
+        gypsum_deposited: total_gypsum_deposited,
         dirty_chunks,
         collapse_events: all_collapse_events,
         transform_log,

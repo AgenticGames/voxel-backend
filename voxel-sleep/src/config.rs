@@ -170,6 +170,10 @@ pub struct ReactionConfig {
     pub sulfide_acid_prob: f32,
     pub sulfide_acid_radius: u32,
     pub sulfide_water_amplification: f32,
+    // Gypsum deposition (acid dissolution byproduct)
+    pub limestone_acid_radius_boost: f32,
+    pub gypsum_deposition_prob: f32,
+    pub gypsum_enabled: bool,
 }
 
 impl Default for ReactionConfig {
@@ -186,6 +190,9 @@ impl Default for ReactionConfig {
             sulfide_acid_prob: 0.45,
             sulfide_acid_radius: 2,
             sulfide_water_amplification: 2.0,
+            limestone_acid_radius_boost: 1.5,
+            gypsum_deposition_prob: 0.35,
+            gypsum_enabled: true,
         }
     }
 }
@@ -222,6 +229,12 @@ pub struct AureoleConfig {
     pub silicification_sandstone_prob: f32,
     /// Water search radius multiplier for silicification (radius = effective_radius * this)
     pub silicification_water_radius_mult: u32,
+    // Skarn + hornfels metamorphism
+    pub contact_limestone_to_garnet_prob: f32,
+    pub mid_limestone_to_diopside_prob: f32,
+    pub contact_slate_to_hornfels_prob: f32,
+    pub mid_slate_to_hornfels_prob: f32,
+    pub outer_slate_to_hornfels_prob: f32,
 }
 
 impl Default for AureoleConfig {
@@ -245,6 +258,11 @@ impl Default for AureoleConfig {
             silicification_limestone_prob: 0.30,
             silicification_sandstone_prob: 0.15,
             silicification_water_radius_mult: 3,
+            contact_limestone_to_garnet_prob: 0.80,
+            mid_limestone_to_diopside_prob: 0.50,
+            contact_slate_to_hornfels_prob: 0.70,
+            mid_slate_to_hornfels_prob: 0.40,
+            outer_slate_to_hornfels_prob: 0.15,
         }
     }
 }
@@ -285,6 +303,10 @@ pub struct VeinConfig {
     pub growth_density_max: f32,
     /// Aperture scaling: wider tunnels = richer vein deposition
     pub aperture_scaling_enabled: bool,
+    // Per-host rock ore selection
+    pub host_rock_ore_enabled: bool,
+    pub slate_pyrite_codeposit_prob: f32,
+    pub slate_quartz_vein_prob: f32,
 }
 
 impl Default for VeinConfig {
@@ -310,6 +332,9 @@ impl Default for VeinConfig {
             growth_density_min: 0.3,
             growth_density_max: 0.6,
             aperture_scaling_enabled: true,
+            host_rock_ore_enabled: true,
+            slate_pyrite_codeposit_prob: 0.50,
+            slate_quartz_vein_prob: 0.30,
         }
     }
 }
@@ -352,6 +377,11 @@ pub struct DeepTimeConfig {
     pub nest_fossilization: NestFossilizationConfig,
     // Corpse fossilization
     pub corpse_fossilization: CorpseFossilizationConfig,
+    // Slate aquitard (blocks vertical water flow)
+    pub slate_aquitard_enabled: bool,
+    pub slate_aquitard_scan_depth: i32,
+    pub slate_aquitard_factor: f32,
+    pub slate_aquitard_concentration: f32,
 }
 
 impl Default for DeepTimeConfig {
@@ -374,6 +404,10 @@ impl Default for DeepTimeConfig {
             collapse: CollapseConfig::default(),
             nest_fossilization: NestFossilizationConfig::default(),
             corpse_fossilization: CorpseFossilizationConfig::default(),
+            slate_aquitard_enabled: true,
+            slate_aquitard_scan_depth: 8,
+            slate_aquitard_factor: 0.05,
+            slate_aquitard_concentration: 2.0,
         }
     }
 }

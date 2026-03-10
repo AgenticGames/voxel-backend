@@ -32,26 +32,65 @@ pub struct VeinResult {
     pub diagnostics: PhaseDiagnostics,
 }
 
-/// Select ore type by BFS distance from heat source (temperature zonation).
-fn select_ore_by_distance(
+/// Select ore type by BFS distance from heat source and host rock (temperature zonation + skarn/slate).
+fn select_ore_by_distance_and_host(
     config: &VeinConfig,
     distance: u32,
+    host_rock: Material,
     rng: &mut ChaCha8Rng,
 ) -> Material {
+    // Per-host ore selection (limestone skarn = copper-iron, slate = gold-pyrite Bendigo)
+    if config.host_rock_ore_enabled {
+        match host_rock {
+            Material::Limestone | Material::Garnet | Material::Diopside => {
+                if distance < config.hypothermal_max {
+                    let r = rng.gen::<f32>();
+                    if r < 0.50 { return Material::Copper; }
+                    else if r < 0.80 { return Material::Iron; }
+                    else { return Material::Pyrite; }
+                } else if distance < config.mesothermal_max {
+                    let r = rng.gen::<f32>();
+                    if r < 0.45 { return Material::Copper; }
+                    else if r < 0.80 { return Material::Iron; }
+                    else { return Material::Pyrite; }
+                }
+                // epithermal falls through to default
+            },
+            Material::Slate | Material::Hornfels => {
+                if distance < config.hypothermal_max {
+                    let r = rng.gen::<f32>();
+                    if r < 0.40 { return Material::Quartz; }
+                    else if r < 0.70 { return Material::Pyrite; }
+                    else { return Material::Tin; }
+                } else if distance < config.mesothermal_max {
+                    let r = rng.gen::<f32>();
+                    if r < 0.25 { return Material::Gold; }
+                    else if r < 0.60 { return Material::Pyrite; }
+                    else if r < 0.85 { return Material::Iron; }
+                    else { return Material::Copper; }
+                } else {
+                    let r = rng.gen::<f32>();
+                    if r < 0.50 { return Material::Gold; }
+                    else if r < 0.80 { return Material::Pyrite; }
+                    else { return Material::Sulfide; }
+                }
+            },
+            _ => {},
+        }
+    }
+
+    // Default behavior (all other hosts)
     if distance < config.hypothermal_max {
-        // Hypothermal (high-temperature): Tin / Quartz / Pyrite
         let r = rng.gen::<f32>();
         if r < 0.35 { Material::Tin }
         else if r < 0.65 { Material::Quartz }
         else { Material::Pyrite }
     } else if distance < config.mesothermal_max {
-        // Mesothermal (medium-temperature): Copper / Iron / Pyrite
         let r = rng.gen::<f32>();
         if r < 0.40 { Material::Copper }
         else if r < 0.75 { Material::Iron }
         else { Material::Pyrite }
     } else {
-        // Epithermal (low-temperature): Gold / Sulfide / Pyrite
         let r = rng.gen::<f32>();
         if r < 0.30 { Material::Gold }
         else if r < 0.55 { Material::Sulfide }
@@ -63,7 +102,8 @@ fn select_ore_by_distance(
 fn is_host_rock(mat: Material) -> bool {
     matches!(mat,
         Material::Sandstone | Material::Limestone | Material::Granite |
-        Material::Basalt | Material::Slate | Material::Marble
+        Material::Basalt | Material::Slate | Material::Marble |
+        Material::Hornfels | Material::Garnet | Material::Diopside
     )
 }
 
@@ -155,7 +195,7 @@ pub fn apply_veins(
                             aperture_multiplier(air_n)
                         } else { 1.0 };
                         if is_host_rock(mat) && rng.gen::<f32>() < eff_prob {
-                            let ore = select_ore_by_distance(config, dist, rng);
+                            let ore = select_ore_by_distance_and_host(config, dist, mat, rng);
 
                             // Epithermal rarity: precious metals deposit less frequently
                             let rarity_factor = if dist >= config.mesothermal_max {
@@ -195,7 +235,12 @@ pub fn apply_veins(
                             }
 
                             // Co-deposit pyrite gangue mineral alongside non-Pyrite ores
-                            if ore != Material::Pyrite && rng.gen::<f32>() < 0.25 && source_deposited < max_per_source {
+                            let pyrite_codeposit_prob = if matches!(mat, Material::Slate | Material::Hornfels) {
+                                config.slate_pyrite_codeposit_prob
+                            } else {
+                                0.25
+                            };
+                            if ore != Material::Pyrite && rng.gen::<f32>() < pyrite_codeposit_prob && source_deposited < max_per_source {
                                 // Pick first host-rock neighbor of the vein seed for pyrite co-deposit
                                 for &(pdx, pdy, pdz) in &FACE_OFFSETS {
                                     let pnx = nx + pdx;
@@ -224,6 +269,48 @@ pub fn apply_veins(
                                                         new_material: Material::Pyrite,
                                                     });
                                                     global_deposited.insert(pvpos);
+                                                    source_deposited += 1;
+                                                }
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Quartz co-deposit for gold in Slate (saddle reef)
+                            if matches!(mat, Material::Slate | Material::Hornfels)
+                                && ore == Material::Gold
+                                && rng.gen::<f32>() < config.slate_quartz_vein_prob
+                                && source_deposited < max_per_source
+                            {
+                                for &(qdx, qdy, qdz) in &FACE_OFFSETS {
+                                    let qnx = nx + qdx;
+                                    let qny = ny + qdy;
+                                    let qnz = nz + qdz;
+                                    if global_deposited.contains(&(qnx, qny, qnz)) { continue; }
+                                    if let Some(qmat) = sample_material(density_fields, qnx, qny, qnz, chunk_size) {
+                                        if is_host_rock(qmat) {
+                                            let quartz_params = VeinGrowthParams {
+                                                ore: Material::Quartz,
+                                                min_size: 1,
+                                                max_size: 3,
+                                                bias: default_vein_bias(Material::Quartz, rng),
+                                            };
+                                            let quartz_vein = grow_vein(density_fields, (qnx, qny, qnz), &quartz_params, chunk_size, rng);
+                                            for &qvpos in &quartz_vein {
+                                                if global_deposited.contains(&qvpos) { continue; }
+                                                if source_deposited >= max_per_source { break; }
+                                                let (qck, qlx, qly, qlz) = world_to_chunk_local(qvpos.0, qvpos.1, qvpos.2, chunk_size);
+                                                if let Some(qdf) = density_fields.get(&qck) {
+                                                    let qsample = qdf.get(qlx, qly, qlz);
+                                                    vein_candidates.push(VeinCandidate {
+                                                        chunk_key: qck, lx: qlx, ly: qly, lz: qlz,
+                                                        old_material: qsample.material,
+                                                        old_density: qsample.density,
+                                                        new_material: Material::Quartz,
+                                                    });
+                                                    global_deposited.insert(qvpos);
                                                     source_deposited += 1;
                                                 }
                                             }

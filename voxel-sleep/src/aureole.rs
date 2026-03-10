@@ -269,8 +269,9 @@ pub fn apply_aureole(
                                     }
                                 } else {
                                     match mat {
-                                        Material::Limestone if rng.gen::<f32>() < config.contact_limestone_to_marble_prob => Some(Material::Marble),
+                                        Material::Limestone if rng.gen::<f32>() < config.contact_limestone_to_garnet_prob => Some(Material::Garnet),
                                         Material::Sandstone if rng.gen::<f32>() < config.contact_sandstone_to_granite_prob => Some(Material::Granite),
+                                        Material::Slate if rng.gen::<f32>() < config.contact_slate_to_hornfels_prob => Some(Material::Hornfels),
                                         _ => None,
                                     }
                                 }
@@ -294,15 +295,17 @@ pub fn apply_aureole(
                                             Some(Material::Quartz)
                                         },
                                         _ => match mat {
-                                            Material::Limestone if rng.gen::<f32>() < config.mid_limestone_to_marble_prob => Some(Material::Marble),
+                                            Material::Limestone if rng.gen::<f32>() < config.mid_limestone_to_diopside_prob => Some(Material::Diopside),
                                             Material::Sandstone if rng.gen::<f32>() < config.mid_sandstone_to_granite_prob => Some(Material::Granite),
+                                            Material::Slate if rng.gen::<f32>() < config.mid_slate_to_hornfels_prob => Some(Material::Hornfels),
                                             _ => None,
                                         },
                                     }
                                 } else {
                                     match mat {
-                                        Material::Limestone if rng.gen::<f32>() < config.mid_limestone_to_marble_prob => Some(Material::Marble),
+                                        Material::Limestone if rng.gen::<f32>() < config.mid_limestone_to_diopside_prob => Some(Material::Diopside),
                                         Material::Sandstone if rng.gen::<f32>() < config.mid_sandstone_to_granite_prob => Some(Material::Granite),
+                                        Material::Slate if rng.gen::<f32>() < config.mid_slate_to_hornfels_prob => Some(Material::Hornfels),
                                         _ => None,
                                     }
                                 }
@@ -322,14 +325,14 @@ pub fn apply_aureole(
                                         },
                                         _ => match mat {
                                             Material::Limestone if rng.gen::<f32>() < config.outer_limestone_to_marble_prob => Some(Material::Marble),
-                                            Material::Slate if rng.gen::<f32>() < config.outer_slate_to_marble_prob => Some(Material::Marble),
+                                            Material::Slate if rng.gen::<f32>() < config.outer_slate_to_hornfels_prob => Some(Material::Hornfels),
                                             _ => None,
                                         },
                                     }
                                 } else {
                                     match mat {
                                         Material::Limestone if rng.gen::<f32>() < config.outer_limestone_to_marble_prob => Some(Material::Marble),
-                                        Material::Slate if rng.gen::<f32>() < config.outer_slate_to_marble_prob => Some(Material::Marble),
+                                        Material::Slate if rng.gen::<f32>() < config.outer_slate_to_hornfels_prob => Some(Material::Hornfels),
                                         _ => None,
                                     }
                                 }

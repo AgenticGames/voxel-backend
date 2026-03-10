@@ -42,6 +42,10 @@ fn mat_name(id: u8) -> &'static str {
         19 => "Coal",
         20 => "Graphite",
         21 => "Opal",
+        22 => "Hornfels",
+        23 => "Garnet",
+        24 => "Diopside",
+        25 => "Gypsum",
         _ => "Unknown",
     }
 }
@@ -405,7 +409,7 @@ const FLUID_CONFIGS: &[FluidConfig] = &[
 ];
 
 // All non-Air material u8 IDs (1..=21)
-const ALL_MAT_IDS: [u8; 21] = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21];
+const ALL_MAT_IDS: [u8; 25] = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25];
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Test 1: Full statistical profile across fluid configs (4 × 50 = 200 runs)
