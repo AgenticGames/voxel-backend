@@ -1639,7 +1639,7 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
         chunk_radius: c.sleep_chunk_radius.min(10),
         sleep_count: if c.sleep_count > 0 { c.sleep_count } else { 1 },
         accumulation_enabled: true,
-        accumulation_iterations: 5,
+        accumulation_iterations: voxel_sleep::SleepConfig::default().accumulation_iterations,
         nest_positions: Vec::new(),
         // New 4-phase system — now mapped from FFI fields
         phase1_enabled: c.sleep_phase1_enabled != 0,

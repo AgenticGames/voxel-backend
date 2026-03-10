@@ -968,6 +968,9 @@ fn send_progress(
 }
 
 #[cfg(test)]
+mod bench;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use voxel_core::stress::{StressField, SupportField, SupportType};
