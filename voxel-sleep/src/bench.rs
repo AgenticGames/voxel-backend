@@ -60,6 +60,8 @@ fn make_ue_config() -> SleepConfig {
     cfg.deeptime.enrichment_prob = 0.25;
     cfg.deeptime.vein_thickening_prob = 0.20;
     cfg.reaction.copper_oxidation_prob = 0.15;
+    cfg.reaction.acid_dissolution_prob = 0.45;
+    cfg.reaction.acid_max_dissolved_per_source = 80;
     cfg.stress.propagation_radius = 4;
     cfg.stress.max_collapse_volume = 50;
     // Collapse OFF — isolate geological effects from structural destruction
@@ -215,7 +217,7 @@ fn make_realistic_world(seed: u64, water_count: usize) -> (
     let grid_size = 17;
     let mut coords = Vec::new();
     for cx in 0..3i32 {
-        for cy in -5..-2i32 {
+        for cy in -2..1i32 {
             for cz in 0..3i32 {
                 coords.push((cx, cy, cz));
             }
@@ -481,16 +483,16 @@ fn bench_sleep_statistics() {
             let mut config = make_ue_config();
             // Inject test fossilization targets
             config.nest_positions = vec![
-                (8, -72, 8), (24, -68, 24), (40, -64, 12), (16, -76, 32), (32, -70, 20),
+                (8, -24, 8), (24, -20, 24), (40, -16, 12), (16, -28, 32), (32, -22, 20),
             ];
             config.corpse_positions = vec![
-                (10, -72, 10), (12, -68, 22), (38, -66, 14), (20, -74, 30), (28, -70, 18),
-                (6, -72, 6), (26, -68, 26), (36, -64, 16), (14, -76, 28), (30, -70, 22),
+                (10, -24, 10), (12, -20, 22), (38, -18, 14), (20, -26, 30), (28, -22, 18),
+                (6, -24, 6), (26, -20, 26), (36, -16, 16), (14, -28, 28), (30, -22, 22),
             ];
 
             let result = execute_sleep(
                 &config, &mut density, &mut stress, &mut support,
-                &mut run_fluid, (1, -4, 1), i, None,
+                &mut run_fluid, (1, -1, 1), i, None,
             );
 
             let after = count_materials(&density);
@@ -704,7 +706,7 @@ fn bench_epithermal_rarity_sweep() {
 
                 execute_sleep(
                     &cfg, &mut density, &mut stress, &mut support,
-                    &mut run_fluid, (1, -4, 1), run, None,
+                    &mut run_fluid, (1, -1, 1), run, None,
                 );
                 let after = count_materials(&density);
                 let delta = material_delta(&before_census, &after);
@@ -777,7 +779,7 @@ fn bench_vein_size_comparison() {
 
             execute_sleep(
                 &cfg, &mut density, &mut stress, &mut support,
-                &mut run_fluid, (1, -4, 1), run, None,
+                &mut run_fluid, (1, -1, 1), run, None,
             );
             let after = count_materials(&density);
             let delta = material_delta(&before_census, &after);

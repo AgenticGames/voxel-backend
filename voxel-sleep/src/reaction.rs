@@ -102,6 +102,7 @@ pub fn apply_reaction(
             // Start BFS from limestone neighbors of this pyrite
             let mut queue: VecDeque<((i32, i32, i32), i32)> = VecDeque::new();
             let mut visited: HashSet<(i32, i32, i32)> = HashSet::new();
+            let mut source_dissolved: u32 = 0;
 
             for &(dx, dy, dz) in &FACE_OFFSETS {
                 let nx = px + dx;
@@ -124,7 +125,12 @@ pub fn apply_reaction(
 
                 // Roll probability for dissolution
                 if rng.gen::<f32>() < config.acid_dissolution_prob {
-                    dissolved_set.insert((wx, wy, wz));
+                    if dissolved_set.insert((wx, wy, wz)) {
+                        source_dissolved += 1;
+                        if source_dissolved >= config.acid_max_dissolved_per_source {
+                            break;
+                        }
+                    }
                 }
 
                 // Expand BFS to limestone neighbors
@@ -348,6 +354,7 @@ pub fn apply_reaction(
 
             let mut queue: VecDeque<((i32, i32, i32), i32)> = VecDeque::new();
             let mut visited: HashSet<(i32, i32, i32)> = HashSet::new();
+            let mut source_dissolved: u32 = 0;
 
             for &(dx, dy, dz) in &FACE_OFFSETS {
                 let nx = sx + dx;
@@ -369,7 +376,12 @@ pub fn apply_reaction(
                 sulfide_bfs_visited.insert((wx, wy, wz));
 
                 if rng.gen::<f32>() < config.sulfide_acid_prob {
-                    sulfide_dissolved_set.insert((wx, wy, wz));
+                    if sulfide_dissolved_set.insert((wx, wy, wz)) {
+                        source_dissolved += 1;
+                        if source_dissolved >= config.acid_max_dissolved_per_source {
+                            break;
+                        }
+                    }
                 }
 
                 if depth < effective_radius {

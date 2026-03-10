@@ -724,6 +724,8 @@ pub struct FfiEngineConfig {
     pub formation_cauldron_floor_inset: i32,
     // ── Grace Period ──
     pub fluid_source_grace_ticks: u16,
+    // ── Acid Dissolution Cap ──
+    pub sleep_acid_max_dissolved_per_source: u32,
 }
 
 #[repr(C)]

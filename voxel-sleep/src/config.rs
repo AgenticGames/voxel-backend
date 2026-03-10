@@ -159,6 +159,7 @@ pub struct ReactionConfig {
     pub acid_dissolution_prob: f32,
     pub acid_dissolution_radius: u32,
     pub acid_dissolution_enabled: bool,
+    pub acid_max_dissolved_per_source: u32,
     // Copper oxidation (copper + air → malachite)
     pub copper_oxidation_prob: f32,
     pub copper_oxidation_enabled: bool,
@@ -179,9 +180,10 @@ pub struct ReactionConfig {
 impl Default for ReactionConfig {
     fn default() -> Self {
         Self {
-            acid_dissolution_prob: 0.60,
+            acid_dissolution_prob: 0.45,
             acid_dissolution_radius: 3,
             acid_dissolution_enabled: true,
+            acid_max_dissolved_per_source: 80,
             copper_oxidation_prob: 0.15,
             copper_oxidation_enabled: true,
             basalt_crust_prob: 0.70,
