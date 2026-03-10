@@ -812,6 +812,8 @@ pub struct FfiSleepResult {
     pub diamonds_formed: u32,
     pub voxels_silicified: u32,
     pub nests_fossilized: u32,
+    pub channels_eroded: u32,
+    pub corpses_fossilized: u32,
     pub dirty_chunks: *mut FfiChunkCoord,
     pub dirty_chunk_count: u32,
     pub collapse_events: *mut FfiCollapseEvent,
@@ -953,6 +955,8 @@ pub enum WorkerResult {
         diamonds_formed: u32,
         voxels_silicified: u32,
         nests_fossilized: u32,
+        channels_eroded: u32,
+        corpses_fossilized: u32,
         profile_report: String,
     },
     ScanComplete {

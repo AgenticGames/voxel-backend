@@ -1130,7 +1130,7 @@ fn handle_request(
             // Request fluid snapshot for geological processes
             let (snap_tx, snap_rx) = crossbeam_channel::bounded(1);
             let _ = fluid_event_tx.send(voxel_fluid::FluidEvent::SnapshotRequest { reply_tx: snap_tx });
-            let fluid_snapshot = snap_rx.recv().unwrap_or_else(|_| voxel_fluid::FluidSnapshot::default());
+            let mut fluid_snapshot = snap_rx.recv().unwrap_or_else(|_| voxel_fluid::FluidSnapshot::default());
 
             let mut s = store.write().unwrap();
 
@@ -1144,7 +1144,7 @@ fn handle_request(
                 density_fields,
                 stress_fields,
                 support_fields,
-                &fluid_snapshot,
+                &mut fluid_snapshot,
                 player_chunk,
                 sleep_count,
                 None, // No progress channel for now
@@ -1234,6 +1234,8 @@ fn handle_request(
                 diamonds_formed: sleep_result.diamonds_formed,
                 voxels_silicified: sleep_result.voxels_silicified,
                 nests_fossilized: sleep_result.nests_fossilized,
+                channels_eroded: sleep_result.channels_eroded,
+                corpses_fossilized: sleep_result.corpses_fossilized,
                 profile_report: report,
             });
         }

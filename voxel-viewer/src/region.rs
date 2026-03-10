@@ -191,13 +191,13 @@ impl GeneratedRegion {
         // Use center chunk as player position
         let player_chunk = (0, 0, 0);
 
-        let fluid = voxel_fluid::FluidSnapshot::default();
+        let mut fluid = voxel_fluid::FluidSnapshot::default();
         let result = voxel_sleep::execute_sleep(
             sleep_config,
             &mut self.density_fields,
             &mut self.stress_fields,
             &mut self.support_fields,
-            &fluid,
+            &mut fluid,
             player_chunk,
             1, // sleep_count
             None, // no progress channel

@@ -46,6 +46,8 @@ pub struct SleepCompleteData {
     pub diamonds_formed: u32,
     pub voxels_silicified: u32,
     pub nests_fossilized: u32,
+    pub channels_eroded: u32,
+    pub corpses_fossilized: u32,
     pub profile_report: String,
 }
 
@@ -272,6 +274,8 @@ impl VoxelEngine {
                 diamonds_formed,
                 voxels_silicified,
                 nests_fossilized,
+                channels_eroded,
+                corpses_fossilized,
                 profile_report,
             }) => {
                 if let Ok(mut sc) = self.sleep_complete.lock() {
@@ -290,6 +294,8 @@ impl VoxelEngine {
                         diamonds_formed,
                         voxels_silicified,
                         nests_fossilized,
+                        channels_eroded,
+                        corpses_fossilized,
                         profile_report,
                     });
                 }
@@ -318,6 +324,13 @@ impl VoxelEngine {
     pub fn set_sleep_nests(&self, positions: Vec<(i32, i32, i32)>) {
         if let Ok(mut sc) = self.sleep_config.write() {
             sc.nest_positions = positions;
+        }
+    }
+
+    /// Set spider corpse positions for fossilization during sleep.
+    pub fn set_sleep_corpses(&self, positions: Vec<(i32, i32, i32)>) {
+        if let Ok(mut sc) = self.sleep_config.write() {
+            sc.corpse_positions = positions;
         }
     }
 
@@ -1641,6 +1654,7 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
         accumulation_enabled: true,
         accumulation_iterations: voxel_sleep::SleepConfig::default().accumulation_iterations,
         nest_positions: Vec::new(),
+        corpse_positions: Vec::new(),
         // New 4-phase system — now mapped from FFI fields
         phase1_enabled: c.sleep_phase1_enabled != 0,
         phase2_enabled: c.sleep_phase2_enabled != 0,

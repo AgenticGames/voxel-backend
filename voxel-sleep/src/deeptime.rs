@@ -29,6 +29,7 @@ pub struct DeepTimeResult {
     pub supports_degraded: u32,
     pub collapses_triggered: u32,
     pub nests_fossilized: u32,
+    pub corpses_fossilized: u32,
     pub collapse_result: Option<CollapseResult>,
     pub manifest: ChangeManifest,
     pub glimpse_chunk: Option<(i32, i32, i32)>,
@@ -45,6 +46,7 @@ impl Default for DeepTimeResult {
             supports_degraded: 0,
             collapses_triggered: 0,
             nests_fossilized: 0,
+            corpses_fossilized: 0,
             collapse_result: None,
             manifest: ChangeManifest::default(),
             glimpse_chunk: None,
@@ -78,12 +80,14 @@ pub fn apply_deeptime(
     density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
     stress_fields: &mut HashMap<(i32, i32, i32), StressField>,
     support_fields: &mut HashMap<(i32, i32, i32), SupportField>,
-    fluid_snapshot: &FluidSnapshot,
+    fluid_snapshot: &mut FluidSnapshot,
     _heat_map: &HeatMap,
     chunks: &[(i32, i32, i32)],
     chunk_size: usize,
     stress_config: &voxel_core::stress::StressConfig,
     nest_positions: &[(i32, i32, i32)],
+    corpse_positions: &[(i32, i32, i32)],
+    sleep_count: u32,
     rng: &mut ChaCha8Rng,
     census: &ResourceCensus,
 ) -> DeepTimeResult {
@@ -149,7 +153,7 @@ pub fn apply_deeptime(
                                         let sy = above_y + sdy;
                                         let sz = wz + sdz;
                                         if let Some(m) = sample_material(density_fields, sx, sy, sz, chunk_size) {
-                                            if matches!(m, Material::Copper | Material::Iron | Material::Gold) {
+                                            if matches!(m, Material::Copper | Material::Iron | Material::Gold | Material::Sulfide | Material::Pyrite) {
                                                 found_ore = Some(m);
                                                 break 'search;
                                             }
@@ -268,7 +272,7 @@ pub fn apply_deeptime(
                                     let sy = wy + sdy;
                                     let sz = wz + sdz;
                                     if let Some(m) = sample_material(density_fields, sx, sy, sz, chunk_size) {
-                                        if matches!(m, Material::Copper | Material::Iron | Material::Gold) {
+                                        if matches!(m, Material::Copper | Material::Iron | Material::Gold | Material::Sulfide | Material::Pyrite) {
                                             found_ore = Some(m);
                                             break 'asearch;
                                         }
@@ -510,12 +514,9 @@ pub fn apply_deeptime(
                 None => continue,
             };
 
-            // Check if buried (0 air neighbors)
+            // Check air neighbors (burial no longer required — over 1.25Ma, material self-buries)
             let air_count = count_neighbors(density_fields, nx, ny, nz, chunk_size, |m| !m.is_solid());
             let is_buried = air_count == 0;
-            if nf.buried_required && !is_buried {
-                continue;
-            }
 
             // Check for adjacent water
             let has_water = {
@@ -641,11 +642,162 @@ pub fn apply_deeptime(
         }
     }
 
+    // --- Corpse Fossilization ---
+    let mut corpses_fossilized = 0u32;
+    if config.corpse_fossilization.enabled && !corpse_positions.is_empty() && sleep_count >= config.corpse_fossilization.min_sleep_cycles {
+        let cf = &config.corpse_fossilization;
+        let corpse_radius = cf.corpse_radius as i32;
+
+        for &(cx_pos, cy_pos, cz_pos) in corpse_positions {
+            let host_mat = match sample_material(density_fields, cx_pos, cy_pos, cz_pos, chunk_size) {
+                Some(m) => m,
+                None => continue,
+            };
+
+            // Check for adjacent water
+            let has_water = if cf.water_required {
+                let cs = fluid_snapshot.chunk_size;
+                let mut found = false;
+                if cs > 0 {
+                    for &(dx, dy, dz) in &FACE_OFFSETS {
+                        let nwx = cx_pos + dx;
+                        let nwy = cy_pos + dy;
+                        let nwz = cz_pos + dz;
+                        let fck = (
+                            nwx.div_euclid(cs as i32),
+                            nwy.div_euclid(cs as i32),
+                            nwz.div_euclid(cs as i32),
+                        );
+                        if let Some(cells) = fluid_snapshot.chunks.get(&fck) {
+                            let flx = nwx.rem_euclid(cs as i32) as usize;
+                            let fly = nwy.rem_euclid(cs as i32) as usize;
+                            let flz = nwz.rem_euclid(cs as i32) as usize;
+                            let fidx = flz * cs * cs + fly * cs + flx;
+                            if fidx < cells.len() && cells[fidx].level > 0.001 && cells[fidx].fluid_type.is_water() {
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                found
+            } else {
+                true
+            };
+
+            if !has_water {
+                continue;
+            }
+
+            // Check for nearby lava (destroys corpses)
+            let has_lava = {
+                let cs = fluid_snapshot.chunk_size;
+                let mut found = false;
+                if cs > 0 {
+                    for &(dx, dy, dz) in &FACE_OFFSETS {
+                        let nwx = cx_pos + dx;
+                        let nwy = cy_pos + dy;
+                        let nwz = cz_pos + dz;
+                        let fck = (
+                            nwx.div_euclid(cs as i32),
+                            nwy.div_euclid(cs as i32),
+                            nwz.div_euclid(cs as i32),
+                        );
+                        if let Some(cells) = fluid_snapshot.chunks.get(&fck) {
+                            let flx = nwx.rem_euclid(cs as i32) as usize;
+                            let fly = nwy.rem_euclid(cs as i32) as usize;
+                            let flz = nwz.rem_euclid(cs as i32) as usize;
+                            let fidx = flz * cs * cs + fly * cs + flx;
+                            if fidx < cells.len() && cells[fidx].level > 0.001 && cells[fidx].fluid_type.is_lava() {
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                found
+            };
+            if has_lava { continue; }
+
+            // Material selection for corpse fossilization
+            let iron_rich = matches!(host_mat, Material::Basalt)
+                || has_material_within_radius(density_fields, cx_pos, cy_pos, cz_pos, chunk_size, 3, Material::Iron)
+                || has_material_within_radius(density_fields, cx_pos, cy_pos, cz_pos, chunk_size, 3, Material::Sulfide)
+                || has_material_within_radius(density_fields, cx_pos, cy_pos, cz_pos, chunk_size, 3, Material::Pyrite);
+
+            let target_mat = if iron_rich && rng.gen::<f32>() < cf.pyrite_prob {
+                // Iron-rich + water → Pyrite replacement mineralization (like real insect fossils)
+                Some(Material::Pyrite)
+            } else if host_mat == Material::Limestone && rng.gen::<f32>() < cf.calcium_prob {
+                // Limestone host → calcium carbonate preservation
+                Some(Material::Limestone)
+            } else {
+                None
+            };
+
+            if let Some(target) = target_mat {
+                for rdx in -corpse_radius..=corpse_radius {
+                    for rdy in -corpse_radius..=corpse_radius {
+                        for rdz in -corpse_radius..=corpse_radius {
+                            if rdx.abs() + rdy.abs() + rdz.abs() > corpse_radius {
+                                continue;
+                            }
+                            let wx = cx_pos + rdx;
+                            let wy = cy_pos + rdy;
+                            let wz = cz_pos + rdz;
+                            if let Some(mat) = sample_material(density_fields, wx, wy, wz, chunk_size) {
+                                if mat.is_solid() {
+                                    let (ck, lx, ly, lz) = world_to_chunk_local(wx, wy, wz, chunk_size);
+                                    if let Some(df) = density_fields.get(&ck) {
+                                        let sample = df.get(lx, ly, lz);
+                                        candidates.push(Candidate {
+                                            chunk_key: ck, lx, ly, lz,
+                                            old_material: mat,
+                                            old_density: sample.density,
+                                            new_material: target,
+                                            change_type: 4, // corpse fossilization
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                corpses_fossilized += 1;
+
+                // Drain nearby water for fossilization (0.1 per corpse)
+                let cs = fluid_snapshot.chunk_size;
+                if cs > 0 {
+                    for &(dx, dy, dz) in &FACE_OFFSETS {
+                        let nwx = cx_pos + dx;
+                        let nwy = cy_pos + dy;
+                        let nwz = cz_pos + dz;
+                        let fck = (
+                            nwx.div_euclid(cs as i32),
+                            nwy.div_euclid(cs as i32),
+                            nwz.div_euclid(cs as i32),
+                        );
+                        if let Some(cells) = fluid_snapshot.chunks.get_mut(&fck) {
+                            let flx = nwx.rem_euclid(cs as i32) as usize;
+                            let fly = nwy.rem_euclid(cs as i32) as usize;
+                            let flz = nwz.rem_euclid(cs as i32) as usize;
+                            let fidx = flz * cs * cs + fly * cs + flx;
+                            if fidx < cells.len() && !cells[fidx].is_source && cells[fidx].level > 0.001 && cells[fidx].fluid_type.is_water() {
+                                cells[fidx].level = (cells[fidx].level - 0.1).max(0.0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // --- Apply all candidates ---
     let mut enrichment_count = 0u32;
     let mut thickening_count = 0u32;
     let mut formation_count = 0u32;
     let mut fossilization_count = 0u32;
+    let mut corpse_fossil_count = 0u32;
     let mut conversions: std::collections::BTreeMap<(u8, u8), u32> = std::collections::BTreeMap::new();
 
     for c in &candidates {
@@ -675,6 +827,7 @@ pub fn apply_deeptime(
             1 => thickening_count += 1,
             2 => formation_count += 1,
             3 => fossilization_count += 1,
+            4 => corpse_fossil_count += 1,
             _ => {}
         }
     }
@@ -683,6 +836,7 @@ pub fn apply_deeptime(
     result.veins_thickened = thickening_count;
     result.formations_grown = formation_count;
     result.nests_fossilized = nests_fossilized;
+    result.corpses_fossilized = corpses_fossilized;
 
     // --- Structural Collapse (delegated to existing collapse.rs) ---
     if config.collapse.collapse_enabled {
@@ -712,6 +866,15 @@ pub fn apply_deeptime(
     }
 
     // Build transform log for non-collapse changes
+    if corpses_fossilized > 0 {
+        result.transform_log.insert(0, TransformEntry {
+            description: format!(
+                "The Deep Time \u{2014} 1,250,000 years: {} spider corpses fossilized ({} voxels replaced)",
+                corpses_fossilized, corpse_fossil_count
+            ),
+            count: corpses_fossilized,
+        });
+    }
     if nests_fossilized > 0 {
         result.transform_log.insert(0, TransformEntry {
             description: format!(

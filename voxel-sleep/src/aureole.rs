@@ -18,6 +18,52 @@ use crate::manifest::ChangeManifest;
 use crate::util::{FACE_OFFSETS, sample_material};
 use crate::{Bottleneck, PhaseDiagnostics, ResourceCensus, TransformEntry};
 
+/// Count water cells within Chebyshev radius of a world position.
+fn count_water_in_radius(
+    fluid_snapshot: &FluidSnapshot,
+    cx: i32, cy: i32, cz: i32,
+    radius: i32,
+) -> u32 {
+    let cs = fluid_snapshot.chunk_size as i32;
+    if cs == 0 { return 0; }
+    let mut count = 0u32;
+    let chunk_min = (
+        (cx - radius).div_euclid(cs),
+        (cy - radius).div_euclid(cs),
+        (cz - radius).div_euclid(cs),
+    );
+    let chunk_max = (
+        (cx + radius).div_euclid(cs),
+        (cy + radius).div_euclid(cs),
+        (cz + radius).div_euclid(cs),
+    );
+    for ckx in chunk_min.0..=chunk_max.0 {
+        for cky in chunk_min.1..=chunk_max.1 {
+            for ckz in chunk_min.2..=chunk_max.2 {
+                if let Some(cells) = fluid_snapshot.chunks.get(&(ckx, cky, ckz)) {
+                    for lz in 0..cs {
+                        for ly in 0..cs {
+                            for lx in 0..cs {
+                                let wx = ckx * cs + lx;
+                                let wy = cky * cs + ly;
+                                let wz = ckz * cs + lz;
+                                let dist = (wx - cx).abs().max((wy - cy).abs()).max((wz - cz).abs());
+                                if dist <= radius {
+                                    let idx = (lz * cs * cs + ly * cs + lx) as usize;
+                                    if idx < cells.len() && cells[idx].level > 0.001 && cells[idx].fluid_type.is_water() {
+                                        count += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    count
+}
+
 /// Type of heat source for coal maturation decisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeatSourceType {
@@ -110,7 +156,7 @@ pub fn apply_aureole(
     config: &AureoleConfig,
     groundwater: &GroundwaterConfig,
     density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
-    fluid_snapshot: &FluidSnapshot,
+    fluid_snapshot: &mut FluidSnapshot,
     heat_map: &HeatMap,
     _chunks: &[(i32, i32, i32)],
     chunk_size: usize,
@@ -135,11 +181,6 @@ pub fn apply_aureole(
     let mut coal_matured = 0u32;
     let mut diamonds_formed = 0u32;
     let mut voxels_silicified = 0u32;
-
-    // Check if water exists anywhere in the fluid snapshot (for silicification)
-    let has_water_in_snapshot = fluid_snapshot.chunks.values().any(|cells| {
-        cells.iter().any(|cell| cell.level > 0.001 && cell.fluid_type.is_water())
-    });
 
     if config.metamorphism_enabled && !heat_map.is_empty() {
         // Compute heat strength: count nearby heat sources within radius 3
@@ -180,6 +221,12 @@ pub fn apply_aureole(
             } else {
                 2 // isolated cell, heat dissipates fast
             };
+            // Per-heat-source water proximity check for silicification
+            let water_search_radius = effective_radius * config.silicification_water_radius_mult as i32;
+            let local_water_count = count_water_in_radius(fluid_snapshot, hx, hy, hz, water_search_radius);
+            let has_local_water = local_water_count > 0;
+            // Magnitude scaling: more water = stronger silicification (0.0-1.0)
+            let water_magnitude = (local_water_count as f32 / 20.0).min(1.0);
             for dx in -effective_radius..=effective_radius {
                 for dy in -effective_radius..=effective_radius {
                     for dz in -effective_radius..=effective_radius {
@@ -236,13 +283,13 @@ pub fn apply_aureole(
                                     Some(Material::Graphite)
                                 }
                                 // Silicification (requires water)
-                                else if config.silicification_enabled && has_water_in_snapshot {
+                                else if config.silicification_enabled && has_local_water {
                                     match mat {
-                                        Material::Limestone if rng.gen::<f32>() < config.silicification_limestone_prob => {
+                                        Material::Limestone if rng.gen::<f32>() < config.silicification_limestone_prob * water_magnitude => {
                                             voxels_silicified += 1;
                                             Some(Material::Quartz)
                                         },
-                                        Material::Sandstone if rng.gen::<f32>() < config.silicification_sandstone_prob => {
+                                        Material::Sandstone if rng.gen::<f32>() < config.silicification_sandstone_prob * water_magnitude => {
                                             voxels_silicified += 1;
                                             Some(Material::Quartz)
                                         },
@@ -263,13 +310,13 @@ pub fn apply_aureole(
                             // Outer aureole (6+)
                             _ => {
                                 // Silicification in outer aureole (weaker, requires water)
-                                if config.silicification_enabled && has_water_in_snapshot {
+                                if config.silicification_enabled && has_local_water {
                                     match mat {
-                                        Material::Limestone if rng.gen::<f32>() < config.silicification_limestone_prob * 0.5 => {
+                                        Material::Limestone if rng.gen::<f32>() < config.silicification_limestone_prob * 0.5 * water_magnitude => {
                                             voxels_silicified += 1;
                                             Some(Material::Quartz)
                                         },
-                                        Material::Sandstone if rng.gen::<f32>() < config.silicification_sandstone_prob * 0.5 => {
+                                        Material::Sandstone if rng.gen::<f32>() < config.silicification_sandstone_prob * 0.5 * water_magnitude => {
                                             voxels_silicified += 1;
                                             Some(Material::Quartz)
                                         },
@@ -314,48 +361,66 @@ pub fn apply_aureole(
     let mut erosion_count = 0u32;
     if config.water_erosion_enabled && !fluid_snapshot.chunks.is_empty() {
         let cs = fluid_snapshot.chunk_size;
-        for (&chunk_key, cells) in &fluid_snapshot.chunks {
-            let (cx, cy, cz) = chunk_key;
-            for z in 0..cs {
-                for y in 0..cs {
-                    for x in 0..cs {
-                        let idx = z * cs * cs + y * cs + x;
-                        let cell = &cells[idx];
-                        if cell.level <= 0.001 || !cell.fluid_type.is_water() {
-                            continue;
-                        }
+        // Collect water cell positions and levels first (avoids borrow conflict for drain)
+        let water_cells: Vec<((i32, i32, i32), usize, f32, bool)> = fluid_snapshot.chunks.iter()
+            .flat_map(|(&chunk_key, cells)| {
+                let (cx, cy, cz) = chunk_key;
+                (0..cs).flat_map(move |z| (0..cs).flat_map(move |y| (0..cs).map(move |x| {
+                    let idx = z * cs * cs + y * cs + x;
+                    let cell = &cells[idx];
+                    let wx = cx * (cs as i32) + x as i32;
+                    let wy = cy * (cs as i32) + y as i32;
+                    let wz = cz * (cs as i32) + z as i32;
+                    ((wx, wy, wz), idx, cell.level, cell.fluid_type.is_water() && cell.level > 0.001)
+                })))
+            })
+            .filter(|(_, _, _, valid)| *valid)
+            .collect();
 
-                        let wx = cx * (cs as i32) + x as i32;
-                        let wy = cy * (cs as i32) + y as i32;
-                        let wz = cz * (cs as i32) + z as i32;
-
-                        // Check solid neighbors for erodible host rocks
-                        for &(dx, dy, dz) in &FACE_OFFSETS {
-                            let nx = wx + dx;
-                            let ny = wy + dy;
-                            let nz = wz + dz;
-                            if let Some(mat) = sample_material(density_fields, nx, ny, nz, chunk_size) {
-                                if mat == Material::Limestone || mat == Material::Sandstone {
-                                    theoretical_max += 1;
-                                }
-                                if (mat == Material::Limestone || mat == Material::Sandstone)
-                                    && rng.gen::<f32>() < config.water_erosion_prob
-                                {
-                                    let (ck, elx, ely, elz) = world_to_chunk_local(nx, ny, nz, chunk_size);
-                                    if let Some(df) = density_fields.get(&ck) {
-                                        let sample = df.get(elx, ely, elz);
-                                        candidates.push(Candidate {
-                                            chunk_key: ck,
-                                            lx: elx, ly: ely, lz: elz,
-                                            old_material: mat,
-                                            density: sample.density,
-                                            new_material: Material::Air,
-                                        });
-                                        erosion_count += 1;
-                                    }
-                                }
-                            }
+        for &((wx, wy, wz), _idx, level, _) in &water_cells {
+            // Scale erosion probability by water cell level (more water = stronger erosion)
+            let level_factor = level.min(1.0);
+            for &(dx, dy, dz) in &FACE_OFFSETS {
+                let nx = wx + dx;
+                let ny = wy + dy;
+                let nz = wz + dz;
+                if let Some(mat) = sample_material(density_fields, nx, ny, nz, chunk_size) {
+                    if mat == Material::Limestone || mat == Material::Sandstone {
+                        theoretical_max += 1;
+                    }
+                    if (mat == Material::Limestone || mat == Material::Sandstone)
+                        && rng.gen::<f32>() < config.water_erosion_prob * level_factor
+                    {
+                        let (ck, elx, ely, elz) = world_to_chunk_local(nx, ny, nz, chunk_size);
+                        if let Some(df) = density_fields.get(&ck) {
+                            let sample = df.get(elx, ely, elz);
+                            candidates.push(Candidate {
+                                chunk_key: ck,
+                                lx: elx, ly: ely, lz: elz,
+                                old_material: mat,
+                                density: sample.density,
+                                new_material: Material::Air,
+                            });
+                            erosion_count += 1;
                         }
+                    }
+                }
+            }
+        }
+
+        // Drain water cells used for erosion (0.05 per voxel eroded, skip sources)
+        if erosion_count > 0 {
+            let drain_total = erosion_count as f32 * 0.05;
+            let per_cell = drain_total / water_cells.len().max(1) as f32;
+            for &((wx, wy, wz), _idx, _level, _) in &water_cells {
+                let fck = (wx.div_euclid(cs as i32), wy.div_euclid(cs as i32), wz.div_euclid(cs as i32));
+                let flx = wx.rem_euclid(cs as i32) as usize;
+                let fly = wy.rem_euclid(cs as i32) as usize;
+                let flz = wz.rem_euclid(cs as i32) as usize;
+                let fidx = flz * cs * cs + fly * cs + flx;
+                if let Some(cells) = fluid_snapshot.chunks.get_mut(&fck) {
+                    if fidx < cells.len() && !cells[fidx].is_source && cells[fidx].level > 0.001 {
+                        cells[fidx].level = (cells[fidx].level - per_cell).max(0.0);
                     }
                 }
             }

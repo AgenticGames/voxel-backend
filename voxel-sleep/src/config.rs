@@ -44,6 +44,9 @@ pub struct SleepConfig {
     /// Spider nest world positions (set by FFI before sleep starts)
     #[serde(skip)]
     pub nest_positions: Vec<(i32, i32, i32)>,
+    /// Spider corpse world positions (set by FFI before sleep starts)
+    #[serde(skip)]
+    pub corpse_positions: Vec<(i32, i32, i32)>,
 
     // --- Legacy fields (kept for FFI backward compat during transition) ---
     #[serde(skip)]
@@ -79,6 +82,7 @@ impl Default for SleepConfig {
             accumulation_enabled: true,
             accumulation_iterations: 3,
             nest_positions: Vec::new(),
+            corpse_positions: Vec::new(),
             // Legacy defaults
             metamorphism: MetamorphismConfig::default(),
             minerals: MineralConfig::default(),
@@ -216,6 +220,8 @@ pub struct AureoleConfig {
     pub silicification_enabled: bool,
     pub silicification_limestone_prob: f32,
     pub silicification_sandstone_prob: f32,
+    /// Water search radius multiplier for silicification (radius = effective_radius * this)
+    pub silicification_water_radius_mult: u32,
 }
 
 impl Default for AureoleConfig {
@@ -238,6 +244,7 @@ impl Default for AureoleConfig {
             silicification_enabled: true,
             silicification_limestone_prob: 0.30,
             silicification_sandstone_prob: 0.15,
+            silicification_water_radius_mult: 3,
         }
     }
 }
@@ -285,7 +292,7 @@ impl Default for VeinConfig {
         Self {
             vein_deposition_prob: 0.35,
             max_vein_voxels_per_source: 20,
-            vein_max_distance: 16,
+            vein_max_distance: 22,
             vein_enabled: true,
             heat_source_search_radius: 8,
             hypothermal_max: 4,
@@ -343,6 +350,8 @@ pub struct DeepTimeConfig {
     pub collapse: CollapseConfig,
     // Nest fossilization
     pub nest_fossilization: NestFossilizationConfig,
+    // Corpse fossilization
+    pub corpse_fossilization: CorpseFossilizationConfig,
 }
 
 impl Default for DeepTimeConfig {
@@ -364,6 +373,31 @@ impl Default for DeepTimeConfig {
             column_formation_prob: 0.05,
             collapse: CollapseConfig::default(),
             nest_fossilization: NestFossilizationConfig::default(),
+            corpse_fossilization: CorpseFossilizationConfig::default(),
+        }
+    }
+}
+
+/// Config for spider corpse fossilization (Phase 4 sub-stage).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorpseFossilizationConfig {
+    pub enabled: bool,
+    pub corpse_radius: u32,
+    pub pyrite_prob: f32,
+    pub calcium_prob: f32,
+    pub water_required: bool,
+    pub min_sleep_cycles: u32,
+}
+
+impl Default for CorpseFossilizationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            corpse_radius: 1,
+            pyrite_prob: 0.50,
+            calcium_prob: 0.40,
+            water_required: true,
+            min_sleep_cycles: 2,
         }
     }
 }
@@ -387,7 +421,7 @@ impl Default for NestFossilizationConfig {
             nest_radius: 2,
             pyrite_prob: 0.60,
             opal_prob: 0.40,
-            buried_required: true,
+            buried_required: false,
             water_required_for_pyrite: true,
             water_required_for_opal: true,
         }

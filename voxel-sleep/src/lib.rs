@@ -110,6 +110,8 @@ pub struct SleepResult {
     pub diamonds_formed: u32,
     pub voxels_silicified: u32,
     pub nests_fossilized: u32,
+    pub channels_eroded: u32,
+    pub corpses_fossilized: u32,
     pub dirty_chunks: Vec<(i32, i32, i32)>,
     pub collapse_events: Vec<voxel_core::stress::CollapseEvent>,
     /// Detailed log of transformations for UI display
@@ -311,7 +313,7 @@ pub fn execute_sleep(
     density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
     stress_fields: &mut HashMap<(i32, i32, i32), StressField>,
     support_fields: &mut HashMap<(i32, i32, i32), SupportField>,
-    fluid_snapshot: &FluidSnapshot,
+    fluid_snapshot: &mut FluidSnapshot,
     player_chunk: (i32, i32, i32),
     sleep_count: u32,
     progress_tx: Option<&Sender<SleepProgress>>,
@@ -392,6 +394,8 @@ pub fn execute_sleep(
     let mut total_diamonds_formed = 0u32;
     let mut total_silicified = 0u32;
     let mut total_nests_fossilized = 0u32;
+    let mut total_channels_eroded = 0u32;
+    let mut total_corpses_fossilized = 0u32;
     let mut all_collapse_events: Vec<voxel_core::stress::CollapseEvent> = Vec::new();
     let mut collapse_sub_timings: Option<CollapseTimings> = None;
     let mut diag_reaction = PhaseDiagnostics::default();
@@ -438,6 +442,7 @@ pub fn execute_sleep(
         total_coal_matured = aureole_result.coal_matured;
         total_diamonds_formed = aureole_result.diamonds_formed;
         total_silicified = aureole_result.voxels_silicified;
+        total_channels_eroded = aureole_result.channels_eroded;
         diag_aureole = aureole_result.diagnostics;
         result_manifest.merge_sleep_changes(&aureole_result.manifest);
         transform_log.extend(aureole_result.transform_log);
@@ -487,10 +492,12 @@ pub fn execute_sleep(
         let dt_result = apply_deeptime(
             &config.deeptime, &config.groundwater, density_fields, stress_fields, support_fields,
             fluid_snapshot, &heat_map, &collapse_chunks, chunk_size,
-            &config.stress, &config.nest_positions, &mut rng, &census,
+            &config.stress, &config.nest_positions, &config.corpse_positions, sleep_count,
+            &mut rng, &census,
         );
         total_enriched = dt_result.voxels_enriched;
         total_nests_fossilized = dt_result.nests_fossilized;
+        total_corpses_fossilized = dt_result.corpses_fossilized;
         total_formations += dt_result.formations_grown;
         total_supports_degraded = dt_result.supports_degraded;
         diag_deeptime = dt_result.diagnostics;
@@ -605,6 +612,7 @@ pub fn execute_sleep(
         total_coal_matured += accum_coal_matured;
         total_diamonds_formed += accum_diamonds;
         total_silicified += accum_silicified;
+        total_channels_eroded += accum_eroded;
         total_veins += accum_veins;
         total_formations += accum_formations;
     }
@@ -703,6 +711,8 @@ pub fn execute_sleep(
         diamonds_formed: total_diamonds_formed,
         voxels_silicified: total_silicified,
         nests_fossilized: total_nests_fossilized,
+        channels_eroded: total_channels_eroded,
+        corpses_fossilized: total_corpses_fossilized,
         dirty_chunks,
         collapse_events: all_collapse_events,
         transform_log,
@@ -1000,13 +1010,13 @@ mod tests {
     fn test_execute_sleep_basic() {
         let (mut density_fields, mut stress_fields, mut support_fields) = make_test_world(16);
         let config = SleepConfig::default();
-        let fluid = FluidSnapshot::default();
+        let mut fluid = FluidSnapshot::default();
         let result = execute_sleep(
             &config,
             &mut density_fields,
             &mut stress_fields,
             &mut support_fields,
-            &fluid,
+            &mut fluid,
             (0, 0, 0),
             1,
             None,
@@ -1019,10 +1029,11 @@ mod tests {
         let (mut df1, mut sf1, mut sup1) = make_test_world(16);
         let (mut df2, mut sf2, mut sup2) = make_test_world(16);
         let config = SleepConfig::default();
-        let fluid = FluidSnapshot::default();
+        let mut fluid1 = FluidSnapshot::default();
+        let mut fluid2 = FluidSnapshot::default();
 
-        let r1 = execute_sleep(&config, &mut df1, &mut sf1, &mut sup1, &fluid, (0, 0, 0), 1, None);
-        let r2 = execute_sleep(&config, &mut df2, &mut sf2, &mut sup2, &fluid, (0, 0, 0), 1, None);
+        let r1 = execute_sleep(&config, &mut df1, &mut sf1, &mut sup1, &mut fluid1, (0, 0, 0), 1, None);
+        let r2 = execute_sleep(&config, &mut df2, &mut sf2, &mut sup2, &mut fluid2, (0, 0, 0), 1, None);
 
         assert_eq!(r1.acid_dissolved, r2.acid_dissolved);
         assert_eq!(r1.voxels_metamorphosed, r2.voxels_metamorphosed);
@@ -1035,7 +1046,7 @@ mod tests {
     fn test_multiple_sleep_cycles() {
         let (mut density_fields, mut stress_fields, mut support_fields) = make_test_world(16);
         let config = SleepConfig::default();
-        let fluid = FluidSnapshot::default();
+        let mut fluid = FluidSnapshot::default();
 
         for cycle in 1..=3 {
             let result = execute_sleep(
@@ -1043,7 +1054,7 @@ mod tests {
                 &mut density_fields,
                 &mut stress_fields,
                 &mut support_fields,
-                &fluid,
+                &mut fluid,
                 (0, 0, 0),
                 cycle,
                 None,
@@ -1055,7 +1066,7 @@ mod tests {
     #[test]
     fn test_sleep_with_supports() {
         let (mut density_fields, mut stress_fields, mut support_fields) = make_test_world(16);
-        let fluid = FluidSnapshot::default();
+        let mut fluid = FluidSnapshot::default();
 
         if let Some(sf) = support_fields.get_mut(&(0, 0, 0)) {
             sf.set(5, 5, 5, SupportType::SlateStrut);
@@ -1069,7 +1080,7 @@ mod tests {
             &mut density_fields,
             &mut stress_fields,
             &mut support_fields,
-            &fluid,
+            &mut fluid,
             (0, 0, 0),
             1,
             None,
@@ -1081,14 +1092,14 @@ mod tests {
     fn test_sleep_manifest_records_changes() {
         let (mut density_fields, mut stress_fields, mut support_fields) = make_test_world(16);
         let config = SleepConfig::default();
-        let fluid = FluidSnapshot::default();
+        let mut fluid = FluidSnapshot::default();
 
         let result = execute_sleep(
             &config,
             &mut density_fields,
             &mut stress_fields,
             &mut support_fields,
-            &fluid,
+            &mut fluid,
             (0, 0, 0),
             1,
             None,
@@ -1122,14 +1133,14 @@ mod tests {
     fn test_reaction_diagnostics() {
         let (mut density_fields, mut stress_fields, mut support_fields) = make_test_world(16);
         let config = SleepConfig::default();
-        let fluid = FluidSnapshot::default();
+        let mut fluid = FluidSnapshot::default();
 
         let result = execute_sleep(
             &config,
             &mut density_fields,
             &mut stress_fields,
             &mut support_fields,
-            &fluid,
+            &mut fluid,
             (0, 0, 0),
             1,
             None,
@@ -1162,10 +1173,11 @@ mod tests {
         let (mut df1, mut sf1, mut sup1) = make_test_world(16);
         let (mut df2, mut sf2, mut sup2) = make_test_world(16);
         let config = SleepConfig::default();
-        let fluid = FluidSnapshot::default();
+        let mut fluid1 = FluidSnapshot::default();
+        let mut fluid2 = FluidSnapshot::default();
 
-        let r1 = execute_sleep(&config, &mut df1, &mut sf1, &mut sup1, &fluid, (0, 0, 0), 1, None);
-        let r2 = execute_sleep(&config, &mut df2, &mut sf2, &mut sup2, &fluid, (0, 0, 0), 1, None);
+        let r1 = execute_sleep(&config, &mut df1, &mut sf1, &mut sup1, &mut fluid1, (0, 0, 0), 1, None);
+        let r2 = execute_sleep(&config, &mut df2, &mut sf2, &mut sup2, &mut fluid2, (0, 0, 0), 1, None);
 
         // Strip timing values (non-deterministic) by checking structural content
         assert!(r1.profile_report.contains("Resource Census"));

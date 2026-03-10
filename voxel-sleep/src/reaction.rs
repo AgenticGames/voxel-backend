@@ -33,7 +33,7 @@ pub struct ReactionResult {
 pub fn apply_reaction(
     config: &ReactionConfig,
     density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
-    fluid_snapshot: &FluidSnapshot,
+    fluid_snapshot: &mut FluidSnapshot,
     chunks: &[(i32, i32, i32)],
     chunk_size: usize,
     rng: &mut ChaCha8Rng,
@@ -339,11 +339,11 @@ pub fn apply_reaction(
         let mut sulfide_bfs_visited: HashSet<(i32, i32, i32)> = HashSet::new();
 
         for &(sx, sy, sz, has_water) in &sulfide_sites {
-            let effective_radius = if has_water {
-                (base_radius as f32 * config.sulfide_water_amplification) as i32
-            } else {
-                base_radius as i32
-            };
+            // Sulfide oxidation requires water as reactant (FeS₂ + 7O₂ + 2H₂O → ...)
+            if !has_water {
+                continue;
+            }
+            let effective_radius = (base_radius as f32 * config.sulfide_water_amplification) as i32;
 
             let mut queue: VecDeque<((i32, i32, i32), i32)> = VecDeque::new();
             let mut visited: HashSet<(i32, i32, i32)> = HashSet::new();
@@ -404,6 +404,32 @@ pub fn apply_reaction(
                     new_density: -1.0,
                     change_type: 3, // sulfide acid
                 });
+            }
+        }
+
+        // Drain water near sulfide sites (acid consumes water: 0.1 per BFS step)
+        let cs = fluid_snapshot.chunk_size;
+        for &(sx, sy, sz, has_water) in &sulfide_sites {
+            if !has_water { continue; }
+            let drain_amount = 0.1;
+            for &(dx, dy, dz) in &FACE_OFFSETS {
+                let nwx = sx + dx;
+                let nwy = sy + dy;
+                let nwz = sz + dz;
+                let fck = (
+                    nwx.div_euclid(cs as i32),
+                    nwy.div_euclid(cs as i32),
+                    nwz.div_euclid(cs as i32),
+                );
+                if let Some(cells) = fluid_snapshot.chunks.get_mut(&fck) {
+                    let flx = nwx.rem_euclid(cs as i32) as usize;
+                    let fly = nwy.rem_euclid(cs as i32) as usize;
+                    let flz = nwz.rem_euclid(cs as i32) as usize;
+                    let idx = flz * cs * cs + fly * cs + flx;
+                    if idx < cells.len() && !cells[idx].is_source && cells[idx].level > 0.001 && cells[idx].fluid_type.is_water() {
+                        cells[idx].level = (cells[idx].level - drain_amount).max(0.0);
+                    }
+                }
             }
         }
     }

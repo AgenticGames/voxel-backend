@@ -668,6 +668,31 @@ pub unsafe extern "C" fn voxel_set_sleep_nests(
     1
 }
 
+/// Set spider corpse positions for sleep fossilization. Coordinates are UE world space.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_set_sleep_corpses(
+    engine: *mut c_void,
+    world_xs: *const i32,
+    world_ys: *const i32,
+    world_zs: *const i32,
+    count: u32,
+) -> u32 {
+    if engine.is_null() || (count > 0 && (world_xs.is_null() || world_ys.is_null() || world_zs.is_null())) {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let positions: Vec<(i32, i32, i32)> = (0..count as usize)
+        .map(|i| {
+            let ux = *world_xs.add(i);
+            let uy = *world_ys.add(i);
+            let uz = *world_zs.add(i);
+            crate::convert::ue_chunk_to_rust(ux, uy, uz)
+        })
+        .collect();
+    engine.set_sleep_corpses(positions);
+    1
+}
+
 /// Start a deep sleep cycle. player_chunk coordinates are in UE space.
 /// Returns 1 on success, 0 if queue full.
 #[no_mangle]
@@ -708,6 +733,8 @@ pub unsafe extern "C" fn voxel_poll_sleep_result(engine: *mut c_void) -> FfiSlee
         diamonds_formed: 0,
         voxels_silicified: 0,
         nests_fossilized: 0,
+        channels_eroded: 0,
+        corpses_fossilized: 0,
         dirty_chunks: ptr::null_mut(),
         dirty_chunk_count: 0,
         collapse_events: ptr::null_mut(),
@@ -744,6 +771,8 @@ pub unsafe extern "C" fn voxel_poll_sleep_result(engine: *mut c_void) -> FfiSlee
                 diamonds_formed: data.diamonds_formed,
                 voxels_silicified: data.voxels_silicified,
                 nests_fossilized: data.nests_fossilized,
+                channels_eroded: data.channels_eroded,
+                corpses_fossilized: data.corpses_fossilized,
                 dirty_chunks: ptr::null_mut(),
                 dirty_chunk_count: 0,
                 collapse_events: ptr::null_mut(),

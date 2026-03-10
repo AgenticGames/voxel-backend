@@ -39,14 +39,23 @@ fn select_ore_by_distance(
     rng: &mut ChaCha8Rng,
 ) -> Material {
     if distance < config.hypothermal_max {
-        // Hypothermal (high-temperature): Tin / Quartz
-        if rng.gen::<f32>() < 0.40 { Material::Tin } else { Material::Quartz }
+        // Hypothermal (high-temperature): Tin / Quartz / Pyrite
+        let r = rng.gen::<f32>();
+        if r < 0.35 { Material::Tin }
+        else if r < 0.65 { Material::Quartz }
+        else { Material::Pyrite }
     } else if distance < config.mesothermal_max {
-        // Mesothermal (medium-temperature): Copper / Iron
-        if rng.gen::<f32>() < 0.50 { Material::Copper } else { Material::Iron }
+        // Mesothermal (medium-temperature): Copper / Iron / Pyrite
+        let r = rng.gen::<f32>();
+        if r < 0.40 { Material::Copper }
+        else if r < 0.75 { Material::Iron }
+        else { Material::Pyrite }
     } else {
-        // Epithermal (low-temperature): Gold / Sulfide
-        if rng.gen::<f32>() < 0.40 { Material::Gold } else { Material::Sulfide }
+        // Epithermal (low-temperature): Gold / Sulfide / Pyrite
+        let r = rng.gen::<f32>();
+        if r < 0.30 { Material::Gold }
+        else if r < 0.55 { Material::Sulfide }
+        else { Material::Pyrite }
     }
 }
 
@@ -63,7 +72,7 @@ pub fn apply_veins(
     config: &VeinConfig,
     groundwater: &GroundwaterConfig,
     density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
-    fluid_snapshot: &FluidSnapshot,
+    fluid_snapshot: &mut FluidSnapshot,
     heat_map: &HeatMap,
     chunks: &[(i32, i32, i32)],
     chunk_size: usize,
@@ -182,6 +191,45 @@ pub fn apply_veins(
                                     });
                                     global_deposited.insert(vpos);
                                     source_deposited += 1;
+                                }
+                            }
+
+                            // Co-deposit pyrite gangue mineral alongside non-Pyrite ores
+                            if ore != Material::Pyrite && rng.gen::<f32>() < 0.25 && source_deposited < max_per_source {
+                                // Pick first host-rock neighbor of the vein seed for pyrite co-deposit
+                                for &(pdx, pdy, pdz) in &FACE_OFFSETS {
+                                    let pnx = nx + pdx;
+                                    let pny = ny + pdy;
+                                    let pnz = nz + pdz;
+                                    if global_deposited.contains(&(pnx, pny, pnz)) { continue; }
+                                    if let Some(pmat) = sample_material(density_fields, pnx, pny, pnz, chunk_size) {
+                                        if is_host_rock(pmat) {
+                                            let pyrite_params = VeinGrowthParams {
+                                                ore: Material::Pyrite,
+                                                min_size: 1,
+                                                max_size: 3,
+                                                bias: default_vein_bias(Material::Pyrite, rng),
+                                            };
+                                            let pyrite_vein = grow_vein(density_fields, (pnx, pny, pnz), &pyrite_params, chunk_size, rng);
+                                            for &pvpos in &pyrite_vein {
+                                                if global_deposited.contains(&pvpos) { continue; }
+                                                if source_deposited >= max_per_source { break; }
+                                                let (pck, plx, ply, plz) = world_to_chunk_local(pvpos.0, pvpos.1, pvpos.2, chunk_size);
+                                                if let Some(pdf) = density_fields.get(&pck) {
+                                                    let psample = pdf.get(plx, ply, plz);
+                                                    vein_candidates.push(VeinCandidate {
+                                                        chunk_key: pck, lx: plx, ly: ply, lz: plz,
+                                                        old_material: psample.material,
+                                                        old_density: psample.density,
+                                                        new_material: Material::Pyrite,
+                                                    });
+                                                    global_deposited.insert(pvpos);
+                                                    source_deposited += 1;
+                                                }
+                                            }
+                                            break;
+                                        }
+                                    }
                                 }
                             }
                         }

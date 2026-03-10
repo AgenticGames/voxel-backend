@@ -51,7 +51,7 @@ fn mat_name(id: u8) -> &'static str {
 fn make_ue_config() -> SleepConfig {
     let mut cfg = SleepConfig::default();
     cfg.veins.vein_deposition_prob = 0.35;
-    cfg.veins.vein_max_distance = 16;
+    cfg.veins.vein_max_distance = 22;
     cfg.veins.max_vein_voxels_per_source = 20;
     cfg.deeptime.enrichment_prob = 0.25;
     cfg.deeptime.vein_thickening_prob = 0.20;
@@ -419,12 +419,12 @@ fn bench_sleep_statistics() {
     eprintln!("\n{:=<80}", "= SLEEP STATISTICS (collapse OFF, 50 runs × 4 fluid configs) ");
 
     // ── Summary comparison table ──
-    eprintln!("\n{:<10} {:>5} {:>5} | {:>7} {:>7} {:>7} {:>7} {:>7} | {:>7} {:>7} {:>7} {:>7} | {:>6}",
+    eprintln!("\n{:<10} {:>5} {:>5} | {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} | {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} | {:>6}",
         "Config", "Water", "Lava",
-        "Marble", "Iron", "Copper", "Gold", "Sulfide",
-        "Eroded", "Flowst", "Enrich", "Silici",
+        "Marble", "Iron", "Copper", "Gold", "Sulfide", "Pyrite",
+        "Eroded", "ChErode", "Flowst", "Enrich", "Silici", "Corpse",
         "ms");
-    eprintln!("{:-<115}", "");
+    eprintln!("{:-<145}", "");
 
     for fc in FLUID_CONFIGS {
         eprintln!("\n--- Generating world for '{}' (water={}) ---", fc.name, fc.water_count);
@@ -446,11 +446,20 @@ fn bench_sleep_statistics() {
             let mut density = template_density.clone();
             let mut stress = template_stress.clone();
             let mut support = template_support.clone();
-            let config = make_ue_config();
+            let mut run_fluid = fluid.clone();
+            let mut config = make_ue_config();
+            // Inject test fossilization targets
+            config.nest_positions = vec![
+                (8, -72, 8), (24, -68, 24), (40, -64, 12), (16, -76, 32), (32, -70, 20),
+            ];
+            config.corpse_positions = vec![
+                (10, -72, 10), (12, -68, 22), (38, -66, 14), (20, -74, 30), (28, -70, 18),
+                (6, -72, 6), (26, -68, 26), (36, -64, 16), (14, -76, 28), (30, -70, 22),
+            ];
 
             let result = execute_sleep(
                 &config, &mut density, &mut stress, &mut support,
-                &fluid, (1, -4, 1), i, None,
+                &mut run_fluid, (1, -4, 1), i, None,
             );
 
             let after = count_materials(&density);
@@ -473,17 +482,20 @@ fn bench_sleep_statistics() {
 
         let timing = compute_stats(&all_total_ms);
 
-        eprintln!("{:<10} {:>5} {:>5} | {:>+7.0} {:>+7.0} {:>+7.0} {:>+7.0} {:>+7.0} | {:>7.1} {:>7.1} {:>7.1} {:>7.1} | {:>6.0}",
+        eprintln!("{:<10} {:>5} {:>5} | {:>+7.0} {:>+7.0} {:>+7.0} {:>+7.0} {:>+7.0} {:>+7.0} | {:>7.1} {:>7.1} {:>7.1} {:>7.1} {:>7.1} {:>7.1} | {:>6.0}",
             fc.name, fc.water_count, lava_count,
             avg_delta(mat_id(Material::Marble)),
             avg_delta(mat_id(Material::Iron)),
             avg_delta(mat_id(Material::Copper)),
             avg_delta(mat_id(Material::Gold)),
             avg_delta(mat_id(Material::Sulfide)),
+            avg_delta(mat_id(Material::Pyrite)),
             avg_counter(|r| r.acid_dissolved as f64),
+            avg_counter(|r| r.channels_eroded as f64),
             avg_counter(|r| r.formations_grown as f64),
             avg_counter(|r| r.voxels_enriched as f64),
             avg_counter(|r| r.voxels_silicified as f64),
+            avg_counter(|r| r.corpses_fossilized as f64),
             timing.avg,
         );
 
@@ -515,6 +527,9 @@ fn bench_sleep_statistics() {
             ("coal_matured",        |r| r.coal_matured as f64),
             ("diamonds_formed",     |r| r.diamonds_formed as f64),
             ("voxels_silicified",   |r| r.voxels_silicified as f64),
+            ("channels_eroded",    |r| r.channels_eroded as f64),
+            ("corpses_fossilized", |r| r.corpses_fossilized as f64),
+            ("nests_fossilized",   |r| r.nests_fossilized as f64),
         ];
         eprintln!("  {:<22} {:>10} {:>10}", "Counter", "Avg", "Stddev");
         eprintln!("  {:-<44}", "");
@@ -576,7 +591,7 @@ fn bench_aureole_heat_scaling() {
                 let mut timing_ms = Vec::new();
 
                 for run in 0..10u32 {
-                    let (mut density, mut stress, mut support, fluid) =
+                    let (mut density, mut stress, mut support, mut fluid) =
                         make_synthetic_world(base_mat, &lava_positions, &water_positions);
 
                     let mut cfg = make_ue_config();
@@ -589,7 +604,7 @@ fn bench_aureole_heat_scaling() {
                     let before = count_materials(&density);
                     let result = execute_sleep(
                         &cfg, &mut density, &mut stress, &mut support,
-                        &fluid, (1, 1, 1), run, None,
+                        &mut fluid, (1, 1, 1), run, None,
                     );
                     let after = count_materials(&density);
                     let delta = material_delta(&before, &after);
@@ -651,13 +666,14 @@ fn bench_epithermal_rarity_sweep() {
                 let mut density = template_density.clone();
                 let mut stress = template_stress.clone();
                 let mut support = template_support.clone();
+                let mut run_fluid = fluid.clone();
 
                 let mut cfg = make_ue_config();
                 cfg.veins.epithermal_rarity = rarity;
 
                 execute_sleep(
                     &cfg, &mut density, &mut stress, &mut support,
-                    &fluid, (1, -4, 1), run, None,
+                    &mut run_fluid, (1, -4, 1), run, None,
                 );
                 let after = count_materials(&density);
                 let delta = material_delta(&before_census, &after);
@@ -725,11 +741,12 @@ fn bench_vein_size_comparison() {
             let mut density = template_density.clone();
             let mut stress = template_stress.clone();
             let mut support = template_support.clone();
+            let mut run_fluid = fluid.clone();
             let cfg = make_ue_config();
 
             execute_sleep(
                 &cfg, &mut density, &mut stress, &mut support,
-                &fluid, (1, -4, 1), run, None,
+                &mut run_fluid, (1, -4, 1), run, None,
             );
             let after = count_materials(&density);
             let delta = material_delta(&before_census, &after);
