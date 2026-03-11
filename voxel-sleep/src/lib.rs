@@ -113,6 +113,7 @@ pub struct SleepResult {
     pub channels_eroded: u32,
     pub corpses_fossilized: u32,
     pub gypsum_deposited: u32,
+    pub lava_solidified: u32,
     pub dirty_chunks: Vec<(i32, i32, i32)>,
     pub collapse_events: Vec<voxel_core::stress::CollapseEvent>,
     /// Detailed log of transformations for UI display
@@ -405,36 +406,11 @@ pub fn execute_sleep(
     let mut diag_veins = PhaseDiagnostics::default();
     let mut diag_deeptime = PhaseDiagnostics::default();
 
-    // ═══ Phase 1: The Reaction (10,000 years) ═══
+    // ═══ Phase 1: The Aureole (100,000 years) ═══
+    // Aureole runs BEFORE reaction so metamorphic minerals (marble, garnet, diopside)
+    // form from limestone BEFORE acid dissolution can destroy it. Marble is immune to acid.
     let t_p1 = Instant::now();
-    send_progress(progress_tx, 0, "The Reaction", 10_000, 0.0, 0, total_chunks, None, 0, String::new());
-
-    if config.phase1_enabled {
-        let reaction_result = apply_reaction(
-            &config.reaction, density_fields, fluid_snapshot,
-            &all_chunks, chunk_size, &mut rng, &census,
-        );
-        total_acid_dissolved = reaction_result.acid_dissolved;
-        total_oxidized = reaction_result.voxels_oxidized;
-        total_sulfide_dissolved = reaction_result.sulfide_dissolved;
-        total_gypsum_deposited += reaction_result.gypsum_deposited;
-        diag_reaction = reaction_result.diagnostics;
-        result_manifest.merge_sleep_changes(&reaction_result.manifest);
-        transform_log.extend(reaction_result.transform_log);
-        for key in reaction_result.manifest.chunk_deltas.keys() {
-            all_dirty.insert(*key);
-        }
-        send_progress(progress_tx, 0, "The Reaction", 10_000, 1.0, total_chunks, total_chunks,
-            reaction_result.glimpse_chunk, if reaction_result.glimpse_chunk.is_some() { 1 } else { 0 },
-            format!("Acid dissolved {} voxels, {} oxidized", total_acid_dissolved, total_oxidized));
-    } else {
-        send_progress(progress_tx, 0, "The Reaction", 10_000, 1.0, total_chunks, total_chunks, None, 0, String::new());
-    }
-    let t_p1_elapsed = t_p1.elapsed();
-
-    // ═══ Phase 2: The Aureole (100,000 years) ═══
-    let t_p2 = Instant::now();
-    send_progress(progress_tx, 1, "The Aureole", 100_000, 0.0, 0, total_chunks, None, 0, String::new());
+    send_progress(progress_tx, 0, "The Aureole", 100_000, 0.0, 0, total_chunks, None, 0, String::new());
 
     if config.phase2_enabled {
         let aureole_result = apply_aureole(
@@ -452,11 +428,38 @@ pub fn execute_sleep(
         for key in aureole_result.manifest.chunk_deltas.keys() {
             all_dirty.insert(*key);
         }
-        send_progress(progress_tx, 1, "The Aureole", 100_000, 1.0, total_chunks, total_chunks,
-            aureole_result.glimpse_chunk, if aureole_result.glimpse_chunk.is_some() { 2 } else { 0 },
+        send_progress(progress_tx, 0, "The Aureole", 100_000, 1.0, total_chunks, total_chunks,
+            aureole_result.glimpse_chunk, if aureole_result.glimpse_chunk.is_some() { 1 } else { 0 },
             format!("{} voxels metamorphosed, {} eroded", total_metamorphosed, aureole_result.channels_eroded));
     } else {
-        send_progress(progress_tx, 1, "The Aureole", 100_000, 1.0, total_chunks, total_chunks, None, 0, String::new());
+        send_progress(progress_tx, 0, "The Aureole", 100_000, 1.0, total_chunks, total_chunks, None, 0, String::new());
+    }
+    let t_p1_elapsed = t_p1.elapsed();
+
+    // ═══ Phase 2: The Reaction (10,000 years) ═══
+    let t_p2 = Instant::now();
+    send_progress(progress_tx, 1, "The Reaction", 10_000, 0.0, 0, total_chunks, None, 0, String::new());
+
+    if config.phase1_enabled {
+        let reaction_result = apply_reaction(
+            &config.reaction, density_fields, fluid_snapshot,
+            &all_chunks, chunk_size, &mut rng, &census,
+        );
+        total_acid_dissolved = reaction_result.acid_dissolved;
+        total_oxidized = reaction_result.voxels_oxidized;
+        total_sulfide_dissolved = reaction_result.sulfide_dissolved;
+        total_gypsum_deposited += reaction_result.gypsum_deposited;
+        diag_reaction = reaction_result.diagnostics;
+        result_manifest.merge_sleep_changes(&reaction_result.manifest);
+        transform_log.extend(reaction_result.transform_log);
+        for key in reaction_result.manifest.chunk_deltas.keys() {
+            all_dirty.insert(*key);
+        }
+        send_progress(progress_tx, 1, "The Reaction", 10_000, 1.0, total_chunks, total_chunks,
+            reaction_result.glimpse_chunk, if reaction_result.glimpse_chunk.is_some() { 2 } else { 0 },
+            format!("Acid dissolved {} voxels, {} oxidized", total_acid_dissolved, total_oxidized));
+    } else {
+        send_progress(progress_tx, 1, "The Reaction", 10_000, 1.0, total_chunks, total_chunks, None, 0, String::new());
     }
     let t_p2_elapsed = t_p2.elapsed();
 
@@ -622,6 +625,14 @@ pub fn execute_sleep(
     }
     let t_accum_elapsed = t_accum.elapsed();
 
+    // --- Lava Solidification ---
+    let mut total_lava_solidified = 0u32;
+    if config.lava_solidification_enabled {
+        let (count, entries) = solidify_lava(density_fields, fluid_snapshot, &mut result_manifest, &mut all_dirty, chunk_size);
+        total_lava_solidified = count;
+        transform_log.extend(entries);
+    }
+
     // --- Done ---
     let t_agg = Instant::now();
     send_progress(progress_tx, 5, "Complete", 1_250_000, 1.0, total_chunks, total_chunks, None, 0, String::new());
@@ -654,11 +665,11 @@ pub fn execute_sleep(
         chunk_classify: t_classify_elapsed,
         fluid_snapshot: Duration::ZERO, // Snapshot acquired externally
         heat_map: t_heat_elapsed,
-        reaction: t_p1_elapsed,
-        reaction_acid: t_p1_elapsed,     // Sub-timing not split yet
+        reaction: t_p2_elapsed,
+        reaction_acid: t_p2_elapsed,     // Sub-timing not split yet
         reaction_oxidation: Duration::ZERO,
-        aureole: t_p2_elapsed,
-        aureole_metamorphism: t_p2_elapsed,
+        aureole: t_p1_elapsed,
+        aureole_metamorphism: t_p1_elapsed,
         aureole_erosion: Duration::ZERO,
         veins: t_p3_elapsed,
         veins_hydrothermal: t_p3_elapsed,
@@ -718,6 +729,7 @@ pub fn execute_sleep(
         channels_eroded: total_channels_eroded,
         corpses_fossilized: total_corpses_fossilized,
         gypsum_deposited: total_gypsum_deposited,
+        lava_solidified: total_lava_solidified,
         dirty_chunks,
         collapse_events: all_collapse_events,
         transform_log,
@@ -727,6 +739,79 @@ pub fn execute_sleep(
         // Legacy
         minerals_grown: total_formations,
     }
+}
+
+/// Convert all lava fluid cells to solid basalt voxels.
+/// After 1.25Ma of geological time, any standing lava would have solidified.
+fn solidify_lava(
+    density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
+    fluid_snapshot: &mut FluidSnapshot,
+    manifest: &mut ChangeManifest,
+    all_dirty: &mut HashSet<(i32, i32, i32)>,
+    chunk_size: usize,
+) -> (u32, Vec<TransformEntry>) {
+    use voxel_core::stress::world_to_chunk_local;
+    let mut count = 0u32;
+    let cs = fluid_snapshot.chunk_size;
+    if cs == 0 {
+        return (0, Vec::new());
+    }
+
+    // Collect all lava cell positions first to avoid borrow conflict
+    let lava_cells: Vec<((i32, i32, i32), (i32, i32, i32), usize)> = fluid_snapshot.chunks.iter()
+        .flat_map(|(&chunk_key, cells)| {
+            let (cx, cy, cz) = chunk_key;
+            let mut out = Vec::new();
+            for z in 0..cs {
+                for y in 0..cs {
+                    for x in 0..cs {
+                        let idx = z * cs * cs + y * cs + x;
+                        let cell = &cells[idx];
+                        if cell.level > 0.001 && cell.fluid_type.is_lava() {
+                            let wx = cx * (cs as i32) + x as i32;
+                            let wy = cy * (cs as i32) + y as i32;
+                            let wz = cz * (cs as i32) + z as i32;
+                            out.push(((wx, wy, wz), chunk_key, idx));
+                        }
+                    }
+                }
+            }
+            out
+        })
+        .collect();
+
+    // Set density field voxels to basalt
+    for &((wx, wy, wz), _fluid_chunk, _) in &lava_cells {
+        let (ck, lx, ly, lz) = world_to_chunk_local(wx, wy, wz, chunk_size);
+        if let Some(df) = density_fields.get_mut(&ck) {
+            let sample = df.get_mut(lx, ly, lz);
+            let old_mat = sample.material;
+            let old_density = sample.density;
+            sample.material = Material::Basalt;
+            sample.density = 1.0;
+            manifest.record_voxel_change(ck, lx, ly, lz, old_mat, old_density, Material::Basalt, 1.0);
+            all_dirty.insert(ck);
+            count += 1;
+        }
+    }
+
+    // Drain all lava cells
+    for &(_, fluid_chunk, idx) in &lava_cells {
+        if let Some(cells) = fluid_snapshot.chunks.get_mut(&fluid_chunk) {
+            if idx < cells.len() {
+                cells[idx].level = 0.0;
+            }
+        }
+    }
+
+    let mut entries = Vec::new();
+    if count > 0 {
+        entries.push(TransformEntry {
+            description: format!("Lava Solidification: {} lava cells \u{2192} basalt", count),
+            count,
+        });
+    }
+    (count, entries)
 }
 
 fn dur_ms(d: Duration) -> f64 {

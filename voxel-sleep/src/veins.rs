@@ -32,6 +32,48 @@ pub struct VeinResult {
     pub diagnostics: PhaseDiagnostics,
 }
 
+/// Select a dominant ore type for a heat source based on position hash + temperature zone.
+/// Each heat source consistently produces mostly one ore type, creating coherent vein bodies
+/// instead of confetti patterns where every surface voxel is a different mineral.
+fn select_dominant_ore(
+    _config: &VeinConfig,
+    heat_pos: (i32, i32, i32),
+    host_rock: Material,
+) -> Material {
+    // Spatial hash: mix position to get a stable per-source value
+    let (hx, hy, hz) = heat_pos;
+    let hash = ((hx.wrapping_mul(73856093)) ^ (hy.wrapping_mul(19349663)) ^ (hz.wrapping_mul(83492791))) as u32;
+    let r = (hash % 1000) as f32 / 1000.0;
+
+    match host_rock {
+        Material::Limestone | Material::Garnet | Material::Diopside | Material::Marble => {
+            // Limestone/skarn assemblage: Cu-Fe dominant
+            if r < 0.35 { Material::Copper }
+            else if r < 0.65 { Material::Iron }
+            else if r < 0.80 { Material::Tin }
+            else { Material::Sulfide }
+        },
+        Material::Slate | Material::Hornfels => {
+            // Slate assemblage: variable (Bendigo-style gold, cassiterite-copper, etc.)
+            if r < 0.25 { Material::Copper }
+            else if r < 0.45 { Material::Iron }
+            else if r < 0.60 { Material::Sulfide }
+            else if r < 0.75 { Material::Tin }
+            else if r < 0.90 { Material::Gold }
+            else { Material::Quartz }
+        },
+        _ => {
+            if r < 0.30 { Material::Copper }
+            else if r < 0.55 { Material::Iron }
+            else if r < 0.75 { Material::Tin }
+            else { Material::Sulfide }
+        }
+    }
+}
+
+/// Probability that a heat source uses its dominant ore vs random selection.
+const DOMINANT_ORE_PROB: f32 = 0.75;
+
 /// Select ore type by BFS distance from heat source and host rock (temperature zonation + skarn/slate).
 fn select_ore_by_distance_and_host(
     config: &VeinConfig,
@@ -42,46 +84,60 @@ fn select_ore_by_distance_and_host(
     // Per-host ore selection (limestone skarn = copper-iron, slate = gold-pyrite Bendigo)
     if config.host_rock_ore_enabled {
         match host_rock {
-            Material::Limestone | Material::Garnet | Material::Diopside => {
+            Material::Limestone | Material::Garnet | Material::Diopside | Material::Marble => {
                 if distance < config.hypothermal_max {
+                    // High-T skarn: Cu-Fe dominant, Tin, Pyrite gangue
                     let r = rng.gen::<f32>();
-                    if r < 0.50 { return Material::Copper; }
-                    else if r < 0.80 { return Material::Iron; }
+                    if r < 0.07 { return Material::Tin; }
+                    else if r < 0.42 { return Material::Copper; }
+                    else if r < 0.67 { return Material::Iron; }
+                    else if r < 0.77 { return Material::Sulfide; }
                     else { return Material::Pyrite; }
                 } else if distance < config.mesothermal_max {
+                    // Mid-T: Cu/Fe/Sulfide, some Tin, Pyrite gangue
                     let r = rng.gen::<f32>();
-                    if r < 0.45 { return Material::Copper; }
-                    else if r < 0.80 { return Material::Iron; }
+                    if r < 0.04 { return Material::Tin; }
+                    else if r < 0.31 { return Material::Copper; }
+                    else if r < 0.56 { return Material::Iron; }
+                    else if r < 0.71 { return Material::Sulfide; }
+                    else { return Material::Pyrite; }
+                } else {
+                    // Epithermal limestone: Pyrite-rich for cascade + Cu/Fe/Sulfide
+                    let r = rng.gen::<f32>();
+                    if r < 0.10 { return Material::Gold; }
+                    else if r < 0.25 { return Material::Copper; }
+                    else if r < 0.40 { return Material::Iron; }
+                    else if r < 0.55 { return Material::Sulfide; }
                     else { return Material::Pyrite; }
                 }
-                // epithermal falls through to default
             },
             Material::Slate | Material::Hornfels => {
                 if distance < config.hypothermal_max {
-                    // High-T: Iron dominant, Tin/Copper significant, Pyrite gangue
+                    // High-T: Tin/Copper dominant (cassiterite-chalcopyrite)
                     let r = rng.gen::<f32>();
-                    if r < 0.05 { return Material::Quartz; }
-                    else if r < 0.20 { return Material::Pyrite; }
-                    else if r < 0.40 { return Material::Tin; }
-                    else if r < 0.70 { return Material::Iron; }
-                    else { return Material::Copper; }
-                } else if distance < config.mesothermal_max {
-                    // Mid-T: Iron/Sulfide dominant, Pyrite gangue
-                    let r = rng.gen::<f32>();
-                    if r < 0.05 { return Material::Gold; }
-                    else if r < 0.25 { return Material::Pyrite; }
-                    else if r < 0.50 { return Material::Iron; }
-                    else if r < 0.65 { return Material::Copper; }
-                    else if r < 0.90 { return Material::Sulfide; }
-                    else { return Material::Tin; }
-                } else {
-                    // Low-T epithermal: Sulfide dominant, Iron/Pyrite secondary
-                    let r = rng.gen::<f32>();
-                    if r < 0.10 { return Material::Gold; }
-                    else if r < 0.30 { return Material::Pyrite; }
-                    else if r < 0.60 { return Material::Sulfide; }
+                    if r < 0.30 { return Material::Tin; }
+                    else if r < 0.60 { return Material::Copper; }
                     else if r < 0.80 { return Material::Iron; }
-                    else { return Material::Copper; }
+                    else if r < 0.90 { return Material::Quartz; }
+                    else { return Material::Pyrite; }
+                } else if distance < config.mesothermal_max {
+                    // Mid-T: Copper/Iron/Sulfide, some Tin
+                    let r = rng.gen::<f32>();
+                    if r < 0.25 { return Material::Copper; }
+                    else if r < 0.50 { return Material::Iron; }
+                    else if r < 0.70 { return Material::Sulfide; }
+                    else if r < 0.80 { return Material::Tin; }
+                    else if r < 0.90 { return Material::Quartz; }
+                    else { return Material::Gold; }
+                } else {
+                    // Low-T epithermal: Sulfide/Gold dominant, some Cu/Fe
+                    let r = rng.gen::<f32>();
+                    if r < 0.15 { return Material::Gold; }
+                    else if r < 0.35 { return Material::Sulfide; }
+                    else if r < 0.50 { return Material::Copper; }
+                    else if r < 0.65 { return Material::Iron; }
+                    else if r < 0.80 { return Material::Quartz; }
+                    else { return Material::Pyrite; }
                 }
             },
             _ => {},
@@ -154,6 +210,14 @@ pub fn apply_veins(
             let mut queue: VecDeque<((i32, i32, i32), u32)> = VecDeque::new();
             let mut visited: HashSet<(i32, i32, i32)> = HashSet::new();
             let mut source_deposited = 0u32;
+            let mut skip_counter: u32 = 0;
+
+            // Determine dominant ore for this heat source (sampled from nearby host rock)
+            let nearby_host = FACE_OFFSETS.iter()
+                .filter_map(|&(dx, dy, dz)| sample_material(density_fields, hx + dx, hy + dy, hz + dz, chunk_size))
+                .find(|m| is_host_rock(*m))
+                .unwrap_or(Material::Slate);
+            let dominant_ore = select_dominant_ore(config, heat.pos, nearby_host);
 
             // Try direct air neighbors first (fast path for exposed lava/kimberlite)
             for &(dx, dy, dz) in &FACE_OFFSETS {
@@ -204,7 +268,16 @@ pub fn apply_veins(
                             aperture_multiplier(air_n)
                         } else { 1.0 };
                         if is_host_rock(mat) && rng.gen::<f32>() < eff_prob {
-                            let ore = select_ore_by_distance_and_host(config, dist, mat, rng);
+                            if skip_counter > 0 {
+                                skip_counter -= 1;
+                                continue; // skip this surface, try next face
+                            }
+                            // 75% chance to use per-source dominant ore for coherent vein bodies
+                            let ore = if rng.gen::<f32>() < DOMINANT_ORE_PROB {
+                                dominant_ore
+                            } else {
+                                select_ore_by_distance_and_host(config, dist, mat, rng)
+                            };
 
                             // Epithermal rarity: precious metals deposit less frequently
                             let rarity_factor = if dist >= config.mesothermal_max {
@@ -240,6 +313,48 @@ pub fn apply_veins(
                                     });
                                     global_deposited.insert(vpos);
                                     source_deposited += 1;
+
+                                    // Wall-rock alteration: ore-bearing fluid alters adjacent limestone
+                                    if config.wall_rock_alteration_prob > 0.0
+                                        && rng.gen::<f32>() < config.wall_rock_alteration_prob
+                                    {
+                                        let alter_mat = if dist < config.hypothermal_max {
+                                            // High-T: garnet-dominated skarn
+                                            if rng.gen::<f32>() < 0.30 { Material::Diopside } else { Material::Garnet }
+                                        } else if dist < config.mesothermal_max {
+                                            // Mid-T: diopside + garnet mix
+                                            let r = rng.gen::<f32>();
+                                            if r < 0.25 { Material::Garnet } else { Material::Diopside }
+                                        } else {
+                                            // Low-T epithermal: diopside dominant, some garnet + marble
+                                            let r = rng.gen::<f32>();
+                                            if r < 0.20 { Material::Garnet }
+                                            else if r < 0.80 { Material::Diopside }
+                                            else { Material::Marble }
+                                        };
+                                        for &(adx, ady, adz) in &FACE_OFFSETS {
+                                            let anx = vpos.0 + adx;
+                                            let any = vpos.1 + ady;
+                                            let anz = vpos.2 + adz;
+                                            if global_deposited.contains(&(anx, any, anz)) { continue; }
+                                            if let Some(amat) = sample_material(density_fields, anx, any, anz, chunk_size) {
+                                                if amat == Material::Limestone {
+                                                    let (ack, alx, aly, alz) = world_to_chunk_local(anx, any, anz, chunk_size);
+                                                    if let Some(adf) = density_fields.get(&ack) {
+                                                        let asample = adf.get(alx, aly, alz);
+                                                        vein_candidates.push(VeinCandidate {
+                                                            chunk_key: ack, lx: alx, ly: aly, lz: alz,
+                                                            old_material: amat,
+                                                            old_density: asample.density,
+                                                            new_material: alter_mat,
+                                                        });
+                                                        global_deposited.insert((anx, any, anz));
+                                                    }
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
 
@@ -247,7 +362,7 @@ pub fn apply_veins(
                             let pyrite_codeposit_prob = if matches!(mat, Material::Slate | Material::Hornfels) {
                                 config.slate_pyrite_codeposit_prob
                             } else {
-                                0.25
+                                0.10
                             };
                             if ore != Material::Pyrite && rng.gen::<f32>() < pyrite_codeposit_prob && source_deposited < max_per_source {
                                 // Pick first host-rock neighbor of the vein seed for pyrite co-deposit
@@ -328,6 +443,8 @@ pub fn apply_veins(
                                     }
                                 }
                             }
+
+                            skip_counter = config.vein_deposit_spacing;
                         }
                     }
                 }

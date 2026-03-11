@@ -620,17 +620,32 @@ fn assign_material(
 /// Simplified host rock selection based purely on depth thresholds (no noise).
 /// Used by the terrace/building system to determine the correct floor material.
 pub fn host_rock_for_depth(y: f64, host: &HostRockConfig) -> Material {
+    let (boundaries, mid_rock, low_rock) = sorted_host_layers(host);
     if y > host.sandstone_depth {
         Material::Sandstone
-    } else if y > host.granite_depth {
+    } else if y > boundaries[0] {
         Material::Limestone
-    } else if y > host.basalt_depth {
-        Material::Granite
-    } else if y > host.slate_depth {
-        Material::Slate
+    } else if y > boundaries[1] {
+        mid_rock
+    } else if y > boundaries[2] {
+        low_rock
     } else {
         Material::Marble
     }
+}
+
+/// Sort the three non-sandstone boundaries descending and determine which
+/// material (Granite vs Slate) occupies the upper vs lower zone.
+/// Returns (sorted_boundaries, upper_material, lower_material).
+fn sorted_host_layers(host: &HostRockConfig) -> ([f64; 3], Material, Material) {
+    let mut boundaries = [host.granite_depth, host.basalt_depth, host.slate_depth];
+    boundaries.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let (mid_rock, low_rock) = if host.granite_depth >= host.slate_depth {
+        (Material::Granite, Material::Slate)
+    } else {
+        (Material::Slate, Material::Granite)
+    };
+    (boundaries, mid_rock, low_rock)
 }
 
 /// Compute the water table Y level at a given world (X, Z) position.
@@ -646,7 +661,7 @@ pub fn water_table_y_at(wx: f64, wz: f64, config: &crate::config::WaterTableConf
 
 /// Select host rock based on depth with noise-perturbed layer boundaries.
 ///
-/// Layers (top to bottom): Sandstone → Limestone → Granite → Slate → Marble
+/// Layers (top to bottom): Sandstone → Limestone → {Granite,Slate sorted by depth} → Marble
 /// Basalt appears as vertical intrusion columns cutting through all layers.
 fn select_host_rock(
     wx: f64,
@@ -675,15 +690,16 @@ fn select_host_rock(
         }
     }
 
-    // Depth layering
+    // Depth layering (dynamically sorted so layer order follows config values)
+    let (boundaries, mid_rock, low_rock) = sorted_host_layers(host);
     if effective_y > host.sandstone_depth {
         Material::Sandstone
-    } else if effective_y > host.granite_depth {
+    } else if effective_y > boundaries[0] {
         Material::Limestone
-    } else if effective_y > host.basalt_depth {
-        Material::Granite
-    } else if effective_y > host.slate_depth {
-        Material::Slate
+    } else if effective_y > boundaries[1] {
+        mid_rock
+    } else if effective_y > boundaries[2] {
+        low_rock
     } else {
         Material::Marble
     }

@@ -1236,6 +1236,7 @@ fn handle_request(
                 nests_fossilized: sleep_result.nests_fossilized,
                 channels_eroded: sleep_result.channels_eroded,
                 corpses_fossilized: sleep_result.corpses_fossilized,
+                lava_solidified: sleep_result.lava_solidified,
                 profile_report: report,
             });
         }

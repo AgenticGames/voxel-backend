@@ -169,6 +169,34 @@ pub fn apply_reaction(
         }
 
         theoretical_max += acid_bfs_visited.len() as u32;
+
+        // Gypsum deposition from pyrite acid: CaCO₃ + H₂SO₄ → CaSO₄·2H₂O
+        if config.gypsum_enabled {
+            for &(wx, wy, wz) in &dissolved_set {
+                for &(dx, dy, dz) in &FACE_OFFSETS {
+                    let nx = wx + dx;
+                    let ny = wy + dy;
+                    let nz = wz + dz;
+                    if dissolved_set.contains(&(nx, ny, nz)) { continue; }
+                    if let Some(mat) = sample_material(density_fields, nx, ny, nz, chunk_size) {
+                        if mat == Material::Limestone && rng.gen::<f32>() < config.gypsum_deposition_prob {
+                            let (gck, glx, gly, glz) = world_to_chunk_local(nx, ny, nz, chunk_size);
+                            if let Some(df) = density_fields.get(&gck) {
+                                let gsample = df.get(glx, gly, glz);
+                                candidates.push(Candidate {
+                                    chunk_key: gck, lx: glx, ly: gly, lz: glz,
+                                    old_material: gsample.material,
+                                    old_density: gsample.density,
+                                    new_material: Material::Gypsum,
+                                    new_density: gsample.density,
+                                    change_type: 4, // gypsum deposition
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // --- Copper Oxidation: copper + air neighbor → malachite ---

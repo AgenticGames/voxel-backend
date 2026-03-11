@@ -41,6 +41,9 @@ pub struct SleepConfig {
     /// Number of accumulation iterations (each represents a fraction of remaining time)
     #[serde(default = "default_accumulation_iterations")]
     pub accumulation_iterations: u32,
+    /// Convert all lava fluid cells to solid basalt after sleep cycle
+    #[serde(default = "default_true")]
+    pub lava_solidification_enabled: bool,
     /// Spider nest world positions (set by FFI before sleep starts)
     #[serde(skip)]
     pub nest_positions: Vec<(i32, i32, i32)>,
@@ -81,6 +84,7 @@ impl Default for SleepConfig {
             sleep_count: 1,
             accumulation_enabled: true,
             accumulation_iterations: 3,
+            lava_solidification_enabled: true,
             nest_positions: Vec::new(),
             corpse_positions: Vec::new(),
             // Legacy defaults
@@ -180,20 +184,20 @@ pub struct ReactionConfig {
 impl Default for ReactionConfig {
     fn default() -> Self {
         Self {
-            acid_dissolution_prob: 0.20,
+            acid_dissolution_prob: 0.25,
             acid_dissolution_radius: 3,
             acid_dissolution_enabled: true,
             acid_max_dissolved_per_source: 30,
-            copper_oxidation_prob: 0.15,
+            copper_oxidation_prob: 0.0012,
             copper_oxidation_enabled: true,
-            basalt_crust_prob: 0.70,
+            basalt_crust_prob: 0.001,
             basalt_crust_enabled: true,
             sulfide_acid_enabled: true,
-            sulfide_acid_prob: 0.45,
+            sulfide_acid_prob: 0.60,
             sulfide_acid_radius: 2,
             sulfide_water_amplification: 2.0,
             limestone_acid_radius_boost: 1.5,
-            gypsum_deposition_prob: 0.35,
+            gypsum_deposition_prob: 0.18,
             gypsum_enabled: true,
         }
     }
@@ -232,7 +236,10 @@ pub struct AureoleConfig {
     pub silicification_water_radius_mult: u32,
     // Skarn + hornfels metamorphism
     pub contact_limestone_to_garnet_prob: f32,
+    pub mid_limestone_to_garnet_prob: f32,
     pub mid_limestone_to_diopside_prob: f32,
+    // Post-acid recrystallization (fills acid-dissolved air near heat with metamorphic minerals)
+    pub recrystallization_prob: f32,
     pub contact_slate_to_hornfels_prob: f32,
     pub mid_slate_to_hornfels_prob: f32,
     pub outer_slate_to_hornfels_prob: f32,
@@ -241,12 +248,12 @@ pub struct AureoleConfig {
 impl Default for AureoleConfig {
     fn default() -> Self {
         Self {
-            aureole_radius: 8,
-            contact_limestone_to_marble_prob: 0.80,
+            aureole_radius: 10,
+            contact_limestone_to_marble_prob: 0.18,
             contact_sandstone_to_granite_prob: 0.50,
-            mid_limestone_to_marble_prob: 0.50,
+            mid_limestone_to_marble_prob: 0.15,
             mid_sandstone_to_granite_prob: 0.25,
-            outer_limestone_to_marble_prob: 0.20,
+            outer_limestone_to_marble_prob: 0.30,
             water_erosion_prob: 0.05,
             water_erosion_enabled: true,
             metamorphism_enabled: true,
@@ -255,14 +262,16 @@ impl Default for AureoleConfig {
             coal_to_graphite_mid_prob: 0.35,
             graphite_to_diamond_prob: 0.15,
             silicification_enabled: true,
-            silicification_limestone_prob: 0.30,
+            silicification_limestone_prob: 0.55,
             silicification_sandstone_prob: 0.15,
             silicification_water_radius_mult: 3,
-            contact_limestone_to_garnet_prob: 0.80,
-            mid_limestone_to_diopside_prob: 0.50,
-            contact_slate_to_hornfels_prob: 0.70,
-            mid_slate_to_hornfels_prob: 0.40,
-            outer_slate_to_hornfels_prob: 0.15,
+            contact_limestone_to_garnet_prob: 0.65,
+            mid_limestone_to_garnet_prob: 0.30,
+            mid_limestone_to_diopside_prob: 0.65,
+            recrystallization_prob: 0.70,
+            contact_slate_to_hornfels_prob: 0.90,
+            mid_slate_to_hornfels_prob: 0.60,
+            outer_slate_to_hornfels_prob: 0.25,
         }
     }
 }
@@ -307,16 +316,23 @@ pub struct VeinConfig {
     pub host_rock_ore_enabled: bool,
     pub slate_pyrite_codeposit_prob: f32,
     pub slate_quartz_vein_prob: f32,
+    /// Wall-rock alteration: probability that vein deposition converts adjacent limestone to garnet/diopside
+    pub wall_rock_alteration_prob: f32,
+    /// Skip N surface voxels between vein deposits for spacing along contact surfaces
+    #[serde(default = "default_vein_deposit_spacing")]
+    pub vein_deposit_spacing: u32,
 }
+
+fn default_vein_deposit_spacing() -> u32 { 5 }
 
 impl Default for VeinConfig {
     fn default() -> Self {
         Self {
-            vein_deposition_prob: 0.65,
+            vein_deposition_prob: 0.85,
             max_vein_voxels_per_source: 80,
             vein_max_distance: 26,
             vein_enabled: true,
-            heat_source_search_radius: 8,
+            heat_source_search_radius: 20,
             hypothermal_max: 8,
             mesothermal_max: 14,
             epithermal_rarity: 0.55,
@@ -333,8 +349,10 @@ impl Default for VeinConfig {
             growth_density_max: 0.6,
             aperture_scaling_enabled: true,
             host_rock_ore_enabled: true,
-            slate_pyrite_codeposit_prob: 0.80,
+            slate_pyrite_codeposit_prob: 0.25,
             slate_quartz_vein_prob: 0.30,
+            wall_rock_alteration_prob: 0.18,
+            vein_deposit_spacing: 5,
         }
     }
 }
@@ -388,17 +406,17 @@ pub struct DeepTimeConfig {
 impl Default for DeepTimeConfig {
     fn default() -> Self {
         Self {
-            enrichment_prob: 0.25,
-            max_enrichment_per_chunk: 40,
-            enrichment_search_radius: 5,
+            enrichment_prob: 0.90,
+            max_enrichment_per_chunk: 400,
+            enrichment_search_radius: 12,
             enrichment_enabled: true,
-            enrichment_cluster_min: 2,
-            enrichment_cluster_max: 6,
-            vein_thickening_prob: 0.20,
-            vein_thickening_max_per_chunk: 20,
+            enrichment_cluster_min: 3,
+            enrichment_cluster_max: 30,
+            vein_thickening_prob: 0.35,
+            vein_thickening_max_per_chunk: 40,
             vein_thickening_enabled: true,
-            vein_thickening_growth_min: 2,
-            vein_thickening_growth_max: 5,
+            vein_thickening_growth_min: 3,
+            vein_thickening_growth_max: 8,
             mature_formations_enabled: true,
             stalactite_growth_prob: 0.10,
             column_formation_prob: 0.05,

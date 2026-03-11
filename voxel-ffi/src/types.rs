@@ -726,6 +726,10 @@ pub struct FfiEngineConfig {
     pub fluid_source_grace_ticks: u16,
     // ── Acid Dissolution Cap ──
     pub sleep_acid_max_dissolved_per_source: u32,
+    // ── Vein Deposit Spacing ──
+    pub sleep_vein_deposit_spacing: u32,
+    // ── Lava Solidification ──
+    pub sleep_lava_solidification_enabled: u8,
 }
 
 #[repr(C)]
@@ -816,6 +820,7 @@ pub struct FfiSleepResult {
     pub nests_fossilized: u32,
     pub channels_eroded: u32,
     pub corpses_fossilized: u32,
+    pub lava_solidified: u32,
     pub dirty_chunks: *mut FfiChunkCoord,
     pub dirty_chunk_count: u32,
     pub collapse_events: *mut FfiCollapseEvent,
@@ -959,6 +964,7 @@ pub enum WorkerResult {
         nests_fossilized: u32,
         channels_eroded: u32,
         corpses_fossilized: u32,
+        lava_solidified: u32,
         profile_report: String,
     },
     ScanComplete {

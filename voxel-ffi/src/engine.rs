@@ -48,6 +48,7 @@ pub struct SleepCompleteData {
     pub nests_fossilized: u32,
     pub channels_eroded: u32,
     pub corpses_fossilized: u32,
+    pub lava_solidified: u32,
     pub profile_report: String,
 }
 
@@ -276,6 +277,7 @@ impl VoxelEngine {
                 nests_fossilized,
                 channels_eroded,
                 corpses_fossilized,
+                lava_solidified,
                 profile_report,
             }) => {
                 if let Ok(mut sc) = self.sleep_complete.lock() {
@@ -296,6 +298,7 @@ impl VoxelEngine {
                         nests_fossilized,
                         channels_eroded,
                         corpses_fossilized,
+                        lava_solidified,
                         profile_report,
                     });
                 }
@@ -1653,6 +1656,7 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
         sleep_count: if c.sleep_count > 0 { c.sleep_count } else { 1 },
         accumulation_enabled: true,
         accumulation_iterations: voxel_sleep::SleepConfig::default().accumulation_iterations,
+        lava_solidification_enabled: c.sleep_lava_solidification_enabled != 0,
         nest_positions: Vec::new(),
         corpse_positions: Vec::new(),
         // New 4-phase system — now mapped from FFI fields
@@ -1674,29 +1678,30 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
             ..Default::default()
         },
         reaction: ReactionConfig {
-            acid_dissolution_prob: if c.sleep_acid_dissolution_prob > 0.0 { c.sleep_acid_dissolution_prob } else { 0.20 },
-            copper_oxidation_prob: if c.sleep_copper_oxidation_prob > 0.0 { c.sleep_copper_oxidation_prob } else { 0.15 },
-            basalt_crust_prob: if c.sleep_basalt_crust_prob > 0.0 { c.sleep_basalt_crust_prob } else { 0.70 },
+            acid_dissolution_prob: if c.sleep_acid_dissolution_prob > 0.0 { c.sleep_acid_dissolution_prob } else { 0.25 },
+            copper_oxidation_prob: if c.sleep_copper_oxidation_prob > 0.0 { c.sleep_copper_oxidation_prob } else { 0.0012 },
+            basalt_crust_prob: if c.sleep_basalt_crust_prob > 0.0 { c.sleep_basalt_crust_prob } else { 0.001 },
             acid_max_dissolved_per_source: if c.sleep_acid_max_dissolved_per_source > 0 { c.sleep_acid_max_dissolved_per_source } else { 30 },
             ..Default::default()
         },
         aureole: AureoleConfig {
-            aureole_radius: if c.sleep_aureole_radius > 0 { c.sleep_aureole_radius } else { 8 },
-            contact_limestone_to_marble_prob: if c.sleep_contact_marble_prob > 0.0 { c.sleep_contact_marble_prob } else { 0.80 },
+            aureole_radius: if c.sleep_aureole_radius > 0 { c.sleep_aureole_radius } else { 10 },
+            contact_limestone_to_marble_prob: if c.sleep_contact_marble_prob > 0.0 { c.sleep_contact_marble_prob } else { 0.18 },
             water_erosion_prob: if c.sleep_water_erosion_prob > 0.0 { c.sleep_water_erosion_prob } else { 0.05 },
             water_erosion_enabled: c.sleep_water_erosion_enabled != 0,
             ..Default::default()
         },
         veins: VeinConfig {
-            vein_deposition_prob: if c.sleep_vein_deposition_prob > 0.0 { c.sleep_vein_deposition_prob } else { 0.65 },
+            vein_deposition_prob: if c.sleep_vein_deposition_prob > 0.0 { c.sleep_vein_deposition_prob } else { 0.85 },
             vein_max_distance: if c.sleep_vein_max_distance > 0 { c.sleep_vein_max_distance } else { 26 },
             max_vein_voxels_per_source: if c.sleep_vein_max_per_source > 0 { c.sleep_vein_max_per_source } else { 80 },
             flowstone_prob: if c.sleep_flowstone_prob > 0.0 { c.sleep_flowstone_prob } else { 0.10 },
+            vein_deposit_spacing: if c.sleep_vein_deposit_spacing > 0 { c.sleep_vein_deposit_spacing } else { 5 },
             ..Default::default()
         },
         deeptime: DeepTimeConfig {
-            enrichment_prob: if c.sleep_enrichment_prob > 0.0 { c.sleep_enrichment_prob } else { 0.25 },
-            vein_thickening_prob: if c.sleep_vein_thickening_prob > 0.0 { c.sleep_vein_thickening_prob } else { 0.20 },
+            enrichment_prob: if c.sleep_enrichment_prob > 0.0 { c.sleep_enrichment_prob } else { 0.90 },
+            vein_thickening_prob: if c.sleep_vein_thickening_prob > 0.0 { c.sleep_vein_thickening_prob } else { 0.35 },
             stalactite_growth_prob: if c.sleep_stalactite_growth_prob > 0.0 { c.sleep_stalactite_growth_prob } else { 0.10 },
             slate_zone_top: c.host_slate_depth,
             slate_zone_bottom: c.host_granite_depth,

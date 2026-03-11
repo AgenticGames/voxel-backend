@@ -735,6 +735,7 @@ pub unsafe extern "C" fn voxel_poll_sleep_result(engine: *mut c_void) -> FfiSlee
         nests_fossilized: 0,
         channels_eroded: 0,
         corpses_fossilized: 0,
+        lava_solidified: 0,
         dirty_chunks: ptr::null_mut(),
         dirty_chunk_count: 0,
         collapse_events: ptr::null_mut(),
@@ -748,12 +749,14 @@ pub unsafe extern "C" fn voxel_poll_sleep_result(engine: *mut c_void) -> FfiSlee
     let engine = &*(engine as *const VoxelEngine);
     match engine.poll_sleep_complete() {
         Some(data) => {
-            let (report_ptr, report_len) = match CString::new(data.profile_report) {
-                Ok(cstr) => {
-                    let len = cstr.as_bytes().len() as u32;
-                    (cstr.into_raw(), len)
-                }
-                Err(_) => (ptr::null_mut(), 0u32),
+            // Strip any interior null bytes so CString::new() cannot fail.
+            // A null byte in the profile report (e.g. from a botched format or
+            // Material::display_name()) would silently produce a 0-byte file in UE5.
+            let sanitized_report: String = data.profile_report.replace('\0', "");
+            let (report_ptr, report_len) = {
+                let cstr = CString::new(sanitized_report).unwrap_or_default();
+                let len = cstr.as_bytes().len() as u32;
+                (cstr.into_raw(), len)
             };
             FfiSleepResult {
                 success: 1,
@@ -773,6 +776,7 @@ pub unsafe extern "C" fn voxel_poll_sleep_result(engine: *mut c_void) -> FfiSlee
                 nests_fossilized: data.nests_fossilized,
                 channels_eroded: data.channels_eroded,
                 corpses_fossilized: data.corpses_fossilized,
+                lava_solidified: data.lava_solidified,
                 dirty_chunks: ptr::null_mut(),
                 dirty_chunk_count: 0,
                 collapse_events: ptr::null_mut(),
@@ -2010,21 +2014,23 @@ mod tests {
             sleep_phase2_enabled: 1,
             sleep_phase3_enabled: 1,
             sleep_phase4_enabled: 1,
-            sleep_acid_dissolution_prob: 0.20,
-            sleep_copper_oxidation_prob: 0.50,
-            sleep_basalt_crust_prob: 0.70,
+            sleep_acid_dissolution_prob: 0.25,
+            sleep_copper_oxidation_prob: 0.0012,
+            sleep_basalt_crust_prob: 0.001,
             sleep_acid_max_dissolved_per_source: 30,
-            sleep_aureole_radius: 8,
-            sleep_contact_marble_prob: 0.80,
+            sleep_vein_deposit_spacing: 5,
+            sleep_lava_solidification_enabled: 1,
+            sleep_aureole_radius: 10,
+            sleep_contact_marble_prob: 0.18,
             sleep_water_erosion_prob: 0.05,
             sleep_water_erosion_enabled: 1,
-            sleep_vein_deposition_prob: 0.65,
+            sleep_vein_deposition_prob: 0.85,
             sleep_vein_max_distance: 26,
             sleep_vein_max_per_source: 80,
 
             sleep_flowstone_prob: 0.10,
-            sleep_enrichment_prob: 0.15,
-            sleep_vein_thickening_prob: 0.10,
+            sleep_enrichment_prob: 0.90,
+            sleep_vein_thickening_prob: 0.35,
             sleep_stalactite_growth_prob: 0.10,
             sleep_new_collapse_enabled: 1,
             sleep_new_stress_multiplier: 1.5,
