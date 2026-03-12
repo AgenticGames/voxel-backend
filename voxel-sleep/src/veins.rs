@@ -1,11 +1,12 @@
 //! Phase 3: "The Veins" — 500,000 years.
 //!
-//! THE GAMEPLAY PAYOFF: Hydrothermal ore deposition through player tunnels.
-//! BFS from heat sources through air (player tunnels = fracture pathways),
-//! depositing temperature-zonated ores on tunnel walls.
+//! THE GAMEPLAY PAYOFF: Water-heat convergence hydrothermal ore deposition.
+//! Heat sources within convergence_radius of water "activate" that water.
+//! Veins grow upward from activated water onto solid walls/ceilings as
+//! visible climbing streaks that thicken into the rock.
 //! Also: cave formation growth (crystal, calcite, flowstone).
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
 use voxel_core::density::DensityField;
@@ -18,7 +19,7 @@ use crate::aureole::HeatMap;
 use crate::config::{VeinConfig, GroundwaterConfig};
 use crate::groundwater::ambient_moisture;
 use crate::manifest::ChangeManifest;
-use crate::util::{FACE_OFFSETS, sample_material, count_neighbors, aperture_multiplier, find_air_from_solid, grow_vein, sleep_vein_size, default_vein_bias, VeinGrowthParams};
+use crate::util::{FACE_OFFSETS, sample_material, count_neighbors, grow_vein, VeinGrowthParams, VeinBias};
 use crate::{Bottleneck, PhaseDiagnostics, ResourceCensus, TransformEntry};
 
 /// Result of the veins phase.
@@ -32,112 +33,90 @@ pub struct VeinResult {
     pub diagnostics: PhaseDiagnostics,
 }
 
-/// Select a dominant ore type for a heat source based on position hash + temperature zone.
-/// Each heat source consistently produces mostly one ore type, creating coherent vein bodies
-/// instead of confetti patterns where every surface voxel is a different mineral.
-fn select_dominant_ore(
-    _config: &VeinConfig,
-    heat_pos: (i32, i32, i32),
-    host_rock: Material,
-) -> Material {
-    // Spatial hash: mix position to get a stable per-source value
-    let (hx, hy, hz) = heat_pos;
-    let hash = ((hx.wrapping_mul(73856093)) ^ (hy.wrapping_mul(19349663)) ^ (hz.wrapping_mul(83492791))) as u32;
-    let r = (hash % 1000) as f32 / 1000.0;
+// ──────────────────────────────────────────────────────────────
+// Temperature zones & helper types
+// ──────────────────────────────────────────────────────────────
 
-    match host_rock {
-        Material::Limestone | Material::Garnet | Material::Diopside | Material::Marble => {
-            // Limestone/skarn assemblage: Cu-Fe dominant
-            if r < 0.35 { Material::Copper }
-            else if r < 0.65 { Material::Iron }
-            else if r < 0.80 { Material::Tin }
-            else { Material::Sulfide }
-        },
-        Material::Slate | Material::Hornfels => {
-            // Slate assemblage: variable (Bendigo-style gold, cassiterite-copper, etc.)
-            if r < 0.25 { Material::Copper }
-            else if r < 0.45 { Material::Iron }
-            else if r < 0.60 { Material::Sulfide }
-            else if r < 0.75 { Material::Tin }
-            else if r < 0.90 { Material::Gold }
-            else { Material::Quartz }
-        },
-        _ => {
-            if r < 0.30 { Material::Copper }
-            else if r < 0.55 { Material::Iron }
-            else if r < 0.75 { Material::Tin }
-            else { Material::Sulfide }
-        }
-    }
+#[derive(Debug, Clone, Copy)]
+enum TemperatureZone { Hypothermal, Mesothermal, Epithermal }
+
+struct ActivatedWater {
+    pos: (i32, i32, i32),
+    heat_pos: (i32, i32, i32),
 }
 
-/// Probability that a heat source uses its dominant ore vs random selection.
-const DOMINANT_ORE_PROB: f32 = 0.75;
+struct WallSite {
+    pos: (i32, i32, i32),
+    wall_normal: (i32, i32, i32),
+    host_rock: Material,
+    heat_score: f32,
+}
 
-/// Select ore type by BFS distance from heat source and host rock (temperature zonation + skarn/slate).
-fn select_ore_by_distance_and_host(
+/// Select ore type by temperature zone and host rock (replaces old distance-based selection).
+fn select_ore_by_zone_and_host(
     config: &VeinConfig,
-    distance: u32,
+    zone: TemperatureZone,
     host_rock: Material,
     rng: &mut ChaCha8Rng,
 ) -> Material {
-    // Per-host ore selection (limestone skarn = copper-iron, slate = gold-pyrite Bendigo)
     if config.host_rock_ore_enabled {
         match host_rock {
             Material::Limestone | Material::Garnet | Material::Diopside | Material::Marble => {
-                if distance < config.hypothermal_max {
-                    // High-T skarn: Cu-Fe dominant, Tin, Pyrite gangue
-                    let r = rng.gen::<f32>();
-                    if r < 0.07 { return Material::Tin; }
-                    else if r < 0.42 { return Material::Copper; }
-                    else if r < 0.67 { return Material::Iron; }
-                    else if r < 0.77 { return Material::Sulfide; }
-                    else { return Material::Pyrite; }
-                } else if distance < config.mesothermal_max {
-                    // Mid-T: Cu/Fe/Sulfide, some Tin, Pyrite gangue
-                    let r = rng.gen::<f32>();
-                    if r < 0.04 { return Material::Tin; }
-                    else if r < 0.31 { return Material::Copper; }
-                    else if r < 0.56 { return Material::Iron; }
-                    else if r < 0.71 { return Material::Sulfide; }
-                    else { return Material::Pyrite; }
-                } else {
-                    // Epithermal limestone: Pyrite-rich for cascade + Cu/Fe/Sulfide
-                    let r = rng.gen::<f32>();
-                    if r < 0.10 { return Material::Gold; }
-                    else if r < 0.25 { return Material::Copper; }
-                    else if r < 0.40 { return Material::Iron; }
-                    else if r < 0.55 { return Material::Sulfide; }
-                    else { return Material::Pyrite; }
+                match zone {
+                    TemperatureZone::Hypothermal => {
+                        let r = rng.gen::<f32>();
+                        if r < 0.07 { return Material::Tin; }
+                        else if r < 0.42 { return Material::Copper; }
+                        else if r < 0.67 { return Material::Iron; }
+                        else if r < 0.77 { return Material::Sulfide; }
+                        else { return Material::Pyrite; }
+                    }
+                    TemperatureZone::Mesothermal => {
+                        let r = rng.gen::<f32>();
+                        if r < 0.04 { return Material::Tin; }
+                        else if r < 0.31 { return Material::Copper; }
+                        else if r < 0.56 { return Material::Iron; }
+                        else if r < 0.71 { return Material::Sulfide; }
+                        else { return Material::Pyrite; }
+                    }
+                    TemperatureZone::Epithermal => {
+                        let r = rng.gen::<f32>();
+                        if r < 0.10 { return Material::Gold; }
+                        else if r < 0.25 { return Material::Copper; }
+                        else if r < 0.40 { return Material::Iron; }
+                        else if r < 0.55 { return Material::Sulfide; }
+                        else { return Material::Pyrite; }
+                    }
                 }
             },
             Material::Slate | Material::Hornfels => {
-                if distance < config.hypothermal_max {
-                    // High-T: Tin/Copper dominant (cassiterite-chalcopyrite)
-                    let r = rng.gen::<f32>();
-                    if r < 0.30 { return Material::Tin; }
-                    else if r < 0.60 { return Material::Copper; }
-                    else if r < 0.80 { return Material::Iron; }
-                    else if r < 0.90 { return Material::Quartz; }
-                    else { return Material::Pyrite; }
-                } else if distance < config.mesothermal_max {
-                    // Mid-T: Copper/Iron/Sulfide, some Tin
-                    let r = rng.gen::<f32>();
-                    if r < 0.25 { return Material::Copper; }
-                    else if r < 0.50 { return Material::Iron; }
-                    else if r < 0.70 { return Material::Sulfide; }
-                    else if r < 0.80 { return Material::Tin; }
-                    else if r < 0.90 { return Material::Quartz; }
-                    else { return Material::Gold; }
-                } else {
-                    // Low-T epithermal: Sulfide/Gold dominant, some Cu/Fe
-                    let r = rng.gen::<f32>();
-                    if r < 0.15 { return Material::Gold; }
-                    else if r < 0.35 { return Material::Sulfide; }
-                    else if r < 0.50 { return Material::Copper; }
-                    else if r < 0.65 { return Material::Iron; }
-                    else if r < 0.80 { return Material::Quartz; }
-                    else { return Material::Pyrite; }
+                match zone {
+                    TemperatureZone::Hypothermal => {
+                        let r = rng.gen::<f32>();
+                        if r < 0.30 { return Material::Tin; }
+                        else if r < 0.60 { return Material::Copper; }
+                        else if r < 0.80 { return Material::Iron; }
+                        else if r < 0.90 { return Material::Quartz; }
+                        else { return Material::Pyrite; }
+                    }
+                    TemperatureZone::Mesothermal => {
+                        let r = rng.gen::<f32>();
+                        if r < 0.25 { return Material::Copper; }
+                        else if r < 0.50 { return Material::Iron; }
+                        else if r < 0.70 { return Material::Sulfide; }
+                        else if r < 0.80 { return Material::Tin; }
+                        else if r < 0.90 { return Material::Quartz; }
+                        else { return Material::Gold; }
+                    }
+                    TemperatureZone::Epithermal => {
+                        let r = rng.gen::<f32>();
+                        if r < 0.15 { return Material::Gold; }
+                        else if r < 0.35 { return Material::Sulfide; }
+                        else if r < 0.50 { return Material::Copper; }
+                        else if r < 0.65 { return Material::Iron; }
+                        else if r < 0.80 { return Material::Quartz; }
+                        else { return Material::Pyrite; }
+                    }
                 }
             },
             _ => {},
@@ -145,21 +124,25 @@ fn select_ore_by_distance_and_host(
     }
 
     // Default behavior (all other hosts)
-    if distance < config.hypothermal_max {
-        let r = rng.gen::<f32>();
-        if r < 0.35 { Material::Tin }
-        else if r < 0.65 { Material::Quartz }
-        else { Material::Pyrite }
-    } else if distance < config.mesothermal_max {
-        let r = rng.gen::<f32>();
-        if r < 0.40 { Material::Copper }
-        else if r < 0.75 { Material::Iron }
-        else { Material::Pyrite }
-    } else {
-        let r = rng.gen::<f32>();
-        if r < 0.30 { Material::Gold }
-        else if r < 0.55 { Material::Sulfide }
-        else { Material::Pyrite }
+    match zone {
+        TemperatureZone::Hypothermal => {
+            let r = rng.gen::<f32>();
+            if r < 0.35 { Material::Tin }
+            else if r < 0.65 { Material::Quartz }
+            else { Material::Pyrite }
+        }
+        TemperatureZone::Mesothermal => {
+            let r = rng.gen::<f32>();
+            if r < 0.40 { Material::Copper }
+            else if r < 0.75 { Material::Iron }
+            else { Material::Pyrite }
+        }
+        TemperatureZone::Epithermal => {
+            let r = rng.gen::<f32>();
+            if r < 0.30 { Material::Gold }
+            else if r < 0.55 { Material::Sulfide }
+            else { Material::Pyrite }
+        }
     }
 }
 
@@ -172,7 +155,11 @@ fn is_host_rock(mat: Material) -> bool {
     )
 }
 
-/// Execute Phase 3: hydrothermal vein injection + formation growth.
+// ──────────────────────────────────────────────────────────────
+// Core algorithm
+// ──────────────────────────────────────────────────────────────
+
+/// Execute Phase 3: water-heat convergence vein deposition + formation growth.
 pub fn apply_veins(
     config: &VeinConfig,
     groundwater: &GroundwaterConfig,
@@ -197,274 +184,433 @@ pub fn apply_veins(
 
     let mut vein_candidates: Vec<VeinCandidate> = Vec::new();
     let mut theoretical_max = 0u32;
+    let mut convergence_count = 0u32;
 
-    // --- Hydrothermal Vein Deposition ---
-    if config.vein_enabled && !heat_map.is_empty() {
-        let max_dist = config.vein_max_distance;
-        let max_per_source = config.max_vein_voxels_per_source;
-        let mut global_deposited: HashSet<(i32, i32, i32)> = HashSet::new();
+    // --- Water-Heat Convergence Vein Deposition ---
+    if config.vein_enabled && !heat_map.is_empty() && !fluid_snapshot.chunks.is_empty() {
+        let convergence_radius = config.convergence_radius;
+        let convergence_radius_sq = convergence_radius * convergence_radius;
 
+        // 1. Spatial-bucket heat sources by chunk for fast lookup
+        let search_chunks = (convergence_radius / chunk_size as f32).ceil() as i32 + 1;
+        let mut heat_buckets: HashMap<(i32, i32, i32), Vec<(i32, i32, i32)>> = HashMap::new();
         for heat in heat_map {
             let (hx, hy, hz) = heat.pos;
-            // BFS through air voxels from heat source
-            let mut queue: VecDeque<((i32, i32, i32), u32)> = VecDeque::new();
-            let mut visited: HashSet<(i32, i32, i32)> = HashSet::new();
-            let mut source_deposited = 0u32;
-            let mut skip_counter: u32 = 0;
+            let bucket_key = (
+                hx.div_euclid(chunk_size as i32),
+                hy.div_euclid(chunk_size as i32),
+                hz.div_euclid(chunk_size as i32),
+            );
+            heat_buckets.entry(bucket_key).or_default().push((hx, hy, hz));
+        }
 
-            // Determine dominant ore for this heat source (sampled from nearby host rock)
-            let nearby_host = FACE_OFFSETS.iter()
-                .filter_map(|&(dx, dy, dz)| sample_material(density_fields, hx + dx, hy + dy, hz + dz, chunk_size))
-                .find(|m| is_host_rock(*m))
-                .unwrap_or(Material::Slate);
-            let dominant_ore = select_dominant_ore(config, heat.pos, nearby_host);
+        // 2. Find activated water cells
+        let mut activated: Vec<ActivatedWater> = Vec::new();
+        let mut spacing_grid: HashSet<(i32, i32, i32)> = HashSet::new();
+        let spacing = config.convergence_spacing.max(1) as i32;
+        let cs = fluid_snapshot.chunk_size;
 
-            // Try direct air neighbors first (fast path for exposed lava/kimberlite)
-            for &(dx, dy, dz) in &FACE_OFFSETS {
-                let nx = hx + dx;
-                let ny = hy + dy;
-                let nz = hz + dz;
-                if let Some(mat) = sample_material(density_fields, nx, ny, nz, chunk_size) {
-                    if !mat.is_solid() && visited.insert((nx, ny, nz)) {
-                        queue.push_back(((nx, ny, nz), 1));
-                    }
-                }
-            }
+        // Collect fluid chunk keys and sort for determinism
+        let mut fluid_chunk_keys: Vec<(i32, i32, i32)> = fluid_snapshot.chunks.keys().copied().collect();
+        fluid_chunk_keys.sort();
 
-            // Fallback: search through solid rock to find air (submerged lava in solid bowls)
-            if queue.is_empty() {
-                let air_seeds = find_air_from_solid(
-                    density_fields, (hx, hy, hz),
-                    config.heat_source_search_radius, chunk_size,
-                );
-                for (pos, dist) in air_seeds {
-                    if visited.insert(pos) {
-                        queue.push_back((pos, dist));
-                    }
-                }
-            }
-
-            while let Some(((ax, ay, az), dist)) = queue.pop_front() {
-                if source_deposited >= max_per_source {
-                    break;
-                }
-
-                // Check solid neighbors of this air voxel for deposition sites
-                for &(dx, dy, dz) in &FACE_OFFSETS {
-                    let nx = ax + dx;
-                    let ny = ay + dy;
-                    let nz = az + dz;
-
-                    if global_deposited.contains(&(nx, ny, nz)) {
-                        continue;
-                    }
-
-                    if let Some(mat) = sample_material(density_fields, nx, ny, nz, chunk_size) {
-                        if is_host_rock(mat) {
-                            theoretical_max += 1;
+        for fchunk in &fluid_chunk_keys {
+            let cells = match fluid_snapshot.chunks.get(fchunk) {
+                Some(c) => c,
+                None => continue,
+            };
+            let (cx, cy, cz) = *fchunk;
+            for z in 0..cs {
+                for y in 0..cs {
+                    for x in 0..cs {
+                        let idx = z * cs * cs + y * cs + x;
+                        let cell = &cells[idx];
+                        if cell.level <= 0.001 || !cell.fluid_type.is_water() {
+                            continue;
                         }
-                        let air_n = count_neighbors(density_fields, ax, ay, az, chunk_size, |m| !m.is_solid());
-                        let eff_prob = config.vein_deposition_prob * if config.aperture_scaling_enabled {
-                            aperture_multiplier(air_n)
-                        } else { 1.0 };
-                        if is_host_rock(mat) && rng.gen::<f32>() < eff_prob {
-                            if skip_counter > 0 {
-                                skip_counter -= 1;
-                                continue; // skip this surface, try next face
+
+                        let wx = cx * (cs as i32) + x as i32;
+                        let wy = cy * (cs as i32) + y as i32;
+                        let wz = cz * (cs as i32) + z as i32;
+
+                        // Grid-based spacing check
+                        let grid_key = (
+                            wx.div_euclid(spacing),
+                            wy.div_euclid(spacing),
+                            wz.div_euclid(spacing),
+                        );
+                        if !spacing_grid.insert(grid_key) {
+                            continue;
+                        }
+
+                        // Search nearby heat buckets for nearest heat source
+                        let water_bucket = (
+                            wx.div_euclid(chunk_size as i32),
+                            wy.div_euclid(chunk_size as i32),
+                            wz.div_euclid(chunk_size as i32),
+                        );
+                        let mut nearest_heat: Option<(i32, i32, i32)> = None;
+                        let mut nearest_dist_sq = f32::MAX;
+
+                        for bx in (water_bucket.0 - search_chunks)..=(water_bucket.0 + search_chunks) {
+                            for by in (water_bucket.1 - search_chunks)..=(water_bucket.1 + search_chunks) {
+                                for bz in (water_bucket.2 - search_chunks)..=(water_bucket.2 + search_chunks) {
+                                    if let Some(heats) = heat_buckets.get(&(bx, by, bz)) {
+                                        for &hp in heats {
+                                            let dx = (hp.0 - wx) as f32;
+                                            let dy = (hp.1 - wy) as f32;
+                                            let dz = (hp.2 - wz) as f32;
+                                            let dist_sq = dx * dx + dy * dy + dz * dz;
+                                            if dist_sq <= convergence_radius_sq && dist_sq < nearest_dist_sq {
+                                                nearest_dist_sq = dist_sq;
+                                                nearest_heat = Some(hp);
+                                            }
+                                        }
+                                    }
+                                }
                             }
-                            // 75% chance to use per-source dominant ore for coherent vein bodies
-                            let ore = if rng.gen::<f32>() < DOMINANT_ORE_PROB {
-                                dominant_ore
-                            } else {
-                                select_ore_by_distance_and_host(config, dist, mat, rng)
+                        }
+
+                        if let Some(heat_pos) = nearest_heat {
+                            activated.push(ActivatedWater { pos: (wx, wy, wz), heat_pos });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sort activated for determinism (HashMap iteration is nondeterministic)
+        activated.sort_by(|a, b| a.pos.cmp(&b.pos));
+        convergence_count = activated.len() as u32;
+
+        // 3. For each activated water cell, deposit veins above
+        let mut global_deposited: HashSet<(i32, i32, i32)> = HashSet::new();
+        let zones = [TemperatureZone::Hypothermal, TemperatureZone::Mesothermal, TemperatureZone::Epithermal];
+
+        for aw in &activated {
+            let (water_x, water_y, water_z) = aw.pos;
+            let (heat_x, _heat_y, heat_z) = aw.heat_pos;
+
+            // XZ direction from water toward heat (for bias scoring)
+            let hdx = (heat_x - water_x) as f32;
+            let hdz = (heat_z - water_z) as f32;
+            let heat_dir_len = (hdx * hdx + hdz * hdz).sqrt();
+            let (heat_dir_x, heat_dir_z) = if heat_dir_len > 0.001 {
+                (hdx / heat_dir_len, hdz / heat_dir_len)
+            } else {
+                (0.0, 0.0)
+            };
+
+            let spread = config.horizontal_spread as i32;
+
+            for &zone in &zones {
+                let (y_min, y_max) = match zone {
+                    TemperatureZone::Hypothermal => (0i32, config.hypothermal_height as i32),
+                    TemperatureZone::Mesothermal => (config.hypothermal_height as i32, config.mesothermal_height as i32),
+                    TemperatureZone::Epithermal => (config.mesothermal_height as i32, config.epithermal_height as i32),
+                };
+                if y_min >= y_max { continue; }
+
+                let num_veins = rng.gen_range(config.veins_per_zone_min..=config.veins_per_zone_max);
+                let max_candidates = (num_veins * 3) as usize;
+
+                // Find wall sites: scan box above water
+                let mut candidates: Vec<WallSite> = Vec::new();
+                let scan_x_min = water_x - spread;
+                let scan_x_max = water_x + spread;
+                let scan_z_min = water_z - spread;
+                let scan_z_max = water_z + spread;
+                let scan_y_min = water_y + y_min;
+                let scan_y_max = water_y + y_max;
+
+                // Check which chunks overlap the scan box and iterate only loaded ones
+                let chunk_x_min = scan_x_min.div_euclid(chunk_size as i32);
+                let chunk_x_max = scan_x_max.div_euclid(chunk_size as i32);
+                let chunk_y_min = scan_y_min.div_euclid(chunk_size as i32);
+                let chunk_y_max = scan_y_max.div_euclid(chunk_size as i32);
+                let chunk_z_min = scan_z_min.div_euclid(chunk_size as i32);
+                let chunk_z_max = scan_z_max.div_euclid(chunk_size as i32);
+
+                'scan: for ckx in chunk_x_min..=chunk_x_max {
+                    for cky in chunk_y_min..=chunk_y_max {
+                        for ckz in chunk_z_min..=chunk_z_max {
+                            let ck = (ckx, cky, ckz);
+                            let df = match density_fields.get(&ck) {
+                                Some(df) => df,
+                                None => continue,
                             };
 
-                            // Epithermal rarity: precious metals deposit less frequently
-                            let rarity_factor = if dist >= config.mesothermal_max {
-                                config.epithermal_rarity
-                            } else {
-                                1.0
-                            };
-                            if rng.gen::<f32>() >= rarity_factor {
-                                continue; // fluid too dilute for precious metals
-                            }
+                            // Iterate voxels within this chunk that overlap the scan box
+                            let local_x_min = (scan_x_min - ckx * chunk_size as i32).max(0) as usize;
+                            let local_x_max = ((scan_x_max - ckx * chunk_size as i32) as usize).min(field_size - 1);
+                            let local_y_min = (scan_y_min - cky * chunk_size as i32).max(0) as usize;
+                            let local_y_max = ((scan_y_max - cky * chunk_size as i32) as usize).min(field_size - 1);
+                            let local_z_min = (scan_z_min - ckz * chunk_size as i32).max(0) as usize;
+                            let local_z_max = ((scan_z_max - ckz * chunk_size as i32) as usize).min(field_size - 1);
 
-                            let (min_sz, max_sz) = sleep_vein_size(ore);
-                            let bias = default_vein_bias(ore, rng);
-                            let params = VeinGrowthParams { ore, min_size: min_sz, max_size: max_sz, bias };
-                            let vein_positions = grow_vein(density_fields, (nx, ny, nz), &params, chunk_size, rng);
+                            for lz in local_z_min..=local_z_max {
+                                for ly in local_y_min..=local_y_max {
+                                    for lx in local_x_min..=local_x_max {
+                                        let sample = df.get(lx, ly, lz);
+                                        let mat = sample.material;
+                                        if !is_host_rock(mat) { continue; }
+                                        if global_deposited.contains(&(
+                                            ckx * chunk_size as i32 + lx as i32,
+                                            cky * chunk_size as i32 + ly as i32,
+                                            ckz * chunk_size as i32 + lz as i32,
+                                        )) { continue; }
 
-                            for &vpos in &vein_positions {
-                                if global_deposited.contains(&vpos) {
-                                    continue;
-                                }
-                                if source_deposited >= max_per_source {
-                                    break;
-                                }
-                                let (ck, lx, ly, lz) = world_to_chunk_local(vpos.0, vpos.1, vpos.2, chunk_size);
-                                if let Some(df) = density_fields.get(&ck) {
-                                    let sample = df.get(lx, ly, lz);
-                                    let old_mat = sample.material;
-                                    vein_candidates.push(VeinCandidate {
-                                        chunk_key: ck, lx, ly, lz,
-                                        old_material: old_mat,
-                                        old_density: sample.density,
-                                        new_material: ore,
-                                    });
-                                    global_deposited.insert(vpos);
-                                    source_deposited += 1;
+                                        let wx = ckx * chunk_size as i32 + lx as i32;
+                                        let wy = cky * chunk_size as i32 + ly as i32;
+                                        let wz = ckz * chunk_size as i32 + lz as i32;
 
-                                    // Wall-rock alteration: ore-bearing fluid alters adjacent limestone
-                                    if config.wall_rock_alteration_prob > 0.0
-                                        && rng.gen::<f32>() < config.wall_rock_alteration_prob
-                                    {
-                                        let alter_mat = if dist < config.hypothermal_max {
-                                            // High-T: garnet-dominated skarn
-                                            if rng.gen::<f32>() < 0.30 { Material::Diopside } else { Material::Garnet }
-                                        } else if dist < config.mesothermal_max {
-                                            // Mid-T: diopside + garnet mix
-                                            let r = rng.gen::<f32>();
-                                            if r < 0.25 { Material::Garnet } else { Material::Diopside }
-                                        } else {
-                                            // Low-T epithermal: diopside dominant, some garnet + marble
-                                            let r = rng.gen::<f32>();
-                                            if r < 0.20 { Material::Garnet }
-                                            else if r < 0.80 { Material::Diopside }
-                                            else { Material::Marble }
-                                        };
-                                        for &(adx, ady, adz) in &FACE_OFFSETS {
-                                            let anx = vpos.0 + adx;
-                                            let any = vpos.1 + ady;
-                                            let anz = vpos.2 + adz;
-                                            if global_deposited.contains(&(anx, any, anz)) { continue; }
-                                            if let Some(amat) = sample_material(density_fields, anx, any, anz, chunk_size) {
-                                                if amat == Material::Limestone {
-                                                    let (ack, alx, aly, alz) = world_to_chunk_local(anx, any, anz, chunk_size);
-                                                    if let Some(adf) = density_fields.get(&ack) {
-                                                        let asample = adf.get(alx, aly, alz);
-                                                        vein_candidates.push(VeinCandidate {
-                                                            chunk_key: ack, lx: alx, ly: aly, lz: alz,
-                                                            old_material: amat,
-                                                            old_density: asample.density,
-                                                            new_material: alter_mat,
-                                                        });
-                                                        global_deposited.insert((anx, any, anz));
-                                                    }
+                                        // Check for at least 1 air face neighbor (wall site)
+                                        let mut wall_normal = (0i32, 0i32, 0i32);
+                                        let mut has_air_face = false;
+                                        for &(dx, dy, dz) in &FACE_OFFSETS {
+                                            if let Some(nm) = sample_material(density_fields, wx + dx, wy + dy, wz + dz, chunk_size) {
+                                                if !nm.is_solid() {
+                                                    wall_normal = (dx, dy, dz);
+                                                    has_air_face = true;
                                                     break;
                                                 }
                                             }
                                         }
-                                    }
-                                }
-                            }
+                                        if !has_air_face { continue; }
 
-                            // Co-deposit pyrite gangue mineral alongside non-Pyrite ores
-                            let pyrite_codeposit_prob = if matches!(mat, Material::Slate | Material::Hornfels) {
-                                config.slate_pyrite_codeposit_prob
-                            } else {
-                                0.10
-                            };
-                            if ore != Material::Pyrite && rng.gen::<f32>() < pyrite_codeposit_prob && source_deposited < max_per_source {
-                                // Pick first host-rock neighbor of the vein seed for pyrite co-deposit
-                                for &(pdx, pdy, pdz) in &FACE_OFFSETS {
-                                    let pnx = nx + pdx;
-                                    let pny = ny + pdy;
-                                    let pnz = nz + pdz;
-                                    if global_deposited.contains(&(pnx, pny, pnz)) { continue; }
-                                    if let Some(pmat) = sample_material(density_fields, pnx, pny, pnz, chunk_size) {
-                                        if is_host_rock(pmat) {
-                                            let pyrite_params = VeinGrowthParams {
-                                                ore: Material::Pyrite,
-                                                min_size: 1,
-                                                max_size: 3,
-                                                bias: default_vein_bias(Material::Pyrite, rng),
-                                            };
-                                            let pyrite_vein = grow_vein(density_fields, (pnx, pny, pnz), &pyrite_params, chunk_size, rng);
-                                            for &pvpos in &pyrite_vein {
-                                                if global_deposited.contains(&pvpos) { continue; }
-                                                if source_deposited >= max_per_source { break; }
-                                                let (pck, plx, ply, plz) = world_to_chunk_local(pvpos.0, pvpos.1, pvpos.2, chunk_size);
-                                                if let Some(pdf) = density_fields.get(&pck) {
-                                                    let psample = pdf.get(plx, ply, plz);
-                                                    vein_candidates.push(VeinCandidate {
-                                                        chunk_key: pck, lx: plx, ly: ply, lz: plz,
-                                                        old_material: psample.material,
-                                                        old_density: psample.density,
-                                                        new_material: Material::Pyrite,
-                                                    });
-                                                    global_deposited.insert(pvpos);
-                                                    source_deposited += 1;
-                                                }
-                                            }
-                                            break;
+                                        theoretical_max += 1;
+
+                                        // Score: base + heat direction bias
+                                        let site_dx = (wx - water_x) as f32;
+                                        let site_dz = (wz - water_z) as f32;
+                                        let site_len = (site_dx * site_dx + site_dz * site_dz).sqrt();
+                                        let dot = if site_len > 0.001 {
+                                            (site_dx * heat_dir_x + site_dz * heat_dir_z) / site_len
+                                        } else {
+                                            0.0
+                                        };
+                                        let heat_score = 1.0 + config.heat_direction_bias * dot;
+
+                                        candidates.push(WallSite {
+                                            pos: (wx, wy, wz),
+                                            wall_normal,
+                                            host_rock: mat,
+                                            heat_score,
+                                        });
+
+                                        if candidates.len() >= max_candidates {
+                                            break 'scan;
                                         }
                                     }
-                                }
-                            }
-
-                            // Quartz co-deposit for gold in Slate (saddle reef)
-                            if matches!(mat, Material::Slate | Material::Hornfels)
-                                && ore == Material::Gold
-                                && rng.gen::<f32>() < config.slate_quartz_vein_prob
-                                && source_deposited < max_per_source
-                            {
-                                for &(qdx, qdy, qdz) in &FACE_OFFSETS {
-                                    let qnx = nx + qdx;
-                                    let qny = ny + qdy;
-                                    let qnz = nz + qdz;
-                                    if global_deposited.contains(&(qnx, qny, qnz)) { continue; }
-                                    if let Some(qmat) = sample_material(density_fields, qnx, qny, qnz, chunk_size) {
-                                        if is_host_rock(qmat) {
-                                            let quartz_params = VeinGrowthParams {
-                                                ore: Material::Quartz,
-                                                min_size: 1,
-                                                max_size: 3,
-                                                bias: default_vein_bias(Material::Quartz, rng),
-                                            };
-                                            let quartz_vein = grow_vein(density_fields, (qnx, qny, qnz), &quartz_params, chunk_size, rng);
-                                            for &qvpos in &quartz_vein {
-                                                if global_deposited.contains(&qvpos) { continue; }
-                                                if source_deposited >= max_per_source { break; }
-                                                let (qck, qlx, qly, qlz) = world_to_chunk_local(qvpos.0, qvpos.1, qvpos.2, chunk_size);
-                                                if let Some(qdf) = density_fields.get(&qck) {
-                                                    let qsample = qdf.get(qlx, qly, qlz);
-                                                    vein_candidates.push(VeinCandidate {
-                                                        chunk_key: qck, lx: qlx, ly: qly, lz: qlz,
-                                                        old_material: qsample.material,
-                                                        old_density: qsample.density,
-                                                        new_material: Material::Quartz,
-                                                    });
-                                                    global_deposited.insert(qvpos);
-                                                    source_deposited += 1;
-                                                }
-                                            }
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-
-                            skip_counter = config.vein_deposit_spacing;
-                        }
-                    }
-                }
-
-                // Expand BFS through air voxels
-                if dist < max_dist {
-                    for &(dx, dy, dz) in &FACE_OFFSETS {
-                        let nx = ax + dx;
-                        let ny = ay + dy;
-                        let nz = az + dz;
-                        if !visited.contains(&(nx, ny, nz)) {
-                            if let Some(mat) = sample_material(density_fields, nx, ny, nz, chunk_size) {
-                                if !mat.is_solid() {
-                                    visited.insert((nx, ny, nz));
-                                    queue.push_back(((nx, ny, nz), dist + 1));
                                 }
                             }
                         }
                     }
                 }
+
+                if candidates.is_empty() { continue; }
+
+                // Select num_veins sites with minimum spacing (6 voxels apart)
+                let min_site_spacing = 6i32;
+                let mut selected: Vec<usize> = Vec::new();
+
+                for _ in 0..num_veins {
+                    if candidates.is_empty() { break; }
+
+                    // Weighted random selection
+                    let total_weight: f32 = candidates.iter().map(|s| s.heat_score.max(0.01)).sum();
+                    if total_weight <= 0.0 { break; }
+                    let mut roll = rng.gen::<f32>() * total_weight;
+                    let mut chosen_idx = 0;
+                    for (i, site) in candidates.iter().enumerate() {
+                        roll -= site.heat_score.max(0.01);
+                        if roll <= 0.0 {
+                            chosen_idx = i;
+                            break;
+                        }
+                    }
+
+                    let chosen = candidates.swap_remove(chosen_idx);
+                    selected.push(0); // placeholder, we process immediately
+
+                    // Remove candidates too close to chosen
+                    candidates.retain(|s| {
+                        let dx = (s.pos.0 - chosen.pos.0).abs();
+                        let dy = (s.pos.1 - chosen.pos.1).abs();
+                        let dz = (s.pos.2 - chosen.pos.2).abs();
+                        dx + dy + dz >= min_site_spacing
+                    });
+
+                    // Select ore for this site
+                    let ore = select_ore_by_zone_and_host(config, zone, chosen.host_rock, rng);
+
+                    // Epithermal rarity filter
+                    if matches!(zone, TemperatureZone::Epithermal) {
+                        if rng.gen::<f32>() >= config.epithermal_rarity {
+                            continue;
+                        }
+                    }
+
+                    // Deposition probability check
+                    if rng.gen::<f32>() >= config.vein_deposition_prob {
+                        continue;
+                    }
+
+                    // Compute climbing vein target size
+                    let height = rng.gen_range(config.vein_climb_height_min..=config.vein_climb_height_max);
+                    let width = rng.gen_range(config.vein_wall_width_min..=config.vein_wall_width_max);
+                    let depth = rng.gen_range(config.vein_rock_depth_min..=config.vein_rock_depth_max);
+                    let target = ((height * width * depth * 6) / 10).max(20);
+
+                    let params = VeinGrowthParams {
+                        ore,
+                        min_size: (target * 8) / 10,
+                        max_size: target,
+                        bias: VeinBias::WallClimbing { wall_normal: chosen.wall_normal },
+                    };
+                    let vein_positions = grow_vein(density_fields, chosen.pos, &params, chunk_size, rng);
+
+                    for &vpos in &vein_positions {
+                        if global_deposited.contains(&vpos) { continue; }
+                        let (ck, lx, ly, lz) = world_to_chunk_local(vpos.0, vpos.1, vpos.2, chunk_size);
+                        if let Some(df) = density_fields.get(&ck) {
+                            let sample = df.get(lx, ly, lz);
+                            let old_mat = sample.material;
+                            vein_candidates.push(VeinCandidate {
+                                chunk_key: ck, lx, ly, lz,
+                                old_material: old_mat,
+                                old_density: sample.density,
+                                new_material: ore,
+                            });
+                            global_deposited.insert(vpos);
+                        }
+                    }
+
+                    // Wall-rock alteration: ore-bearing fluid alters adjacent limestone
+                    if config.wall_rock_alteration_prob > 0.0
+                        && rng.gen::<f32>() < config.wall_rock_alteration_prob
+                    {
+                        let alter_mat = match zone {
+                            TemperatureZone::Hypothermal => {
+                                if rng.gen::<f32>() < 0.30 { Material::Diopside } else { Material::Garnet }
+                            }
+                            TemperatureZone::Mesothermal => {
+                                let r = rng.gen::<f32>();
+                                if r < 0.25 { Material::Garnet } else { Material::Diopside }
+                            }
+                            TemperatureZone::Epithermal => {
+                                let r = rng.gen::<f32>();
+                                if r < 0.20 { Material::Garnet }
+                                else if r < 0.80 { Material::Diopside }
+                                else { Material::Marble }
+                            }
+                        };
+                        for &(adx, ady, adz) in &FACE_OFFSETS {
+                            let anx = chosen.pos.0 + adx;
+                            let any = chosen.pos.1 + ady;
+                            let anz = chosen.pos.2 + adz;
+                            if global_deposited.contains(&(anx, any, anz)) { continue; }
+                            if let Some(amat) = sample_material(density_fields, anx, any, anz, chunk_size) {
+                                if amat == Material::Limestone {
+                                    let (ack, alx, aly, alz) = world_to_chunk_local(anx, any, anz, chunk_size);
+                                    if let Some(adf) = density_fields.get(&ack) {
+                                        let asample = adf.get(alx, aly, alz);
+                                        vein_candidates.push(VeinCandidate {
+                                            chunk_key: ack, lx: alx, ly: aly, lz: alz,
+                                            old_material: amat,
+                                            old_density: asample.density,
+                                            new_material: alter_mat,
+                                        });
+                                        global_deposited.insert((anx, any, anz));
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    // Pyrite co-deposition alongside non-Pyrite ores
+                    let pyrite_codeposit_prob = if matches!(chosen.host_rock, Material::Slate | Material::Hornfels) {
+                        config.slate_pyrite_codeposit_prob
+                    } else {
+                        0.10
+                    };
+                    if ore != Material::Pyrite && rng.gen::<f32>() < pyrite_codeposit_prob {
+                        for &(pdx, pdy, pdz) in &FACE_OFFSETS {
+                            let pnx = chosen.pos.0 + pdx;
+                            let pny = chosen.pos.1 + pdy;
+                            let pnz = chosen.pos.2 + pdz;
+                            if global_deposited.contains(&(pnx, pny, pnz)) { continue; }
+                            if let Some(pmat) = sample_material(density_fields, pnx, pny, pnz, chunk_size) {
+                                if is_host_rock(pmat) {
+                                    let pyrite_params = VeinGrowthParams {
+                                        ore: Material::Pyrite,
+                                        min_size: 1,
+                                        max_size: 3,
+                                        bias: VeinBias::Compact,
+                                    };
+                                    let pyrite_vein = grow_vein(density_fields, (pnx, pny, pnz), &pyrite_params, chunk_size, rng);
+                                    for &pvpos in &pyrite_vein {
+                                        if global_deposited.contains(&pvpos) { continue; }
+                                        let (pck, plx, ply, plz) = world_to_chunk_local(pvpos.0, pvpos.1, pvpos.2, chunk_size);
+                                        if let Some(pdf) = density_fields.get(&pck) {
+                                            let psample = pdf.get(plx, ply, plz);
+                                            vein_candidates.push(VeinCandidate {
+                                                chunk_key: pck, lx: plx, ly: ply, lz: plz,
+                                                old_material: psample.material,
+                                                old_density: psample.density,
+                                                new_material: Material::Pyrite,
+                                            });
+                                            global_deposited.insert(pvpos);
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    // Quartz co-deposit for gold in Slate (saddle reef)
+                    if matches!(chosen.host_rock, Material::Slate | Material::Hornfels)
+                        && ore == Material::Gold
+                        && rng.gen::<f32>() < config.slate_quartz_vein_prob
+                    {
+                        for &(qdx, qdy, qdz) in &FACE_OFFSETS {
+                            let qnx = chosen.pos.0 + qdx;
+                            let qny = chosen.pos.1 + qdy;
+                            let qnz = chosen.pos.2 + qdz;
+                            if global_deposited.contains(&(qnx, qny, qnz)) { continue; }
+                            if let Some(qmat) = sample_material(density_fields, qnx, qny, qnz, chunk_size) {
+                                if is_host_rock(qmat) {
+                                    let quartz_params = VeinGrowthParams {
+                                        ore: Material::Quartz,
+                                        min_size: 1,
+                                        max_size: 3,
+                                        bias: VeinBias::Planar(rng.gen_range(0..3)),
+                                    };
+                                    let quartz_vein = grow_vein(density_fields, (qnx, qny, qnz), &quartz_params, chunk_size, rng);
+                                    for &qvpos in &quartz_vein {
+                                        if global_deposited.contains(&qvpos) { continue; }
+                                        let (qck, qlx, qly, qlz) = world_to_chunk_local(qvpos.0, qvpos.1, qvpos.2, chunk_size);
+                                        if let Some(qdf) = density_fields.get(&qck) {
+                                            let qsample = qdf.get(qlx, qly, qlz);
+                                            vein_candidates.push(VeinCandidate {
+                                                chunk_key: qck, lx: qlx, ly: qly, lz: qlz,
+                                                old_material: qsample.material,
+                                                old_density: qsample.density,
+                                                new_material: Material::Quartz,
+                                            });
+                                            global_deposited.insert(qvpos);
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let _ = selected; // consumed above
             }
         }
     }
@@ -476,7 +622,7 @@ pub fn apply_veins(
         if let Some(df) = density_fields.get_mut(&c.chunk_key) {
             let sample = df.get_mut(c.lx, c.ly, c.lz);
             sample.material = c.new_material;
-            // Preserve density (solid → solid)
+            // Preserve density (solid -> solid)
         }
 
         result.manifest.record_voxel_change(
@@ -584,7 +730,7 @@ pub fn apply_veins(
                         let wz = cz * (cs as i32) + z as i32;
 
                         // Check air neighbors for flowstone deposition
-                        // Flowstone = calcite precipitation → requires carbonate host rock nearby
+                        // Flowstone = calcite precipitation -> requires carbonate host rock nearby
                         for &(dx, dy, dz) in &FACE_OFFSETS {
                             let nx = wx + dx;
                             let ny = wy + dy;
@@ -712,8 +858,8 @@ pub fn apply_veins(
     if result.veins_deposited > 0 {
         result.transform_log.push(TransformEntry {
             description: format!(
-                "The Veins \u{2014} 500,000 years: {} ore voxels deposited from {} heat sources",
-                result.veins_deposited, heat_map.len()
+                "The Veins \u{2014} 500,000 years: {} ore voxels deposited from {} convergence zones",
+                result.veins_deposited, convergence_count
             ),
             count: result.veins_deposited,
         });
@@ -753,7 +899,7 @@ pub fn apply_veins(
     result
 }
 
-fn compute_veins_bottlenecks(census: &ResourceCensus, heat_map: &HeatMap) -> Vec<Bottleneck> {
+fn compute_veins_bottlenecks(census: &ResourceCensus, _heat_map: &HeatMap) -> Vec<Bottleneck> {
     let mut bottlenecks = Vec::new();
 
     let total_heat = census.heat_source_lava + census.heat_source_kimberlite;
@@ -762,10 +908,12 @@ fn compute_veins_bottlenecks(census: &ResourceCensus, heat_map: &HeatMap) -> Vec
             severity: 1.0,
             description: "No heat sources \u{2014} hydrothermal veins require lava or kimberlite".into(),
         });
-    } else if heat_map.is_empty() {
+    }
+
+    if census.water.cell_count == 0 {
         bottlenecks.push(Bottleneck {
-            severity: 0.9,
-            description: "Heat sources have no air pathways \u{2014} mine tunnels toward heat sources".into(),
+            severity: 1.0,
+            description: "No water \u{2014} hydrothermal veins require water near heat sources. Direct water toward lava/kimberlite.".into(),
         });
     }
 
@@ -790,13 +938,6 @@ fn compute_veins_bottlenecks(census: &ResourceCensus, heat_map: &HeatMap) -> Vec
         bottlenecks.push(Bottleneck {
             severity: 0.8,
             description: "No exposed host rock adjacent to air \u{2014} mine into rock to create deposition surfaces".into(),
-        });
-    }
-
-    if census.water.cell_count == 0 {
-        bottlenecks.push(Bottleneck {
-            severity: 0.3,
-            description: "No water \u{2014} flowstone formation requires active water flow".into(),
         });
     }
 

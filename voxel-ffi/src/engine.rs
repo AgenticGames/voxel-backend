@@ -1703,10 +1703,10 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
         },
         veins: VeinConfig {
             vein_deposition_prob: if c.sleep_vein_deposition_prob > 0.0 { c.sleep_vein_deposition_prob } else { 0.85 },
-            vein_max_distance: if c.sleep_vein_max_distance > 0 { c.sleep_vein_max_distance } else { 26 },
-            max_vein_voxels_per_source: if c.sleep_vein_max_per_source > 0 { c.sleep_vein_max_per_source } else { 80 },
+            convergence_radius: if c.sleep_vein_max_distance > 0 { c.sleep_vein_max_distance as f32 } else { 70.0 },
+            veins_per_zone_max: if c.sleep_vein_max_per_source > 0 { c.sleep_vein_max_per_source } else { 8 },
             flowstone_prob: if c.sleep_flowstone_prob > 0.0 { c.sleep_flowstone_prob } else { 0.10 },
-            vein_deposit_spacing: if c.sleep_vein_deposit_spacing > 0 { c.sleep_vein_deposit_spacing } else { 5 },
+            convergence_spacing: if c.sleep_vein_deposit_spacing > 0 { c.sleep_vein_deposit_spacing } else { 10 },
             ..Default::default()
         },
         deeptime: DeepTimeConfig {

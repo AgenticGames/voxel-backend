@@ -57,10 +57,10 @@ fn mat_name(id: u8) -> &'static str {
 
 fn make_ue_config() -> SleepConfig {
     let mut cfg = SleepConfig::default();
-    // Veins (defaults: vein_deposition_prob=0.85, max_vein_voxels=80, search_radius=20)
+    // Veins (water-heat convergence model)
     cfg.veins.vein_deposition_prob = 0.85;
-    cfg.veins.max_vein_voxels_per_source = 80;
-    cfg.veins.heat_source_search_radius = 20;
+    cfg.veins.convergence_radius = 70.0;
+    cfg.veins.veins_per_zone_max = 8;
     // Enrichment
     cfg.deeptime.enrichment_prob = 0.90;
     cfg.deeptime.max_enrichment_per_chunk = 400;

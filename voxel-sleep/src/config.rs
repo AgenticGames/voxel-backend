@@ -4,7 +4,21 @@ use voxel_core::stress::StressConfig;
 fn default_true() -> bool { true }
 fn default_one() -> f32 { 1.0 }
 fn default_accumulation_iterations() -> u32 { 3 }
-fn default_heat_source_search_radius() -> u32 { 8 }
+fn default_convergence_radius() -> f32 { 70.0 }
+fn default_hypothermal_height() -> u32 { 25 }
+fn default_mesothermal_height() -> u32 { 45 }
+fn default_epithermal_height() -> u32 { 65 }
+fn default_horizontal_spread() -> u32 { 20 }
+fn default_veins_per_zone_min() -> u32 { 5 }
+fn default_veins_per_zone_max() -> u32 { 8 }
+fn default_vein_climb_height_min() -> u32 { 8 }
+fn default_vein_climb_height_max() -> u32 { 15 }
+fn default_vein_wall_width_min() -> u32 { 3 }
+fn default_vein_wall_width_max() -> u32 { 5 }
+fn default_vein_rock_depth_min() -> u32 { 4 }
+fn default_vein_rock_depth_max() -> u32 { 8 }
+fn default_heat_direction_bias() -> f32 { 0.3 }
+fn default_convergence_spacing() -> u32 { 10 }
 fn default_enrichment_cluster_min() -> u32 { 2 }
 fn default_enrichment_cluster_max() -> u32 { 6 }
 fn default_vein_thickening_growth_min() -> u32 { 2 }
@@ -319,21 +333,57 @@ impl Default for AureoleConfig {
 // Phase 3: The Veins (500,000 years)
 // ──────────────────────────────────────────────────────────────
 
-/// Config for Phase 3: hydrothermal BFS vein injection + formation growth.
+/// Config for Phase 3: water-heat convergence vein deposition + formation growth.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VeinConfig {
-    // Hydrothermal vein deposition
+    // Water-heat convergence vein deposition
     pub vein_deposition_prob: f32,
-    pub max_vein_voxels_per_source: u32,
-    pub vein_max_distance: u32,
     pub vein_enabled: bool,
-    /// BFS search radius through solid rock to find air from submerged heat sources
-    #[serde(default = "default_heat_source_search_radius")]
-    pub heat_source_search_radius: u32,
-    // Temperature zone boundaries (BFS distance from heat)
-    pub hypothermal_max: u32,   // 0..hypothermal_max = high-temp zone
-    pub mesothermal_max: u32,   // hypothermal_max..mesothermal_max = mid-temp
-    // epithermal = mesothermal_max..vein_max_distance
+    /// Max 3D distance between water and heat source for activation
+    #[serde(default = "default_convergence_radius")]
+    pub convergence_radius: f32,
+    /// Height of hypothermal zone above water (0..hypothermal_height)
+    #[serde(default = "default_hypothermal_height")]
+    pub hypothermal_height: u32,
+    /// Height of mesothermal zone above water (hypothermal..mesothermal_height)
+    #[serde(default = "default_mesothermal_height")]
+    pub mesothermal_height: u32,
+    /// Height of epithermal zone above water (mesothermal..epithermal_height)
+    #[serde(default = "default_epithermal_height")]
+    pub epithermal_height: u32,
+    /// Max XZ spread from water source for wall site scanning
+    #[serde(default = "default_horizontal_spread")]
+    pub horizontal_spread: u32,
+    /// Min veins to place per temperature zone per convergence area
+    #[serde(default = "default_veins_per_zone_min")]
+    pub veins_per_zone_min: u32,
+    /// Max veins to place per temperature zone per convergence area
+    #[serde(default = "default_veins_per_zone_max")]
+    pub veins_per_zone_max: u32,
+    /// Min height of individual wall-climbing veins
+    #[serde(default = "default_vein_climb_height_min")]
+    pub vein_climb_height_min: u32,
+    /// Max height of individual wall-climbing veins
+    #[serde(default = "default_vein_climb_height_max")]
+    pub vein_climb_height_max: u32,
+    /// Min visible width on wall face
+    #[serde(default = "default_vein_wall_width_min")]
+    pub vein_wall_width_min: u32,
+    /// Max visible width on wall face
+    #[serde(default = "default_vein_wall_width_max")]
+    pub vein_wall_width_max: u32,
+    /// Min depth into solid rock behind wall
+    #[serde(default = "default_vein_rock_depth_min")]
+    pub vein_rock_depth_min: u32,
+    /// Max depth into solid rock behind wall
+    #[serde(default = "default_vein_rock_depth_max")]
+    pub vein_rock_depth_max: u32,
+    /// Preference for heat-facing walls (0.0 = none, 1.0 = strong)
+    #[serde(default = "default_heat_direction_bias")]
+    pub heat_direction_bias: f32,
+    /// Min distance between processed water cells (spatial deduplication)
+    #[serde(default = "default_convergence_spacing")]
+    pub convergence_spacing: u32,
     /// Epithermal rarity: probability that Gold/Sulfide actually deposits (0.0-1.0)
     pub epithermal_rarity: f32,
     // Formation growth
@@ -357,23 +407,28 @@ pub struct VeinConfig {
     pub slate_quartz_vein_prob: f32,
     /// Wall-rock alteration: probability that vein deposition converts adjacent limestone to garnet/diopside
     pub wall_rock_alteration_prob: f32,
-    /// Skip N surface voxels between vein deposits for spacing along contact surfaces
-    #[serde(default = "default_vein_deposit_spacing")]
-    pub vein_deposit_spacing: u32,
 }
-
-fn default_vein_deposit_spacing() -> u32 { 5 }
 
 impl Default for VeinConfig {
     fn default() -> Self {
         Self {
             vein_deposition_prob: 0.85,
-            max_vein_voxels_per_source: 80,
-            vein_max_distance: 26,
             vein_enabled: true,
-            heat_source_search_radius: 20,
-            hypothermal_max: 8,
-            mesothermal_max: 14,
+            convergence_radius: 70.0,
+            hypothermal_height: 25,
+            mesothermal_height: 45,
+            epithermal_height: 65,
+            horizontal_spread: 20,
+            veins_per_zone_min: 5,
+            veins_per_zone_max: 8,
+            vein_climb_height_min: 8,
+            vein_climb_height_max: 15,
+            vein_wall_width_min: 3,
+            vein_wall_width_max: 5,
+            vein_rock_depth_min: 4,
+            vein_rock_depth_max: 8,
+            heat_direction_bias: 0.3,
+            convergence_spacing: 10,
             epithermal_rarity: 0.55,
             crystal_growth_enabled: true,
             crystal_growth_prob: 0.30,
@@ -391,7 +446,6 @@ impl Default for VeinConfig {
             slate_pyrite_codeposit_prob: 0.25,
             slate_quartz_vein_prob: 0.30,
             wall_rock_alteration_prob: 0.18,
-            vein_deposit_spacing: 5,
         }
     }
 }

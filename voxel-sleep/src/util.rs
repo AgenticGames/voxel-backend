@@ -51,6 +51,7 @@ pub fn count_neighbors(
     count
 }
 
+#[allow(dead_code)]
 /// Vein deposition probability multiplier based on tunnel aperture (air neighbor count).
 /// Wider tunnels = more fluid flow = richer veins; narrow cracks = less deposition.
 pub fn aperture_multiplier(air_neighbors: u32) -> f32 {
@@ -112,6 +113,8 @@ pub enum VeinBias {
     Planar(u8),
     /// Gold/Sulfide: tight spherical clusters
     Compact,
+    /// Veins grow upward on wall faces, thickening into rock behind
+    WallClimbing { wall_normal: (i32, i32, i32) },
 }
 
 /// Parameters for growing a connected vein deposit.
@@ -172,7 +175,21 @@ pub fn grow_vein(
                         };
                         if on_compressed { 0.3 } else { 1.0 }
                     }
-                    VeinBias::Branching | VeinBias::Compact => 1.0,
+                    VeinBias::Compact => 1.0,
+                    VeinBias::Branching => 1.0,
+                    VeinBias::WallClimbing { wall_normal } => {
+                        // Y+ (up): primary climbing direction
+                        if dy > 0 { 3.0 }
+                        // Into wall (opposite of wall_normal): depth into rock
+                        else if dx == -wall_normal.0 && dy == -wall_normal.1 && dz == -wall_normal.2 { 2.0 }
+                        // Lateral (horizontal, perpendicular to wall_normal): width on wall face
+                        else if dy == 0 && (dx != wall_normal.0 || dz != wall_normal.2) { 1.5 }
+                        // Y- (down): rarely descend
+                        else if dy < 0 { 0.3 }
+                        // Toward air (same as wall_normal): avoid growing outward
+                        else if dx == wall_normal.0 && dy == wall_normal.1 && dz == wall_normal.2 { 0.1 }
+                        else { 1.0 }
+                    },
                 };
                 candidates.push((n, weight));
             }
@@ -254,6 +271,7 @@ pub fn default_vein_bias(ore: Material, rng: &mut ChaCha8Rng) -> VeinBias {
     }
 }
 
+#[allow(dead_code)]
 /// BFS through solid rock from a solid starting position to find nearby air voxels.
 ///
 /// Returns `(air_position, bfs_distance)` pairs sorted by distance (closest first).
