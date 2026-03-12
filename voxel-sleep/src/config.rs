@@ -2,12 +2,20 @@ use serde::{Deserialize, Serialize};
 use voxel_core::stress::StressConfig;
 
 fn default_true() -> bool { true }
+fn default_one() -> f32 { 1.0 }
 fn default_accumulation_iterations() -> u32 { 3 }
 fn default_heat_source_search_radius() -> u32 { 8 }
 fn default_enrichment_cluster_min() -> u32 { 2 }
 fn default_enrichment_cluster_max() -> u32 { 6 }
 fn default_vein_thickening_growth_min() -> u32 { 2 }
 fn default_vein_thickening_growth_max() -> u32 { 5 }
+fn default_water_boost_max() -> f32 { 0.6 }
+fn default_water_search_mult() -> f32 { 2.0 }
+fn default_large_vein() -> u32 { 15 }
+fn default_small_vein() -> u32 { 6 }
+fn default_min_zone() -> u32 { 5 }
+fn default_garnet_pocket() -> u32 { 4 }
+fn default_diopside_pocket() -> u32 { 4 }
 
 /// Top-level sleep configuration — 4-phase geological time simulation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -243,6 +251,27 @@ pub struct AureoleConfig {
     pub contact_slate_to_hornfels_prob: f32,
     pub mid_slate_to_hornfels_prob: f32,
     pub outer_slate_to_hornfels_prob: f32,
+    // Lava zone contact metamorphism + ore veins
+    #[serde(default = "default_true")]
+    pub zone_enabled: bool,
+    #[serde(default = "default_one")]
+    pub heat_multiplier: f32,
+    #[serde(default = "default_one")]
+    pub radius_scale: f32,
+    #[serde(default = "default_water_boost_max")]
+    pub water_boost_max: f32,
+    #[serde(default = "default_water_search_mult")]
+    pub water_search_radius_mult: f32,
+    #[serde(default = "default_large_vein")]
+    pub large_vein_base_size: u32,
+    #[serde(default = "default_small_vein")]
+    pub small_vein_base_size: u32,
+    #[serde(default = "default_min_zone")]
+    pub min_lava_zone_size: u32,
+    #[serde(default = "default_garnet_pocket")]
+    pub garnet_pocket_size: u32,
+    #[serde(default = "default_diopside_pocket")]
+    pub diopside_pocket_size: u32,
 }
 
 impl Default for AureoleConfig {
@@ -272,6 +301,16 @@ impl Default for AureoleConfig {
             contact_slate_to_hornfels_prob: 0.90,
             mid_slate_to_hornfels_prob: 0.60,
             outer_slate_to_hornfels_prob: 0.25,
+            zone_enabled: true,
+            heat_multiplier: 1.0,
+            radius_scale: 1.0,
+            water_boost_max: 0.6,
+            water_search_radius_mult: 2.0,
+            large_vein_base_size: 15,
+            small_vein_base_size: 6,
+            min_lava_zone_size: 5,
+            garnet_pocket_size: 4,
+            diopside_pocket_size: 4,
         }
     }
 }

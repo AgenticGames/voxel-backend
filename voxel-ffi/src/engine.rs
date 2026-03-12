@@ -1689,6 +1689,16 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
             contact_limestone_to_marble_prob: if c.sleep_contact_marble_prob > 0.0 { c.sleep_contact_marble_prob } else { 0.18 },
             water_erosion_prob: if c.sleep_water_erosion_prob > 0.0 { c.sleep_water_erosion_prob } else { 0.05 },
             water_erosion_enabled: c.sleep_water_erosion_enabled != 0,
+            zone_enabled: c.sleep_zone_enabled != 0,
+            heat_multiplier: if c.sleep_heat_multiplier > 0.0 { c.sleep_heat_multiplier } else { 1.0 },
+            radius_scale: if c.sleep_radius_scale > 0.0 { c.sleep_radius_scale } else { 1.0 },
+            water_boost_max: if c.sleep_water_boost_max > 0.0 { c.sleep_water_boost_max } else { 0.6 },
+            water_search_radius_mult: if c.sleep_water_search_radius_mult > 0.0 { c.sleep_water_search_radius_mult } else { 2.0 },
+            large_vein_base_size: if c.sleep_large_vein_base_size > 0 { c.sleep_large_vein_base_size } else { 15 },
+            small_vein_base_size: if c.sleep_small_vein_base_size > 0 { c.sleep_small_vein_base_size } else { 6 },
+            min_lava_zone_size: if c.sleep_min_lava_zone_size > 0 { c.sleep_min_lava_zone_size } else { 5 },
+            garnet_pocket_size: if c.sleep_garnet_pocket_size > 0 { c.sleep_garnet_pocket_size } else { 4 },
+            diopside_pocket_size: if c.sleep_diopside_pocket_size > 0 { c.sleep_diopside_pocket_size } else { 4 },
             ..Default::default()
         },
         veins: VeinConfig {

@@ -456,9 +456,16 @@ pub fn execute_sleep(
         for key in aureole_result.manifest.chunk_deltas.keys() {
             all_dirty.insert(*key);
         }
+        let aureole_summary = if aureole_result.lava_zones_found > 0 {
+            format!("{} metamorphosed ({} hornfels, {} skarn, {} veins), {} eroded, {} zones",
+                total_metamorphosed, aureole_result.hornfels_placed, aureole_result.skarn_placed,
+                aureole_result.veins_placed, aureole_result.channels_eroded, aureole_result.lava_zones_found)
+        } else {
+            format!("{} voxels metamorphosed, {} eroded", total_metamorphosed, aureole_result.channels_eroded)
+        };
         send_progress(progress_tx, 0, "The Aureole", 100_000, 1.0, total_chunks, total_chunks,
             aureole_result.glimpse_chunk, if aureole_result.glimpse_chunk.is_some() { 1 } else { 0 },
-            format!("{} voxels metamorphosed, {} eroded", total_metamorphosed, aureole_result.channels_eroded));
+            aureole_summary);
     } else {
         send_progress(progress_tx, 0, "The Aureole", 100_000, 1.0, total_chunks, total_chunks, None, 0, String::new());
     }

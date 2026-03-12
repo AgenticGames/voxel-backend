@@ -48,6 +48,9 @@ pub enum Material {
 
     // Evaporite
     Gypsum = 25,
+
+    // Calc-silicate metamorphic (limestone contact aureole)
+    Skarn = 26,
 }
 
 impl Material {
@@ -78,6 +81,7 @@ impl Material {
             23 => Material::Garnet,
             24 => Material::Diopside,
             25 => Material::Gypsum,
+            26 => Material::Skarn,
             _ => Material::Air,
         }
     }
@@ -116,6 +120,7 @@ impl Material {
                 | Material::Slate
                 | Material::Marble
                 | Material::Hornfels
+                | Material::Skarn
         )
     }
 
@@ -125,7 +130,7 @@ impl Material {
 
     pub fn is_hard_rock(self) -> bool {
         matches!(self, Material::Granite | Material::Basalt | Material::Slate | Material::Marble
-            | Material::Hornfels | Material::Garnet | Material::Diopside)
+            | Material::Hornfels | Material::Garnet | Material::Diopside | Material::Skarn)
     }
 
     pub fn is_geode_shell(self) -> bool {
@@ -140,7 +145,7 @@ impl Material {
     /// Impermeable materials block water flow, creating geological contacts.
     pub fn is_impermeable(self) -> bool {
         matches!(self, Material::Granite | Material::Basalt | Material::Slate | Material::Marble
-            | Material::Hornfels | Material::Garnet | Material::Diopside)
+            | Material::Hornfels | Material::Garnet | Material::Diopside | Material::Skarn)
     }
 
     /// Porosity value (0.0 = impervious, 1.0 = highly porous).
@@ -157,6 +162,7 @@ impl Material {
             Material::Garnet => 0.05,
             Material::Diopside => 0.1,
             Material::Gypsum => 0.7,
+            Material::Skarn => 0.08,
             _ => 0.0,
         }
     }
@@ -195,6 +201,7 @@ impl Material {
             Material::Garnet => "Garnet",
             Material::Diopside => "Diopside",
             Material::Gypsum => "Gypsum",
+            Material::Skarn => "Skarn",
         }
     }
 
@@ -226,6 +233,7 @@ impl Material {
             Material::Garnet => 0x8B2500,
             Material::Diopside => 0x2E8B57,
             Material::Gypsum => 0xF5F0E8,
+            Material::Skarn => 0x4A5A3C,
         }
     }
 
@@ -257,6 +265,7 @@ impl Material {
             Material::Garnet,
             Material::Diopside,
             Material::Gypsum,
+            Material::Skarn,
         ]
     }
 }

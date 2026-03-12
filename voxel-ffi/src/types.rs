@@ -43,7 +43,7 @@ pub struct FfiMeshData {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct FfiMinedMaterials {
-    pub counts: [u32; 26],
+    pub counts: [u32; 27],
 }
 
 #[repr(u8)]
@@ -730,6 +730,17 @@ pub struct FfiEngineConfig {
     pub sleep_vein_deposit_spacing: u32,
     // ── Lava Solidification ──
     pub sleep_lava_solidification_enabled: u8,
+    // ── Aureole Zone Config (10 fields) ──
+    pub sleep_zone_enabled: u8,
+    pub sleep_heat_multiplier: f32,
+    pub sleep_radius_scale: f32,
+    pub sleep_water_boost_max: f32,
+    pub sleep_water_search_radius_mult: f32,
+    pub sleep_large_vein_base_size: u32,
+    pub sleep_small_vein_base_size: u32,
+    pub sleep_min_lava_zone_size: u32,
+    pub sleep_garnet_pocket_size: u32,
+    pub sleep_diopside_pocket_size: u32,
 }
 
 #[repr(C)]
@@ -774,7 +785,7 @@ pub struct FfiCollapseEvent {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct FfiStressConfig {
-    pub material_hardness: [f32; 26],
+    pub material_hardness: [f32; 27],
     pub gravity_weight: f32,
     pub lateral_support_factor: f32,
     pub vertical_support_factor: f32,
