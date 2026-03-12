@@ -103,6 +103,7 @@ pub struct SleepResult {
     pub veins_deposited: u32,
     pub formations_grown: u32,
     pub voxels_enriched: u32,
+    pub veins_thickened: u32,
     pub supports_degraded: u32,
     pub collapses_triggered: u32,
     pub sulfide_dissolved: u32,
@@ -417,6 +418,7 @@ pub fn execute_sleep(
     let mut total_veins = 0u32;
     let mut total_formations = 0u32;
     let mut total_enriched = 0u32;
+    let mut total_thickened = 0u32;
     let mut total_supports_degraded = 0u32;
     let mut total_collapses = 0u32;
     let mut total_sulfide_dissolved = 0u32;
@@ -537,6 +539,7 @@ pub fn execute_sleep(
             &mut rng, &census,
         );
         total_enriched = dt_result.voxels_enriched;
+        total_thickened = dt_result.veins_thickened;
         total_nests_fossilized = dt_result.nests_fossilized;
         total_corpses_fossilized = dt_result.corpses_fossilized;
         total_formations += dt_result.formations_grown;
@@ -736,7 +739,7 @@ pub fn execute_sleep(
     let profile_report = build_sleep_profile_report(
         &timings, sleep_count, config.chunk_radius,
         total_acid_dissolved, total_oxidized, total_metamorphosed,
-        total_veins, total_formations, total_enriched,
+        total_veins, total_formations, total_enriched, total_thickened,
         total_supports_degraded, total_collapses,
         all_chunks.len() as u32, mineral_chunks.len() as u32,
         collapse_chunks.len() as u32, dirty_chunks.len() as u32,
@@ -759,6 +762,7 @@ pub fn execute_sleep(
         veins_deposited: total_veins,
         formations_grown: total_formations,
         voxels_enriched: total_enriched,
+        veins_thickened: total_thickened,
         supports_degraded: total_supports_degraded,
         collapses_triggered: total_collapses,
         sulfide_dissolved: total_sulfide_dissolved,
@@ -878,6 +882,7 @@ fn build_sleep_profile_report(
     veins_deposited: u32,
     formations_grown: u32,
     voxels_enriched: u32,
+    veins_thickened: u32,
     supports_degraded: u32,
     collapses_triggered: u32,
     _all_chunk_count: u32,
@@ -942,7 +947,7 @@ fn build_sleep_profile_report(
     let _ = writeln!(s);
     let _ = writeln!(s, "\u{2500}\u{2500}\u{2500} Phase 4: The Deep Time (1,250,000 years) \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}");
     let _ = writeln!(s, "  Supergene enrichment: {:.2} ms  ({} voxels enriched)", dur_ms(timings.deeptime_enrichment), voxels_enriched);
-    let _ = writeln!(s, "  Vein thickening:      {:.2} ms", dur_ms(timings.deeptime_thickening));
+    let _ = writeln!(s, "  Vein thickening:      {:.2} ms  ({} voxels thickened)", dur_ms(timings.deeptime_thickening), veins_thickened);
     let _ = writeln!(s, "  Formations:           {:.2} ms", dur_ms(timings.deeptime_formations));
     let _ = writeln!(s, "  Nest fossilization:   {:.2} ms  ({} nests fossilized)", dur_ms(timings.deeptime_fossilization), nests_fossilized);
     if let Some(ref ct) = timings.collapse_sub {
