@@ -2018,7 +2018,7 @@ mod tests {
             sleep_copper_oxidation_prob: 0.0012,
             sleep_basalt_crust_prob: 0.001,
             sleep_acid_max_dissolved_per_source: 30,
-            sleep_vein_deposit_spacing: 10,  // now convergence_spacing
+            sleep_vein_deposit_spacing: 25,  // now convergence_spacing
             sleep_lava_solidification_enabled: 1,
             sleep_zone_enabled: 1,
             sleep_heat_multiplier: 1.0,
@@ -2030,14 +2030,14 @@ mod tests {
             sleep_min_lava_zone_size: 5,
             sleep_garnet_pocket_size: 4,
             sleep_diopside_pocket_size: 4,
-            sleep_max_aureole_radius: 20.0,
+            sleep_max_aureole_radius: 10.0,
             sleep_aureole_radius: 10,
             sleep_contact_marble_prob: 0.18,
             sleep_water_erosion_prob: 0.05,
             sleep_water_erosion_enabled: 1,
             sleep_vein_deposition_prob: 0.85,
             sleep_vein_max_distance: 70,    // now convergence_radius
-            sleep_vein_max_per_source: 8,   // now veins_per_zone_max
+            sleep_vein_max_per_source: 4,   // now veins_per_zone_max
 
             sleep_flowstone_prob: 0.10,
             sleep_enrichment_prob: 0.90,

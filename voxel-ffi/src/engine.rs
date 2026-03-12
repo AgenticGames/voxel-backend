@@ -1699,15 +1699,15 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
             min_lava_zone_size: if c.sleep_min_lava_zone_size > 0 { c.sleep_min_lava_zone_size } else { 5 },
             garnet_pocket_size: if c.sleep_garnet_pocket_size > 0 { c.sleep_garnet_pocket_size } else { 4 },
             diopside_pocket_size: if c.sleep_diopside_pocket_size > 0 { c.sleep_diopside_pocket_size } else { 4 },
-            max_radius: if c.sleep_max_aureole_radius > 0.0 { c.sleep_max_aureole_radius } else { 20.0 },
+            max_radius: if c.sleep_max_aureole_radius > 0.0 { c.sleep_max_aureole_radius } else { 10.0 },
             ..Default::default()
         },
         veins: VeinConfig {
             vein_deposition_prob: if c.sleep_vein_deposition_prob > 0.0 { c.sleep_vein_deposition_prob } else { 0.85 },
             convergence_radius: if c.sleep_vein_max_distance > 0 { c.sleep_vein_max_distance as f32 } else { 70.0 },
-            veins_per_zone_max: if c.sleep_vein_max_per_source > 0 { c.sleep_vein_max_per_source } else { 8 },
+            veins_per_zone_max: if c.sleep_vein_max_per_source > 0 { c.sleep_vein_max_per_source } else { 4 },
             flowstone_prob: if c.sleep_flowstone_prob > 0.0 { c.sleep_flowstone_prob } else { 0.10 },
-            convergence_spacing: if c.sleep_vein_deposit_spacing > 0 { c.sleep_vein_deposit_spacing } else { 10 },
+            convergence_spacing: if c.sleep_vein_deposit_spacing > 0 { c.sleep_vein_deposit_spacing } else { 25 },
             ..Default::default()
         },
         deeptime: DeepTimeConfig {

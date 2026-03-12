@@ -304,6 +304,16 @@ pub fn apply_veins(
 
             let spread = config.horizontal_spread as i32;
 
+            // Pre-select dominant ore per zone for this convergence area (coherent vein bodies)
+            // Sample nearby host rock to determine the dominant ore tables
+            let nearby_host = FACE_OFFSETS.iter()
+                .filter_map(|&(dx, dy, dz)| sample_material(density_fields, water_x + dx, water_y + dy, water_z + dz, chunk_size))
+                .find(|m| is_host_rock(*m))
+                .unwrap_or(Material::Slate);
+            let dominant_hypo = select_ore_by_zone_and_host(config, TemperatureZone::Hypothermal, nearby_host, rng);
+            let dominant_meso = select_ore_by_zone_and_host(config, TemperatureZone::Mesothermal, nearby_host, rng);
+            let dominant_epi = select_ore_by_zone_and_host(config, TemperatureZone::Epithermal, nearby_host, rng);
+
             for &zone in &zones {
                 let (y_min, y_max) = match zone {
                     TemperatureZone::Hypothermal => (0i32, config.hypothermal_height as i32),
@@ -313,7 +323,7 @@ pub fn apply_veins(
                 if y_min >= y_max { continue; }
 
                 let num_veins = rng.gen_range(config.veins_per_zone_min..=config.veins_per_zone_max);
-                let max_candidates = (num_veins * 3) as usize;
+                let max_candidates = (num_veins * 10) as usize;
 
                 // Find wall sites: scan box above water
                 let mut candidates: Vec<WallSite> = Vec::new();
@@ -411,8 +421,8 @@ pub fn apply_veins(
 
                 if candidates.is_empty() { continue; }
 
-                // Select num_veins sites with minimum spacing (6 voxels apart)
-                let min_site_spacing = 6i32;
+                // Select num_veins sites with minimum spacing (15 voxels apart for distinct streaks)
+                let min_site_spacing = 15i32;
                 let mut selected: Vec<usize> = Vec::new();
 
                 for _ in 0..num_veins {
@@ -442,8 +452,17 @@ pub fn apply_veins(
                         dx + dy + dz >= min_site_spacing
                     });
 
-                    // Select ore for this site
-                    let ore = select_ore_by_zone_and_host(config, zone, chosen.host_rock, rng);
+                    // Select ore: 75% dominant for coherent vein bodies, 25% random for variety
+                    let dominant = match zone {
+                        TemperatureZone::Hypothermal => dominant_hypo,
+                        TemperatureZone::Mesothermal => dominant_meso,
+                        TemperatureZone::Epithermal => dominant_epi,
+                    };
+                    let ore = if rng.gen::<f32>() < 0.75 {
+                        dominant
+                    } else {
+                        select_ore_by_zone_and_host(config, zone, chosen.host_rock, rng)
+                    };
 
                     // Epithermal rarity filter
                     if matches!(zone, TemperatureZone::Epithermal) {
@@ -457,11 +476,11 @@ pub fn apply_veins(
                         continue;
                     }
 
-                    // Compute climbing vein target size
+                    // Compute climbing vein target size (~25% fill of bounding box for thin streaks)
                     let height = rng.gen_range(config.vein_climb_height_min..=config.vein_climb_height_max);
                     let width = rng.gen_range(config.vein_wall_width_min..=config.vein_wall_width_max);
                     let depth = rng.gen_range(config.vein_rock_depth_min..=config.vein_rock_depth_max);
-                    let target = ((height * width * depth * 6) / 10).max(20);
+                    let target = ((height * width * depth) / 4).max(4).min(60);
 
                     let params = VeinGrowthParams {
                         ore,

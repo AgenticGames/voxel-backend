@@ -15,7 +15,7 @@ use voxel_fluid::FluidSnapshot;
 use crate::config::{AureoleConfig, GroundwaterConfig};
 use crate::groundwater::ambient_moisture;
 use crate::manifest::ChangeManifest;
-use crate::util::{FACE_OFFSETS, sample_material, grow_vein, VeinGrowthParams, VeinBias, default_vein_bias};
+use crate::util::{FACE_OFFSETS, sample_material, set_material_synced, grow_vein, VeinGrowthParams, VeinBias, default_vein_bias};
 use crate::{Bottleneck, PhaseDiagnostics, ResourceCensus, TransformEntry};
 
 /// Type of heat source for coal maturation decisions.
@@ -179,25 +179,25 @@ enum AureoleType {
     Limestone,
 }
 
-/// Determine whether the zone is predominantly limestone-hosted or slate-hosted.
+/// Determine whether the zone is predominantly limestone-hosted or slate-hosted
+/// by sampling face-neighbors of lava cells directly (avoids centroid-in-air problem).
 fn determine_aureole_type(
-    centroid: (i32, i32, i32),
+    zone: &LavaZone,
     density_fields: &HashMap<(i32, i32, i32), DensityField>,
     chunk_size: usize,
 ) -> AureoleType {
-    let (cx, cy, cz) = centroid;
     let mut limestone_count = 0u32;
     let mut other_count = 0u32;
 
-    for dx in -3..=3i32 {
-        for dy in -3..=3i32 {
-            for dz in -3..=3i32 {
-                if let Some(mat) = sample_material(density_fields, cx + dx, cy + dy, cz + dz, chunk_size) {
-                    if mat == Material::Limestone {
-                        limestone_count += 1;
-                    } else if mat.is_host_rock() && mat != Material::Limestone {
-                        other_count += 1;
-                    }
+    // Sample up to 200 cells for perf
+    let limit = zone.cells.len().min(200);
+    for &(cx, cy, cz) in &zone.cells[..limit] {
+        for &(dx, dy, dz) in &FACE_OFFSETS {
+            if let Some(mat) = sample_material(density_fields, cx + dx, cy + dy, cz + dz, chunk_size) {
+                if mat == Material::Limestone {
+                    limestone_count += 1;
+                } else if mat.is_host_rock() && mat != Material::Limestone {
+                    other_count += 1;
                 }
             }
         }
@@ -214,43 +214,34 @@ fn determine_aureole_type(
 // Water Boost
 // ──────────────────────────────────────────────────────────────
 
-/// Compute water boost multiplier by counting water cells near the zone centroid.
+/// Compute water boost multiplier by counting water cells adjacent to lava cells.
 fn compute_water_boost(
-    centroid: (i32, i32, i32),
-    lava_count: u32,
+    zone: &LavaZone,
     fluid_snapshot: &FluidSnapshot,
-    search_radius: f32,
     max_boost: f32,
 ) -> f32 {
-    let (cx, cy, cz) = centroid;
-    let r = search_radius.ceil() as i32;
-    let r_sq = search_radius * search_radius;
     let cs = fluid_snapshot.chunk_size;
+    let lava_count = zone.cells.len() as u32;
     let mut water_count = 0u32;
 
-    for dx in -r..=r {
-        for dy in -r..=r {
-            for dz in -r..=r {
-                let dist_sq = (dx * dx + dy * dy + dz * dz) as f32;
-                if dist_sq > r_sq {
-                    continue;
-                }
-                let wx = cx + dx;
-                let wy = cy + dy;
-                let wz = cz + dz;
-                let fck = (
-                    wx.div_euclid(cs as i32),
-                    wy.div_euclid(cs as i32),
-                    wz.div_euclid(cs as i32),
-                );
-                let flx = wx.rem_euclid(cs as i32) as usize;
-                let fly = wy.rem_euclid(cs as i32) as usize;
-                let flz = wz.rem_euclid(cs as i32) as usize;
-                let fidx = flz * cs * cs + fly * cs + flx;
-                if let Some(cells) = fluid_snapshot.chunks.get(&fck) {
-                    if fidx < cells.len() && cells[fidx].fluid_type.is_water() && cells[fidx].level > 0.001 {
-                        water_count += 1;
-                    }
+    // Check face-neighbors of each lava cell for water in the fluid snapshot
+    for &(lx, ly, lz) in &zone.cells {
+        for &(dx, dy, dz) in &FACE_OFFSETS {
+            let wx = lx + dx;
+            let wy = ly + dy;
+            let wz = lz + dz;
+            let fck = (
+                wx.div_euclid(cs as i32),
+                wy.div_euclid(cs as i32),
+                wz.div_euclid(cs as i32),
+            );
+            let flx = wx.rem_euclid(cs as i32) as usize;
+            let fly = wy.rem_euclid(cs as i32) as usize;
+            let flz = wz.rem_euclid(cs as i32) as usize;
+            let fidx = flz * cs * cs + fly * cs + flx;
+            if let Some(cells) = fluid_snapshot.chunks.get(&fck) {
+                if fidx < cells.len() && cells[fidx].fluid_type.is_water() && cells[fidx].level > 0.001 {
+                    water_count += 1;
                 }
             }
         }
@@ -261,127 +252,174 @@ fn compute_water_boost(
 }
 
 // ──────────────────────────────────────────────────────────────
-// Metamorphic Sphere Placement
+// Metamorphic Shell Placement (multi-source BFS from lava cells)
 // ──────────────────────────────────────────────────────────────
 
-/// Place metamorphic sphere: limestone → Skarn, other host rock → Hornfels.
-/// Returns (hornfels_count, skarn_count).
-fn place_metamorphic_sphere(
-    centroid: (i32, i32, i32),
-    radius: f32,
+/// Place metamorphic shell via BFS from every lava cell outward into solid rock.
+/// Limestone → Skarn, other host rock → Hornfels. Air gaps block propagation.
+/// Returns (hornfels_count, skarn_count, set of converted world positions).
+///
+/// Uses `set_material_synced` so overlapping boundary voxels in adjacent chunks
+/// are updated immediately, preventing `sync_boundary_density` from reverting
+/// material-only changes at chunk boundaries.
+fn place_metamorphic_shell(
+    zone: &LavaZone,
+    max_depth: i32,
     density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
     chunk_size: usize,
     manifest: &mut ChangeManifest,
-) -> (u32, u32) {
-    let (cx, cy, cz) = centroid;
-    let r = radius.ceil() as i32;
-    let r_sq = radius * radius;
+) -> (u32, u32, HashSet<(i32, i32, i32)>) {
     let mut hornfels_count = 0u32;
     let mut skarn_count = 0u32;
+    let mut converted: HashSet<(i32, i32, i32)> = HashSet::new();
 
-    for dx in -r..=r {
-        for dy in -r..=r {
-            for dz in -r..=r {
-                let dist_sq = (dx * dx + dy * dy + dz * dz) as f32;
-                if dist_sq > r_sq {
-                    continue;
-                }
-                let wx = cx + dx;
-                let wy = cy + dy;
-                let wz = cz + dz;
-                let (key, lx, ly, lz) = world_to_chunk_local(wx, wy, wz, chunk_size);
-                let (old_mat, old_density) = match density_fields.get(&key) {
-                    Some(df) => {
-                        let s = df.get(lx, ly, lz);
-                        (s.material, s.density)
-                    }
-                    None => continue,
-                };
+    // Build lava position set for O(1) lookup
+    let lava_set: HashSet<(i32, i32, i32)> = zone.cells.iter().copied().collect();
 
-                let new_mat = if old_mat == Material::Limestone {
-                    Material::Skarn
-                } else if old_mat.is_host_rock()
-                    && old_mat != Material::Hornfels
-                    && old_mat != Material::Skarn
-                {
-                    Material::Hornfels
-                } else {
-                    continue;
-                };
+    // Multi-source BFS: seed with all lava cells at distance 0
+    let mut queue: VecDeque<((i32, i32, i32), i32)> = VecDeque::new();
+    let mut visited: HashSet<(i32, i32, i32)> = HashSet::new();
+    for &pos in &zone.cells {
+        queue.push_back((pos, 0));
+        visited.insert(pos);
+    }
 
-                if let Some(df) = density_fields.get_mut(&key) {
-                    df.get_mut(lx, ly, lz).material = new_mat;
-                }
-                manifest.record_voxel_change(key, lx, ly, lz, old_mat, old_density, new_mat, old_density);
-
-                if new_mat == Material::Skarn {
-                    skarn_count += 1;
-                } else {
-                    hornfels_count += 1;
-                }
+    while let Some((pos, dist)) = queue.pop_front() {
+        for &(dx, dy, dz) in &FACE_OFFSETS {
+            let n = (pos.0 + dx, pos.1 + dy, pos.2 + dz);
+            if !visited.insert(n) {
+                continue;
             }
+            if lava_set.contains(&n) {
+                continue; // already a lava cell
+            }
+            let next_dist = dist + 1;
+            if next_dist > max_depth {
+                continue;
+            }
+
+            let (key, lx, ly, lz) = world_to_chunk_local(n.0, n.1, n.2, chunk_size);
+            let (mat, density) = match density_fields.get(&key) {
+                Some(df) => {
+                    let s = df.get(lx, ly, lz);
+                    (s.material, s.density)
+                }
+                None => continue,
+            };
+
+            if !mat.is_solid() {
+                // Air/non-solid: don't enqueue (aureole doesn't cross air gaps)
+                continue;
+            }
+
+            if mat == Material::Hornfels || mat == Material::Skarn {
+                // Already metamorphosed — continue BFS through but don't re-convert
+                queue.push_back((n, next_dist));
+                continue;
+            }
+
+            let new_mat = if mat == Material::Limestone {
+                Material::Skarn
+            } else if mat.is_host_rock() {
+                Material::Hornfels
+            } else {
+                // Non-host-rock solid (ore, etc.) — block BFS
+                continue;
+            };
+
+            // Convert with boundary sync
+            set_material_synced(density_fields, n.0, n.1, n.2, new_mat, chunk_size);
+            manifest.record_voxel_change(key, lx, ly, lz, mat, density, new_mat, density);
+            converted.insert(n);
+
+            if new_mat == Material::Skarn {
+                skarn_count += 1;
+            } else {
+                hornfels_count += 1;
+            }
+
+            queue.push_back((n, next_dist));
         }
     }
 
-    (hornfels_count, skarn_count)
+    (hornfels_count, skarn_count, converted)
 }
 
 // ──────────────────────────────────────────────────────────────
-// Vein Seed Distribution (golden-angle spiral)
+// Aureole Boundary Seed Finding
 // ──────────────────────────────────────────────────────────────
 
-/// Distribute vein seed positions by raycasting outward from centroid using golden-angle spiral.
-fn distribute_vein_seeds(
-    centroid: (i32, i32, i32),
-    radius: f32,
-    count: usize,
+/// Find vein seed positions at the aureole boundary: converted voxels that have
+/// at least one air face-neighbor (visible) AND at least one unconverted host-rock
+/// face-neighbor (vein can grow into). Seeds are placed where players will see them.
+fn find_aureole_boundary_seeds(
+    converted: &HashSet<(i32, i32, i32)>,
     density_fields: &HashMap<(i32, i32, i32), DensityField>,
     chunk_size: usize,
+    count: usize,
+    rng: &mut ChaCha8Rng,
 ) -> Vec<(i32, i32, i32)> {
-    let golden_angle = std::f32::consts::PI * (3.0 - (5.0_f32).sqrt());
-    let (cx, cy, cz) = centroid;
-    let mut seeds = Vec::new();
+    // Collect boundary candidates with air-neighbor count for weighting
+    let mut candidates: Vec<((i32, i32, i32), u32)> = Vec::new();
 
-    // Overshoot: generate 3× the requested count, take first `count` hits
-    let attempt_count = count * 3;
-
-    for i in 0..attempt_count {
-        if seeds.len() >= count {
-            break;
-        }
-        let y_frac = 1.0 - 2.0 * (i as f32) / (attempt_count as f32 - 1.0).max(1.0);
-        let r_at = (1.0 - y_frac * y_frac).sqrt();
-        let theta = golden_angle * i as f32;
-
-        let dx = r_at * theta.cos();
-        let dy = y_frac;
-        let dz = r_at * theta.sin();
-
-        // Raycast outward from centroid
-        let max_steps = (radius * 2.0).ceil().max(20.0) as i32;
-        let mut last_solid = None;
-
-        for step in 1..=max_steps {
-            let wx = cx + (dx * step as f32).round() as i32;
-            let wy = cy + (dy * step as f32).round() as i32;
-            let wz = cz + (dz * step as f32).round() as i32;
-
-            if let Some(mat) = sample_material(density_fields, wx, wy, wz, chunk_size) {
-                if mat.is_solid() {
-                    last_solid = Some((wx, wy, wz));
-                } else if last_solid.is_some() {
-                    // Found air/lava boundary — use the last solid as seed
-                    break;
+    for &pos in converted {
+        let mut air_count = 0u32;
+        let mut has_host = false;
+        for &(dx, dy, dz) in &FACE_OFFSETS {
+            let n = (pos.0 + dx, pos.1 + dy, pos.2 + dz);
+            if let Some(mat) = sample_material(density_fields, n.0, n.1, n.2, chunk_size) {
+                if !mat.is_solid() {
+                    air_count += 1;
+                } else if mat.is_host_rock()
+                    && mat != Material::Hornfels
+                    && mat != Material::Skarn
+                    && !converted.contains(&n)
+                {
+                    has_host = true;
                 }
             }
         }
-
-        if let Some(seed) = last_solid {
-            seeds.push(seed);
+        if air_count > 0 && has_host {
+            candidates.push((pos, air_count));
         }
     }
 
-    seeds
+    // Sort for determinism
+    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    if count >= candidates.len() {
+        return candidates.into_iter().map(|(pos, _)| pos).collect();
+    }
+
+    // Weighted random selection preferring higher air-neighbor count (more visible)
+    let mut selected = Vec::with_capacity(count);
+    let mut remaining = candidates;
+    for _ in 0..count {
+        if remaining.is_empty() {
+            break;
+        }
+        let total_weight: f32 = remaining.iter().map(|(_, w)| *w as f32).sum();
+        if total_weight <= 0.0 {
+            break;
+        }
+        let mut roll = rng.gen::<f32>() * total_weight;
+        let mut chosen = 0;
+        for (i, &(_, w)) in remaining.iter().enumerate() {
+            roll -= w as f32;
+            if roll <= 0.0 {
+                chosen = i;
+                break;
+            }
+        }
+        let (pos, _) = remaining.remove(chosen);
+        selected.push(pos);
+    }
+
+    selected
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -389,6 +427,7 @@ fn distribute_vein_seeds(
 // ──────────────────────────────────────────────────────────────
 
 /// Write vein voxels into density fields, returns count of voxels placed.
+/// Uses boundary-synced writes to prevent chunk-edge seams.
 fn apply_vein_to_world(
     positions: &[(i32, i32, i32)],
     material: Material,
@@ -412,9 +451,7 @@ fn apply_vein_to_world(
             continue;
         }
 
-        if let Some(df) = density_fields.get_mut(&key) {
-            df.get_mut(lx, ly, lz).material = material;
-        }
+        set_material_synced(density_fields, wx, wy, wz, material, chunk_size);
         manifest.record_voxel_change(key, lx, ly, lz, old_mat, old_density, material, old_density);
         count += 1;
     }
@@ -431,8 +468,7 @@ fn scaled_vein_size(base: u32, heat_level: f32, large: bool) -> (u32, u32) {
 
 /// Place ore veins for a Slate-hosted aureole zone.
 fn place_slate_veins(
-    centroid: (i32, i32, i32),
-    radius: f32,
+    converted: &HashSet<(i32, i32, i32)>,
     heat_level: f32,
     config: &AureoleConfig,
     density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
@@ -441,7 +477,7 @@ fn place_slate_veins(
     rng: &mut ChaCha8Rng,
     skarn_count: u32,
 ) -> u32 {
-    let seeds = distribute_vein_seeds(centroid, radius, 8, density_fields, chunk_size);
+    let seeds = find_aureole_boundary_seeds(converted, density_fields, chunk_size, 8, rng);
     if seeds.is_empty() {
         return 0;
     }
@@ -478,33 +514,19 @@ fn place_slate_veins(
         total_placed += apply_vein_to_world(&positions, ore, density_fields, chunk_size, manifest);
     }
 
-    // Bonus: if skarn exists (slate aureole reached limestone), place Garnet/Diopside pockets in skarn region
+    // Bonus: if skarn exists (slate aureole reached limestone), place Garnet/Diopside pockets
     if skarn_count > 0 {
         let (pocket_min, pocket_max) = scaled_vein_size(config.garnet_pocket_size, heat_level, false);
-        // Try to find a skarn voxel to seed pockets
-        let r = radius.ceil() as i32;
-        let (cx, cy, cz) = centroid;
-        let mut skarn_seeds: Vec<(i32, i32, i32)> = Vec::new();
-        for dx in -r..=r {
-            for dy in -r..=r {
-                for dz in -r..=r {
-                    if (dx * dx + dy * dy + dz * dz) as f32 > radius * radius {
-                        continue;
-                    }
-                    let wx = cx + dx;
-                    let wy = cy + dy;
-                    let wz = cz + dz;
-                    if let Some(mat) = sample_material(density_fields, wx, wy, wz, chunk_size) {
-                        if mat == Material::Skarn {
-                            skarn_seeds.push((wx, wy, wz));
-                        }
-                    }
-                }
-            }
-        }
+        // Filter converted set for Skarn voxels
+        let mut skarn_seeds: Vec<(i32, i32, i32)> = converted.iter()
+            .filter(|&&pos| {
+                sample_material(density_fields, pos.0, pos.1, pos.2, chunk_size)
+                    .map_or(false, |m| m == Material::Skarn)
+            })
+            .copied()
+            .collect();
         skarn_seeds.sort();
         if !skarn_seeds.is_empty() {
-            // Place 1-2 garnet pockets + 1-2 diopside pockets
             let garnet_seed = skarn_seeds[rng.gen_range(0..skarn_seeds.len())];
             let params = VeinGrowthParams {
                 ore: Material::Garnet,
@@ -535,8 +557,7 @@ fn place_slate_veins(
 
 /// Place ore veins for a Limestone-hosted (Skarn) aureole zone.
 fn place_limestone_veins(
-    centroid: (i32, i32, i32),
-    radius: f32,
+    converted: &HashSet<(i32, i32, i32)>,
     heat_level: f32,
     config: &AureoleConfig,
     density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
@@ -544,7 +565,7 @@ fn place_limestone_veins(
     manifest: &mut ChangeManifest,
     rng: &mut ChaCha8Rng,
 ) -> u32 {
-    let seeds = distribute_vein_seeds(centroid, radius, 8, density_fields, chunk_size);
+    let seeds = find_aureole_boundary_seeds(converted, density_fields, chunk_size, 8, rng);
     if seeds.is_empty() {
         return 0;
     }
@@ -619,28 +640,25 @@ pub fn apply_aureole(
         result.lava_zones_found = zones.len() as u32;
 
         for zone in &zones {
-            let heat = zone.cells.len() as f32 * config.heat_multiplier;
-            let base_radius = (heat.sqrt() * config.radius_scale).min(config.max_radius);
+            // Compute BFS depth from zone size using ln() for sensible shell thicknesses
+            // 5 cells→2, 50→4, 200→5, 958→7 voxels
+            let cell_count = zone.cells.len() as f32;
+            let base_depth = (cell_count.ln().max(1.0) * config.radius_scale * config.heat_multiplier)
+                .min(config.max_radius)
+                .max(2.0);
+            let water_boost = compute_water_boost(zone, fluid_snapshot, config.water_boost_max);
+            let final_depth = (base_depth * water_boost).ceil() as i32;
 
-            let water_boost = compute_water_boost(
-                zone.centroid,
-                zone.cells.len() as u32,
-                fluid_snapshot,
-                base_radius * config.water_search_radius_mult,
-                config.water_boost_max,
-            );
-            let final_radius = base_radius * water_boost;
-
-            if final_radius < 1.0 {
+            if final_depth < 1 {
                 continue;
             }
 
-            let aureole_type = determine_aureole_type(zone.centroid, density_fields, chunk_size);
+            let aureole_type = determine_aureole_type(zone, density_fields, chunk_size);
 
-            // Pass 1: metamorphic sphere (applied immediately to density_fields)
-            let (hornfels_n, skarn_n) = place_metamorphic_sphere(
-                zone.centroid,
-                final_radius,
+            // Pass 1: metamorphic shell via BFS from lava cells
+            let (hornfels_n, skarn_n, converted) = place_metamorphic_shell(
+                zone,
+                final_depth,
                 density_fields,
                 chunk_size,
                 &mut result.manifest,
@@ -657,13 +675,14 @@ pub fn apply_aureole(
             }
 
             // Pass 2: ore veins + pockets (grow into just-placed metamorphic rock)
+            let heat_level = cell_count * config.heat_multiplier;
             let veins_placed = match aureole_type {
                 AureoleType::Slate => place_slate_veins(
-                    zone.centroid, final_radius, heat, config,
+                    &converted, heat_level, config,
                     density_fields, chunk_size, &mut result.manifest, rng, skarn_n,
                 ),
                 AureoleType::Limestone => place_limestone_veins(
-                    zone.centroid, final_radius, heat, config,
+                    &converted, heat_level, config,
                     density_fields, chunk_size, &mut result.manifest, rng,
                 ),
             };

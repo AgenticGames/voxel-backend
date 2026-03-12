@@ -579,8 +579,8 @@ pub fn execute_sleep(
     let mut accum_coal_matured = 0u32;
     let mut accum_diamonds = 0u32;
     let mut accum_silicified = 0u32;
-    let mut accum_veins = 0u32;
-    let mut accum_formations = 0u32;
+    let accum_veins = 0u32;
+    let accum_formations = 0u32;
     let mut accum_iterations_run = 0u32;
 
     if config.accumulation_enabled {
@@ -629,19 +629,8 @@ pub fn execute_sleep(
                 }
             }
 
-            // Phase 3 accumulation (factor < 1.0 — multiple passes provide the extra volume)
-            if config.phase3_enabled {
-                let r = apply_veins(
-                    &config.veins, &config.groundwater, density_fields, fluid_snapshot,
-                    &heat_map, &mineral_chunks, chunk_size, &mut iter_rng, &iter_census,
-                );
-                accum_veins += r.veins_deposited;
-                accum_formations += r.formations_grown;
-                result_manifest.merge_sleep_changes(&r.manifest);
-                for key in r.manifest.chunk_deltas.keys() {
-                    all_dirty.insert(*key);
-                }
-            }
+            // Phase 3 skipped in accumulation — convergence veins deposit fully in main pass;
+            // re-running creates compounding blobs as new ore surfaces generate more seeds.
 
             accum_iterations_run += 1;
             send_progress(progress_tx, 4, "Accumulation", 1_250_000,

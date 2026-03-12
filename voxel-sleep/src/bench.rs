@@ -60,7 +60,7 @@ fn make_ue_config() -> SleepConfig {
     // Veins (water-heat convergence model)
     cfg.veins.vein_deposition_prob = 0.85;
     cfg.veins.convergence_radius = 70.0;
-    cfg.veins.veins_per_zone_max = 8;
+    cfg.veins.veins_per_zone_max = 4;
     // Enrichment
     cfg.deeptime.enrichment_prob = 0.90;
     cfg.deeptime.max_enrichment_per_chunk = 400;

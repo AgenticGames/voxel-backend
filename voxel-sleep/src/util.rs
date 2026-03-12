@@ -31,6 +31,66 @@ pub fn sample_material(
         .map(|df| df.get(lx, ly, lz).material)
 }
 
+/// Set a voxel's material at world coordinates, also updating overlapping boundary
+/// copies in adjacent density fields. Density fields use (chunk_size+1)^3 grids,
+/// so voxels at local coord 0 overlap with local coord chunk_size in the previous
+/// chunk. Without this sync, `sync_boundary_density` can revert material-only
+/// changes when both adjacent chunks are dirty (it averages with the stale copy).
+pub fn set_material_synced(
+    density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
+    wx: i32, wy: i32, wz: i32,
+    material: Material,
+    chunk_size: usize,
+) {
+    let cs = chunk_size;
+    let (key, lx, ly, lz) = world_to_chunk_local(wx, wy, wz, cs);
+
+    // Write primary
+    if let Some(df) = density_fields.get_mut(&key) {
+        df.get_mut(lx, ly, lz).material = material;
+    }
+
+    // Sync overlapping boundary copies (local 0 overlaps with local chunk_size in prev chunk)
+    let (cx, cy, cz) = key;
+    if lx == 0 {
+        if let Some(df) = density_fields.get_mut(&(cx - 1, cy, cz)) {
+            df.get_mut(cs, ly, lz).material = material;
+        }
+    }
+    if ly == 0 {
+        if let Some(df) = density_fields.get_mut(&(cx, cy - 1, cz)) {
+            df.get_mut(lx, cs, lz).material = material;
+        }
+    }
+    if lz == 0 {
+        if let Some(df) = density_fields.get_mut(&(cx, cy, cz - 1)) {
+            df.get_mut(lx, ly, cs).material = material;
+        }
+    }
+    // Edge overlaps (two coords at boundary)
+    if lx == 0 && ly == 0 {
+        if let Some(df) = density_fields.get_mut(&(cx - 1, cy - 1, cz)) {
+            df.get_mut(cs, cs, lz).material = material;
+        }
+    }
+    if lx == 0 && lz == 0 {
+        if let Some(df) = density_fields.get_mut(&(cx - 1, cy, cz - 1)) {
+            df.get_mut(cs, ly, cs).material = material;
+        }
+    }
+    if ly == 0 && lz == 0 {
+        if let Some(df) = density_fields.get_mut(&(cx, cy - 1, cz - 1)) {
+            df.get_mut(lx, cs, cs).material = material;
+        }
+    }
+    // Corner overlap (all three at boundary)
+    if lx == 0 && ly == 0 && lz == 0 {
+        if let Some(df) = density_fields.get_mut(&(cx - 1, cy - 1, cz - 1)) {
+            df.get_mut(cs, cs, cs).material = material;
+        }
+    }
+}
+
 /// Count 6-connected neighbors matching a predicate.
 pub fn count_neighbors(
     density_fields: &HashMap<(i32, i32, i32), DensityField>,

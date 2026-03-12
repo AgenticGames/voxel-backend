@@ -9,16 +9,16 @@ fn default_hypothermal_height() -> u32 { 25 }
 fn default_mesothermal_height() -> u32 { 45 }
 fn default_epithermal_height() -> u32 { 65 }
 fn default_horizontal_spread() -> u32 { 20 }
-fn default_veins_per_zone_min() -> u32 { 5 }
-fn default_veins_per_zone_max() -> u32 { 8 }
-fn default_vein_climb_height_min() -> u32 { 8 }
-fn default_vein_climb_height_max() -> u32 { 15 }
-fn default_vein_wall_width_min() -> u32 { 3 }
-fn default_vein_wall_width_max() -> u32 { 5 }
-fn default_vein_rock_depth_min() -> u32 { 4 }
-fn default_vein_rock_depth_max() -> u32 { 8 }
+fn default_veins_per_zone_min() -> u32 { 2 }
+fn default_veins_per_zone_max() -> u32 { 4 }
+fn default_vein_climb_height_min() -> u32 { 6 }
+fn default_vein_climb_height_max() -> u32 { 12 }
+fn default_vein_wall_width_min() -> u32 { 2 }
+fn default_vein_wall_width_max() -> u32 { 3 }
+fn default_vein_rock_depth_min() -> u32 { 1 }
+fn default_vein_rock_depth_max() -> u32 { 3 }
 fn default_heat_direction_bias() -> f32 { 0.3 }
-fn default_convergence_spacing() -> u32 { 10 }
+fn default_convergence_spacing() -> u32 { 25 }
 fn default_enrichment_cluster_min() -> u32 { 2 }
 fn default_enrichment_cluster_max() -> u32 { 6 }
 fn default_vein_thickening_water_radius() -> f32 { 40.0 }
@@ -34,7 +34,7 @@ fn default_small_vein() -> u32 { 6 }
 fn default_min_zone() -> u32 { 5 }
 fn default_garnet_pocket() -> u32 { 4 }
 fn default_diopside_pocket() -> u32 { 4 }
-fn default_max_aureole_radius() -> f32 { 20.0 }
+fn default_max_aureole_radius() -> f32 { 10.0 }
 
 /// Top-level sleep configuration — 4-phase geological time simulation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -333,7 +333,7 @@ impl Default for AureoleConfig {
             min_lava_zone_size: 5,
             garnet_pocket_size: 4,
             diopside_pocket_size: 4,
-            max_radius: 20.0,
+            max_radius: 10.0,
         }
     }
 }
@@ -428,16 +428,16 @@ impl Default for VeinConfig {
             mesothermal_height: 45,
             epithermal_height: 65,
             horizontal_spread: 20,
-            veins_per_zone_min: 5,
-            veins_per_zone_max: 8,
-            vein_climb_height_min: 8,
-            vein_climb_height_max: 15,
-            vein_wall_width_min: 3,
-            vein_wall_width_max: 5,
-            vein_rock_depth_min: 4,
-            vein_rock_depth_max: 8,
+            veins_per_zone_min: 2,
+            veins_per_zone_max: 4,
+            vein_climb_height_min: 6,
+            vein_climb_height_max: 12,
+            vein_wall_width_min: 2,
+            vein_wall_width_max: 3,
+            vein_rock_depth_min: 1,
+            vein_rock_depth_max: 3,
             heat_direction_bias: 0.3,
-            convergence_spacing: 10,
+            convergence_spacing: 25,
             epithermal_rarity: 0.55,
             crystal_growth_enabled: true,
             crystal_growth_prob: 0.30,
