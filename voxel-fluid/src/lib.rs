@@ -149,6 +149,11 @@ pub enum FluidEvent {
     SnapshotRequest {
         reply_tx: crossbeam_channel::Sender<FluidSnapshot>,
     },
+    /// Drain (zero out) all lava cells in the given chunks.
+    /// Used after sleep solidification converts lava to basalt.
+    DrainLavaChunks {
+        chunks: Vec<(i32, i32, i32)>,
+    },
 }
 
 /// Results sent from the fluid simulation thread back to the engine.

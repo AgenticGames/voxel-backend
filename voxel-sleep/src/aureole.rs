@@ -3,7 +3,7 @@
 //! Contact metamorphism around heat sources (lava, kimberlite).
 //! Water erosion along fluid pathways.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
 use voxel_core::density::DensityField;
@@ -184,249 +184,224 @@ pub fn apply_aureole(
     let mut heat_sources_processed = 0u32;
     let mut slate_found_in_range = 0u32;
     let mut slate_to_hornfels = 0u32;
+    let mut contact_surface_count = 0u32;
 
     if config.metamorphism_enabled && !heat_map.is_empty() {
-        // Compute heat strength: count nearby heat sources within radius 3
-        // Larger clusters sustain wider aureoles; isolated cells dissipate heat fast
-        let heat_positions: HashSet<(i32, i32, i32)> = heat_map.iter().map(|h| h.pos).collect();
-        let heat_strength: Vec<u32> = heat_map.iter().map(|h| {
-            let (hx, hy, hz) = h.pos;
-            let mut count = 0u32;
-            for dx in -3i32..=3 {
-                for dy in -3i32..=3 {
-                    for dz in -3i32..=3 {
-                        if dx == 0 && dy == 0 && dz == 0 { continue; }
-                        if heat_positions.contains(&(hx + dx, hy + dy, hz + dz)) {
-                            count += 1;
-                        }
-                    }
+        // Multi-source BFS flood fill from ALL heat sources (lava + kimberlite).
+        // Every solid rock voxel within aureole_radius of any heat source is visited
+        // exactly once, guaranteeing complete aureole rings with no coverage gaps.
+
+        // Build seed set: all heat source positions at distance 0.
+        // Also track source type per seed for coal→diamond (kimberlite contact).
+        let mut queue: VecDeque<((i32, i32, i32), i32, HeatSourceType)> = VecDeque::new();
+        let mut visited: HashSet<(i32, i32, i32)> = HashSet::new();
+
+        // Track which seeds are kimberlite for the source_type lookup during BFS
+        let mut kimberlite_seeds: HashSet<(i32, i32, i32)> = HashSet::new();
+
+        for heat in heat_map.iter() {
+            if visited.insert(heat.pos) {
+                queue.push_back((heat.pos, 0, heat.source_type));
+                if heat.source_type == HeatSourceType::Kimberlite {
+                    kimberlite_seeds.insert(heat.pos);
                 }
             }
-            count
-        }).collect();
+        }
 
-        // For each heat source, scan within effective radius using Chebyshev distance
-        // Use a set to avoid duplicate transformations
-        let mut transformed: std::collections::HashSet<(i32, i32, i32)> = std::collections::HashSet::new();
+        heat_sources_processed = heat_map.len() as u32;
 
-        for (hi, heat) in heat_map.iter().enumerate() {
-            heat_sources_processed += 1;
-            let (hx, hy, hz) = heat.pos;
-            // Scale effective aureole radius by local heat clustering
-            let neighbors = heat_strength[hi];
-            let effective_radius: i32 = if neighbors >= 31 {
-                radius // massive intrusion — full config radius
-            } else if neighbors >= 16 {
-                6
-            } else if neighbors >= 6 {
-                5
-            } else if neighbors >= 1 {
-                3
-            } else {
-                2 // isolated cell, heat dissipates fast
-            };
-            // Per-heat-source water proximity check for silicification
-            let water_search_radius = effective_radius * config.silicification_water_radius_mult as i32;
-            let local_water_count = count_water_in_radius(fluid_snapshot, hx, hy, hz, water_search_radius);
-            let has_local_water = local_water_count > 0;
-            // Magnitude scaling: more water = stronger silicification (0.0-1.0)
-            let water_magnitude = (local_water_count as f32 / 20.0).min(1.0);
-            for dx in -effective_radius..=effective_radius {
-                for dy in -effective_radius..=effective_radius {
-                    for dz in -effective_radius..=effective_radius {
-                        let dist = dx.abs().max(dy.abs()).max(dz.abs());
-                        if dist == 0 || dist > effective_radius {
-                            continue;
-                        }
+        // BFS: expand through solid rock only (6-connected), track distance
+        while let Some(((cx, cy, cz), dist, source_type)) = queue.pop_front() {
+            // Seeds (dist=0) are lava/kimberlite themselves — skip transformation
+            if dist > 0 {
+                let mat = match sample_material(density_fields, cx, cy, cz, chunk_size) {
+                    Some(m) => m,
+                    None => continue,
+                };
 
-                        let wx = hx + dx;
-                        let wy = hy + dy;
-                        let wz = hz + dz;
+                if mat == Material::Slate {
+                    slate_found_in_range += 1;
+                }
 
-                        if transformed.contains(&(wx, wy, wz)) {
-                            continue;
-                        }
+                if matches!(mat, Material::Limestone | Material::Sandstone | Material::Slate | Material::Coal) {
+                    theoretical_max += 1;
+                }
 
-                        let mat = match sample_material(density_fields, wx, wy, wz, chunk_size) {
-                            Some(m) => m,
-                            None => continue,
-                        };
+                // Per-voxel water proximity check for silicification
+                let water_search_radius = radius * config.silicification_water_radius_mult as i32;
+                let local_water_count = count_water_in_radius(fluid_snapshot, cx, cy, cz, water_search_radius);
+                let has_local_water = local_water_count > 0;
+                let water_magnitude = (local_water_count as f32 / 20.0).min(1.0);
 
-                        if mat == Material::Slate {
-                            slate_found_in_range += 1;
-                        }
-
-                        // Count transformable materials as theoretical candidates
-                        if matches!(mat, Material::Limestone | Material::Sandstone | Material::Slate | Material::Coal) {
-                            theoretical_max += 1;
-                        }
-
-                        let new_mat = match dist {
-                            // Contact zone (0-2)
-                            d if d <= 2 => {
-                                // Coal maturation: Coal → Diamond (kimberlite contact, dist <=1) or Coal → Graphite
-                                if config.coal_maturation_enabled && mat == Material::Coal {
-                                    if heat.source_type == HeatSourceType::Kimberlite && d <= 1 && rng.gen::<f32>() < config.graphite_to_diamond_prob {
-                                        diamonds_formed += 1;
-                                        Some(Material::Diamond)
-                                    } else if rng.gen::<f32>() < config.coal_to_graphite_prob {
-                                        coal_matured += 1;
-                                        Some(Material::Graphite)
+                let new_mat = match dist {
+                    // Contact zone (dist 1-2)
+                    d if d <= 2 => {
+                        if config.coal_maturation_enabled && mat == Material::Coal {
+                            if source_type == HeatSourceType::Kimberlite && d <= 1 && rng.gen::<f32>() < config.graphite_to_diamond_prob {
+                                diamonds_formed += 1;
+                                Some(Material::Diamond)
+                            } else if rng.gen::<f32>() < config.coal_to_graphite_prob {
+                                coal_matured += 1;
+                                Some(Material::Graphite)
+                            } else {
+                                None
+                            }
+                        } else {
+                            match mat {
+                                Material::Limestone => {
+                                    if rng.gen::<f32>() < config.contact_limestone_to_marble_prob {
+                                        Some(Material::Marble)
+                                    } else if rng.gen::<f32>() < config.contact_limestone_to_garnet_prob {
+                                        Some(Material::Garnet)
                                     } else {
                                         None
                                     }
-                                } else {
-                                    match mat {
-                                        Material::Limestone => {
-                                            // Contact zone: marble primary, garnet secondary
-                                            if rng.gen::<f32>() < config.contact_limestone_to_marble_prob {
-                                                Some(Material::Marble)
-                                            } else if rng.gen::<f32>() < config.contact_limestone_to_garnet_prob {
-                                                Some(Material::Garnet)
-                                            } else {
-                                                None
-                                            }
-                                        },
-                                        Material::Sandstone if rng.gen::<f32>() < config.contact_sandstone_to_granite_prob => Some(Material::Granite),
-                                        Material::Slate if rng.gen::<f32>() < config.contact_slate_to_hornfels_prob => Some(Material::Hornfels),
-                                        _ => None,
+                                },
+                                Material::Sandstone if rng.gen::<f32>() < config.contact_sandstone_to_granite_prob => Some(Material::Granite),
+                                Material::Slate if rng.gen::<f32>() < config.contact_slate_to_hornfels_prob => Some(Material::Hornfels),
+                                _ => None,
+                            }
+                        }
+                    },
+                    // Mid aureole (dist 3-5)
+                    d if d <= 5 => {
+                        if config.coal_maturation_enabled && mat == Material::Coal && rng.gen::<f32>() < config.coal_to_graphite_mid_prob {
+                            coal_matured += 1;
+                            Some(Material::Graphite)
+                        } else if config.silicification_enabled && has_local_water {
+                            match mat {
+                                Material::Limestone if rng.gen::<f32>() < config.silicification_limestone_prob * water_magnitude => {
+                                    voxels_silicified += 1;
+                                    Some(Material::Quartz)
+                                },
+                                Material::Sandstone if rng.gen::<f32>() < config.silicification_sandstone_prob * water_magnitude => {
+                                    voxels_silicified += 1;
+                                    Some(Material::Quartz)
+                                },
+                                _ => match mat {
+                                    Material::Limestone => {
+                                        if rng.gen::<f32>() < config.mid_limestone_to_marble_prob {
+                                            Some(Material::Marble)
+                                        } else if rng.gen::<f32>() < config.mid_limestone_to_garnet_prob {
+                                            Some(Material::Garnet)
+                                        } else if rng.gen::<f32>() < config.mid_limestone_to_diopside_prob {
+                                            Some(Material::Diopside)
+                                        } else {
+                                            None
+                                        }
+                                    },
+                                    Material::Sandstone if rng.gen::<f32>() < config.mid_sandstone_to_granite_prob => Some(Material::Granite),
+                                    Material::Slate if rng.gen::<f32>() < config.mid_slate_to_hornfels_prob => Some(Material::Hornfels),
+                                    _ => None,
+                                },
+                            }
+                        } else {
+                            match mat {
+                                Material::Limestone => {
+                                    if rng.gen::<f32>() < config.mid_limestone_to_marble_prob {
+                                        Some(Material::Marble)
+                                    } else if rng.gen::<f32>() < config.mid_limestone_to_garnet_prob {
+                                        Some(Material::Garnet)
+                                    } else if rng.gen::<f32>() < config.mid_limestone_to_diopside_prob {
+                                        Some(Material::Diopside)
+                                    } else {
+                                        None
                                     }
-                                }
-                            },
-                            // Mid aureole (3-5)
-                            d if d <= 5 => {
-                                // Coal maturation in mid aureole
-                                if config.coal_maturation_enabled && mat == Material::Coal && rng.gen::<f32>() < config.coal_to_graphite_mid_prob {
-                                    coal_matured += 1;
-                                    Some(Material::Graphite)
-                                }
-                                // Silicification (requires water)
-                                else if config.silicification_enabled && has_local_water {
-                                    match mat {
-                                        Material::Limestone if rng.gen::<f32>() < config.silicification_limestone_prob * water_magnitude => {
-                                            voxels_silicified += 1;
-                                            Some(Material::Quartz)
-                                        },
-                                        Material::Sandstone if rng.gen::<f32>() < config.silicification_sandstone_prob * water_magnitude => {
-                                            voxels_silicified += 1;
-                                            Some(Material::Quartz)
-                                        },
-                                        _ => match mat {
-                                            Material::Limestone => {
-                                                // Mid zone: marble, then garnet, then diopside
-                                                if rng.gen::<f32>() < config.mid_limestone_to_marble_prob {
-                                                    Some(Material::Marble)
-                                                } else if rng.gen::<f32>() < config.mid_limestone_to_garnet_prob {
-                                                    Some(Material::Garnet)
-                                                } else if rng.gen::<f32>() < config.mid_limestone_to_diopside_prob {
-                                                    Some(Material::Diopside)
-                                                } else {
-                                                    None
-                                                }
-                                            },
-                                            Material::Sandstone if rng.gen::<f32>() < config.mid_sandstone_to_granite_prob => Some(Material::Granite),
-                                            Material::Slate if rng.gen::<f32>() < config.mid_slate_to_hornfels_prob => Some(Material::Hornfels),
-                                            _ => None,
-                                        },
+                                },
+                                Material::Sandstone if rng.gen::<f32>() < config.mid_sandstone_to_granite_prob => Some(Material::Granite),
+                                Material::Slate if rng.gen::<f32>() < config.mid_slate_to_hornfels_prob => Some(Material::Hornfels),
+                                _ => None,
+                            }
+                        }
+                    },
+                    // Outer aureole (dist 6+)
+                    _ => {
+                        if config.silicification_enabled && has_local_water {
+                            match mat {
+                                Material::Limestone if rng.gen::<f32>() < config.silicification_limestone_prob * 0.5 * water_magnitude => {
+                                    voxels_silicified += 1;
+                                    Some(Material::Quartz)
+                                },
+                                Material::Sandstone if rng.gen::<f32>() < config.silicification_sandstone_prob * 0.5 * water_magnitude => {
+                                    voxels_silicified += 1;
+                                    Some(Material::Quartz)
+                                },
+                                _ => match mat {
+                                    Material::Limestone => {
+                                        if rng.gen::<f32>() < config.outer_limestone_to_marble_prob {
+                                            Some(Material::Marble)
+                                        } else if rng.gen::<f32>() < 0.15 {
+                                            Some(Material::Garnet)
+                                        } else if rng.gen::<f32>() < config.mid_limestone_to_diopside_prob * 0.5 {
+                                            Some(Material::Diopside)
+                                        } else {
+                                            None
+                                        }
+                                    },
+                                    Material::Slate if rng.gen::<f32>() < config.outer_slate_to_hornfels_prob => Some(Material::Hornfels),
+                                    _ => None,
+                                },
+                            }
+                        } else {
+                            match mat {
+                                Material::Limestone => {
+                                    if rng.gen::<f32>() < config.outer_limestone_to_marble_prob {
+                                        Some(Material::Marble)
+                                    } else if rng.gen::<f32>() < 0.15 {
+                                        Some(Material::Garnet)
+                                    } else if rng.gen::<f32>() < config.mid_limestone_to_diopside_prob * 0.5 {
+                                        Some(Material::Diopside)
+                                    } else {
+                                        None
                                     }
-                                } else {
-                                    match mat {
-                                        Material::Limestone => {
-                                            // Mid zone (no water): marble, then garnet, then diopside
-                                            if rng.gen::<f32>() < config.mid_limestone_to_marble_prob {
-                                                Some(Material::Marble)
-                                            } else if rng.gen::<f32>() < config.mid_limestone_to_garnet_prob {
-                                                Some(Material::Garnet)
-                                            } else if rng.gen::<f32>() < config.mid_limestone_to_diopside_prob {
-                                                Some(Material::Diopside)
-                                            } else {
-                                                None
-                                            }
-                                        },
-                                        Material::Sandstone if rng.gen::<f32>() < config.mid_sandstone_to_granite_prob => Some(Material::Granite),
-                                        Material::Slate if rng.gen::<f32>() < config.mid_slate_to_hornfels_prob => Some(Material::Hornfels),
-                                        _ => None,
-                                    }
-                                }
-                            },
-                            // Outer aureole (6+)
-                            _ => {
-                                // Silicification in outer aureole (weaker, requires water)
-                                if config.silicification_enabled && has_local_water {
-                                    match mat {
-                                        Material::Limestone if rng.gen::<f32>() < config.silicification_limestone_prob * 0.5 * water_magnitude => {
-                                            voxels_silicified += 1;
-                                            Some(Material::Quartz)
-                                        },
-                                        Material::Sandstone if rng.gen::<f32>() < config.silicification_sandstone_prob * 0.5 * water_magnitude => {
-                                            voxels_silicified += 1;
-                                            Some(Material::Quartz)
-                                        },
-                                        _ => match mat {
-                                            Material::Limestone => {
-                                                // Outer zone: marble, then distal garnet/diopside
-                                                if rng.gen::<f32>() < config.outer_limestone_to_marble_prob {
-                                                    Some(Material::Marble)
-                                                } else if rng.gen::<f32>() < 0.15 {
-                                                    Some(Material::Garnet)
-                                                } else if rng.gen::<f32>() < config.mid_limestone_to_diopside_prob * 0.5 {
-                                                    Some(Material::Diopside)
-                                                } else {
-                                                    None
-                                                }
-                                            },
-                                            Material::Slate if rng.gen::<f32>() < config.outer_slate_to_hornfels_prob => Some(Material::Hornfels),
-                                            _ => None,
-                                        },
-                                    }
-                                } else {
-                                    match mat {
-                                        Material::Limestone => {
-                                            // Outer zone (no water): marble, then distal garnet/diopside
-                                            if rng.gen::<f32>() < config.outer_limestone_to_marble_prob {
-                                                Some(Material::Marble)
-                                            } else if rng.gen::<f32>() < 0.15 {
-                                                Some(Material::Garnet)
-                                            } else if rng.gen::<f32>() < config.mid_limestone_to_diopside_prob * 0.5 {
-                                                Some(Material::Diopside)
-                                            } else {
-                                                None
-                                            }
-                                        },
-                                        Material::Slate if rng.gen::<f32>() < config.outer_slate_to_hornfels_prob => Some(Material::Hornfels),
-                                        _ => None,
-                                    }
-                                }
-                            },
-                        };
+                                },
+                                Material::Slate if rng.gen::<f32>() < config.outer_slate_to_hornfels_prob => Some(Material::Hornfels),
+                                _ => None,
+                            }
+                        }
+                    },
+                };
 
-                        if let Some(new_material) = new_mat {
-                            if new_material == Material::Hornfels {
-                                slate_to_hornfels += 1;
-                            }
-                            transformed.insert((wx, wy, wz));
-                            let (chunk_key, lx, ly, lz) = world_to_chunk_local(wx, wy, wz, chunk_size);
-                            if let Some(df) = density_fields.get(&chunk_key) {
-                                let sample = df.get(lx, ly, lz);
-                                candidates.push(Candidate {
-                                    chunk_key, lx, ly, lz,
-                                    old_material: mat,
-                                    density: sample.density,
-                                    new_material,
-                                });
-                            }
+                if let Some(new_material) = new_mat {
+                    if new_material == Material::Hornfels {
+                        slate_to_hornfels += 1;
+                    }
+                    let (chunk_key, lx, ly, lz) = world_to_chunk_local(cx, cy, cz, chunk_size);
+                    if let Some(df) = density_fields.get(&chunk_key) {
+                        let sample = df.get(lx, ly, lz);
+                        candidates.push(Candidate {
+                            chunk_key, lx, ly, lz,
+                            old_material: mat,
+                            density: sample.density,
+                            new_material,
+                        });
+                    }
+                }
+            }
+
+            // Expand BFS to face neighbors through solid rock
+            if dist < radius {
+                for &(dx, dy, dz) in &FACE_OFFSETS {
+                    let n = (cx + dx, cy + dy, cz + dz);
+                    if !visited.insert(n) {
+                        continue;
+                    }
+                    // Only expand into solid rock (not air/fluid)
+                    if let Some(mat) = sample_material(density_fields, n.0, n.1, n.2, chunk_size) {
+                        if mat.is_solid() {
+                            queue.push_back((n, dist + 1, source_type));
                         }
                     }
                 }
             }
         }
 
+        contact_surface_count = heat_map.len() as u32;
+
         // --- Post-acid Recrystallization ---
-        // Fill acid-dissolved air near heat with metamorphic minerals (marble/garnet/diopside).
-        // Only targets air positions with at least one solid neighbor (dissolved surface, not deep cave).
+        // Fill acid-dissolved air near heat sources with metamorphic minerals.
+        // Only targets air positions with at least one solid neighbor (dissolved surface).
         if config.recrystallization_prob > 0.0 {
-            // Recrystallize acid-dissolved air in contact zone only (dist<=3).
-            // Farther zones stay as air to preserve acid cascade pathways.
             let recryst_radius = 3i32;
             for heat in heat_map.iter() {
                 let (hx, hy, hz) = heat.pos;
@@ -438,12 +413,11 @@ pub fn apply_aureole(
                             let wx = hx + dx;
                             let wy = hy + dy;
                             let wz = hz + dz;
-                            if transformed.contains(&(wx, wy, wz)) { continue; }
+                            if visited.contains(&(wx, wy, wz)) { continue; }
                             let mat = match sample_material(density_fields, wx, wy, wz, chunk_size) {
                                 Some(m) => m,
                                 None => continue,
                             };
-                            // Only target air (acid-dissolved) with solid neighbors
                             if mat.is_solid() { continue; }
                             let has_solid = FACE_OFFSETS.iter().any(|&(fdx, fdy, fdz)| {
                                 sample_material(density_fields, wx + fdx, wy + fdy, wz + fdz, chunk_size)
@@ -451,7 +425,6 @@ pub fn apply_aureole(
                             });
                             if !has_solid { continue; }
                             if rng.gen::<f32>() >= config.recrystallization_prob { continue; }
-                            // Recrystallization: marble primary, garnet/diopside in contact
                             let recryst_mat = if dist <= 2 {
                                 let r = rng.gen::<f32>();
                                 if r < 0.15 { Material::Garnet }
@@ -462,7 +435,7 @@ pub fn apply_aureole(
                                 if r < 0.20 { Material::Diopside }
                                 else { Material::Marble }
                             };
-                            transformed.insert((wx, wy, wz));
+                            visited.insert((wx, wy, wz));
                             let (chunk_key, lx, ly, lz) = world_to_chunk_local(wx, wy, wz, chunk_size);
                             if let Some(df) = density_fields.get(&chunk_key) {
                                 let sample = df.get(lx, ly, lz);
@@ -645,8 +618,8 @@ pub fn apply_aureole(
     if metamorphism_count > 0 {
         result.transform_log.push(TransformEntry {
             description: format!(
-                "The Aureole \u{2014} 100,000 years: {} voxels metamorphosed around {} heat sources (radius {})",
-                metamorphism_count, heat_map.len(), config.aureole_radius
+                "The Aureole \u{2014} 100,000 years: {} voxels metamorphosed via BFS from {} heat sources (radius {})",
+                metamorphism_count, contact_surface_count, config.aureole_radius
             ),
             count: metamorphism_count,
         });
@@ -684,7 +657,7 @@ pub fn apply_aureole(
     if heat_sources_processed > 0 {
         result.transform_log.push(TransformEntry {
             description: format!(
-                "Aureole debug: {} heat sources, {} slate in range, {} \u{2192} hornfels",
+                "Aureole debug: {} heat sources (BFS seeds), {} slate in range, {} \u{2192} hornfels",
                 heat_sources_processed, slate_found_in_range, slate_to_hornfels
             ),
             count: slate_to_hornfels,

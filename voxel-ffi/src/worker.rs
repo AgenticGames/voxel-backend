@@ -1150,6 +1150,12 @@ fn handle_request(
                 None, // No progress channel for now
             );
 
+            // Drain solidified lava from the real fluid system
+            if sleep_result.lava_solidified > 0 {
+                let lava_chunks: Vec<(i32, i32, i32)> = fluid_snapshot.chunks.keys().copied().collect();
+                let _ = fluid_event_tx.send(voxel_fluid::FluidEvent::DrainLavaChunks { chunks: lava_chunks });
+            }
+
             // Remesh all dirty chunks (full chunk bounds)
             let t_remesh = Instant::now();
             let dirty_count = sleep_result.dirty_chunks.len();

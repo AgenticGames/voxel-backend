@@ -372,10 +372,38 @@ pub fn execute_sleep(
     let mut all_dirty: HashSet<(i32, i32, i32)> = HashSet::new();
     let mut transform_log: Vec<TransformEntry> = Vec::new();
 
+    // --- Fluid snapshot diagnostics ---
+    let fluid_chunk_count = fluid_snapshot.chunks.len();
+    let mut fluid_lava_cells = 0u32;
+    let mut fluid_water_cells = 0u32;
+    let fluid_cs = fluid_snapshot.chunk_size;
+    for cells in fluid_snapshot.chunks.values() {
+        for cell in cells {
+            if cell.level > 0.001 {
+                if cell.fluid_type.is_lava() {
+                    fluid_lava_cells += 1;
+                } else if cell.fluid_type.is_water() {
+                    fluid_water_cells += 1;
+                }
+            }
+        }
+    }
+
     // --- Heat map computation ---
     let t_heat = Instant::now();
     let heat_map = build_heat_map(density_fields, fluid_snapshot, &all_chunks, chunk_size);
     let t_heat_elapsed = t_heat.elapsed();
+
+    // Log fluid snapshot stats for debugging
+    let lava_heat_count = heat_map.iter().filter(|h| h.source_type == crate::aureole::HeatSourceType::Lava).count();
+    let kimb_heat_count = heat_map.iter().filter(|h| h.source_type == crate::aureole::HeatSourceType::Kimberlite).count();
+    transform_log.push(TransformEntry {
+        description: format!(
+            "Fluid snapshot: {} chunks (cs={}), {} lava cells, {} water cells | Heat map: {} lava sources, {} kimberlite sources",
+            fluid_chunk_count, fluid_cs, fluid_lava_cells, fluid_water_cells, lava_heat_count, kimb_heat_count,
+        ),
+        count: fluid_lava_cells + fluid_water_cells, // nonzero so retain() keeps it
+    });
 
     // --- Resource Census (pre-scan) ---
     let t_census = Instant::now();
@@ -627,10 +655,14 @@ pub fn execute_sleep(
 
     // --- Lava Solidification ---
     let mut total_lava_solidified = 0u32;
+    eprintln!("[SLEEP] lava_solidification_enabled={}, fluid_snapshot chunks={}, density_fields={}",
+        config.lava_solidification_enabled, fluid_snapshot.chunks.len(), density_fields.len());
     if config.lava_solidification_enabled {
         let (count, entries) = solidify_lava(density_fields, fluid_snapshot, &mut result_manifest, &mut all_dirty, chunk_size);
         total_lava_solidified = count;
         transform_log.extend(entries);
+    } else {
+        eprintln!("[SLEEP] Lava solidification DISABLED by config");
     }
 
     // --- Done ---
@@ -708,6 +740,7 @@ pub fn execute_sleep(
         &census, &diag_reaction, &diag_aureole, &diag_veins, &diag_deeptime,
         accum_iterations_run, accum_acid + accum_sulfide, accum_oxidized,
         accum_metamorphosed, accum_eroded, accum_veins, accum_formations,
+        total_lava_solidified,
     );
 
     SleepResult {
@@ -781,6 +814,8 @@ fn solidify_lava(
         .collect();
 
     // Set density field voxels to basalt
+    let mut missing_df = 0u32;
+    let mut dirty_chunks_set: HashSet<(i32, i32, i32)> = HashSet::new();
     for &((wx, wy, wz), _fluid_chunk, _) in &lava_cells {
         let (ck, lx, ly, lz) = world_to_chunk_local(wx, wy, wz, chunk_size);
         if let Some(df) = density_fields.get_mut(&ck) {
@@ -788,14 +823,17 @@ fn solidify_lava(
             let old_mat = sample.material;
             let old_density = sample.density;
             sample.material = Material::Basalt;
-            sample.density = 1.0;
-            manifest.record_voxel_change(ck, lx, ly, lz, old_mat, old_density, Material::Basalt, 1.0);
+            sample.density = -1.0;
+            manifest.record_voxel_change(ck, lx, ly, lz, old_mat, old_density, Material::Basalt, -1.0);
             all_dirty.insert(ck);
+            dirty_chunks_set.insert(ck);
             count += 1;
+        } else {
+            missing_df += 1;
         }
     }
 
-    // Drain all lava cells
+    // Drain all lava cells in the snapshot (real fluid sim gets DrainLavaChunks from worker)
     for &(_, fluid_chunk, idx) in &lava_cells {
         if let Some(cells) = fluid_snapshot.chunks.get_mut(&fluid_chunk) {
             if idx < cells.len() {
@@ -805,12 +843,17 @@ fn solidify_lava(
     }
 
     let mut entries = Vec::new();
-    if count > 0 {
+    if !lava_cells.is_empty() || count > 0 {
         entries.push(TransformEntry {
-            description: format!("Lava Solidification: {} lava cells \u{2192} basalt", count),
-            count,
+            description: format!(
+                "Lava Solidification: {} lava cells in snapshot, {} \u{2192} basalt in {} chunks, {} missing density fields (cs={}, df_chunks={}, snap_chunks={})",
+                lava_cells.len(), count, dirty_chunks_set.len(), missing_df, cs, density_fields.len(), fluid_snapshot.chunks.len()
+            ),
+            count: count.max(1), // ensure it survives retain filter
         });
     }
+    eprintln!("[SLEEP] solidify_lava: {} lava cells, {} basalt placed, {} missing density fields, cs={}, chunk_size={}",
+        lava_cells.len(), count, missing_df, cs, chunk_size);
     (count, entries)
 }
 
@@ -853,6 +896,7 @@ fn build_sleep_profile_report(
     accum_eroded: u32,
     accum_veins: u32,
     accum_formations: u32,
+    lava_solidified: u32,
 ) -> String {
     use voxel_core::material::Material;
 
@@ -914,6 +958,13 @@ fn build_sleep_profile_report(
         let _ = writeln!(s, "  Phase 3 ({} passes): {} vein voxels deposited, {} formations",
             accum_iterations, accum_veins, accum_formations);
         let _ = writeln!(s, "  Accumulation time:   {:.2} ms", dur_ms(timings.accumulation));
+    }
+
+    // ═══ Lava Solidification ═══
+    if lava_solidified > 0 {
+        let _ = writeln!(s);
+        let _ = writeln!(s, "\u{2550}\u{2550}\u{2550} Lava Solidification \u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}");
+        let _ = writeln!(s, "  {} lava cells \u{2192} basalt (solid, density=-1.0)", lava_solidified);
     }
 
     let _ = writeln!(s);

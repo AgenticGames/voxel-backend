@@ -31,6 +31,9 @@ pub fn fluid_sim_loop(
     let mut last_tick = Instant::now();
     let mut tick_count: u64 = 0;
     let lava_divisor = config.lava_tick_divisor.max(1) as u64;
+    // Track chunks that have active (non-empty) fluid meshes so we can send
+    // an empty mesh when they transition to empty (e.g. after DrainLavaChunks).
+    let mut active_fluid_meshes: HashSet<(i32, i32, i32)> = HashSet::new();
 
     while !shutdown.load(Ordering::Relaxed) {
         // Drain all pending events
@@ -112,6 +115,13 @@ pub fn fluid_sim_loop(
                 grid.dirty = false;
 
                 if !mesh.positions.is_empty() {
+                    active_fluid_meshes.insert(*key);
+                    let _ = result_tx.send(FluidResult::FluidMesh {
+                        chunk: *key,
+                        mesh,
+                    });
+                } else if active_fluid_meshes.remove(key) {
+                    // Was previously non-empty — send empty mesh to clear visual
                     let _ = result_tx.send(FluidResult::FluidMesh {
                         chunk: *key,
                         mesh,
@@ -174,6 +184,20 @@ fn handle_event(
                 chunk_size,
             };
             let _ = reply_tx.send(snapshot);
+        }
+        FluidEvent::DrainLavaChunks { chunks: drain_chunks } => {
+            for chunk_key in drain_chunks {
+                if let Some(grid) = chunks.get_mut(&chunk_key) {
+                    let total = grid.size * grid.size * grid.size;
+                    for idx in 0..total {
+                        if grid.cells[idx].fluid_type.is_lava() && grid.cells[idx].level > 0.001 {
+                            grid.cells[idx].level = 0.0;
+                            grid.cells[idx].is_source = false;
+                        }
+                    }
+                    grid.dirty = true;
+                }
+            }
         }
         FluidEvent::PlaceGeologicalSprings { chunk, springs } => {
             ensure_grid(chunks, chunk_densities, chunk, chunk_size);
