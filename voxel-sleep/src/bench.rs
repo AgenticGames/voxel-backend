@@ -66,8 +66,8 @@ fn make_ue_config() -> SleepConfig {
     cfg.deeptime.max_enrichment_per_chunk = 400;
     cfg.deeptime.enrichment_cluster_max = 30;
     cfg.deeptime.enrichment_search_radius = 12;
-    cfg.deeptime.vein_thickening_prob = 0.35;
-    cfg.deeptime.vein_thickening_growth_max = 8;
+    cfg.deeptime.vein_thickening_coat_depth = 1;
+    cfg.deeptime.vein_thickening_finger_interval = 5;
     // Reaction (defaults: acid_prob=0.25, acid_cap=30, copper_ox=0.001, basalt=0.03, gypsum=0.18)
     // Aureole (defaults: radius=10, marble=0.90/0.60/0.30, garnet=0.35, diopside=0.80, recryst=0.70)
     // Stress/collapse

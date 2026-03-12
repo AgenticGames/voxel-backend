@@ -271,6 +271,118 @@ pub fn default_vein_bias(ore: Material, rng: &mut ChaCha8Rng) -> VeinBias {
     }
 }
 
+// ──────────────────────────────────────────────────────────────
+// Water Proximity Helpers (for vein thickening)
+// ──────────────────────────────────────────────────────────────
+
+/// Build a set of chunk keys that contain at least one water cell.
+pub fn water_chunk_keys(fluid_snapshot: &voxel_fluid::FluidSnapshot) -> HashSet<(i32, i32, i32)> {
+    let mut result = HashSet::new();
+    for (&chunk_key, cells) in &fluid_snapshot.chunks {
+        for cell in cells {
+            if cell.fluid_type.is_water() && cell.level > 0.001 {
+                result.insert(chunk_key);
+                break;
+            }
+        }
+    }
+    result
+}
+
+/// Chunk-level water proximity classification.
+/// Returns: 1 = definitely near water, -1 = definitely far, 0 = uncertain (needs per-voxel check).
+pub fn chunk_water_classification(
+    chunk_key: (i32, i32, i32),
+    water_chunks: &HashSet<(i32, i32, i32)>,
+    radius: f32,
+    chunk_size: usize,
+) -> i8 {
+    if water_chunks.is_empty() {
+        return -1;
+    }
+    // Chunk center in world coords
+    let half = chunk_size as f32 * 0.5;
+    let cx = chunk_key.0 as f32 * chunk_size as f32 + half;
+    let cy = chunk_key.1 as f32 * chunk_size as f32 + half;
+    let cz = chunk_key.2 as f32 * chunk_size as f32 + half;
+    // Chunk diagonal half-length (~13.86 for chunk_size=16)
+    let diag = (3.0f32 * (chunk_size as f32 * chunk_size as f32)).sqrt() * 0.5;
+
+    let mut min_dist = f32::MAX;
+    for &wk in water_chunks {
+        let whalf = chunk_size as f32 * 0.5;
+        let wx = wk.0 as f32 * chunk_size as f32 + whalf;
+        let wy = wk.1 as f32 * chunk_size as f32 + whalf;
+        let wz = wk.2 as f32 * chunk_size as f32 + whalf;
+        let dx = cx - wx;
+        let dy = cy - wy;
+        let dz = cz - wz;
+        let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+        if dist < min_dist {
+            min_dist = dist;
+        }
+    }
+
+    if min_dist + diag <= radius {
+        1  // definitely near — even farthest corner is within radius
+    } else if min_dist - diag > radius {
+        -1 // definitely far — even closest corner is beyond radius
+    } else {
+        0  // uncertain — need per-voxel check
+    }
+}
+
+/// Per-voxel water proximity check. Scans fluid snapshot cells for water within
+/// Euclidean distance <= radius. Only call for "uncertain" chunks.
+pub fn is_near_water(
+    fluid_snapshot: &voxel_fluid::FluidSnapshot,
+    water_chunks: &HashSet<(i32, i32, i32)>,
+    wx: i32, wy: i32, wz: i32,
+    radius: f32,
+    chunk_size: usize,
+) -> bool {
+    let radius_sq = radius * radius;
+    let r_chunks = (radius / chunk_size as f32).ceil() as i32 + 1;
+    let voxel_chunk = (
+        wx.div_euclid(chunk_size as i32),
+        wy.div_euclid(chunk_size as i32),
+        wz.div_euclid(chunk_size as i32),
+    );
+
+    for dck_x in -r_chunks..=r_chunks {
+        for dck_y in -r_chunks..=r_chunks {
+            for dck_z in -r_chunks..=r_chunks {
+                let ck = (voxel_chunk.0 + dck_x, voxel_chunk.1 + dck_y, voxel_chunk.2 + dck_z);
+                if !water_chunks.contains(&ck) {
+                    continue;
+                }
+                if let Some(cells) = fluid_snapshot.chunks.get(&ck) {
+                    let cs = fluid_snapshot.chunk_size;
+                    for (idx, cell) in cells.iter().enumerate() {
+                        if !cell.fluid_type.is_water() || cell.level <= 0.001 {
+                            continue;
+                        }
+                        // Reconstruct world position from flat index
+                        let lx = idx % cs;
+                        let ly = (idx / cs) % cs;
+                        let lz = idx / (cs * cs);
+                        let fwx = ck.0 * cs as i32 + lx as i32;
+                        let fwy = ck.1 * cs as i32 + ly as i32;
+                        let fwz = ck.2 * cs as i32 + lz as i32;
+                        let dx = (fwx - wx) as f32;
+                        let dy = (fwy - wy) as f32;
+                        let dz = (fwz - wz) as f32;
+                        if dx * dx + dy * dy + dz * dz <= radius_sq {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 #[allow(dead_code)]
 /// BFS through solid rock from a solid starting position to find nearby air voxels.
 ///

@@ -21,8 +21,12 @@ fn default_heat_direction_bias() -> f32 { 0.3 }
 fn default_convergence_spacing() -> u32 { 10 }
 fn default_enrichment_cluster_min() -> u32 { 2 }
 fn default_enrichment_cluster_max() -> u32 { 6 }
-fn default_vein_thickening_growth_min() -> u32 { 2 }
-fn default_vein_thickening_growth_max() -> u32 { 5 }
+fn default_vein_thickening_water_radius() -> f32 { 40.0 }
+fn default_vein_thickening_coat_depth() -> u32 { 1 }
+fn default_vein_thickening_finger_interval() -> u32 { 5 }
+fn default_vein_thickening_finger_length_min() -> u32 { 3 }
+fn default_vein_thickening_finger_length_max() -> u32 { 5 }
+fn default_vein_thickening_finger_taper() -> f32 { 0.7 }
 fn default_water_boost_max() -> f32 { 0.6 }
 fn default_water_search_mult() -> f32 { 2.0 }
 fn default_large_vein() -> u32 { 15 }
@@ -468,16 +472,27 @@ pub struct DeepTimeConfig {
     /// Maximum cluster size when enrichment triggers grow_vein()
     #[serde(default = "default_enrichment_cluster_max")]
     pub enrichment_cluster_max: u32,
-    // Vein thickening
-    pub vein_thickening_prob: f32,
-    pub vein_thickening_max_per_chunk: u32,
+    // Vein thickening (water-proximity coating + fracture fingers)
     pub vein_thickening_enabled: bool,
-    /// Minimum growth size per thickening trigger
-    #[serde(default = "default_vein_thickening_growth_min")]
-    pub vein_thickening_growth_min: u32,
-    /// Maximum growth size per thickening trigger
-    #[serde(default = "default_vein_thickening_growth_max")]
-    pub vein_thickening_growth_max: u32,
+    pub vein_thickening_max_per_chunk: u32,
+    /// Max Euclidean distance to water for hydrothermal influence
+    #[serde(default = "default_vein_thickening_water_radius")]
+    pub vein_thickening_water_radius: f32,
+    /// Coating depth into host rock (1 or 2 voxels)
+    #[serde(default = "default_vein_thickening_coat_depth")]
+    pub vein_thickening_coat_depth: u32,
+    /// Every N-th surface ore voxel spawns a fracture finger
+    #[serde(default = "default_vein_thickening_finger_interval")]
+    pub vein_thickening_finger_interval: u32,
+    /// Minimum fracture finger length
+    #[serde(default = "default_vein_thickening_finger_length_min")]
+    pub vein_thickening_finger_length_min: u32,
+    /// Maximum fracture finger length
+    #[serde(default = "default_vein_thickening_finger_length_max")]
+    pub vein_thickening_finger_length_max: u32,
+    /// Per-step survival probability decay for fracture fingers
+    #[serde(default = "default_vein_thickening_finger_taper")]
+    pub vein_thickening_finger_taper: f32,
     // Mature formations
     pub mature_formations_enabled: bool,
     pub stalactite_growth_prob: f32,
@@ -505,11 +520,14 @@ impl Default for DeepTimeConfig {
             enrichment_enabled: true,
             enrichment_cluster_min: 3,
             enrichment_cluster_max: 30,
-            vein_thickening_prob: 0.35,
-            vein_thickening_max_per_chunk: 40,
             vein_thickening_enabled: true,
-            vein_thickening_growth_min: 3,
-            vein_thickening_growth_max: 8,
+            vein_thickening_max_per_chunk: 100,
+            vein_thickening_water_radius: 40.0,
+            vein_thickening_coat_depth: 1,
+            vein_thickening_finger_interval: 5,
+            vein_thickening_finger_length_min: 3,
+            vein_thickening_finger_length_max: 5,
+            vein_thickening_finger_taper: 0.7,
             mature_formations_enabled: true,
             stalactite_growth_prob: 0.10,
             column_formation_prob: 0.05,

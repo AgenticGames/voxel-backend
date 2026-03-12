@@ -1711,7 +1711,7 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
         },
         deeptime: DeepTimeConfig {
             enrichment_prob: if c.sleep_enrichment_prob > 0.0 { c.sleep_enrichment_prob } else { 0.90 },
-            vein_thickening_prob: if c.sleep_vein_thickening_prob > 0.0 { c.sleep_vein_thickening_prob } else { 0.35 },
+            // vein_thickening_prob removed — new water-proximity coating system uses Rust defaults via ..Default::default()
             stalactite_growth_prob: if c.sleep_stalactite_growth_prob > 0.0 { c.sleep_stalactite_growth_prob } else { 0.10 },
             slate_zone_top: c.host_slate_depth,
             slate_zone_bottom: c.host_granite_depth,

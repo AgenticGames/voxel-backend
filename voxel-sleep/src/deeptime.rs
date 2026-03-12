@@ -17,7 +17,7 @@ use crate::collapse::{apply_collapse, CollapseResult};
 use crate::config::{DeepTimeConfig, GroundwaterConfig};
 use crate::groundwater::{ambient_moisture, is_fracture_site};
 use crate::manifest::ChangeManifest;
-use crate::util::{FACE_OFFSETS, sample_material, count_neighbors, has_material_within_radius, grow_vein, default_vein_bias, sleep_vein_size, VeinGrowthParams, VeinBias};
+use crate::util::{FACE_OFFSETS, sample_material, count_neighbors, has_material_within_radius, grow_vein, default_vein_bias, sleep_vein_size, VeinGrowthParams};
 use crate::{Bottleneck, PhaseDiagnostics, ResourceCensus, TransformEntry};
 
 /// Result of the deep time phase.
@@ -363,11 +363,37 @@ pub fn apply_deeptime(
         }
     }
 
-    // --- Vein Thickening ---
+    // --- Vein Thickening (water-proximity coating + fracture fingers) ---
     if config.vein_thickening_enabled {
+        use crate::util::{water_chunk_keys, chunk_water_classification, is_near_water};
+        use std::collections::HashSet;
+
+        let water_chunks = water_chunk_keys(fluid_snapshot);
+        let water_radius = config.vein_thickening_water_radius;
+
+        // Pre-classify each chunk's water proximity
+        let mut chunk_class: HashMap<(i32, i32, i32), i8> = HashMap::new();
+        for &ck in chunks {
+            chunk_class.insert(ck, chunk_water_classification(ck, &water_chunks, water_radius, chunk_size));
+        }
+
         let mut thickening_per_chunk: HashMap<(i32, i32, i32), u32> = HashMap::new();
 
+        // Collect surface ore voxels: (world_pos, ore_material, air_directions)
+        struct SurfaceOre {
+            wx: i32, wy: i32, wz: i32,
+            ore: Material,
+            air_dirs: Vec<(i32, i32, i32)>,
+        }
+        let mut surface_ores: Vec<SurfaceOre> = Vec::new();
+
         for &chunk_key in chunks {
+            let class = chunk_class.get(&chunk_key).copied().unwrap_or(-1);
+            if class == -1 {
+                // Definitely far from water — skip entire chunk
+                continue;
+            }
+
             let (cx, cy, cz) = chunk_key;
             let df = match density_fields.get(&chunk_key) {
                 Some(df) => df,
@@ -386,73 +412,196 @@ pub fn apply_deeptime(
                         let wy = cy * (chunk_size as i32) + ly as i32;
                         let wz = cz * (chunk_size as i32) + lz as i32;
 
-                        // Check if this ore is air-adjacent (surface ore)
-                        let mut has_air_neighbor = false;
+                        // Check for air neighbors
+                        let mut air_dirs = Vec::new();
                         for &(dx, dy, dz) in &FACE_OFFSETS {
                             if let Some(mat) = sample_material(density_fields, wx + dx, wy + dy, wz + dz, chunk_size) {
                                 if !mat.is_solid() {
-                                    has_air_neighbor = true;
-                                    break;
+                                    air_dirs.push((dx, dy, dz));
                                 }
                             }
                         }
+                        if air_dirs.is_empty() {
+                            continue;
+                        }
 
-                        if !has_air_neighbor {
+                        // Water proximity check (class=1 means definitely near)
+                        if class == 0 && !is_near_water(fluid_snapshot, &water_chunks, wx, wy, wz, water_radius, chunk_size) {
                             continue;
                         }
 
                         theoretical_max += 1;
+                        surface_ores.push(SurfaceOre { wx, wy, wz, ore: sample.material, air_dirs });
+                    }
+                }
+            }
+        }
 
-                        // Try to grow into adjacent host rock
-                        if rng.gen::<f32>() >= config.vein_thickening_prob {
+        // Pass 1: Uniform coating — convert host-rock neighbors of surface ore to same ore
+        let coat_depth = config.vein_thickening_coat_depth.max(1).min(2);
+        let mut coated: HashSet<(i32, i32, i32)> = HashSet::new();
+
+        for so in &surface_ores {
+            // Depth-1 coat: all 6-connected host-rock neighbors
+            for &(dx, dy, dz) in &FACE_OFFSETS {
+                let nx = so.wx + dx;
+                let ny = so.wy + dy;
+                let nz = so.wz + dz;
+                if coated.contains(&(nx, ny, nz)) {
+                    continue;
+                }
+                if let Some(mat) = sample_material(density_fields, nx, ny, nz, chunk_size) {
+                    if !is_host_rock(mat) {
+                        continue;
+                    }
+                    let (ck, tlx, tly, tlz) = world_to_chunk_local(nx, ny, nz, chunk_size);
+                    let count = thickening_per_chunk.entry(ck).or_insert(0);
+                    if *count >= config.vein_thickening_max_per_chunk {
+                        continue;
+                    }
+                    if let Some(tdf) = density_fields.get(&ck) {
+                        let tsample = tdf.get(tlx, tly, tlz);
+                        candidates.push(Candidate {
+                            chunk_key: ck, lx: tlx, ly: tly, lz: tlz,
+                            old_material: tsample.material,
+                            old_density: tsample.density,
+                            new_material: so.ore,
+                            change_type: 1,
+                        });
+                        *count += 1;
+                        coated.insert((nx, ny, nz));
+                    }
+                }
+            }
+        }
+
+        // Depth-2 coat: repeat on newly coated positions
+        if coat_depth == 2 {
+            let depth1_positions: Vec<((i32, i32, i32), Material)> = coated.iter()
+                .filter_map(|&pos| {
+                    // Find which ore this was coated with by scanning candidates
+                    // The ore is the new_material of the candidate at this position
+                    let (ck, lx, ly, lz) = world_to_chunk_local(pos.0, pos.1, pos.2, chunk_size);
+                    candidates.iter().rev().find(|c| c.chunk_key == ck && c.lx == lx && c.ly == ly && c.lz == lz && c.change_type == 1)
+                        .map(|c| (pos, c.new_material))
+                })
+                .collect();
+
+            for (pos, ore) in &depth1_positions {
+                for &(dx, dy, dz) in &FACE_OFFSETS {
+                    let nx = pos.0 + dx;
+                    let ny = pos.1 + dy;
+                    let nz = pos.2 + dz;
+                    if coated.contains(&(nx, ny, nz)) {
+                        continue;
+                    }
+                    if let Some(mat) = sample_material(density_fields, nx, ny, nz, chunk_size) {
+                        if !is_host_rock(mat) {
                             continue;
                         }
-
-                        // Find first host-rock neighbor to seed vein growth from
-                        let mut growth_seed: Option<(i32, i32, i32)> = None;
-                        for &(dx, dy, dz) in &FACE_OFFSETS {
-                            let nx = wx + dx;
-                            let ny = wy + dy;
-                            let nz = wz + dz;
-                            if let Some(mat) = sample_material(density_fields, nx, ny, nz, chunk_size) {
-                                if is_host_rock(mat) {
-                                    growth_seed = Some((nx, ny, nz));
-                                    break;
-                                }
-                            }
+                        let (ck, tlx, tly, tlz) = world_to_chunk_local(nx, ny, nz, chunk_size);
+                        let count = thickening_per_chunk.entry(ck).or_insert(0);
+                        if *count >= config.vein_thickening_max_per_chunk {
+                            continue;
                         }
-
-                        if let Some(seed_pos) = growth_seed {
-                            let (ck, _, _, _) = world_to_chunk_local(seed_pos.0, seed_pos.1, seed_pos.2, chunk_size);
-                            let count = thickening_per_chunk.entry(ck).or_insert(0);
-                            if *count < config.vein_thickening_max_per_chunk {
-                                let params = VeinGrowthParams {
-                                    ore: sample.material,
-                                    min_size: config.vein_thickening_growth_min,
-                                    max_size: config.vein_thickening_growth_max,
-                                    bias: VeinBias::Compact,
-                                };
-                                let growth = grow_vein(density_fields, seed_pos, &params, chunk_size, rng);
-                                for &pos in &growth {
-                                    if *count >= config.vein_thickening_max_per_chunk {
-                                        break;
-                                    }
-                                    let (ck2, tlx, tly, tlz) = world_to_chunk_local(pos.0, pos.1, pos.2, chunk_size);
-                                    if let Some(tdf) = density_fields.get(&ck2) {
-                                        let tsample = tdf.get(tlx, tly, tlz);
-                                        candidates.push(Candidate {
-                                            chunk_key: ck2, lx: tlx, ly: tly, lz: tlz,
-                                            old_material: tsample.material,
-                                            old_density: tsample.density,
-                                            new_material: sample.material,
-                                            change_type: 1,
-                                        });
-                                        *count += 1;
-                                    }
-                                }
-                            }
+                        if let Some(tdf) = density_fields.get(&ck) {
+                            let tsample = tdf.get(tlx, tly, tlz);
+                            candidates.push(Candidate {
+                                chunk_key: ck, lx: tlx, ly: tly, lz: tlz,
+                                old_material: tsample.material,
+                                old_density: tsample.density,
+                                new_material: *ore,
+                                change_type: 1,
+                            });
+                            *count += 1;
+                            coated.insert((nx, ny, nz));
                         }
                     }
+                }
+            }
+        }
+
+        // Pass 2: Fracture fingers — every N-th surface ore spawns a finger into host rock
+        let finger_interval = config.vein_thickening_finger_interval.max(1);
+        let mut surface_counter = 0u32;
+
+        for so in &surface_ores {
+            surface_counter += 1;
+            if surface_counter % finger_interval != 0 {
+                continue;
+            }
+
+            // Compute surface normal: average of directions toward air neighbors
+            let mut nx_sum = 0i32;
+            let mut ny_sum = 0i32;
+            let mut nz_sum = 0i32;
+            for &(dx, dy, dz) in &so.air_dirs {
+                nx_sum += dx;
+                ny_sum += dy;
+                nz_sum += dz;
+            }
+            // Negate to point INTO rock (away from air)
+            nx_sum = -nx_sum;
+            ny_sum = -ny_sum;
+            nz_sum = -nz_sum;
+
+            // Quantize to dominant axis
+            let (step_x, step_y, step_z) = {
+                let ax = nx_sum.abs();
+                let ay = ny_sum.abs();
+                let az = nz_sum.abs();
+                if ax == 0 && ay == 0 && az == 0 {
+                    // No clear direction — skip
+                    continue;
+                }
+                if ax >= ay && ax >= az {
+                    (nx_sum.signum(), 0, 0)
+                } else if ay >= ax && ay >= az {
+                    (0, ny_sum.signum(), 0)
+                } else {
+                    (0, 0, nz_sum.signum())
+                }
+            };
+
+            // March along quantized direction
+            let finger_len = rng.gen_range(config.vein_thickening_finger_length_min..=config.vein_thickening_finger_length_max);
+            let mut prob = 1.0f32;
+            let mut fx = so.wx;
+            let mut fy = so.wy;
+            let mut fz = so.wz;
+
+            for _step in 0..finger_len {
+                fx += step_x;
+                fy += step_y;
+                fz += step_z;
+                prob *= config.vein_thickening_finger_taper;
+
+                if rng.gen::<f32>() > prob {
+                    break;
+                }
+
+                if let Some(mat) = sample_material(density_fields, fx, fy, fz, chunk_size) {
+                    if !is_host_rock(mat) {
+                        break; // Hit air, ore, or non-host-rock — stop
+                    }
+                    let (ck, tlx, tly, tlz) = world_to_chunk_local(fx, fy, fz, chunk_size);
+                    let count = thickening_per_chunk.entry(ck).or_insert(0);
+                    if *count >= config.vein_thickening_max_per_chunk {
+                        break;
+                    }
+                    if let Some(tdf) = density_fields.get(&ck) {
+                        let tsample = tdf.get(tlx, tly, tlz);
+                        candidates.push(Candidate {
+                            chunk_key: ck, lx: tlx, ly: tly, lz: tlz,
+                            old_material: tsample.material,
+                            old_density: tsample.density,
+                            new_material: so.ore,
+                            change_type: 1,
+                        });
+                        *count += 1;
+                    }
+                } else {
+                    break; // Unloaded chunk — stop
                 }
             }
         }
@@ -974,12 +1123,17 @@ fn compute_deeptime_bottlenecks(census: &ResourceCensus, nest_positions: &[(i32,
         });
     }
 
-    // Check surface ore for vein thickening
+    // Check surface ore for vein thickening (requires water proximity)
     let surface_ore: u32 = census.exposed_ore.values().sum();
     if surface_ore == 0 {
         bottlenecks.push(Bottleneck {
             severity: 0.6,
-            description: "No exposed ore voxels \u{2014} vein thickening needs air-adjacent ore".into(),
+            description: "No exposed ore voxels \u{2014} vein thickening needs air-adjacent ore near water".into(),
+        });
+    } else if census.water.cell_count == 0 {
+        bottlenecks.push(Bottleneck {
+            severity: 0.5,
+            description: "Exposed ore but no water \u{2014} vein thickening requires hydrothermal fluid (water within 40 voxels)".into(),
         });
     }
 
