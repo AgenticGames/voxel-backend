@@ -818,19 +818,21 @@ fn solidify_lava(
     let mut dirty_chunks_set: HashSet<(i32, i32, i32)> = HashSet::new();
     for &((wx, wy, wz), _fluid_chunk, _) in &lava_cells {
         let (ck, lx, ly, lz) = world_to_chunk_local(wx, wy, wz, chunk_size);
-        if let Some(df) = density_fields.get_mut(&ck) {
-            let sample = df.get_mut(lx, ly, lz);
-            let old_mat = sample.material;
-            let old_density = sample.density;
-            sample.material = Material::Basalt;
-            sample.density = -1.0;
-            manifest.record_voxel_change(ck, lx, ly, lz, old_mat, old_density, Material::Basalt, -1.0);
-            all_dirty.insert(ck);
-            dirty_chunks_set.insert(ck);
-            count += 1;
-        } else {
-            missing_df += 1;
-        }
+        let (old_mat, old_density) = match density_fields.get(&ck) {
+            Some(df) => {
+                let s = df.get(lx, ly, lz);
+                (s.material, s.density)
+            }
+            None => {
+                missing_df += 1;
+                continue;
+            }
+        };
+        crate::util::set_voxel_synced(density_fields, ck, lx, ly, lz, Material::Basalt, Some(-1.0), chunk_size);
+        manifest.record_voxel_change(ck, lx, ly, lz, old_mat, old_density, Material::Basalt, -1.0);
+        all_dirty.insert(ck);
+        dirty_chunks_set.insert(ck);
+        count += 1;
     }
 
     // Drain all lava cells in the snapshot (real fluid sim gets DrainLavaChunks from worker)

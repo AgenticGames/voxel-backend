@@ -14,7 +14,7 @@ use voxel_fluid::FluidSnapshot;
 
 use crate::config::ReactionConfig;
 use crate::manifest::ChangeManifest;
-use crate::util::{FACE_OFFSETS, sample_material, count_neighbors};
+use crate::util::{FACE_OFFSETS, sample_material, set_voxel_synced, count_neighbors};
 use crate::{Bottleneck, PhaseDiagnostics, ResourceCensus, TransformEntry};
 
 /// Result of the reaction phase.
@@ -515,11 +515,7 @@ pub fn apply_reaction(
 
     for c in &candidates {
         *conversions.entry((c.old_material as u8, c.new_material as u8)).or_insert(0) += 1;
-        if let Some(df) = density_fields.get_mut(&c.chunk_key) {
-            let sample = df.get_mut(c.lx, c.ly, c.lz);
-            sample.material = c.new_material;
-            sample.density = c.new_density;
-        }
+        set_voxel_synced(density_fields, c.chunk_key, c.lx, c.ly, c.lz, c.new_material, Some(c.new_density), chunk_size);
 
         result.manifest.record_voxel_change(
             c.chunk_key, c.lx, c.ly, c.lz,

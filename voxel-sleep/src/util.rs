@@ -17,6 +17,107 @@ pub const FACE_OFFSETS: [(i32, i32, i32); 6] = [
     (0, 0, -1),
 ];
 
+/// Write a material (and optionally density) to a voxel AND all overlapping boundary
+/// copies in adjacent chunks. Density fields use a 17³ grid for 16-voxel chunks, so
+/// boundary voxels (local coord 0 or chunk_size) exist in multiple chunks. This
+/// function ensures all copies stay in sync, preventing `sync_boundary_density` from
+/// incorrectly "fixing" sleep-modified voxels.
+///
+/// `new_density`: `None` = material-only change (preserve existing density),
+/// `Some(d)` = set both material and density.
+pub fn set_voxel_synced(
+    density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
+    chunk_key: (i32, i32, i32),
+    lx: usize, ly: usize, lz: usize,
+    new_material: Material,
+    new_density: Option<f32>,
+    chunk_size: usize,
+) {
+    // Write primary copy
+    if let Some(df) = density_fields.get_mut(&chunk_key) {
+        let sample = df.get_mut(lx, ly, lz);
+        sample.material = new_material;
+        if let Some(d) = new_density {
+            sample.density = d;
+        }
+    }
+
+    // Compute mirror positions for each axis where local coord is on a boundary.
+    // Local 0 in chunk C is also local chunk_size in chunk C-1.
+    // Local chunk_size in chunk C is also local 0 in chunk C+1.
+    let mirrors: [(usize, i32, usize); 3] = [
+        (lx, chunk_key.0, 0), // x-axis
+        (ly, chunk_key.1, 1), // y-axis
+        (lz, chunk_key.2, 2), // z-axis
+    ];
+
+    // For each axis, determine if there's a mirror neighbor and what the mirror coord is.
+    // None = not on boundary, Some((neighbor_offset, mirror_local_coord))
+    let mut axis_mirror: [Option<(i32, usize)>; 3] = [None; 3];
+    for i in 0..3 {
+        let (local, _chunk_coord, _) = mirrors[i];
+        if local == 0 {
+            axis_mirror[i] = Some((-1, chunk_size));
+        } else if local == chunk_size {
+            axis_mirror[i] = Some((1, 0));
+        }
+    }
+
+    // Iterate all 2^3 = 8 combinations of (primary, mirror) per axis.
+    // Skip the (primary, primary, primary) case (already written above).
+    for x_use_mirror in 0..2u8 {
+        for y_use_mirror in 0..2u8 {
+            for z_use_mirror in 0..2u8 {
+                if x_use_mirror == 0 && y_use_mirror == 0 && z_use_mirror == 0 {
+                    continue; // primary already written
+                }
+
+                // Each axis must have a mirror available if we want to use it
+                let (nx_offset, nx_local) = if x_use_mirror == 1 {
+                    match axis_mirror[0] {
+                        Some(v) => v,
+                        None => continue, // x not on boundary, skip
+                    }
+                } else {
+                    (0, lx)
+                };
+
+                let (ny_offset, ny_local) = if y_use_mirror == 1 {
+                    match axis_mirror[1] {
+                        Some(v) => v,
+                        None => continue,
+                    }
+                } else {
+                    (0, ly)
+                };
+
+                let (nz_offset, nz_local) = if z_use_mirror == 1 {
+                    match axis_mirror[2] {
+                        Some(v) => v,
+                        None => continue,
+                    }
+                } else {
+                    (0, lz)
+                };
+
+                let neighbor_key = (
+                    chunk_key.0 + nx_offset,
+                    chunk_key.1 + ny_offset,
+                    chunk_key.2 + nz_offset,
+                );
+
+                if let Some(df) = density_fields.get_mut(&neighbor_key) {
+                    let sample = df.get_mut(nx_local, ny_local, nz_local);
+                    sample.material = new_material;
+                    if let Some(d) = new_density {
+                        sample.density = d;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Look up material at a world coordinate, returning None if the chunk is not loaded.
 pub fn sample_material(
     density_fields: &HashMap<(i32, i32, i32), DensityField>,
@@ -29,66 +130,6 @@ pub fn sample_material(
     density_fields
         .get(&chunk_key)
         .map(|df| df.get(lx, ly, lz).material)
-}
-
-/// Set a voxel's material at world coordinates, also updating overlapping boundary
-/// copies in adjacent density fields. Density fields use (chunk_size+1)^3 grids,
-/// so voxels at local coord 0 overlap with local coord chunk_size in the previous
-/// chunk. Without this sync, `sync_boundary_density` can revert material-only
-/// changes when both adjacent chunks are dirty (it averages with the stale copy).
-pub fn set_material_synced(
-    density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
-    wx: i32, wy: i32, wz: i32,
-    material: Material,
-    chunk_size: usize,
-) {
-    let cs = chunk_size;
-    let (key, lx, ly, lz) = world_to_chunk_local(wx, wy, wz, cs);
-
-    // Write primary
-    if let Some(df) = density_fields.get_mut(&key) {
-        df.get_mut(lx, ly, lz).material = material;
-    }
-
-    // Sync overlapping boundary copies (local 0 overlaps with local chunk_size in prev chunk)
-    let (cx, cy, cz) = key;
-    if lx == 0 {
-        if let Some(df) = density_fields.get_mut(&(cx - 1, cy, cz)) {
-            df.get_mut(cs, ly, lz).material = material;
-        }
-    }
-    if ly == 0 {
-        if let Some(df) = density_fields.get_mut(&(cx, cy - 1, cz)) {
-            df.get_mut(lx, cs, lz).material = material;
-        }
-    }
-    if lz == 0 {
-        if let Some(df) = density_fields.get_mut(&(cx, cy, cz - 1)) {
-            df.get_mut(lx, ly, cs).material = material;
-        }
-    }
-    // Edge overlaps (two coords at boundary)
-    if lx == 0 && ly == 0 {
-        if let Some(df) = density_fields.get_mut(&(cx - 1, cy - 1, cz)) {
-            df.get_mut(cs, cs, lz).material = material;
-        }
-    }
-    if lx == 0 && lz == 0 {
-        if let Some(df) = density_fields.get_mut(&(cx - 1, cy, cz - 1)) {
-            df.get_mut(cs, ly, cs).material = material;
-        }
-    }
-    if ly == 0 && lz == 0 {
-        if let Some(df) = density_fields.get_mut(&(cx, cy - 1, cz - 1)) {
-            df.get_mut(lx, cs, cs).material = material;
-        }
-    }
-    // Corner overlap (all three at boundary)
-    if lx == 0 && ly == 0 && lz == 0 {
-        if let Some(df) = density_fields.get_mut(&(cx - 1, cy - 1, cz - 1)) {
-            df.get_mut(cs, cs, cs).material = material;
-        }
-    }
 }
 
 /// Count 6-connected neighbors matching a predicate.
@@ -490,4 +531,103 @@ pub fn find_air_from_solid(
 
     air_results.sort_by_key(|&(_, d)| d);
     air_results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use voxel_core::density::DensityField;
+
+    const CHUNK_SIZE: usize = 16;
+    const FIELD_SIZE: usize = CHUNK_SIZE + 1;
+
+    fn make_filled_field(material: Material, density: f32) -> DensityField {
+        let mut df = DensityField::new(FIELD_SIZE);
+        for s in df.samples.iter_mut() {
+            s.material = material;
+            s.density = density;
+        }
+        df
+    }
+
+    #[test]
+    fn test_set_voxel_synced_x_boundary() {
+        // 2×1×1 chunk grid. Write at X=0 in chunk (1,0,0) which mirrors to
+        // X=chunk_size in chunk (0,0,0).
+        let mut fields: HashMap<(i32, i32, i32), DensityField> = HashMap::new();
+        fields.insert((0, 0, 0), make_filled_field(Material::Granite, 1.0));
+        fields.insert((1, 0, 0), make_filled_field(Material::Granite, 1.0));
+
+        let target_key = (1, 0, 0);
+        let lx = 0;
+        let ly = 5;
+        let lz = 5;
+
+        set_voxel_synced(&mut fields, target_key, lx, ly, lz, Material::Hornfels, None, CHUNK_SIZE);
+
+        // Primary copy
+        assert_eq!(fields[&(1, 0, 0)].get(0, 5, 5).material, Material::Hornfels);
+        // Mirror copy in neighbor
+        assert_eq!(fields[&(0, 0, 0)].get(CHUNK_SIZE, 5, 5).material, Material::Hornfels);
+    }
+
+    #[test]
+    fn test_set_voxel_synced_corner() {
+        // Write at corner (0,0,0) in chunk (0,0,0) — should mirror to 7 neighbors.
+        let mut fields: HashMap<(i32, i32, i32), DensityField> = HashMap::new();
+        for cx in -1..=0 {
+            for cy in -1..=0 {
+                for cz in -1..=0 {
+                    fields.insert((cx, cy, cz), make_filled_field(Material::Granite, 1.0));
+                }
+            }
+        }
+
+        set_voxel_synced(&mut fields, (0, 0, 0), 0, 0, 0, Material::Skarn, Some(0.5), CHUNK_SIZE);
+
+        // Check all 8 copies (primary + 7 mirrors)
+        let cs = CHUNK_SIZE;
+        let expected = [
+            ((0, 0, 0), 0, 0, 0),
+            ((-1, 0, 0), cs, 0, 0),
+            ((0, -1, 0), 0, cs, 0),
+            ((0, 0, -1), 0, 0, cs),
+            ((-1, -1, 0), cs, cs, 0),
+            ((-1, 0, -1), cs, 0, cs),
+            ((0, -1, -1), 0, cs, cs),
+            ((-1, -1, -1), cs, cs, cs),
+        ];
+        for &(key, x, y, z) in &expected {
+            let s = fields[&key].get(x, y, z);
+            assert_eq!(s.material, Material::Skarn, "Failed at {:?} ({},{},{})", key, x, y, z);
+            assert_eq!(s.density, 0.5, "Density mismatch at {:?} ({},{},{})", key, x, y, z);
+        }
+    }
+
+    #[test]
+    fn test_set_voxel_synced_missing_neighbor() {
+        // Write at boundary with no neighbor chunk — should not panic.
+        let mut fields: HashMap<(i32, i32, i32), DensityField> = HashMap::new();
+        fields.insert((0, 0, 0), make_filled_field(Material::Granite, 1.0));
+
+        // lx=0 mirrors to chunk (-1,0,0) which doesn't exist — should silently skip
+        set_voxel_synced(&mut fields, (0, 0, 0), 0, 8, 8, Material::Hornfels, None, CHUNK_SIZE);
+
+        // Primary copy should still be written
+        assert_eq!(fields[&(0, 0, 0)].get(0, 8, 8).material, Material::Hornfels);
+    }
+
+    #[test]
+    fn test_set_voxel_synced_interior_no_mirror() {
+        // Write at interior position (not on any boundary) — no mirrors should be written.
+        let mut fields: HashMap<(i32, i32, i32), DensityField> = HashMap::new();
+        fields.insert((0, 0, 0), make_filled_field(Material::Granite, 1.0));
+        fields.insert((1, 0, 0), make_filled_field(Material::Granite, 1.0));
+
+        set_voxel_synced(&mut fields, (0, 0, 0), 8, 8, 8, Material::Iron, None, CHUNK_SIZE);
+
+        assert_eq!(fields[&(0, 0, 0)].get(8, 8, 8).material, Material::Iron);
+        // Neighbor should be untouched
+        assert_eq!(fields[&(1, 0, 0)].get(8, 8, 8).material, Material::Granite);
+    }
 }

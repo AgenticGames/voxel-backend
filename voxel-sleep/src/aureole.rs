@@ -15,7 +15,7 @@ use voxel_fluid::FluidSnapshot;
 use crate::config::{AureoleConfig, GroundwaterConfig};
 use crate::groundwater::ambient_moisture;
 use crate::manifest::ChangeManifest;
-use crate::util::{FACE_OFFSETS, sample_material, set_material_synced, grow_vein, VeinGrowthParams, VeinBias, default_vein_bias};
+use crate::util::{FACE_OFFSETS, sample_material, set_voxel_synced, grow_vein, VeinGrowthParams, VeinBias, default_vein_bias};
 use crate::{Bottleneck, PhaseDiagnostics, ResourceCensus, TransformEntry};
 
 /// Type of heat source for coal maturation decisions.
@@ -259,7 +259,7 @@ fn compute_water_boost(
 /// Limestone → Skarn, other host rock → Hornfels. Air gaps block propagation.
 /// Returns (hornfels_count, skarn_count, set of converted world positions).
 ///
-/// Uses `set_material_synced` so overlapping boundary voxels in adjacent chunks
+/// Uses `set_voxel_synced` so overlapping boundary voxels in adjacent chunks
 /// are updated immediately, preventing `sync_boundary_density` from reverting
 /// material-only changes at chunk boundaries.
 fn place_metamorphic_shell(
@@ -328,7 +328,7 @@ fn place_metamorphic_shell(
             };
 
             // Convert with boundary sync
-            set_material_synced(density_fields, n.0, n.1, n.2, new_mat, chunk_size);
+            set_voxel_synced(density_fields, key, lx, ly, lz, new_mat, None, chunk_size);
             manifest.record_voxel_change(key, lx, ly, lz, mat, density, new_mat, density);
             converted.insert(n);
 
@@ -451,7 +451,7 @@ fn apply_vein_to_world(
             continue;
         }
 
-        set_material_synced(density_fields, wx, wy, wz, material, chunk_size);
+        set_voxel_synced(density_fields, key, lx, ly, lz, material, None, chunk_size);
         manifest.record_voxel_change(key, lx, ly, lz, old_mat, old_density, material, old_density);
         count += 1;
     }
@@ -835,15 +835,9 @@ pub fn apply_aureole(
     let mut conversions: std::collections::BTreeMap<(u8, u8), u32> = std::collections::BTreeMap::new();
     for c in &candidates {
         *conversions.entry((c.old_material as u8, c.new_material as u8)).or_insert(0) += 1;
-        if let Some(df) = density_fields.get_mut(&c.chunk_key) {
-            let sample = df.get_mut(c.lx, c.ly, c.lz);
-            sample.material = c.new_material;
-            if c.new_material == Material::Air {
-                sample.density = -1.0;
-            }
-        }
-
         let new_density = if c.new_material == Material::Air { -1.0 } else { c.density };
+        set_voxel_synced(density_fields, c.chunk_key, c.lx, c.ly, c.lz, c.new_material, Some(new_density), chunk_size);
+
         result.manifest.record_voxel_change(
             c.chunk_key, c.lx, c.ly, c.lz,
             c.old_material, c.density,

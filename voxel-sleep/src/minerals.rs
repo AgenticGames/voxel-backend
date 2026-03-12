@@ -5,7 +5,7 @@ use voxel_core::density::DensityField;
 use voxel_core::material::Material;
 use crate::config::MineralConfig;
 use crate::manifest::ChangeManifest;
-use crate::util::{FACE_OFFSETS, sample_material, count_neighbors, has_material_within_radius};
+use crate::util::{FACE_OFFSETS, sample_material, set_voxel_synced, count_neighbors, has_material_within_radius};
 use crate::TransformEntry;
 
 /// Result of mineral growth pass.
@@ -253,12 +253,8 @@ pub fn apply_mineral_growth(
         // Generate growth density
         let new_density = rng.gen_range(config.growth_density_min..=config.growth_density_max);
 
-        // Apply the growth
-        if let Some(df) = density_fields.get_mut(&candidate.chunk_key) {
-            let sample = df.get_mut(candidate.lx, candidate.ly, candidate.lz);
-            sample.material = candidate.new_material;
-            sample.density = new_density;
-        }
+        // Apply the growth (synced to boundary neighbors)
+        set_voxel_synced(density_fields, candidate.chunk_key, candidate.lx, candidate.ly, candidate.lz, candidate.new_material, Some(new_density), chunk_size);
 
         // Record in manifest
         result.manifest.record_voxel_change(

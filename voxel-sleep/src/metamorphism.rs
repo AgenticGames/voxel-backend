@@ -5,7 +5,7 @@ use voxel_core::density::DensityField;
 use voxel_core::material::Material;
 use crate::config::MetamorphismConfig;
 use crate::manifest::ChangeManifest;
-use crate::util::{count_neighbors, has_material_within_radius};
+use crate::util::{set_voxel_synced, count_neighbors, has_material_within_radius};
 use crate::TransformEntry;
 
 /// Result of metamorphism pass on a set of chunks.
@@ -221,12 +221,8 @@ pub fn apply_metamorphism(
     let mut counts: HashMap<&str, u32> = HashMap::new();
 
     for candidate in &candidates {
-        // Apply the material change
-        if let Some(df) = density_fields.get_mut(&candidate.chunk_key) {
-            let sample = df.get_mut(candidate.lx, candidate.ly, candidate.lz);
-            sample.material = candidate.new_material;
-            // density stays the same
-        }
+        // Apply the material change (synced to boundary neighbors)
+        set_voxel_synced(density_fields, candidate.chunk_key, candidate.lx, candidate.ly, candidate.lz, candidate.new_material, None, chunk_size);
 
         // Record in manifest
         result.manifest.record_voxel_change(

@@ -17,7 +17,7 @@ use crate::collapse::{apply_collapse, CollapseResult};
 use crate::config::{DeepTimeConfig, GroundwaterConfig};
 use crate::groundwater::{ambient_moisture, is_fracture_site};
 use crate::manifest::ChangeManifest;
-use crate::util::{FACE_OFFSETS, sample_material, count_neighbors, has_material_within_radius, grow_vein, default_vein_bias, sleep_vein_size, VeinGrowthParams};
+use crate::util::{FACE_OFFSETS, sample_material, set_voxel_synced, count_neighbors, has_material_within_radius, grow_vein, default_vein_bias, sleep_vein_size, VeinGrowthParams};
 use crate::{Bottleneck, PhaseDiagnostics, ResourceCensus, TransformEntry};
 
 /// Result of the deep time phase.
@@ -975,20 +975,19 @@ pub fn apply_deeptime(
 
     for c in &candidates {
         *conversions.entry((c.old_material as u8, c.new_material as u8)).or_insert(0) += 1;
-        if let Some(df) = density_fields.get_mut(&c.chunk_key) {
-            let sample = df.get_mut(c.lx, c.ly, c.lz);
-            sample.material = c.new_material;
-            if c.change_type == 2 {
-                // Formation growth gets partial density for smooth DC mesh
-                sample.density = rng.gen_range(0.3..=0.6);
-            }
-        }
+        let new_density = if c.change_type == 2 {
+            // Formation growth gets partial density for smooth DC mesh
+            rng.gen_range(0.3..=0.6)
+        } else {
+            c.old_density
+        };
+        set_voxel_synced(density_fields, c.chunk_key, c.lx, c.ly, c.lz, c.new_material, if c.change_type == 2 { Some(new_density) } else { None }, chunk_size);
 
-        let new_density = if c.change_type == 2 { 0.45 } else { c.old_density };
+        let manifest_density = if c.change_type == 2 { 0.45 } else { c.old_density };
         result.manifest.record_voxel_change(
             c.chunk_key, c.lx, c.ly, c.lz,
             c.old_material, c.old_density,
-            c.new_material, new_density,
+            c.new_material, manifest_density,
         );
 
         if result.glimpse_chunk.is_none() {

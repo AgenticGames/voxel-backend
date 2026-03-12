@@ -19,7 +19,7 @@ use crate::aureole::HeatMap;
 use crate::config::{VeinConfig, GroundwaterConfig};
 use crate::groundwater::ambient_moisture;
 use crate::manifest::ChangeManifest;
-use crate::util::{FACE_OFFSETS, sample_material, count_neighbors, grow_vein, VeinGrowthParams, VeinBias};
+use crate::util::{FACE_OFFSETS, sample_material, set_voxel_synced, count_neighbors, grow_vein, VeinGrowthParams, VeinBias};
 use crate::{Bottleneck, PhaseDiagnostics, ResourceCensus, TransformEntry};
 
 /// Result of the veins phase.
@@ -642,11 +642,7 @@ pub fn apply_veins(
     let mut conversions: std::collections::BTreeMap<(u8, u8), u32> = std::collections::BTreeMap::new();
     for c in &vein_candidates {
         *conversions.entry((c.old_material as u8, c.new_material as u8)).or_insert(0) += 1;
-        if let Some(df) = density_fields.get_mut(&c.chunk_key) {
-            let sample = df.get_mut(c.lx, c.ly, c.lz);
-            sample.material = c.new_material;
-            // Preserve density (solid -> solid)
-        }
+        set_voxel_synced(density_fields, c.chunk_key, c.lx, c.ly, c.lz, c.new_material, None, chunk_size);
 
         result.manifest.record_voxel_change(
             c.chunk_key, c.lx, c.ly, c.lz,
