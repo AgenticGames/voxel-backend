@@ -342,8 +342,14 @@ fn distribute_vein_seeds(
     let (cx, cy, cz) = centroid;
     let mut seeds = Vec::new();
 
-    for i in 0..count {
-        let y_frac = 1.0 - 2.0 * (i as f32) / (count as f32 - 1.0).max(1.0);
+    // Overshoot: generate 3× the requested count, take first `count` hits
+    let attempt_count = count * 3;
+
+    for i in 0..attempt_count {
+        if seeds.len() >= count {
+            break;
+        }
+        let y_frac = 1.0 - 2.0 * (i as f32) / (attempt_count as f32 - 1.0).max(1.0);
         let r_at = (1.0 - y_frac * y_frac).sqrt();
         let theta = golden_angle * i as f32;
 
@@ -352,7 +358,7 @@ fn distribute_vein_seeds(
         let dz = r_at * theta.sin();
 
         // Raycast outward from centroid
-        let max_steps = (radius * 1.5).ceil() as i32;
+        let max_steps = (radius * 2.0).ceil().max(20.0) as i32;
         let mut last_solid = None;
 
         for step in 1..=max_steps {
@@ -467,7 +473,7 @@ fn place_slate_veins(
         }
         let (ore, min_sz, max_sz) = assignments[i];
         let bias = default_vein_bias(ore, rng);
-        let params = VeinGrowthParams { ore, min_size: min_sz, max_size: max_sz, bias };
+        let params = VeinGrowthParams { ore, min_size: min_sz, max_size: max_sz, bias, exclude_aureole: false };
         let positions = grow_vein(density_fields, seed, &params, chunk_size, rng);
         total_placed += apply_vein_to_world(&positions, ore, density_fields, chunk_size, manifest);
     }
@@ -505,6 +511,7 @@ fn place_slate_veins(
                 min_size: pocket_min,
                 max_size: pocket_max,
                 bias: VeinBias::Compact,
+                exclude_aureole: false,
             };
             let positions = grow_vein(density_fields, garnet_seed, &params, chunk_size, rng);
             total_placed += apply_vein_to_world(&positions, Material::Garnet, density_fields, chunk_size, manifest);
@@ -516,6 +523,7 @@ fn place_slate_veins(
                 min_size: dp_min,
                 max_size: dp_max,
                 bias: VeinBias::Compact,
+                exclude_aureole: false,
             };
             let positions = grow_vein(density_fields, diopside_seed, &params, chunk_size, rng);
             total_placed += apply_vein_to_world(&positions, Material::Diopside, density_fields, chunk_size, manifest);
@@ -568,7 +576,7 @@ fn place_limestone_veins(
         } else {
             default_vein_bias(ore, rng)
         };
-        let params = VeinGrowthParams { ore, min_size: min_sz, max_size: max_sz, bias };
+        let params = VeinGrowthParams { ore, min_size: min_sz, max_size: max_sz, bias, exclude_aureole: false };
         let positions = grow_vein(density_fields, seed, &params, chunk_size, rng);
         total_placed += apply_vein_to_world(&positions, ore, density_fields, chunk_size, manifest);
     }
@@ -612,7 +620,7 @@ pub fn apply_aureole(
 
         for zone in &zones {
             let heat = zone.cells.len() as f32 * config.heat_multiplier;
-            let base_radius = heat.sqrt() * config.radius_scale;
+            let base_radius = (heat.sqrt() * config.radius_scale).min(config.max_radius);
 
             let water_boost = compute_water_boost(
                 zone.centroid,

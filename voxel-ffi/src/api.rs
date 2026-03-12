@@ -2030,6 +2030,7 @@ mod tests {
             sleep_min_lava_zone_size: 5,
             sleep_garnet_pocket_size: 4,
             sleep_diopside_pocket_size: 4,
+            sleep_max_aureole_radius: 20.0,
             sleep_aureole_radius: 10,
             sleep_contact_marble_prob: 0.18,
             sleep_water_erosion_prob: 0.05,

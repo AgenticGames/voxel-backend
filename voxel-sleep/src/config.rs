@@ -34,6 +34,7 @@ fn default_small_vein() -> u32 { 6 }
 fn default_min_zone() -> u32 { 5 }
 fn default_garnet_pocket() -> u32 { 4 }
 fn default_diopside_pocket() -> u32 { 4 }
+fn default_max_aureole_radius() -> f32 { 20.0 }
 
 /// Top-level sleep configuration — 4-phase geological time simulation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -290,6 +291,9 @@ pub struct AureoleConfig {
     pub garnet_pocket_size: u32,
     #[serde(default = "default_diopside_pocket")]
     pub diopside_pocket_size: u32,
+    /// Maximum base radius for aureole metamorphic sphere (before water boost).
+    #[serde(default = "default_max_aureole_radius")]
+    pub max_radius: f32,
 }
 
 impl Default for AureoleConfig {
@@ -329,6 +333,7 @@ impl Default for AureoleConfig {
             min_lava_zone_size: 5,
             garnet_pocket_size: 4,
             diopside_pocket_size: 4,
+            max_radius: 20.0,
         }
     }
 }

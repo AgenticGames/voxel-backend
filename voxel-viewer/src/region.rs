@@ -203,6 +203,42 @@ impl GeneratedRegion {
             None, // no progress channel
         );
 
+        // Sync boundary density planes between dirty chunks and their face neighbors
+        if !result.dirty_chunks.is_empty() {
+            let cs = self.config.chunk_size;
+            let offsets = [(1i32,0i32,0i32),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)];
+            for &dk in &result.dirty_chunks {
+                for &(ox, oy, oz) in &offsets {
+                    let nk = (dk.0+ox, dk.1+oy, dk.2+oz);
+                    if !self.density_fields.contains_key(&nk) { continue; }
+                    let (axis, src_idx, dst_idx) = if ox == 1 { (0, cs, 0) }
+                        else if ox == -1 { (0, 0, cs) }
+                        else if oy == 1 { (1, cs, 0) }
+                        else if oy == -1 { (1, 0, cs) }
+                        else if oz == 1 { (2, cs, 0) }
+                        else { (2, 0, cs) };
+                    for a in 0..=cs {
+                        for b in 0..=cs {
+                            let (sx, sy, sz) = match axis {
+                                0 => (src_idx, a, b), 1 => (a, src_idx, b), _ => (a, b, src_idx),
+                            };
+                            let (dx, dy, dz) = match axis {
+                                0 => (dst_idx, a, b), 1 => (a, dst_idx, b), _ => (a, b, dst_idx),
+                            };
+                            let sample = self.density_fields[&dk].get(sx, sy, sz);
+                            let mat = sample.material;
+                            let dens = sample.density;
+                            if let Some(ndf) = self.density_fields.get_mut(&nk) {
+                                let dst = ndf.get_mut(dx, dy, dz);
+                                dst.material = mat;
+                                dst.density = dens;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Re-mesh all dirty chunks
         if !result.dirty_chunks.is_empty() {
             // Build full-chunk dirty bounds for each dirty chunk

@@ -96,6 +96,17 @@ impl ChunkStore {
         self.density_fields.len()
     }
 
+    /// Sync boundary density planes between dirty chunks and their neighbors.
+    /// Extends `dirty_bounds` with extra neighbor chunks that need remeshing.
+    pub fn sync_boundaries(
+        &mut self,
+        dirty_bounds: &mut Vec<((i32, i32, i32), usize, usize, usize, usize, usize, usize)>,
+        chunk_size: usize,
+    ) {
+        let extra = sync_boundary_density(&mut self.density_fields, dirty_bounds, chunk_size);
+        dirty_bounds.extend(extra);
+    }
+
     pub fn insert(&mut self, key: (i32, i32, i32), density: DensityField, hermite: HermiteData) {
         let size = density.size;
         self.density_fields.insert(key, density);

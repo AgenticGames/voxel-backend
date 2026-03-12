@@ -1159,9 +1159,13 @@ fn handle_request(
             // Remesh all dirty chunks (full chunk bounds)
             let t_remesh = Instant::now();
             let dirty_count = sleep_result.dirty_chunks.len();
-            let dirty_bounds: Vec<_> = sleep_result.dirty_chunks.iter().map(|&key| {
+            let mut dirty_bounds: Vec<_> = sleep_result.dirty_chunks.iter().map(|&key| {
                 (key, 0usize, 0usize, 0usize, cfg.chunk_size, cfg.chunk_size, cfg.chunk_size)
             }).collect();
+
+            // Sync boundary density (same as mining path)
+            s.sync_boundaries(&mut dirty_bounds, cfg.chunk_size);
+
             let meshes = s.remesh_dirty(&dirty_bounds, &cfg, world_scale);
             drop(s);
             let t_remesh_elapsed = t_remesh.elapsed();

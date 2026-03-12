@@ -151,7 +151,8 @@ fn is_host_rock(mat: Material) -> bool {
     matches!(mat,
         Material::Sandstone | Material::Limestone | Material::Granite |
         Material::Basalt | Material::Slate | Material::Marble |
-        Material::Hornfels | Material::Garnet | Material::Diopside
+        Material::Garnet | Material::Diopside
+        // Hornfels excluded — aureole metamorphic product, Phase 3 should not start veins here
     )
 }
 
@@ -467,6 +468,7 @@ pub fn apply_veins(
                         min_size: (target * 8) / 10,
                         max_size: target,
                         bias: VeinBias::WallClimbing { wall_normal: chosen.wall_normal },
+                        exclude_aureole: true,
                     };
                     let vein_positions = grow_vein(density_fields, chosen.pos, &params, chunk_size, rng);
 
@@ -548,6 +550,7 @@ pub fn apply_veins(
                                         min_size: 1,
                                         max_size: 3,
                                         bias: VeinBias::Compact,
+                                        exclude_aureole: true,
                                     };
                                     let pyrite_vein = grow_vein(density_fields, (pnx, pny, pnz), &pyrite_params, chunk_size, rng);
                                     for &pvpos in &pyrite_vein {
@@ -587,6 +590,7 @@ pub fn apply_veins(
                                         min_size: 1,
                                         max_size: 3,
                                         bias: VeinBias::Planar(rng.gen_range(0..3)),
+                                        exclude_aureole: true,
                                     };
                                     let quartz_vein = grow_vein(density_fields, (qnx, qny, qnz), &quartz_params, chunk_size, rng);
                                     for &qvpos in &quartz_vein {

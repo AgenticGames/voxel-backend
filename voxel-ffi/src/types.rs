@@ -741,6 +741,7 @@ pub struct FfiEngineConfig {
     pub sleep_min_lava_zone_size: u32,
     pub sleep_garnet_pocket_size: u32,
     pub sleep_diopside_pocket_size: u32,
+    pub sleep_max_aureole_radius: f32,
 }
 
 #[repr(C)]

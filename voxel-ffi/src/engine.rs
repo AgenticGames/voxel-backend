@@ -1699,6 +1699,7 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
             min_lava_zone_size: if c.sleep_min_lava_zone_size > 0 { c.sleep_min_lava_zone_size } else { 5 },
             garnet_pocket_size: if c.sleep_garnet_pocket_size > 0 { c.sleep_garnet_pocket_size } else { 4 },
             diopside_pocket_size: if c.sleep_diopside_pocket_size > 0 { c.sleep_diopside_pocket_size } else { 4 },
+            max_radius: if c.sleep_max_aureole_radius > 0.0 { c.sleep_max_aureole_radius } else { 20.0 },
             ..Default::default()
         },
         veins: VeinConfig {

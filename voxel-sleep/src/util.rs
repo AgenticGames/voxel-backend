@@ -124,6 +124,8 @@ pub struct VeinGrowthParams {
     pub min_size: u32,
     pub max_size: u32,
     pub bias: VeinBias,
+    /// Skip Hornfels/Skarn during growth (Phase 3 veins should not invade aureole).
+    pub exclude_aureole: bool,
 }
 
 /// Grow a connected ore vein FROM a seed point INTO surrounding host rock.
@@ -160,6 +162,9 @@ pub fn grow_vein(
             }
             if let Some(mat) = sample_material(density_fields, n.0, n.1, n.2, chunk_size) {
                 if !mat.is_host_rock() {
+                    continue;
+                }
+                if params.exclude_aureole && (mat == Material::Hornfels || mat == Material::Skarn) {
                     continue;
                 }
                 // Directional weight

@@ -134,7 +134,7 @@ impl ChangeManifest {
         if let Some(delta) = self.chunk_deltas.get(&chunk) {
             for change in &delta.voxel_changes {
                 let sample = density.get_mut(change.lx, change.ly, change.lz);
-                sample.material = material_from_u8(change.new_material);
+                sample.material = Material::from_u8(change.new_material);
                 sample.density = change.new_density;
             }
         }
@@ -193,30 +193,6 @@ impl ChangeManifest {
     }
 }
 
-fn material_from_u8(v: u8) -> Material {
-    match v {
-        0 => Material::Air,
-        1 => Material::Sandstone,
-        2 => Material::Limestone,
-        3 => Material::Granite,
-        4 => Material::Basalt,
-        5 => Material::Slate,
-        6 => Material::Marble,
-        7 => Material::Iron,
-        8 => Material::Copper,
-        9 => Material::Malachite,
-        10 => Material::Tin,
-        11 => Material::Gold,
-        12 => Material::Diamond,
-        13 => Material::Kimberlite,
-        14 => Material::Sulfide,
-        15 => Material::Quartz,
-        16 => Material::Pyrite,
-        17 => Material::Amethyst,
-        18 => Material::Crystal,
-        _ => Material::Air,
-    }
-}
 
 #[cfg(test)]
 mod tests {
