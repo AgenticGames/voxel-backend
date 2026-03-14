@@ -1,15 +1,8 @@
 pub mod config;
 pub mod manifest;
 pub mod util;
-pub mod metamorphism;
-pub mod minerals;
-pub mod collapse;
-pub mod priority;
-pub mod reaction;
-pub mod aureole;
-pub mod veins;
-pub mod deeptime;
-pub mod groundwater;
+pub mod phases;
+pub mod systems;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as FmtWrite;
@@ -22,14 +15,14 @@ use voxel_core::material::Material;
 use voxel_core::stress::{StressField, SupportField, SupportType};
 use voxel_fluid::FluidSnapshot;
 
-use crate::aureole::build_heat_map;
-use crate::priority::{classify_chunks, ChunkTier};
-use crate::reaction::apply_reaction;
-use crate::aureole::apply_aureole;
-use crate::veins::apply_veins;
-use crate::deeptime::apply_deeptime;
+use crate::phases::aureole::build_heat_map;
+use crate::systems::priority::{classify_chunks, ChunkTier};
+use crate::phases::reaction::apply_reaction;
+use crate::phases::aureole::apply_aureole;
+use crate::phases::veins::apply_veins;
+use crate::phases::deeptime::apply_deeptime;
 
-pub use collapse::CollapseTimings;
+pub use systems::collapse::CollapseTimings;
 pub use config::SleepConfig;
 pub use manifest::ChangeManifest;
 
@@ -56,6 +49,7 @@ pub struct SleepProgress {
 
 /// Per-phase timing data from the sleep pipeline.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct SleepTimings {
     pub total: Duration,
     pub chunk_filter: Duration,
@@ -396,8 +390,8 @@ pub fn execute_sleep(
     let t_heat_elapsed = t_heat.elapsed();
 
     // Log fluid snapshot stats for debugging
-    let lava_heat_count = heat_map.iter().filter(|h| h.source_type == crate::aureole::HeatSourceType::Lava).count();
-    let kimb_heat_count = heat_map.iter().filter(|h| h.source_type == crate::aureole::HeatSourceType::Kimberlite).count();
+    let lava_heat_count = heat_map.iter().filter(|h| h.source_type == crate::phases::aureole::HeatSourceType::Lava).count();
+    let kimb_heat_count = heat_map.iter().filter(|h| h.source_type == crate::phases::aureole::HeatSourceType::Kimberlite).count();
     transform_log.push(TransformEntry {
         description: format!(
             "Fluid snapshot: {} chunks (cs={}), {} lava cells, {} water cells | Heat map: {} lava sources, {} kimberlite sources",
@@ -405,6 +399,46 @@ pub fn execute_sleep(
         ),
         count: fluid_lava_cells + fluid_water_cells, // nonzero so retain() keeps it
     });
+
+    // Diagnostic: compare fluid snapshot chunk keys with density field chunk keys
+    {
+        let mut fluid_keys_with_lava: Vec<(i32,i32,i32)> = fluid_snapshot.chunks.iter()
+            .filter(|(_, cells)| cells.iter().any(|c| c.level > 0.001 && c.fluid_type.is_lava()))
+            .map(|(&k, _)| k)
+            .collect();
+        fluid_keys_with_lava.sort();
+        let density_keys: std::collections::HashSet<(i32,i32,i32)> = density_fields.keys().copied().collect();
+        let matched = fluid_keys_with_lava.iter().filter(|k| density_keys.contains(k)).count();
+        eprintln!("[SLEEP] Fluid lava chunks: {:?} | matched in density: {}/{}", fluid_keys_with_lava, matched, fluid_keys_with_lava.len());
+
+        // Also log first few lava cell world positions for manual verification
+        let mut sample_count = 0;
+        for &chunk_key in &fluid_keys_with_lava {
+            if sample_count >= 5 { break; }
+            if let Some(cells) = fluid_snapshot.chunks.get(&chunk_key) {
+                let (cx, cy, cz) = chunk_key;
+                for z in 0..fluid_cs {
+                    for y in 0..fluid_cs {
+                        for x in 0..fluid_cs {
+                            let idx = z * fluid_cs * fluid_cs + y * fluid_cs + x;
+                            if idx < cells.len() && cells[idx].level > 0.001 && cells[idx].fluid_type.is_lava() {
+                                let wx = cx * (fluid_cs as i32) + x as i32;
+                                let wy = cy * (fluid_cs as i32) + y as i32;
+                                let wz = cz * (fluid_cs as i32) + z as i32;
+                                eprintln!("[SLEEP] Sample lava: chunk={:?} local=({},{},{}) world=({},{},{}) UE=({},{},{})",
+                                    chunk_key, x, y, z, wx, wy, wz,
+                                    wx as f32 * 40.0, -(wz as f32) * 40.0, wy as f32 * 40.0);
+                                sample_count += 1;
+                                if sample_count >= 5 { break; }
+                            }
+                        }
+                        if sample_count >= 5 { break; }
+                    }
+                    if sample_count >= 5 { break; }
+                }
+            }
+        }
+    }
 
     // --- Resource Census (pre-scan) ---
     let t_census = Instant::now();
@@ -435,6 +469,8 @@ pub fn execute_sleep(
     let mut diag_aureole = PhaseDiagnostics::default();
     let mut diag_veins = PhaseDiagnostics::default();
     let mut diag_deeptime = PhaseDiagnostics::default();
+    let mut aureole_debug_zones: Vec<(i32, i32, i32, i32)> = Vec::new();
+    let mut aureole_debug_lines: Vec<String> = Vec::new();
 
     // ═══ Phase 1: The Aureole (100,000 years) ═══
     // Aureole runs BEFORE reaction so metamorphic minerals (marble, garnet, diopside)
@@ -453,6 +489,8 @@ pub fn execute_sleep(
         total_silicified = aureole_result.voxels_silicified;
         total_channels_eroded = aureole_result.channels_eroded;
         diag_aureole = aureole_result.diagnostics;
+        aureole_debug_zones = aureole_result.debug_zones;
+        aureole_debug_lines = aureole_result.debug_lines;
         result_manifest.merge_sleep_changes(&aureole_result.manifest);
         transform_log.extend(aureole_result.transform_log);
         for key in aureole_result.manifest.chunk_deltas.keys() {
@@ -725,7 +763,7 @@ pub fn execute_sleep(
         cosmetic_chunks: cosmetic_chunks.len() as u32,
     };
 
-    let profile_report = build_sleep_profile_report(
+    let mut profile_report = build_sleep_profile_report(
         &timings, sleep_count, config.chunk_radius,
         total_acid_dissolved, total_oxidized, total_metamorphosed,
         total_veins, total_formations, total_enriched, total_thickened,
@@ -741,6 +779,21 @@ pub fn execute_sleep(
         accum_metamorphosed, accum_eroded, accum_veins, accum_formations,
         total_lava_solidified,
     );
+
+    // Append aureole debug zone markers (parsed by UE for debug sphere visualization)
+    for &(vx, vy, vz, depth) in &aureole_debug_zones {
+        let _ = writeln!(profile_report, "[AUREOLE_ZONE] {} {} {} {}", vx, vy, vz, depth);
+    }
+    // Append detailed zone diagnostic lines
+    for line in &aureole_debug_lines {
+        let _ = writeln!(profile_report, "{}", line);
+    }
+    // Append basalt box and other tagged diagnostic lines from transform_log
+    for entry in &transform_log {
+        if entry.description.starts_with("[BASALT_BOX]") || entry.description.starts_with("[CENTROID_PT]") {
+            let _ = writeln!(profile_report, "{}", entry.description);
+        }
+    }
 
     SleepResult {
         success: true,
@@ -776,7 +829,7 @@ pub fn execute_sleep(
 
 /// Convert all lava fluid cells to solid basalt voxels.
 /// After 1.25Ma of geological time, any standing lava would have solidified.
-fn solidify_lava(
+pub(crate) fn solidify_lava(
     density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
     fluid_snapshot: &mut FluidSnapshot,
     manifest: &mut ChangeManifest,
@@ -816,6 +869,8 @@ fn solidify_lava(
     // Set density field voxels to basalt
     let mut missing_df = 0u32;
     let mut dirty_chunks_set: HashSet<(i32, i32, i32)> = HashSet::new();
+    let mut basalt_min = (i32::MAX, i32::MAX, i32::MAX);
+    let mut basalt_max = (i32::MIN, i32::MIN, i32::MIN);
     for &((wx, wy, wz), _fluid_chunk, _) in &lava_cells {
         let (ck, lx, ly, lz) = world_to_chunk_local(wx, wy, wz, chunk_size);
         let (old_mat, old_density) = match density_fields.get(&ck) {
@@ -832,6 +887,8 @@ fn solidify_lava(
         manifest.record_voxel_change(ck, lx, ly, lz, old_mat, old_density, Material::Basalt, -1.0);
         all_dirty.insert(ck);
         dirty_chunks_set.insert(ck);
+        basalt_min = (basalt_min.0.min(wx), basalt_min.1.min(wy), basalt_min.2.min(wz));
+        basalt_max = (basalt_max.0.max(wx), basalt_max.1.max(wy), basalt_max.2.max(wz));
         count += 1;
     }
 
@@ -853,6 +910,17 @@ fn solidify_lava(
             ),
             count: count.max(1), // ensure it survives retain filter
         });
+        if count > 0 {
+            // Append basalt extent as a debug line (will be added to profile report)
+            entries.push(TransformEntry {
+                description: format!(
+                    "[BASALT_BOX] {} {} {} {} {} {}",
+                    basalt_min.0, basalt_min.1, basalt_min.2,
+                    basalt_max.0, basalt_max.1, basalt_max.2,
+                ),
+                count: 1,
+            });
+        }
     }
     eprintln!("[SLEEP] solidify_lava: {} lava cells, {} basalt placed, {} missing density fields, cs={}, chunk_size={}",
         lava_cells.len(), count, missing_df, cs, chunk_size);
@@ -1120,6 +1188,174 @@ fn send_progress(
     }
 }
 
+/// Run only the aureole (contact metamorphism) phase plus lava solidification.
+/// Used for debugging coordinate alignment — skips all other sleep phases.
+pub fn execute_aureole_only(
+    config: &SleepConfig,
+    density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
+    fluid_snapshot: &mut FluidSnapshot,
+    player_chunk: (i32, i32, i32),
+) -> SleepResult {
+    use std::fmt::Write as FmtWrite;
+    let chunk_size: usize = 16;
+    let mut rng = ChaCha8Rng::seed_from_u64(99991);
+
+    // Filter chunks by radius (same as execute_sleep)
+    let radius = config.chunk_radius as i32;
+    let mut all_chunks: Vec<(i32, i32, i32)> = density_fields.keys()
+        .copied()
+        .filter(|&(cx, cy, cz)| {
+            let dx = (cx - player_chunk.0).abs();
+            let dy = (cy - player_chunk.1).abs();
+            let dz = (cz - player_chunk.2).abs();
+            dx.max(dy).max(dz) <= radius
+        })
+        .collect();
+    all_chunks.sort();
+
+    let mut result_manifest = ChangeManifest::new();
+    let mut all_dirty: HashSet<(i32, i32, i32)> = HashSet::new();
+    let mut transform_log: Vec<TransformEntry> = Vec::new();
+
+    // Log fluid snapshot for diagnostics
+    let fluid_cs = fluid_snapshot.chunk_size;
+    let mut fluid_lava_cells = 0u32;
+    for cells in fluid_snapshot.chunks.values() {
+        for cell in cells {
+            if cell.level > 0.001 && cell.fluid_type.is_lava() {
+                fluid_lava_cells += 1;
+            }
+        }
+    }
+    eprintln!("[AUREOLE_ONLY] chunks_in_radius={} fluid_chunks={} fluid_cs={} lava_cells={}",
+        all_chunks.len(), fluid_snapshot.chunks.len(), fluid_cs, fluid_lava_cells);
+
+    // Log lava chunk keys and sample positions
+    {
+        let mut fluid_keys_with_lava: Vec<(i32,i32,i32)> = fluid_snapshot.chunks.iter()
+            .filter(|(_, cells)| cells.iter().any(|c| c.level > 0.001 && c.fluid_type.is_lava()))
+            .map(|(&k, _)| k)
+            .collect();
+        fluid_keys_with_lava.sort();
+        let density_keys: HashSet<(i32,i32,i32)> = density_fields.keys().copied().collect();
+        let matched = fluid_keys_with_lava.iter().filter(|k| density_keys.contains(k)).count();
+        eprintln!("[AUREOLE_ONLY] Fluid lava chunks: {:?} | matched in density: {}/{}", fluid_keys_with_lava, matched, fluid_keys_with_lava.len());
+        let mut sample_count = 0;
+        for &chunk_key in &fluid_keys_with_lava {
+            if sample_count >= 5 { break; }
+            if let Some(cells) = fluid_snapshot.chunks.get(&chunk_key) {
+                let (cx, cy, cz) = chunk_key;
+                'outer: for z in 0..fluid_cs {
+                    for y in 0..fluid_cs {
+                        for x in 0..fluid_cs {
+                            let idx = z * fluid_cs * fluid_cs + y * fluid_cs + x;
+                            if idx < cells.len() && cells[idx].level > 0.001 && cells[idx].fluid_type.is_lava() {
+                                let wx = cx * (fluid_cs as i32) + x as i32;
+                                let wy = cy * (fluid_cs as i32) + y as i32;
+                                let wz = cz * (fluid_cs as i32) + z as i32;
+                                eprintln!("[AUREOLE_ONLY] Sample lava: chunk={:?} world=({},{},{}) UE=({},{},{})",
+                                    chunk_key, wx, wy, wz,
+                                    wx as f32 * 40.0, -(wz as f32) * 40.0, wy as f32 * 40.0);
+                                sample_count += 1;
+                                if sample_count >= 5 { break 'outer; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Build heat map from fluid snapshot
+    let heat_map = build_heat_map(density_fields, fluid_snapshot, &all_chunks, chunk_size);
+    eprintln!("[AUREOLE_ONLY] heat_map sources: {}", heat_map.len());
+
+    // Resource census
+    let census = compute_resource_census(density_fields, fluid_snapshot, &all_chunks, chunk_size);
+
+    // Run aureole
+    let aureole_result = apply_aureole(
+        &config.aureole, &config.groundwater, density_fields, fluid_snapshot,
+        &heat_map, &all_chunks, chunk_size, &mut rng, &census,
+    );
+    let total_metamorphosed = aureole_result.voxels_metamorphosed;
+    let aureole_debug_zones = aureole_result.debug_zones.clone();
+    let aureole_debug_lines = aureole_result.debug_lines.clone();
+    result_manifest.merge_sleep_changes(&aureole_result.manifest);
+    transform_log.extend(aureole_result.transform_log);
+    for key in aureole_result.manifest.chunk_deltas.keys() {
+        all_dirty.insert(*key);
+    }
+    eprintln!("[AUREOLE_ONLY] zones={} metamorphosed={} hornfels={} skarn={}",
+        aureole_result.lava_zones_found, total_metamorphosed,
+        aureole_result.hornfels_placed, aureole_result.skarn_placed);
+
+    // Solidify lava (for BASALT_BOX debug marker + visual comparison)
+    let mut lava_solidified = 0u32;
+    if config.lava_solidification_enabled {
+        let (count, entries) = solidify_lava(density_fields, fluid_snapshot, &mut result_manifest, &mut all_dirty, chunk_size);
+        lava_solidified = count;
+        transform_log.extend(entries);
+    }
+    eprintln!("[AUREOLE_ONLY] lava_solidified={}", lava_solidified);
+
+    // Build profile report with all debug markers
+    let mut profile_report = String::new();
+    let _ = writeln!(profile_report, "=== Aureole-Only Debug Run ===");
+    let _ = writeln!(profile_report, "Player chunk: {:?}  radius: {}", player_chunk, radius);
+    let _ = writeln!(profile_report, "Chunks in radius: {}  heat sources: {}", all_chunks.len(), heat_map.len());
+    let _ = writeln!(profile_report, "Lava zones: {}  metamorphosed: {} ({} hornfels, {} skarn)",
+        aureole_result.lava_zones_found, total_metamorphosed,
+        aureole_result.hornfels_placed, aureole_result.skarn_placed);
+    let _ = writeln!(profile_report, "Lava solidified: {}  dirty chunks: {}", lava_solidified, all_dirty.len());
+
+    // Debug zone markers (parsed by UE for visualization)
+    for &(vx, vy, vz, depth) in &aureole_debug_zones {
+        let _ = writeln!(profile_report, "[AUREOLE_ZONE] {} {} {} {}", vx, vy, vz, depth);
+    }
+    for line in &aureole_debug_lines {
+        let _ = writeln!(profile_report, "{}", line);
+    }
+    for entry in &transform_log {
+        if entry.description.starts_with("[BASALT_BOX]") || entry.description.starts_with("[CENTROID_PT]") {
+            let _ = writeln!(profile_report, "{}", entry.description);
+        }
+    }
+
+    transform_log.retain(|e| e.count > 0);
+    let dirty_chunks: Vec<(i32, i32, i32)> = all_dirty.into_iter().collect();
+
+    SleepResult {
+        success: true,
+        chunks_changed: dirty_chunks.len() as u32,
+        acid_dissolved: 0,
+        voxels_oxidized: 0,
+        voxels_metamorphosed: total_metamorphosed,
+        veins_deposited: 0,
+        formations_grown: 0,
+        voxels_enriched: 0,
+        veins_thickened: 0,
+        supports_degraded: 0,
+        collapses_triggered: 0,
+        sulfide_dissolved: 0,
+        coal_matured: aureole_result.coal_matured,
+        diamonds_formed: aureole_result.diamonds_formed,
+        voxels_silicified: aureole_result.voxels_silicified,
+        nests_fossilized: 0,
+        channels_eroded: aureole_result.channels_eroded,
+        corpses_fossilized: 0,
+        gypsum_deposited: 0,
+        lava_solidified,
+        dirty_chunks,
+        collapse_events: Vec::new(),
+        transform_log,
+        manifest: result_manifest,
+        profile_report,
+        timings: SleepTimings::default(),
+        minerals_grown: 0,
+    }
+}
+
 #[cfg(test)]
 mod bench;
 
@@ -1302,7 +1538,7 @@ mod tests {
     fn test_bottleneck_empty_world() {
         // An empty world with no fluid should produce bottlenecks about missing resources
         let census = ResourceCensus::default();
-        let result_bottlenecks = crate::reaction::compute_reaction_bottlenecks(&census);
+        let result_bottlenecks = crate::phases::reaction::compute_reaction_bottlenecks(&census);
 
         // Should have bottlenecks about missing pyrite/sulfide, water, copper, lava
         assert!(!result_bottlenecks.is_empty());

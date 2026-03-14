@@ -15,9 +15,9 @@ use voxel_core::stress::world_to_chunk_local;
 use voxel_fluid::FluidSnapshot;
 
 
-use crate::aureole::HeatMap;
+use crate::phases::aureole::HeatMap;
 use crate::config::{VeinConfig, GroundwaterConfig};
-use crate::groundwater::ambient_moisture;
+use crate::systems::groundwater::ambient_moisture;
 use crate::manifest::ChangeManifest;
 use crate::util::{FACE_OFFSETS, sample_material, set_voxel_synced, count_neighbors, grow_vein, VeinGrowthParams, VeinBias};
 use crate::{Bottleneck, PhaseDiagnostics, ResourceCensus, TransformEntry};

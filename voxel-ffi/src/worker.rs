@@ -735,7 +735,7 @@ fn handle_request(
             let mat = voxel_core::material::Material::from_u8(host_material);
             let mut s = store.write().unwrap();
             let ts = terrace_size_for_scale(world_scale);
-            let meshes = s.flatten_terrace(glam::IVec3::new(base_x, base_y, base_z), mat, &cfg, world_scale, ts);
+            let meshes = crate::terrain_ops::flatten_terrace(&mut s, glam::IVec3::new(base_x, base_y, base_z), mat, &cfg, world_scale, ts);
 
             // Collect dirty chunk keys for seam regeneration
             let dirty_keys: Vec<(i32, i32, i32)> = meshes.iter().map(|(k, _)| *k).collect();
@@ -755,7 +755,7 @@ fn handle_request(
             let cfg = config.read().unwrap().clone();
             let mut s = store.write().unwrap();
             let ts = terrace_size_for_scale(world_scale);
-            let meshes = s.flatten_terrace_batch(&tiles, &cfg, world_scale, ts);
+            let meshes = crate::terrain_ops::flatten_terrace_batch(&mut s, &tiles, &cfg, world_scale, ts);
             let dirty_keys: Vec<_> = meshes.iter().map(|(k, _)| *k).collect();
             drop(s);
             for (key, mesh) in meshes {
@@ -805,7 +805,7 @@ fn handle_request(
                 }
             }
 
-            let meshes = s.flatten_terrace(glam::IVec3::new(base_x, base_y, base_z), mat, &cfg, world_scale, bts);
+            let meshes = crate::terrain_ops::flatten_terrace(&mut s, glam::IVec3::new(base_x, base_y, base_z), mat, &cfg, world_scale, bts);
 
             let dirty_keys: Vec<(i32, i32, i32)> = meshes.iter().map(|(k, _)| *k).collect();
 
@@ -830,12 +830,12 @@ fn handle_request(
 
             let mut s = store.write().unwrap();
             let (meshes, mined) = if request.mode == 0 {
-                s.mine_sphere(center, radius, &cfg, world_scale)
+                crate::mining::mine_sphere(&mut s, center, radius, &cfg, world_scale)
             } else {
                 let normal = from_ue_normal(
                     request.normal_x, request.normal_y, request.normal_z,
                 );
-                s.mine_peel(center, normal, radius, &cfg, world_scale)
+                crate::mining::mine_peel(&mut s, center, normal, radius, &cfg, world_scale)
             };
             drop(s);
 
@@ -932,7 +932,7 @@ fn handle_request(
 
             // Step 1: Mine the sphere (same as normal pick)
             let mut s = store.write().unwrap();
-            let (meshes, mined) = s.mine_sphere(center, rust_radius, &cfg, ws);
+            let (meshes, mined) = crate::mining::mine_sphere(&mut s, center, rust_radius, &cfg, ws);
             drop(s);
 
             // Collect dirty chunk keys for seam regeneration
@@ -1163,8 +1163,37 @@ fn handle_request(
                 (key, 0usize, 0usize, 0usize, cfg.chunk_size, cfg.chunk_size, cfg.chunk_size)
             }).collect();
 
-            // Sync boundary density (same as mining path)
-            s.sync_boundaries(&mut dirty_bounds, cfg.chunk_size);
+            // NOTE: Do NOT call sync_boundaries here. Sleep uses set_voxel_synced()
+            // which already keeps boundary overlap voxels consistent. Running
+            // sync_boundary_density on top of that causes material bleeding:
+            // its average_boundary_voxel() picks material by density comparison,
+            // which can propagate hornfels/skarn to distant chunk boundaries.
+
+            // However, set_voxel_synced writes mirror copies into neighbor chunks'
+            // density fields. Those neighbors need remeshing too. Add all 26
+            // face/edge/corner neighbors of dirty chunks that are loaded.
+            {
+                let dirty_set: std::collections::HashSet<(i32,i32,i32)> =
+                    sleep_result.dirty_chunks.iter().copied().collect();
+                let mut extra: Vec<((i32,i32,i32), usize, usize, usize, usize, usize, usize)> = Vec::new();
+                for &(cx, cy, cz) in &sleep_result.dirty_chunks {
+                    for dx in -1i32..=1 {
+                        for dy in -1i32..=1 {
+                            for dz in -1i32..=1 {
+                                if dx == 0 && dy == 0 && dz == 0 { continue; }
+                                let nk = (cx + dx, cy + dy, cz + dz);
+                                if !dirty_set.contains(&nk) && s.density_fields.contains_key(&nk) {
+                                    extra.push((nk, 0, 0, 0, cfg.chunk_size, cfg.chunk_size, cfg.chunk_size));
+                                }
+                            }
+                        }
+                    }
+                }
+                // Deduplicate
+                extra.sort_by_key(|e| e.0);
+                extra.dedup_by_key(|e| e.0);
+                dirty_bounds.extend(extra);
+            }
 
             let meshes = s.remesh_dirty(&dirty_bounds, &cfg, world_scale);
             drop(s);
@@ -1246,6 +1275,99 @@ fn handle_request(
                 nests_fossilized: sleep_result.nests_fossilized,
                 channels_eroded: sleep_result.channels_eroded,
                 corpses_fossilized: sleep_result.corpses_fossilized,
+                lava_solidified: sleep_result.lava_solidified,
+                profile_report: report,
+            });
+        }
+        WorkerRequest::AureoleOnly { player_chunk, sleep_config: sc } => {
+            let cfg = config.read().unwrap().clone();
+
+            // Request fluid snapshot (same as Sleep)
+            let (snap_tx, snap_rx) = crossbeam_channel::bounded(1);
+            let _ = fluid_event_tx.send(voxel_fluid::FluidEvent::SnapshotRequest { reply_tx: snap_tx });
+            let mut fluid_snapshot = snap_rx.recv().unwrap_or_else(|_| voxel_fluid::FluidSnapshot::default());
+
+            let mut s = store.write().unwrap();
+
+            // Run aureole-only (no stress/support fields needed)
+            let sleep_result = voxel_sleep::execute_aureole_only(
+                &sc,
+                &mut s.density_fields,
+                &mut fluid_snapshot,
+                player_chunk,
+            );
+
+            // Drain solidified lava if any
+            if sleep_result.lava_solidified > 0 {
+                let lava_chunks: Vec<(i32, i32, i32)> = fluid_snapshot.chunks.keys().copied().collect();
+                let _ = fluid_event_tx.send(voxel_fluid::FluidEvent::DrainLavaChunks { chunks: lava_chunks });
+            }
+
+            // Remesh dirty chunks (same pattern as Sleep)
+            let dirty_count = sleep_result.dirty_chunks.len();
+            let mut dirty_bounds: Vec<_> = sleep_result.dirty_chunks.iter().map(|&key| {
+                (key, 0usize, 0usize, 0usize, cfg.chunk_size, cfg.chunk_size, cfg.chunk_size)
+            }).collect();
+
+            // Expand to 26-neighbors so boundary voxels remesh correctly
+            {
+                let dirty_set: std::collections::HashSet<(i32,i32,i32)> =
+                    sleep_result.dirty_chunks.iter().copied().collect();
+                let mut extra: Vec<((i32,i32,i32), usize, usize, usize, usize, usize, usize)> = Vec::new();
+                for &(cx, cy, cz) in &sleep_result.dirty_chunks {
+                    for dx in -1i32..=1 {
+                        for dy in -1i32..=1 {
+                            for dz in -1i32..=1 {
+                                if dx == 0 && dy == 0 && dz == 0 { continue; }
+                                let nk = (cx + dx, cy + dy, cz + dz);
+                                if !dirty_set.contains(&nk) && s.density_fields.contains_key(&nk) {
+                                    extra.push((nk, 0, 0, 0, cfg.chunk_size, cfg.chunk_size, cfg.chunk_size));
+                                }
+                            }
+                        }
+                    }
+                }
+                extra.sort_by_key(|e| e.0);
+                extra.dedup_by_key(|e| e.0);
+                dirty_bounds.extend(extra);
+            }
+
+            let meshes = s.remesh_dirty(&dirty_bounds, &cfg, world_scale);
+            drop(s);
+
+            for (chunk, mesh) in meshes {
+                let crystal_data = retrieve_crystal_data(store, chunk, cfg.voxel_scale(), world_scale);
+                let _ = result_tx.send(WorkerResult::ChunkMesh {
+                    chunk,
+                    mesh,
+                    generation: 0,
+                    crystal_data,
+                });
+            }
+
+            // Build report
+            let mut report = sleep_result.profile_report.clone();
+            use std::fmt::Write as FmtWrite;
+            let _ = writeln!(report, "\nRemeshed {} dirty chunks (+neighbors)", dirty_count);
+
+            // Deliver via SleepComplete so UE can parse debug lines and display results
+            let _ = result_tx.send(WorkerResult::SleepComplete {
+                chunks_changed: sleep_result.chunks_changed,
+                voxels_metamorphosed: sleep_result.voxels_metamorphosed,
+                minerals_grown: 0,
+                supports_degraded: 0,
+                collapses_triggered: 0,
+                acid_dissolved: 0,
+                veins_deposited: 0,
+                voxels_enriched: 0,
+                formations_grown: 0,
+                sulfide_dissolved: 0,
+                coal_matured: sleep_result.coal_matured,
+                diamonds_formed: sleep_result.diamonds_formed,
+                voxels_silicified: sleep_result.voxels_silicified,
+                nests_fossilized: 0,
+                channels_eroded: sleep_result.channels_eroded,
+                corpses_fossilized: 0,
                 lava_solidified: sleep_result.lava_solidified,
                 profile_report: report,
             });

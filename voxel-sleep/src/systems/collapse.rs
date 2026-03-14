@@ -14,7 +14,7 @@ use crate::manifest::ChangeManifest;
 use crate::TransformEntry;
 
 /// Per-sub-step timing data from the collapse pass.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CollapseTimings {
     pub support_degradation: Duration,
     pub stress_amplification: Duration,

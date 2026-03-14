@@ -13,7 +13,7 @@ use voxel_core::stress::world_to_chunk_local;
 use voxel_fluid::FluidSnapshot;
 
 use crate::config::{AureoleConfig, GroundwaterConfig};
-use crate::groundwater::ambient_moisture;
+use crate::systems::groundwater::ambient_moisture;
 use crate::manifest::ChangeManifest;
 use crate::util::{FACE_OFFSETS, sample_material, set_voxel_synced, grow_vein, VeinGrowthParams, VeinBias, default_vein_bias};
 use crate::{Bottleneck, PhaseDiagnostics, ResourceCensus, TransformEntry};
@@ -51,6 +51,10 @@ pub struct AureoleResult {
     pub glimpse_chunk: Option<(i32, i32, i32)>,
     pub transform_log: Vec<TransformEntry>,
     pub diagnostics: PhaseDiagnostics,
+    /// Debug: lava zone centroids and BFS depths (voxel coords) for visualization.
+    pub debug_zones: Vec<(i32, i32, i32, i32)>, // (cx, cy, cz, depth)
+    /// Debug: detailed zone placement log lines for profile report.
+    pub debug_lines: Vec<String>,
 }
 
 /// Build a heat map: collect all lava cell positions from fluid snapshot
@@ -666,6 +670,49 @@ pub fn apply_aureole(
             result.hornfels_placed += hornfels_n;
             result.skarn_placed += skarn_n;
             result.voxels_metamorphosed += hornfels_n + skarn_n;
+
+            // Record debug zone info (centroid in voxel coords + BFS depth)
+            result.debug_zones.push((zone.centroid.0, zone.centroid.1, zone.centroid.2, final_depth));
+
+            // Compute lava extent and hornfels placement extent for diagnostics
+            if !zone.cells.is_empty() {
+                let (mut lmin, mut lmax) = (zone.cells[0], zone.cells[0]);
+                for &c in &zone.cells {
+                    lmin = (lmin.0.min(c.0), lmin.1.min(c.1), lmin.2.min(c.2));
+                    lmax = (lmax.0.max(c.0), lmax.1.max(c.1), lmax.2.max(c.2));
+                }
+                let (mut hmin, mut hmax) = ((i32::MAX, i32::MAX, i32::MAX), (i32::MIN, i32::MIN, i32::MIN));
+                for &c in &converted {
+                    hmin = (hmin.0.min(c.0), hmin.1.min(c.1), hmin.2.min(c.2));
+                    hmax = (hmax.0.max(c.0), hmax.1.max(c.1), hmax.2.max(c.2));
+                }
+                result.debug_lines.push(format!(
+                    "[ZONE_DIAG] zone_idx={} cells={} depth={} centroid=({},{},{}) lava_min=({},{},{}) lava_max=({},{},{}) hornfels={} skarn={} placed_min=({},{},{}) placed_max=({},{},{})",
+                    result.debug_zones.len() - 1, zone.cells.len(), final_depth,
+                    zone.centroid.0, zone.centroid.1, zone.centroid.2,
+                    lmin.0, lmin.1, lmin.2, lmax.0, lmax.1, lmax.2,
+                    hornfels_n, skarn_n,
+                    hmin.0, hmin.1, hmin.2, hmax.0, hmax.1, hmax.2,
+                ));
+                // Parseable bounding boxes for UE debug visualization
+                if hornfels_n + skarn_n > 0 {
+                    // Placement extent (where hornfels/skarn was actually placed)
+                    result.debug_lines.push(format!(
+                        "[AUREOLE_BOX] {} {} {} {} {} {}",
+                        hmin.0, hmin.1, hmin.2, hmax.0, hmax.1, hmax.2,
+                    ));
+                    // Lava extent (inner zone)
+                    result.debug_lines.push(format!(
+                        "[LAVA_BOX] {} {} {} {} {} {}",
+                        lmin.0, lmin.1, lmin.2, lmax.0, lmax.1, lmax.2,
+                    ));
+                    // Zone centroid as a single point (for precision alignment check)
+                    result.debug_lines.push(format!(
+                        "[CENTROID_PT] {} {} {}",
+                        zone.centroid.0, zone.centroid.1, zone.centroid.2,
+                    ));
+                }
+            }
 
             if result.glimpse_chunk.is_none() && (hornfels_n > 0 || skarn_n > 0) {
                 let (key, _, _, _) = world_to_chunk_local(

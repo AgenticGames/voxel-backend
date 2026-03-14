@@ -12,10 +12,10 @@ use voxel_core::stress::{StressField, SupportField, world_to_chunk_local};
 use voxel_fluid::FluidSnapshot;
 
 
-use crate::aureole::HeatMap;
-use crate::collapse::{apply_collapse, CollapseResult};
+use crate::phases::aureole::HeatMap;
+use crate::systems::collapse::{apply_collapse, CollapseResult};
 use crate::config::{DeepTimeConfig, GroundwaterConfig};
-use crate::groundwater::{ambient_moisture, is_fracture_site};
+use crate::systems::groundwater::{ambient_moisture, is_fracture_site};
 use crate::manifest::ChangeManifest;
 use crate::util::{FACE_OFFSETS, sample_material, set_voxel_synced, count_neighbors, has_material_within_radius, grow_vein, default_vein_bias, sleep_vein_size, VeinGrowthParams};
 use crate::{Bottleneck, PhaseDiagnostics, ResourceCensus, TransformEntry};

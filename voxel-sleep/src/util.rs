@@ -1,6 +1,6 @@
 //! Shared utility functions for sleep phase modules.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
 use voxel_core::density::DensityField;
@@ -150,21 +150,6 @@ pub fn count_neighbors(
         }
     }
     count
-}
-
-#[allow(dead_code)]
-/// Vein deposition probability multiplier based on tunnel aperture (air neighbor count).
-/// Wider tunnels = more fluid flow = richer veins; narrow cracks = less deposition.
-pub fn aperture_multiplier(air_neighbors: u32) -> f32 {
-    match air_neighbors {
-        0 => 0.0,
-        1 => 1.40,
-        2 => 1.15,
-        3 => 1.00,
-        4 => 0.65,
-        5 => 0.40,
-        _ => 0.20,
-    }
 }
 
 /// Check if any voxel within Manhattan distance <= radius has the given material.
@@ -487,50 +472,6 @@ pub fn is_near_water(
         }
     }
     false
-}
-
-#[allow(dead_code)]
-/// BFS through solid rock from a solid starting position to find nearby air voxels.
-///
-/// Returns `(air_position, bfs_distance)` pairs sorted by distance (closest first).
-/// Used by Phase 3 to find air pathways from submerged heat sources (lava in solid bowls).
-pub fn find_air_from_solid(
-    density_fields: &HashMap<(i32, i32, i32), DensityField>,
-    start: (i32, i32, i32),
-    max_radius: u32,
-    chunk_size: usize,
-) -> Vec<((i32, i32, i32), u32)> {
-    let mut queue: VecDeque<((i32, i32, i32), u32)> = VecDeque::new();
-    let mut visited: HashSet<(i32, i32, i32)> = HashSet::new();
-    let mut air_results: Vec<((i32, i32, i32), u32)> = Vec::new();
-
-    visited.insert(start);
-    queue.push_back((start, 0));
-
-    while let Some(((sx, sy, sz), dist)) = queue.pop_front() {
-        if dist >= max_radius {
-            continue;
-        }
-        for &(dx, dy, dz) in &FACE_OFFSETS {
-            let n = (sx + dx, sy + dy, sz + dz);
-            if !visited.insert(n) {
-                continue;
-            }
-            if let Some(mat) = sample_material(density_fields, n.0, n.1, n.2, chunk_size) {
-                let next_dist = dist + 1;
-                if !mat.is_solid() {
-                    // Found air — record it
-                    air_results.push((n, next_dist));
-                } else {
-                    // Solid — continue BFS through rock
-                    queue.push_back((n, next_dist));
-                }
-            }
-        }
-    }
-
-    air_results.sort_by_key(|&(_, d)| d);
-    air_results
 }
 
 #[cfg(test)]

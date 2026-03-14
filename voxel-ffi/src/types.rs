@@ -909,6 +909,10 @@ pub enum WorkerRequest {
         sleep_count: u32,
         sleep_config: voxel_sleep::SleepConfig,
     },
+    AureoleOnly {
+        player_chunk: (i32, i32, i32),
+        sleep_config: voxel_sleep::SleepConfig,
+    },
     WorldScan,
     WorldScanWithConfig {
         config: voxel_core::world_scan::ScanConfig,

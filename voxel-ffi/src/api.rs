@@ -711,6 +711,24 @@ pub unsafe extern "C" fn voxel_start_sleep(
     engine.start_sleep(player_chunk, sleep_count)
 }
 
+/// Run only the aureole phase (contact metamorphism + lava solidification) for debugging.
+/// Result is delivered via voxel_poll_sleep_result — same polling path as deep sleep.
+/// Player chunk is in UE chunk coordinates (same convention as voxel_start_sleep).
+#[no_mangle]
+pub unsafe extern "C" fn voxel_start_aureole_only(
+    engine: *mut c_void,
+    player_cx: i32,
+    player_cy: i32,
+    player_cz: i32,
+) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let player_chunk = crate::convert::ue_chunk_to_rust(player_cx, player_cy, player_cz);
+    engine.start_aureole_only(player_chunk)
+}
+
 /// Poll for a completed sleep result.
 /// Returns an FfiSleepResult with success=1 if a result is available, success=0 otherwise.
 /// Dirty chunk meshes and collapse events are delivered through the normal voxel_poll_result
