@@ -3,6 +3,8 @@ pub mod manifest;
 pub mod util;
 pub mod phases;
 pub mod systems;
+#[cfg(test)]
+mod aureole_diagnostic;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as FmtWrite;
