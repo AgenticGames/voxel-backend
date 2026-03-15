@@ -999,6 +999,10 @@ pub struct FfiSleepResult {
     pub collapse_event_count: u32,
     pub profile_report: *mut std::ffi::c_char,
     pub profile_report_length: u32,
+    pub has_aureole_glimpse: u32,
+    pub aureole_glimpse: FfiChunkCoord,
+    pub has_vein_glimpse: u32,
+    pub vein_glimpse: FfiChunkCoord,
 }
 
 // ── Internal (non-FFI) types ──
@@ -1142,6 +1146,8 @@ pub enum WorkerResult {
         corpses_fossilized: u32,
         lava_solidified: u32,
         profile_report: String,
+        aureole_glimpse: Option<(i32, i32, i32)>,
+        vein_glimpse: Option<(i32, i32, i32)>,
     },
     ScanComplete {
         json_report: String,
