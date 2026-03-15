@@ -317,7 +317,12 @@ pub fn execute_sleep(
     sleep_count: u32,
     progress_tx: Option<&Sender<SleepProgress>>,
 ) -> SleepResult {
-    let chunk_size: usize = 16;
+    // Derive chunk_size from actual density field grid size (df.size - 1).
+    // When bounds_size != 0 (e.g. 24), the grid is 25x25x25 and chunk keys use 24.
+    let chunk_size: usize = density_fields.values()
+        .next()
+        .map(|df| df.size - 1)
+        .unwrap_or(16);
     let t_total = Instant::now();
 
     // Deterministic RNG seeded from sleep_count
@@ -1199,7 +1204,10 @@ pub fn execute_aureole_only(
     player_chunk: (i32, i32, i32),
 ) -> SleepResult {
     use std::fmt::Write as FmtWrite;
-    let chunk_size: usize = 16;
+    let chunk_size: usize = density_fields.values()
+        .next()
+        .map(|df| df.size - 1)
+        .unwrap_or(16);
     let mut rng = ChaCha8Rng::seed_from_u64(99991);
 
     // Filter chunks by radius (same as execute_sleep)

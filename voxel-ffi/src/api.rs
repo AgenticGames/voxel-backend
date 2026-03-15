@@ -528,9 +528,8 @@ pub unsafe extern "C" fn voxel_query_stress_at(
     }
     let engine = &*(engine as *const VoxelEngine);
 
-    // Get world scale and chunk size from the engine config
-    let chunk_size = 16usize; // Standard chunk size
-    let world_scale = 15.0f32; // Standard world scale
+    let chunk_size = engine.chunk_size();
+    let world_scale = engine.get_world_scale();
 
     let rust_pos = from_ue_world_pos(world_x, world_y, world_z, world_scale);
     engine.query_stress_at(

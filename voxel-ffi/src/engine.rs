@@ -90,6 +90,15 @@ pub struct VoxelEngine {
 }
 
 impl VoxelEngine {
+    /// Read chunk_size and world_scale from the engine.
+    pub fn chunk_size(&self) -> usize {
+        self.config.read().map(|c| c.chunk_size).unwrap_or(16)
+    }
+
+    pub fn get_world_scale(&self) -> f32 {
+        self.world_scale
+    }
+
     pub fn new(ffi_config: &FfiEngineConfig) -> Self {
         debug_log_pool_config(ffi_config);
         let config = ffi_config_to_generation(ffi_config);

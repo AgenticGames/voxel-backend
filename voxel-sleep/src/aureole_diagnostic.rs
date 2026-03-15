@@ -605,7 +605,202 @@ mod tests {
         eprintln!("═══ PASS ═══\n");
     }
 
-    // ─── Test 6: Verify world_to_chunk_local roundtrip ────────────────────
+    // ─── Test 6: Realistic world with diagonal lava pipe ────────────────
+
+    #[test]
+    fn test_aureole_realistic_world_diagonal_lava() {
+        eprintln!("\n═══ TEST: Realistic 3x3x3 world (seed 1) + diagonal lava pipe ═══");
+
+        // Generate a realistic 3x3x3 world using the generation pipeline
+        // Settings: seed 1, worms 0, cavern_freq 0.015, cavern_thresh 0.4, ore_detail 2
+        let gen_config = voxel_gen::config::GenerationConfig {
+            seed: 1,
+            chunk_size: 16,
+            bounds_size: 0.0,
+            region_size: 3,
+            ore_detail_multiplier: 2,
+            fluid_sources_enabled: false,
+            noise: voxel_gen::config::NoiseConfig {
+                cavern_frequency: 0.015,
+                cavern_threshold: 0.4,
+                ..Default::default()
+            },
+            worm: voxel_gen::config::WormConfig {
+                worms_per_region: 0.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut coords = Vec::new();
+        for cz in 0..3i32 {
+            for cy in 0..3i32 {
+                for cx in 0..3i32 {
+                    coords.push((cx, cy, cz));
+                }
+            }
+        }
+        coords.sort();
+
+        let (mut density_fields, _pools, _fluid_seeds, _worms, _timings, _springs) =
+            voxel_gen::region_gen::generate_region_densities(&coords, &gen_config);
+
+        eprintln!("  Generated {} chunks", density_fields.len());
+
+        // Count materials before
+        let before = count_materials(&density_fields);
+        let total_solid_before: u32 = before.iter()
+            .filter(|(&id, _)| id != 0) // exclude air
+            .map(|(_, &c)| c).sum();
+        eprintln!("  Total solid voxels: {}", total_solid_before);
+        for (&id, &count) in &before {
+            if count > 100 {
+                eprintln!("    {}: {}", mat_name(id), count);
+            }
+        }
+
+        // Inject diagonal lava pipe from (0,0,0) to (2,2,2) with radius 2
+        let mut fluid = FluidSnapshot::default();
+        let cs = CHUNK_SIZE;
+        let mut lava_injected = 0u32;
+        let mut lava_in_solid = 0u32;
+        let mut lava_in_air = 0u32;
+
+        for &chunk_key in &coords {
+            let (cx, cy, cz) = chunk_key;
+            // Only chunks on or near the diagonal
+            if (cx - cy).abs() > 1 || (cy - cz).abs() > 1 || (cx - cz).abs() > 1 {
+                continue;
+            }
+
+            let cells = fluid.chunks.entry(chunk_key).or_insert_with(|| {
+                vec![FluidCell {
+                    level: 0.0,
+                    fluid_type: FluidType::Water,
+                    is_source: false,
+                    grace_ticks: 0,
+                    stagnant_ticks: 0,
+                }; cs * cs * cs]
+            });
+
+            for i in 0..cs {
+                let center = i.min(cs - 1);
+                for dz in -2i32..=2 {
+                    for dy in -2i32..=2 {
+                        for dx in -2i32..=2 {
+                            let lx = center as i32 + dx;
+                            let ly = center as i32 + dy;
+                            let lz = center as i32 + dz;
+                            if lx < 0 || lx >= cs as i32 || ly < 0 || ly >= cs as i32 || lz < 0 || lz >= cs as i32 {
+                                continue;
+                            }
+                            if dx * dx + dy * dy + dz * dz > 6 {
+                                continue;
+                            }
+                            let idx = lz as usize * cs * cs + ly as usize * cs + lx as usize;
+                            cells[idx] = FluidCell {
+                                level: 1.0,
+                                fluid_type: FluidType::Lava,
+                                is_source: true,
+                                grace_ticks: 0,
+                                stagnant_ticks: 0,
+                            };
+                            lava_injected += 1;
+
+                            // Check what's at this position in the density field
+                            if let Some(df) = density_fields.get(&chunk_key) {
+                                let s = df.get(lx as usize, ly as usize, lz as usize);
+                                if s.material.is_solid() { lava_in_solid += 1; } else { lava_in_air += 1; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        eprintln!("  Lava pipe: {} cells ({} in solid, {} in air)",
+            lava_injected, lava_in_solid, lava_in_air);
+
+        // Run aureole only
+        let mut aureole_config = AureoleConfig::default();
+        aureole_config.zone_enabled = true;
+        aureole_config.metamorphism_enabled = true;
+        aureole_config.water_erosion_enabled = false;
+        aureole_config.min_lava_zone_size = 1;
+
+        let chunks_list: Vec<(i32, i32, i32)> = density_fields.keys().copied().collect();
+        let heat_map = build_heat_map(&density_fields, &fluid, &chunks_list, CHUNK_SIZE);
+        eprintln!("  Heat map: {} sources", heat_map.len());
+
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let groundwater = GroundwaterConfig::default();
+        let census = make_empty_census();
+
+        let result = apply_aureole(
+            &aureole_config, &groundwater, &mut density_fields, &mut fluid,
+            &heat_map, &chunks_list, CHUNK_SIZE, &mut rng, &census,
+        );
+
+        eprintln!("\n  ─── RESULTS ───");
+        eprintln!("  Lava zones: {}", result.lava_zones_found);
+        eprintln!("  Hornfels placed: {}", result.hornfels_placed);
+        eprintln!("  Skarn placed: {}", result.skarn_placed);
+        eprintln!("  Veins placed: {}", result.veins_placed);
+        eprintln!("  Total metamorphosed: {}", result.voxels_metamorphosed);
+
+        // Show debug zone info
+        for line in &result.debug_lines {
+            eprintln!("    {}", line);
+        }
+
+        // Material census after
+        let after = count_materials(&density_fields);
+        eprintln!("\n  Material changes:");
+        let mut all_mats: std::collections::BTreeSet<u8> = before.keys().copied().collect();
+        all_mats.extend(after.keys());
+        for mat_id in &all_mats {
+            let b = before.get(mat_id).unwrap_or(&0);
+            let a = after.get(mat_id).unwrap_or(&0);
+            if b != a {
+                let delta = *a as i64 - *b as i64;
+                eprintln!("    {}: {} → {} ({:+})", mat_name(*mat_id), b, a, delta);
+            }
+        }
+
+        // Find which chunks have aureole materials
+        let hornfels_voxels = find_material(&density_fields, Material::Hornfels);
+        let skarn_voxels = find_material(&density_fields, Material::Skarn);
+        let mut aureole_chunks: HashSet<(i32, i32, i32)> = HashSet::new();
+        for &(chunk, _, _, _, _, _, _) in &hornfels_voxels { aureole_chunks.insert(chunk); }
+        for &(chunk, _, _, _, _, _, _) in &skarn_voxels { aureole_chunks.insert(chunk); }
+        let mut aureole_chunk_list: Vec<_> = aureole_chunks.iter().copied().collect();
+        aureole_chunk_list.sort();
+        eprintln!("\n  Aureole present in {} chunks: {:?}", aureole_chunk_list.len(), aureole_chunk_list);
+
+        // ─── ASSERTIONS ───
+
+        // Must have found lava zones
+        assert!(result.lava_zones_found > 0, "Expected lava zones from diagonal pipe");
+
+        // Must have produced metamorphic minerals
+        assert!(result.hornfels_placed + result.skarn_placed > 0,
+            "Expected aureole metamorphism from {} lava cells ({} in solid rock)",
+            lava_injected, lava_in_solid);
+
+        // Aureole should only be in chunks that are on/near the diagonal
+        for &chunk in &aureole_chunk_list {
+            let (cx, cy, cz) = chunk;
+            let off_diagonal = (cx - cy).abs().max((cy - cz).abs()).max((cx - cz).abs());
+            assert!(off_diagonal <= 2,
+                "AUREOLE LEAK: Found aureole material in chunk ({},{},{}) which is {} steps off diagonal",
+                cx, cy, cz, off_diagonal);
+        }
+        eprintln!("  ✓ All aureole materials within expected diagonal corridor");
+
+        eprintln!("═══ PASS ═══\n");
+    }
+
+    // ─── Test 7: Verify world_to_chunk_local roundtrip ────────────────────
 
     #[test]
     fn test_coordinate_roundtrip() {

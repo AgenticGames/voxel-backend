@@ -229,11 +229,11 @@ impl Material {
             Material::Coal => 0x2C2C2C,
             Material::Graphite => 0x474747,
             Material::Opal => 0xE0F0FF,
-            Material::Hornfels => 0x3D3229,
+            Material::Hornfels => 0xFF00FF, // NEON PINK for debug visibility
             Material::Garnet => 0x8B2500,
             Material::Diopside => 0x2E8B57,
             Material::Gypsum => 0xF5F0E8,
-            Material::Skarn => 0x4A5A3C,
+            Material::Skarn => 0x00FF00, // NEON GREEN for debug visibility
         }
     }
 

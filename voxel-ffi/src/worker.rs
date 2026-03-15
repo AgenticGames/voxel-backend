@@ -975,6 +975,8 @@ fn handle_request(
                                             let dist2 = (world_pos - center).length_squared();
                                             // Bottom half of sphere (Rust Y-up: below center) and cell is air
                                             if dist2 <= r2 && world_pos.y < center.y && density.get(x, y, z).density <= 0.0 {
+                                                eprintln!("[FLUID_FILL]   placing fluid at chunk({},{},{}) local({},{},{}) world({:.0},{:.0},{:.0})",
+                                                    key.0, key.1, key.2, x, y, z, world_pos.x, world_pos.y, world_pos.z);
                                                 let _ = fluid_event_tx.send(FluidEvent::AddFluid {
                                                     chunk: key,
                                                     x: x as u8,
@@ -1202,7 +1204,12 @@ fn handle_request(
             // Send each dirty chunk mesh through the normal ChunkMesh pipeline
             // so UE auto-remeshes existing chunk actors
             let t_mesh_send = Instant::now();
+            eprintln!("[SLEEP_REMESH] Sending {} chunk meshes (from {} dirty + neighbors)", meshes.len(), dirty_count);
             for (chunk, mesh) in meshes {
+                let ue = crate::convert::rust_chunk_to_ue(chunk.0, chunk.1, chunk.2);
+                let vert_count = mesh.positions.len() / 3;
+                eprintln!("[SLEEP_REMESH]   Rust({},{},{}) → UE({},{},{})  verts={}",
+                    chunk.0, chunk.1, chunk.2, ue.0, ue.1, ue.2, vert_count);
                 let crystal_data = retrieve_crystal_data(store, chunk, cfg.voxel_scale(), world_scale);
                 let _ = result_tx.send(WorkerResult::ChunkMesh {
                     chunk,
@@ -1335,7 +1342,12 @@ fn handle_request(
             let meshes = s.remesh_dirty(&dirty_bounds, &cfg, world_scale);
             drop(s);
 
+            eprintln!("[AUREOLE_REMESH] Sending {} chunk meshes (from {} dirty + neighbors)", meshes.len(), dirty_count);
             for (chunk, mesh) in meshes {
+                let ue = crate::convert::rust_chunk_to_ue(chunk.0, chunk.1, chunk.2);
+                let vert_count = mesh.positions.len() / 3;
+                eprintln!("[AUREOLE_REMESH]   Rust({},{},{}) → UE({},{},{})  verts={}",
+                    chunk.0, chunk.1, chunk.2, ue.0, ue.1, ue.2, vert_count);
                 let crystal_data = retrieve_crystal_data(store, chunk, cfg.voxel_scale(), world_scale);
                 let _ = result_tx.send(WorkerResult::ChunkMesh {
                     chunk,

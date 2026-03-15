@@ -12,7 +12,7 @@ use voxel_core::stress::{StressField, SupportField};
 use voxel_gen::config::GenerationConfig;
 use voxel_gen::density::{self as gen_density, DensityField};
 use voxel_gen::hermite_extract::{extract_hermite_data, patch_hermite_data};
-use voxel_gen::pools::{self, PoolDescriptor};
+use voxel_gen::pools::{self, FluidSeed, PoolDescriptor, PoolFluid};
 use voxel_gen::region_gen::{self, ChunkSeamData};
 
 /// Keeps density fields alive for re-meshing after mining.
@@ -26,6 +26,7 @@ pub struct GeneratedRegion {
     pub stress_fields: HashMap<(i32, i32, i32), StressField>,
     pub support_fields: HashMap<(i32, i32, i32), SupportField>,
     pub pool_descriptors: Vec<PoolDescriptor>,
+    pub fluid_seeds: Vec<FluidSeed>,
 }
 
 pub struct MineResult {
@@ -53,7 +54,7 @@ impl GeneratedRegion {
             .collect();
 
         // Phases 1-5: Generate density fields with global worm carving + pools (shared pipeline)
-        let (mut density_fields, pool_descriptors, _fluid_seeds, _worm_paths, _timings, _river_springs) = region_gen::generate_region_densities(&coords, &config);
+        let (mut density_fields, pool_descriptors, fluid_seeds, _worm_paths, _timings, _river_springs) = region_gen::generate_region_densities(&coords, &config);
 
         // Phase 5b: Ore detail supersampling — regenerate ore chunks at higher resolution
         let multiplier = config.ore_detail_multiplier.max(1).min(4) as usize;
@@ -181,6 +182,7 @@ impl GeneratedRegion {
             stress_fields,
             support_fields,
             pool_descriptors,
+            fluid_seeds,
         }
     }
 
@@ -191,7 +193,106 @@ impl GeneratedRegion {
         // Use center chunk as player position
         let player_chunk = (0, 0, 0);
 
+        // Build FluidSnapshot from generation fluid seeds (lava pools, water springs)
         let mut fluid = voxel_fluid::FluidSnapshot::default();
+        let cs = self.config.chunk_size;
+        let mut lava_count = 0u32;
+        let mut water_count = 0u32;
+        for fs in &self.fluid_seeds {
+            let cells = fluid.chunks.entry(fs.chunk).or_insert_with(|| {
+                vec![voxel_fluid::cell::FluidCell {
+                    level: 0.0,
+                    fluid_type: voxel_fluid::cell::FluidType::Water,
+                    is_source: false,
+                    grace_ticks: 0,
+                    stagnant_ticks: 0,
+                }; cs * cs * cs]
+            });
+            let idx = fs.lz as usize * cs * cs + fs.ly as usize * cs + fs.lx as usize;
+            if idx < cells.len() {
+                let ft = match fs.fluid_type {
+                    PoolFluid::Water => { water_count += 1; voxel_fluid::cell::FluidType::Water },
+                    PoolFluid::Lava => { lava_count += 1; voxel_fluid::cell::FluidType::Lava },
+                };
+                cells[idx] = voxel_fluid::cell::FluidCell {
+                    level: 1.0,
+                    fluid_type: ft,
+                    is_source: fs.is_source,
+                    grace_ticks: 0,
+                    stagnant_ticks: 0,
+                };
+            }
+        }
+        eprintln!("Sleep: Injected {} lava + {} water fluid seeds from generation", lava_count, water_count);
+
+        // If no lava from generation, inject ONE continuous diagonal lava tube
+        // using world coordinates to avoid per-chunk duplication
+        if lava_count == 0 {
+            let mut injected = 0u32;
+            let mut lava_in_solid = 0u32;
+            let mut lava_in_air = 0u32;
+            let pipe_radius = 2i32;
+            let world_max = (cs * 3) as i32; // 48 for 3x3x3 region
+
+            // Walk world diagonal from (0,0,0) to (47,47,47), one step at a time
+            for i in 0..world_max {
+                // Center of pipe at world (i, i, i)
+                for dz in -pipe_radius..=pipe_radius {
+                    for dy in -pipe_radius..=pipe_radius {
+                        for dx in -pipe_radius..=pipe_radius {
+                            if dx * dx + dy * dy + dz * dz > pipe_radius * pipe_radius + 2 {
+                                continue; // cylindrical
+                            }
+                            let wx = i + dx;
+                            let wy = i + dy;
+                            let wz = i + dz;
+                            if wx < 0 || wx >= world_max || wy < 0 || wy >= world_max || wz < 0 || wz >= world_max {
+                                continue;
+                            }
+                            // Convert world → chunk + local
+                            let chunk_key = (wx / cs as i32, wy / cs as i32, wz / cs as i32);
+                            let lx = (wx % cs as i32) as usize;
+                            let ly = (wy % cs as i32) as usize;
+                            let lz = (wz % cs as i32) as usize;
+
+                            if !self.density_fields.contains_key(&chunk_key) {
+                                continue;
+                            }
+
+                            let cells = fluid.chunks.entry(chunk_key).or_insert_with(|| {
+                                vec![voxel_fluid::cell::FluidCell {
+                                    level: 0.0,
+                                    fluid_type: voxel_fluid::cell::FluidType::Water,
+                                    is_source: false,
+                                    grace_ticks: 0,
+                                    stagnant_ticks: 0,
+                                }; cs * cs * cs]
+                            });
+
+                            let idx = lz * cs * cs + ly * cs + lx;
+                            if cells[idx].level < 0.5 {
+                                cells[idx] = voxel_fluid::cell::FluidCell {
+                                    level: 1.0,
+                                    fluid_type: voxel_fluid::cell::FluidType::Lava,
+                                    is_source: true,
+                                    grace_ticks: 0,
+                                    stagnant_ticks: 0,
+                                };
+                                injected += 1;
+
+                                // Check what's at this position
+                                if let Some(df) = self.density_fields.get(&chunk_key) {
+                                    if df.get(lx, ly, lz).material.is_solid() { lava_in_solid += 1; } else { lava_in_air += 1; }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            eprintln!("Sleep: Injected {} lava cells as ONE diagonal pipe (world 0,0,0 → {},{},{})",
+                injected, world_max - 1, world_max - 1, world_max - 1);
+            eprintln!("Sleep: Lava positions: {} in solid rock, {} in air", lava_in_solid, lava_in_air);
+        }
         let result = voxel_sleep::execute_sleep(
             sleep_config,
             &mut self.density_fields,

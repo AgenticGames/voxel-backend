@@ -777,6 +777,12 @@ fn serve_generate(
 
     // Build sleep config from UI overrides (stress settings embedded in sleep config)
     let mut sleep_cfg = SleepConfig::default();
+    // AUREOLE-ONLY MODE: disable all phases except aureole (phase2)
+    sleep_cfg.phase1_enabled = false;  // reaction OFF
+    sleep_cfg.phase2_enabled = true;   // aureole ON
+    sleep_cfg.phase3_enabled = false;  // veins OFF
+    sleep_cfg.phase4_enabled = false;  // deeptime OFF
+    sleep_cfg.accumulation_enabled = false; // accumulation OFF
     // Stress tuning
     if let Some(v) = stress_gravity { sleep_cfg.stress.gravity_weight = v; }
     if let Some(v) = stress_lateral { sleep_cfg.stress.lateral_support_factor = v; }
@@ -876,10 +882,56 @@ fn serve_mine(
         }
     };
 
+    let is_lava_carve = mode == "lava-carve";
     let mine_result = match mode {
         "peel" => region.mine_peel(center, normal, radius),
         _ => region.mine_sphere(center, radius),
     };
+
+    // Lava Carve: fill all air voxels in the carved sphere with lava seeds
+    if is_lava_carve {
+        let cs = region.config.chunk_size;
+        let r = radius as i32;
+        let cx = center.x as i32;
+        let cy = center.y as i32;
+        let cz = center.z as i32;
+        let mut lava_placed = 0u32;
+        for wz in (cz - r)..=(cz + r) {
+            for wy in (cy - r)..=(cy + r) {
+                for wx in (cx - r)..=(cx + r) {
+                    let dx = wx - cx;
+                    let dy = wy - cy;
+                    let dz = wz - cz;
+                    if dx * dx + dy * dy + dz * dz > r * r {
+                        continue;
+                    }
+                    let chunk_key = (
+                        wx.div_euclid(cs as i32),
+                        wy.div_euclid(cs as i32),
+                        wz.div_euclid(cs as i32),
+                    );
+                    let lx = wx.rem_euclid(cs as i32) as usize;
+                    let ly = wy.rem_euclid(cs as i32) as usize;
+                    let lz = wz.rem_euclid(cs as i32) as usize;
+                    // Only place lava in air voxels
+                    if let Some(df) = region.density_fields.get(&chunk_key) {
+                        if !df.get(lx, ly, lz).material.is_solid() {
+                            region.fluid_seeds.push(voxel_gen::pools::FluidSeed {
+                                chunk: chunk_key,
+                                lx: lx as u8,
+                                ly: ly as u8,
+                                lz: lz as u8,
+                                fluid_type: voxel_gen::pools::PoolFluid::Lava,
+                                is_source: true,
+                            });
+                            lava_placed += 1;
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!("Lava Carve: placed {} lava seeds in sphere at ({},{},{})", lava_placed, cx, cy, cz);
+    }
 
     // Check pool containment after mining (drainable pools)
     region.check_pool_containment();

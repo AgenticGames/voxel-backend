@@ -124,9 +124,147 @@
     function loadPresetsFromStorage() {
         try {
             var raw = localStorage.getItem(PRESET_KEY);
-            return raw ? JSON.parse(raw) : {};
+            var presets = raw ? JSON.parse(raw) : {};
+            // Auto-seed preset 5 (slot 4) with UE5-matching config if not yet saved
+            if (!presets[4]) {
+                presets[4] = { name: "UE5 Match", settings: UE5_PRESET_SETTINGS };
+                localStorage.setItem(PRESET_KEY, JSON.stringify(presets));
+            }
+            return presets;
         } catch (e) { return {}; }
     }
+
+    // UE5-matching generation config (from VoxelConfig.json + FormationConfig.json)
+    var UE5_PRESET_SETTINGS = {
+        // Noise
+        "gen-cavern-freq": "0.004",
+        "gen-cavern-threshold": "0.75",
+        "gen-detail-octaves": "12",
+        "gen-detail-persistence": "0.5",
+        "gen-warp-amplitude": "2.0",
+        // Worms (disabled in UE5)
+        "gen-worms-per-region": "0",
+        "gen-worm-radius-min": "4.0",
+        "gen-worm-radius-max": "5.0",
+        "gen-worm-step-length": "0.7",
+        "gen-worm-max-steps": "300",
+        "gen-worm-falloff-power": "2.0",
+        // Chunk
+        "gen-chunk-size": "16",
+        "gen-max-edge-length": "4.0",
+        // Host Rock Depths
+        "gen-sandstone-depth": "250",
+        "gen-granite-depth": "-100",
+        "gen-basalt-depth": "-200",
+        "gen-slate-depth": "130",
+        // Iron
+        "gen-iron-band-freq": "0.2",
+        "gen-iron-noise-freq": "0.11",
+        "gen-iron-perturbation": "1.0",
+        "gen-iron-threshold": "1.35",
+        // Copper
+        "gen-copper-freq": "0.011",
+        "gen-copper-threshold": "0.91",
+        // Malachite
+        "gen-malachite-freq": "0.8",
+        "gen-malachite-threshold": "0.94",
+        // Kimberlite
+        "gen-kimberlite-pipe-freq": "0.008",
+        "gen-kimberlite-pipe-threshold": "0.94",
+        "gen-diamond-freq": "0.10",
+        "gen-diamond-threshold": "0.93",
+        // Sulfide
+        "gen-sulfide-freq": "0.5",
+        "gen-sulfide-threshold": "0.90",
+        "gen-tin-threshold": "0.5",
+        // Pyrite
+        "gen-pyrite-freq": "0.05",
+        "gen-pyrite-threshold": "0.98",
+        // Quartz
+        "gen-quartz-freq": "0.01",
+        "gen-quartz-threshold": "0.88",
+        // Gold
+        "gen-gold-threshold": "0.96",
+        // Geode
+        "gen-geode-freq": "0.002",
+        "gen-geode-center-threshold": "0.98",
+        "gen-geode-shell-thickness": "0.01",
+        "gen-geode-hollow-factor": "-0.1",
+        // Pools (disabled in UE5)
+        "gen-pools-enabled": false,
+        // Formations
+        "gen-formations-enabled": true,
+        "gen-form-placement-frequency": "0.26",
+        "gen-form-placement-threshold": "0.25",
+        "gen-form-stalactite-chance": "0.31",
+        "gen-form-stalagmite-chance": "0.22",
+        "gen-form-flowstone-chance": "0.02",
+        "gen-form-column-chance": "1.0",
+        "gen-form-column-max-gap": "200",
+        "gen-form-length-min": "5.0",
+        "gen-form-length-max": "8.0",
+        "gen-form-radius-min": "1.9",
+        "gen-form-radius-max": "2.4",
+        "gen-form-max-radius": "3.1",
+        "gen-form-column-radius-min": "15.5",
+        "gen-form-column-radius-max": "27.5",
+        "gen-form-flowstone-length-min": "2.7",
+        "gen-form-flowstone-length-max": "4.5",
+        "gen-form-flowstone-thickness": "1.1",
+        "gen-form-min-air-gap": "3",
+        "gen-form-min-clearance": "4",
+        "gen-form-smoothness": "4.0",
+        "gen-form-mega-column-chance": "0.30",
+        "gen-form-mega-column-min-gap": "12",
+        "gen-form-mega-column-radius-min": "16.0",
+        "gen-form-mega-column-radius-max": "26.0",
+        "gen-form-mega-column-noise-strength": "0.3",
+        "gen-form-mega-column-ring-frequency": "0.8",
+        "gen-form-drapery-chance": "0.02",
+        "gen-form-drapery-length-min": "5.0",
+        "gen-form-drapery-length-max": "6.0",
+        "gen-form-drapery-wave-frequency": "3.5",
+        "gen-form-drapery-wave-amplitude": "1.8",
+        "gen-form-rimstone-chance": "0.06",
+        "gen-form-rimstone-dam-height-min": "1.2",
+        "gen-form-rimstone-dam-height-max": "2.1",
+        "gen-form-rimstone-pool-depth": "1.0",
+        "gen-form-rimstone-min-slope": "0.15",
+        "gen-form-shield-chance": "0.41",
+        "gen-form-shield-radius-min": "5.0",
+        "gen-form-shield-radius-max": "8.0",
+        "gen-form-shield-max-tilt": "35.0",
+        "gen-form-shield-stalactite-chance": "0.5",
+        // Stress & collapse
+        "gen-stress-gravity": "1.0",
+        "gen-stress-lateral": "0.3",
+        "gen-stress-vertical": "0.5",
+        "gen-stress-prop-radius": "4",
+        "gen-stress-max-collapse": "50",
+        // Geological realism (all OFF in UE5)
+        "gen-iron-sedimentary-only": false,
+        "gen-iron-depth-fade": false,
+        "gen-copper-supergene": false,
+        "gen-copper-granite-contact": false,
+        "gen-malachite-depth-bias": false,
+        "gen-kimberlite-carrot-taper": false,
+        "gen-diamond-depth-grade": false,
+        "gen-sulfide-gossan-cap": false,
+        "gen-sulfide-disseminated": false,
+        "gen-pyrite-ore-halo": false,
+        "gen-quartz-planar-veins": false,
+        "gen-gold-bonanza": false,
+        "gen-geode-volcanic-host": false,
+        "gen-geode-depth-scaling": false,
+        // Coal
+        "gen-coal-freq": "0.03",
+        "gen-coal-threshold": "0.62",
+        "gen-coal-depth-min": "10",
+        "gen-coal-depth-max": "80",
+        "gen-coal-sedimentary-host": false,
+        "gen-coal-shallow-ceiling": false,
+        "gen-coal-depth-enrichment": false,
+    };
 
     function savePresetsToStorage(presets) {
         localStorage.setItem(PRESET_KEY, JSON.stringify(presets));
