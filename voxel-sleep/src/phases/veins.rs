@@ -476,16 +476,30 @@ pub fn apply_veins(
                 let min_site_spacing = 15i32;
                 let mut selected: Vec<usize> = Vec::new();
 
+                let mut chosen_positions: Vec<(i32, i32, i32)> = Vec::new();
                 for _ in 0..num_veins {
                     if candidates.is_empty() { break; }
 
-                    // Weighted random selection
-                    let total_weight: f32 = candidates.iter().map(|s| s.heat_score.max(0.01)).sum();
+                    // Weighted random selection with spread-based repulsion
+                    let weights: Vec<f32> = candidates.iter().map(|s| {
+                        let mut w = s.heat_score.max(0.01);
+                        if config.vein_spread > 0.0 && !chosen_positions.is_empty() {
+                            let min_dist = chosen_positions.iter().map(|&cp| {
+                                let dx = (s.pos.0 - cp.0) as f32;
+                                let dy = (s.pos.1 - cp.1) as f32;
+                                let dz = (s.pos.2 - cp.2) as f32;
+                                (dx * dx + dy * dy + dz * dz).sqrt()
+                            }).fold(f32::MAX, f32::min);
+                            w *= 1.0 + config.vein_spread * min_dist * 0.3;
+                        }
+                        w
+                    }).collect();
+                    let total_weight: f32 = weights.iter().sum();
                     if total_weight <= 0.0 { break; }
                     let mut roll = rng.gen::<f32>() * total_weight;
                     let mut chosen_idx = 0;
-                    for (i, site) in candidates.iter().enumerate() {
-                        roll -= site.heat_score.max(0.01);
+                    for (i, &w) in weights.iter().enumerate() {
+                        roll -= w;
                         if roll <= 0.0 {
                             chosen_idx = i;
                             break;
@@ -493,6 +507,7 @@ pub fn apply_veins(
                     }
 
                     let chosen = candidates.swap_remove(chosen_idx);
+                    chosen_positions.push(chosen.pos);
                     selected.push(0); // placeholder, we process immediately
 
                     // Remove candidates too close to chosen

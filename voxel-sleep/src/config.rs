@@ -309,6 +309,23 @@ pub struct AureoleConfig {
     pub garnet_pocket_count: u32,
     /// Number of diopside pockets per zone
     pub diopside_pocket_count: u32,
+    // ── Aureole vein geometry (wall-climbing, like hydrothermal) ──
+    /// Use wall-climbing bias for aureole ore veins (0/1). When enabled, veins streak up walls.
+    pub aureole_wall_climbing: bool,
+    /// Min height of aureole wall-climbing veins
+    pub aureole_climb_height_min: u32,
+    /// Max height of aureole wall-climbing veins
+    pub aureole_climb_height_max: u32,
+    /// Min visible width on wall face
+    pub aureole_wall_width_min: u32,
+    /// Max visible width on wall face
+    pub aureole_wall_width_max: u32,
+    /// Min depth into solid rock behind wall
+    pub aureole_rock_depth_min: u32,
+    /// Max depth into solid rock behind wall
+    pub aureole_rock_depth_max: u32,
+    /// Surface exposure: min air-face neighbors required for seed eligibility (higher = more visible)
+    pub aureole_min_surface_exposure: u32,
     // ── Lava volume scaling for aureole ──
     /// Radius to count lava cells for zone volume scaling
     pub aureole_lava_volume_max_cells: u32,
@@ -372,6 +389,14 @@ impl Default for AureoleConfig {
             diopside_compact_size: 8,
             garnet_pocket_count: 2,
             diopside_pocket_count: 1,
+            aureole_wall_climbing: true,
+            aureole_climb_height_min: 4,
+            aureole_climb_height_max: 10,
+            aureole_wall_width_min: 2,
+            aureole_wall_width_max: 3,
+            aureole_rock_depth_min: 1,
+            aureole_rock_depth_max: 3,
+            aureole_min_surface_exposure: 1,
             aureole_vein_spread: 0.5,
             aureole_lava_volume_max_cells: 50,
             aureole_lava_deposit_mult: 1.0,
@@ -481,6 +506,8 @@ pub struct VeinConfig {
     pub lava_volume_vein_mult: f32,
     /// Veins-per-zone multiplier bonus at max lava volume
     pub lava_volume_amount_mult: f32,
+    /// Vein seed spread factor (0.0 = random, 1.0 = max spread apart)
+    pub vein_spread: f32,
     // Spike/tendril intrusions ("centipede" look)
     /// Enable spikey tendrils radiating from vein bodies
     pub spike_enabled: bool,
@@ -542,6 +569,7 @@ impl Default for VeinConfig {
             lava_volume_max_cells: 30,
             lava_volume_vein_mult: 0.5,
             lava_volume_amount_mult: 0.5,
+            vein_spread: 0.5,
             spike_enabled: true,
             spike_count_min: 4,
             spike_count_max: 10,

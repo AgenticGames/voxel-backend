@@ -1736,6 +1736,14 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
             aureole_water_search_radius: if c.sleep_aureole_water_search_radius > 0 { c.sleep_aureole_water_search_radius } else { 3 },
             aureole_water_max_cells: if c.sleep_aureole_water_max_cells > 0 { c.sleep_aureole_water_max_cells } else { 30 },
             aureole_water_deposit_mult: c.sleep_aureole_water_deposit_mult,
+            aureole_wall_climbing: c.sleep_aureole_wall_climbing != 0,
+            aureole_climb_height_min: if c.sleep_aureole_climb_height_min > 0 { c.sleep_aureole_climb_height_min } else { 4 },
+            aureole_climb_height_max: if c.sleep_aureole_climb_height_max > 0 { c.sleep_aureole_climb_height_max } else { 10 },
+            aureole_wall_width_min: if c.sleep_aureole_wall_width_min > 0 { c.sleep_aureole_wall_width_min } else { 2 },
+            aureole_wall_width_max: if c.sleep_aureole_wall_width_max > 0 { c.sleep_aureole_wall_width_max } else { 3 },
+            aureole_rock_depth_min: if c.sleep_aureole_rock_depth_min > 0 { c.sleep_aureole_rock_depth_min } else { 1 },
+            aureole_rock_depth_max: if c.sleep_aureole_rock_depth_max > 0 { c.sleep_aureole_rock_depth_max } else { 3 },
+            aureole_min_surface_exposure: if c.sleep_aureole_min_surface_exposure > 0 { c.sleep_aureole_min_surface_exposure } else { 1 },
         },
         veins: VeinConfig {
             vein_deposition_prob: if c.sleep_vein_deposition_prob > 0.0 { c.sleep_vein_deposition_prob } else { 0.85 },
@@ -1787,6 +1795,7 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
             spike_length_min: if c.sleep_spike_length_min > 0 { c.sleep_spike_length_min } else { 2 },
             spike_length_max: if c.sleep_spike_length_max > 0 { c.sleep_spike_length_max } else { 5 },
             spike_taper: if c.sleep_spike_taper > 0.0 { c.sleep_spike_taper } else { 0.7 },
+            vein_spread: c.sleep_vein_spread,
         },
         deeptime: DeepTimeConfig {
             enrichment_prob: if c.sleep_enrichment_prob > 0.0 { c.sleep_enrichment_prob } else { 0.90 },

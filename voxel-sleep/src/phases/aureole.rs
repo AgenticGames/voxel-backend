@@ -403,7 +403,7 @@ fn find_aureole_boundary_seeds(
                 }
             }
         }
-        if air_count > 0 && has_host {
+        if air_count >= 1 && has_host {
             candidates.push((pos, air_count));
         }
     }
@@ -545,8 +545,26 @@ fn place_slate_veins(
         } else {
             (Material::Pyrite, small_min, small_max)
         };
-        let bias = default_vein_bias(ore, rng);
-        let params = VeinGrowthParams { ore, min_size: min_sz, max_size: max_sz, bias, exclude_aureole: false };
+        let (actual_min, actual_max, bias) = if config.aureole_wall_climbing {
+            // Compute target from geometry params (like hydrothermal)
+            let height = rng.gen_range(config.aureole_climb_height_min..=config.aureole_climb_height_max);
+            let width = rng.gen_range(config.aureole_wall_width_min..=config.aureole_wall_width_max);
+            let depth = rng.gen_range(config.aureole_rock_depth_min..=config.aureole_rock_depth_max);
+            let geo_target = (((height * width * depth) as f32 / 4.0) * deposit_mult).round() as u32;
+            let geo_target = geo_target.max(4).min(120);
+            // Find wall normal from seed
+            let wall_normal = FACE_OFFSETS.iter()
+                .find(|&&(dx, dy, dz)| {
+                    sample_material(density_fields, seed.0 + dx, seed.1 + dy, seed.2 + dz, chunk_size)
+                        .map_or(false, |m| !m.is_solid())
+                })
+                .copied()
+                .unwrap_or((0, 1, 0));
+            ((geo_target * 8) / 10, geo_target, VeinBias::WallClimbing { wall_normal })
+        } else {
+            (min_sz, max_sz, default_vein_bias(ore, rng))
+        };
+        let params = VeinGrowthParams { ore, min_size: actual_min, max_size: actual_max, bias, exclude_aureole: false };
         let positions = grow_vein(density_fields, seed, &params, chunk_size, rng);
         total_placed += apply_vein_to_world(&positions, ore, density_fields, chunk_size, manifest);
     }
@@ -625,8 +643,24 @@ fn place_limestone_veins(
 
     for (i, &seed) in seeds.iter().enumerate() {
         let ore = if (i as f32) < (seeds.len() as f32 * 0.6) { ore_a } else { ore_b };
-        let bias = default_vein_bias(ore, rng);
-        let params = VeinGrowthParams { ore, min_size: vein_min, max_size: vein_max, bias, exclude_aureole: false };
+        let (actual_min, actual_max, bias) = if config.aureole_wall_climbing {
+            let height = rng.gen_range(config.aureole_climb_height_min..=config.aureole_climb_height_max);
+            let width = rng.gen_range(config.aureole_wall_width_min..=config.aureole_wall_width_max);
+            let depth = rng.gen_range(config.aureole_rock_depth_min..=config.aureole_rock_depth_max);
+            let geo_target = (((height * width * depth) as f32 / 4.0) * deposit_mult).round() as u32;
+            let geo_target = geo_target.max(4).min(120);
+            let wall_normal = FACE_OFFSETS.iter()
+                .find(|&&(dx, dy, dz)| {
+                    sample_material(density_fields, seed.0 + dx, seed.1 + dy, seed.2 + dz, chunk_size)
+                        .map_or(false, |m| !m.is_solid())
+                })
+                .copied()
+                .unwrap_or((0, 1, 0));
+            ((geo_target * 8) / 10, geo_target, VeinBias::WallClimbing { wall_normal })
+        } else {
+            (vein_min, vein_max, default_vein_bias(ore, rng))
+        };
+        let params = VeinGrowthParams { ore, min_size: actual_min, max_size: actual_max, bias, exclude_aureole: false };
         let positions = grow_vein(density_fields, seed, &params, chunk_size, rng);
         total_placed += apply_vein_to_world(&positions, ore, density_fields, chunk_size, manifest);
     }

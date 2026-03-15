@@ -2273,6 +2273,17 @@ mod tests {
             sleep_aureole_water_search_radius: 3,
             sleep_aureole_water_max_cells: 30,
             sleep_aureole_water_deposit_mult: 0.5,
+            // Aureole vein geometry
+            sleep_aureole_wall_climbing: 1,
+            sleep_aureole_climb_height_min: 4,
+            sleep_aureole_climb_height_max: 10,
+            sleep_aureole_wall_width_min: 2,
+            sleep_aureole_wall_width_max: 3,
+            sleep_aureole_rock_depth_min: 1,
+            sleep_aureole_rock_depth_max: 3,
+            sleep_aureole_min_surface_exposure: 1,
+            // Hydrothermal vein spread
+            sleep_vein_spread: 0.5,
         }
     }
 

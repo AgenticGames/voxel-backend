@@ -891,6 +891,17 @@ pub struct FfiEngineConfig {
     pub sleep_aureole_water_search_radius: u32,
     pub sleep_aureole_water_max_cells: u32,
     pub sleep_aureole_water_deposit_mult: f32,
+    // Aureole vein geometry
+    pub sleep_aureole_wall_climbing: u8,
+    pub sleep_aureole_climb_height_min: u32,
+    pub sleep_aureole_climb_height_max: u32,
+    pub sleep_aureole_wall_width_min: u32,
+    pub sleep_aureole_wall_width_max: u32,
+    pub sleep_aureole_rock_depth_min: u32,
+    pub sleep_aureole_rock_depth_max: u32,
+    pub sleep_aureole_min_surface_exposure: u32,
+    // Hydrothermal vein spread
+    pub sleep_vein_spread: f32,
 }
 
 #[repr(C)]
