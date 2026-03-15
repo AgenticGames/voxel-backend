@@ -304,6 +304,56 @@ pub fn apply_veins(
 
             let spread = config.horizontal_spread as i32;
 
+            // --- Water/Lava volume scaling ---
+            // Count nearby water cells for volume bonus
+            let water_frac = if config.water_volume_max_cells > 0 && config.water_volume_radius > 0 {
+                let wr = config.water_volume_radius as i32;
+                let mut water_count = 0u32;
+                let wcs = fluid_snapshot.chunk_size as i32;
+                for wdx in -wr..=wr {
+                    for wdy in -wr..=wr {
+                        for wdz in -wr..=wr {
+                            if wdx * wdx + wdy * wdy + wdz * wdz > wr * wr { continue; }
+                            let sx = water_x + wdx;
+                            let sy = water_y + wdy;
+                            let sz = water_z + wdz;
+                            let fck = (sx.div_euclid(wcs), sy.div_euclid(wcs), sz.div_euclid(wcs));
+                            if let Some(cells) = fluid_snapshot.chunks.get(&fck) {
+                                let lx = sx.rem_euclid(wcs) as usize;
+                                let ly = sy.rem_euclid(wcs) as usize;
+                                let lz = sz.rem_euclid(wcs) as usize;
+                                let idx = lz * (wcs as usize) * (wcs as usize) + ly * (wcs as usize) + lx;
+                                if idx < cells.len() && cells[idx].level > 0.001 && cells[idx].fluid_type.is_water() {
+                                    water_count += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                (water_count.min(config.water_volume_max_cells) as f32) / (config.water_volume_max_cells as f32)
+            } else { 0.0 };
+
+            // Count nearby heat sources for lava volume bonus
+            let lava_frac = if config.lava_volume_max_cells > 0 && config.lava_volume_radius > 0 {
+                let lr = config.lava_volume_radius as i32;
+                let lr_sq = lr * lr;
+                let mut heat_count = 0u32;
+                for heat in heat_map.iter() {
+                    let dx = heat.pos.0 - aw.heat_pos.0;
+                    let dy = heat.pos.1 - aw.heat_pos.1;
+                    let dz = heat.pos.2 - aw.heat_pos.2;
+                    if dx * dx + dy * dy + dz * dz <= lr_sq {
+                        heat_count += 1;
+                        if heat_count >= config.lava_volume_max_cells { break; }
+                    }
+                }
+                (heat_count.min(config.lava_volume_max_cells) as f32) / (config.lava_volume_max_cells as f32)
+            } else { 0.0 };
+
+            // Combined scaling multipliers (1.0 base + bonus fraction * max_mult)
+            let volume_vein_mult = 1.0 + water_frac * config.water_volume_vein_mult + lava_frac * config.lava_volume_vein_mult;
+            let volume_amount_mult = 1.0 + water_frac * config.water_volume_amount_mult + lava_frac * config.lava_volume_amount_mult;
+
             // Pre-select dominant ore per zone for this convergence area (coherent vein bodies)
             // Sample nearby host rock to determine the dominant ore tables
             let nearby_host = FACE_OFFSETS.iter()
@@ -316,13 +366,14 @@ pub fn apply_veins(
 
             for &zone in &zones {
                 let (y_min, y_max) = match zone {
-                    TemperatureZone::Hypothermal => (0i32, config.hypothermal_height as i32),
+                    TemperatureZone::Hypothermal => (config.min_vein_height as i32, config.hypothermal_height as i32),
                     TemperatureZone::Mesothermal => (config.hypothermal_height as i32, config.mesothermal_height as i32),
                     TemperatureZone::Epithermal => (config.mesothermal_height as i32, config.epithermal_height as i32),
                 };
                 if y_min >= y_max { continue; }
 
-                let num_veins = rng.gen_range(config.veins_per_zone_min..=config.veins_per_zone_max);
+                let base_veins = rng.gen_range(config.veins_per_zone_min..=config.veins_per_zone_max);
+                let num_veins = ((base_veins as f32 * volume_amount_mult).round() as u32).max(1);
                 let max_candidates = (num_veins * 10) as usize;
 
                 // Find wall sites: scan box above water
@@ -476,11 +527,12 @@ pub fn apply_veins(
                         continue;
                     }
 
-                    // Compute climbing vein target size (~25% fill of bounding box for thin streaks)
+                    // Compute climbing vein target size (~25% fill of bounding box, scaled by water/lava volume)
                     let height = rng.gen_range(config.vein_climb_height_min..=config.vein_climb_height_max);
                     let width = rng.gen_range(config.vein_wall_width_min..=config.vein_wall_width_max);
                     let depth = rng.gen_range(config.vein_rock_depth_min..=config.vein_rock_depth_max);
-                    let target = ((height * width * depth) / 4).max(4).min(60);
+                    let base_target = ((height * width * depth) / 4).max(4).min(60);
+                    let target = ((base_target as f32 * volume_vein_mult).round() as u32).max(4).min(120);
 
                     let params = VeinGrowthParams {
                         ore,
@@ -504,6 +556,99 @@ pub fn apply_veins(
                                 new_material: ore,
                             });
                             global_deposited.insert(vpos);
+                        }
+                    }
+
+                    // Spike/tendril intrusions ("centipede" look)
+                    if config.spike_enabled && config.spike_count_max > 0 && !vein_positions.is_empty() {
+                        let spike_count = rng.gen_range(config.spike_count_min..=config.spike_count_max);
+                        // Collect surface voxels of the vein body (have at least one non-ore neighbor)
+                        let vein_set: HashSet<(i32, i32, i32)> = vein_positions.iter().copied().collect();
+                        let mut surface_voxels: Vec<(i32, i32, i32)> = Vec::new();
+                        for &vp in &vein_positions {
+                            for &(dx, dy, dz) in &FACE_OFFSETS {
+                                let nb = (vp.0 + dx, vp.1 + dy, vp.2 + dz);
+                                if !vein_set.contains(&nb) && !global_deposited.contains(&nb) {
+                                    surface_voxels.push(vp);
+                                    break;
+                                }
+                            }
+                        }
+                        // Pick spike origins spread along the vein
+                        let stride = if surface_voxels.len() > spike_count as usize {
+                            surface_voxels.len() / spike_count as usize
+                        } else { 1 };
+                        let mut spike_origins: Vec<(i32, i32, i32)> = Vec::new();
+                        for i in (0..surface_voxels.len()).step_by(stride.max(1)) {
+                            if spike_origins.len() >= spike_count as usize { break; }
+                            spike_origins.push(surface_voxels[i]);
+                        }
+                        // Grow each spike as a thin tendril into host rock
+                        for origin in spike_origins {
+                            let spike_len = rng.gen_range(config.spike_length_min..=config.spike_length_max);
+                            // Pick a random direction (prefer directions away from vein center & into rock)
+                            let mut dirs: Vec<(i32, i32, i32)> = FACE_OFFSETS.iter()
+                                .filter(|&&(dx, dy, dz)| {
+                                    let nb = (origin.0 + dx, origin.1 + dy, origin.2 + dz);
+                                    !vein_set.contains(&nb) && !global_deposited.contains(&nb)
+                                })
+                                .copied()
+                                .collect();
+                            if dirs.is_empty() { continue; }
+                            let dir_idx = rng.gen_range(0..dirs.len());
+                            let spike_dir = dirs[dir_idx];
+                            // Walk in the chosen direction with taper
+                            let mut pos = origin;
+                            for step in 0..spike_len {
+                                let next = (pos.0 + spike_dir.0, pos.1 + spike_dir.1, pos.2 + spike_dir.2);
+                                if global_deposited.contains(&next) { break; }
+                                // Check target is host rock
+                                if let Some(mat) = sample_material(density_fields, next.0, next.1, next.2, chunk_size) {
+                                    if !is_host_rock(mat) { break; }
+                                } else { break; }
+                                // Taper check: probability decays each step
+                                if step > 0 && rng.gen::<f32>() >= config.spike_taper { break; }
+                                let (ck, slx, sly, slz) = world_to_chunk_local(next.0, next.1, next.2, chunk_size);
+                                if let Some(df) = density_fields.get(&ck) {
+                                    let s = df.get(slx, sly, slz);
+                                    vein_candidates.push(VeinCandidate {
+                                        chunk_key: ck, lx: slx, ly: sly, lz: slz,
+                                        old_material: s.material,
+                                        old_density: s.density,
+                                        new_material: ore,
+                                    });
+                                    global_deposited.insert(next);
+                                }
+                                // Occasionally branch sideways for more organic look
+                                if rng.gen::<f32>() < 0.25 {
+                                    let perp_dirs: Vec<(i32, i32, i32)> = FACE_OFFSETS.iter()
+                                        .filter(|&&(dx, dy, dz)| (dx, dy, dz) != spike_dir && (dx, dy, dz) != (-spike_dir.0, -spike_dir.1, -spike_dir.2))
+                                        .copied()
+                                        .collect();
+                                    if !perp_dirs.is_empty() {
+                                        let branch = perp_dirs[rng.gen_range(0..perp_dirs.len())];
+                                        let bn = (next.0 + branch.0, next.1 + branch.1, next.2 + branch.2);
+                                        if !global_deposited.contains(&bn) {
+                                            if let Some(bmat) = sample_material(density_fields, bn.0, bn.1, bn.2, chunk_size) {
+                                                if is_host_rock(bmat) {
+                                                    let (bck, blx, bly, blz) = world_to_chunk_local(bn.0, bn.1, bn.2, chunk_size);
+                                                    if let Some(bdf) = density_fields.get(&bck) {
+                                                        let bs = bdf.get(blx, bly, blz);
+                                                        vein_candidates.push(VeinCandidate {
+                                                            chunk_key: bck, lx: blx, ly: bly, lz: blz,
+                                                            old_material: bs.material,
+                                                            old_density: bs.density,
+                                                            new_material: ore,
+                                                        });
+                                                        global_deposited.insert(bn);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                pos = next;
+                            }
                         }
                     }
 

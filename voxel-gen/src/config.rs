@@ -601,6 +601,8 @@ pub struct OreConfig {
     pub coal_shallow_ceiling: bool,
     /// Coal seams thicken with depth — deeper burial produces thicker, higher-rank deposits
     pub coal_depth_enrichment: bool,
+    /// Global ore spawn scale (0.0 = no ores, 1.0 = normal). Scales probability of all ore placement at generation time.
+    pub ore_global_scale: f32,
 }
 
 impl Default for HostRockConfig {
@@ -1163,6 +1165,7 @@ impl Default for OreConfig {
             coal_sedimentary_host: false,
             coal_shallow_ceiling: false,
             coal_depth_enrichment: false,
+            ore_global_scale: 1.0,
         }
     }
 }

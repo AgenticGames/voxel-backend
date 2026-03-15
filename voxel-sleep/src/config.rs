@@ -416,6 +416,39 @@ pub struct VeinConfig {
     pub slate_quartz_vein_prob: f32,
     /// Wall-rock alteration: probability that vein deposition converts adjacent limestone to garnet/diopside
     pub wall_rock_alteration_prob: f32,
+    /// Minimum Y offset above water before hypothermal zone starts
+    pub min_vein_height: u32,
+    // Water volume scaling
+    /// Radius to count water cells around each activated water source
+    pub water_volume_radius: u32,
+    /// Max water cells that contribute to scaling (diminishing returns cap)
+    pub water_volume_max_cells: u32,
+    /// Vein size multiplier bonus at max water volume (0.0 = no scaling)
+    pub water_volume_vein_mult: f32,
+    /// Veins-per-zone multiplier bonus at max water volume
+    pub water_volume_amount_mult: f32,
+    // Lava/heat volume scaling
+    /// Radius to count heat sources around each convergence point
+    pub lava_volume_radius: u32,
+    /// Max heat cells that contribute to scaling
+    pub lava_volume_max_cells: u32,
+    /// Vein size multiplier bonus at max lava volume
+    pub lava_volume_vein_mult: f32,
+    /// Veins-per-zone multiplier bonus at max lava volume
+    pub lava_volume_amount_mult: f32,
+    // Spike/tendril intrusions ("centipede" look)
+    /// Enable spikey tendrils radiating from vein bodies
+    pub spike_enabled: bool,
+    /// Min number of spikes per vein body
+    pub spike_count_min: u32,
+    /// Max number of spikes per vein body
+    pub spike_count_max: u32,
+    /// Min spike tendril length (voxels)
+    pub spike_length_min: u32,
+    /// Max spike tendril length (voxels)
+    pub spike_length_max: u32,
+    /// Per-step survival probability for spike decay (taper)
+    pub spike_taper: f32,
 }
 
 impl Default for VeinConfig {
@@ -455,6 +488,21 @@ impl Default for VeinConfig {
             slate_pyrite_codeposit_prob: 0.25,
             slate_quartz_vein_prob: 0.30,
             wall_rock_alteration_prob: 0.18,
+            min_vein_height: 3,
+            water_volume_radius: 8,
+            water_volume_max_cells: 50,
+            water_volume_vein_mult: 1.0,
+            water_volume_amount_mult: 1.0,
+            lava_volume_radius: 8,
+            lava_volume_max_cells: 30,
+            lava_volume_vein_mult: 0.5,
+            lava_volume_amount_mult: 0.5,
+            spike_enabled: true,
+            spike_count_min: 4,
+            spike_count_max: 10,
+            spike_length_min: 2,
+            spike_length_max: 5,
+            spike_taper: 0.7,
         }
     }
 }

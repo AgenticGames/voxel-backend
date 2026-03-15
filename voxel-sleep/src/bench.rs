@@ -392,6 +392,7 @@ fn make_ue_gen_config(seed: u64) -> voxel_gen::config::GenerationConfig {
             coal_sedimentary_host: false,
             coal_shallow_ceiling: false,
             coal_depth_enrichment: false,
+            ore_global_scale: 1.0,
         },
 
         // Formation config — FormationConfig.json

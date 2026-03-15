@@ -2241,6 +2241,23 @@ mod tests {
             sleep_slate_aquitard_enabled: 1,
             sleep_slate_aquitard_factor: 0.05,
             sleep_slate_aquitard_concentration: 2.0,
+            // Vein scaling + spikes + ore global scale
+            sleep_min_vein_height: 3,
+            sleep_water_volume_radius: 8,
+            sleep_water_volume_max_cells: 50,
+            sleep_water_volume_vein_mult: 1.0,
+            sleep_water_volume_amount_mult: 1.0,
+            sleep_lava_volume_radius: 8,
+            sleep_lava_volume_max_cells: 30,
+            sleep_lava_volume_vein_mult: 0.5,
+            sleep_lava_volume_amount_mult: 0.5,
+            sleep_spike_enabled: 1,
+            sleep_spike_count_min: 4,
+            sleep_spike_count_max: 10,
+            sleep_spike_length_min: 2,
+            sleep_spike_length_max: 5,
+            sleep_spike_taper: 0.7,
+            ore_global_scale: 1.0,
         }
     }
 

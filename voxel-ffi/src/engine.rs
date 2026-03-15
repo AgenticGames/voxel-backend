@@ -1173,6 +1173,7 @@ fn ffi_to_ore_config(c: &FfiEngineConfig) -> OreConfig {
         coal_sedimentary_host: c.ore_coal_sedimentary_host != 0,
         coal_shallow_ceiling: c.ore_coal_shallow_ceiling != 0,
         coal_depth_enrichment: c.ore_coal_depth_enrichment != 0,
+        ore_global_scale: if c.ore_global_scale >= 0.0 { c.ore_global_scale } else { 1.0 },
     }
 }
 
@@ -1757,6 +1758,21 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
             slate_pyrite_codeposit_prob: if c.sleep_slate_pyrite_codeposit_prob > 0.0 { c.sleep_slate_pyrite_codeposit_prob } else { 0.25 },
             slate_quartz_vein_prob: if c.sleep_slate_quartz_vein_prob > 0.0 { c.sleep_slate_quartz_vein_prob } else { 0.30 },
             wall_rock_alteration_prob: if c.sleep_wall_rock_alteration_prob > 0.0 { c.sleep_wall_rock_alteration_prob } else { 0.18 },
+            min_vein_height: if c.sleep_min_vein_height > 0 { c.sleep_min_vein_height } else { 3 },
+            water_volume_radius: if c.sleep_water_volume_radius > 0 { c.sleep_water_volume_radius } else { 8 },
+            water_volume_max_cells: if c.sleep_water_volume_max_cells > 0 { c.sleep_water_volume_max_cells } else { 50 },
+            water_volume_vein_mult: c.sleep_water_volume_vein_mult,
+            water_volume_amount_mult: c.sleep_water_volume_amount_mult,
+            lava_volume_radius: if c.sleep_lava_volume_radius > 0 { c.sleep_lava_volume_radius } else { 8 },
+            lava_volume_max_cells: if c.sleep_lava_volume_max_cells > 0 { c.sleep_lava_volume_max_cells } else { 30 },
+            lava_volume_vein_mult: c.sleep_lava_volume_vein_mult,
+            lava_volume_amount_mult: c.sleep_lava_volume_amount_mult,
+            spike_enabled: c.sleep_spike_enabled != 0,
+            spike_count_min: if c.sleep_spike_count_min > 0 { c.sleep_spike_count_min } else { 4 },
+            spike_count_max: if c.sleep_spike_count_max > 0 { c.sleep_spike_count_max } else { 10 },
+            spike_length_min: if c.sleep_spike_length_min > 0 { c.sleep_spike_length_min } else { 2 },
+            spike_length_max: if c.sleep_spike_length_max > 0 { c.sleep_spike_length_max } else { 5 },
+            spike_taper: if c.sleep_spike_taper > 0.0 { c.sleep_spike_taper } else { 0.7 },
         },
         deeptime: DeepTimeConfig {
             enrichment_prob: if c.sleep_enrichment_prob > 0.0 { c.sleep_enrichment_prob } else { 0.90 },

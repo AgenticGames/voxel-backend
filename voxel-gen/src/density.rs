@@ -332,6 +332,12 @@ fn ore_threshold_check(noise_val: f64, threshold: f64, falloff: f64, wx: f64, wy
     }
 }
 
+/// Shortcut: assign only host rock (skip all ore placement).
+#[inline]
+fn assign_host_rock(wx: f64, wy: f64, wz: f64, ore: &OreConfig, noise: &MaterialNoiseSources) -> Material {
+    select_host_rock(wx, wy, wz, &ore.host_rock, noise)
+}
+
 fn assign_material(
     wx: f64,
     wy: f64,
@@ -339,6 +345,18 @@ fn assign_material(
     ore: &OreConfig,
     noise: &MaterialNoiseSources,
 ) -> Material {
+    // ── Global ore scale: skip all ore placement when scale < 1.0 ──
+    if ore.ore_global_scale <= 0.0 {
+        return assign_host_rock(wx, wy, wz, ore, noise);
+    }
+    if ore.ore_global_scale < 1.0 {
+        // Deterministic per-voxel hash to thin ore spawns
+        let hash = ((wx * 73.7 + wy * 37.3 + wz * 91.1) * 1000.0).fract().abs();
+        if hash >= ore.ore_global_scale as f64 {
+            return assign_host_rock(wx, wy, wz, ore, noise);
+        }
+    }
+
     // ── Domain warping for ore shapes ──
     let warp_strength = ore.ore_domain_warp_strength;
     let warp_freq = ore.ore_warp_frequency;

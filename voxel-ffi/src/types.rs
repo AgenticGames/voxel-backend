@@ -852,6 +852,28 @@ pub struct FfiEngineConfig {
     pub sleep_slate_aquitard_enabled: u8,
     pub sleep_slate_aquitard_factor: f32,
     pub sleep_slate_aquitard_concentration: f32,
+    // ── Vein scaling + spikes + ore global scale ──
+    // Min vein height
+    pub sleep_min_vein_height: u32,
+    // Water volume scaling (4 fields)
+    pub sleep_water_volume_radius: u32,
+    pub sleep_water_volume_max_cells: u32,
+    pub sleep_water_volume_vein_mult: f32,
+    pub sleep_water_volume_amount_mult: f32,
+    // Lava volume scaling (4 fields)
+    pub sleep_lava_volume_radius: u32,
+    pub sleep_lava_volume_max_cells: u32,
+    pub sleep_lava_volume_vein_mult: f32,
+    pub sleep_lava_volume_amount_mult: f32,
+    // Spike intrusions (6 fields)
+    pub sleep_spike_enabled: u8,
+    pub sleep_spike_count_min: u32,
+    pub sleep_spike_count_max: u32,
+    pub sleep_spike_length_min: u32,
+    pub sleep_spike_length_max: u32,
+    pub sleep_spike_taper: f32,
+    // Ore global scale
+    pub ore_global_scale: f32,
 }
 
 #[repr(C)]
