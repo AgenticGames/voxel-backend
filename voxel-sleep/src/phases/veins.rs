@@ -553,7 +553,14 @@ pub fn apply_veins(
                         ore,
                         min_size: (target * 8) / 10,
                         max_size: target,
-                        bias: VeinBias::WallClimbing { wall_normal: chosen.wall_normal },
+                        bias: VeinBias::WallClimbing {
+                            wall_normal: chosen.wall_normal,
+                            weight_up: config.vein_weight_up,
+                            weight_into: config.vein_weight_into,
+                            weight_lateral: config.vein_weight_lateral,
+                            weight_down: config.vein_weight_down,
+                            weight_toward_air: config.vein_weight_toward_air,
+                        },
                         exclude_aureole: true,
                     };
                     let vein_positions = grow_vein(density_fields, chosen.pos, &params, chunk_size, rng);

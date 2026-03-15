@@ -199,8 +199,20 @@ pub enum VeinBias {
     Planar(u8),
     /// Gold/Sulfide: tight spherical clusters
     Compact,
-    /// Veins grow upward on wall faces, thickening into rock behind
-    WallClimbing { wall_normal: (i32, i32, i32) },
+    /// Veins grow on wall faces with configurable directional weights
+    WallClimbing {
+        wall_normal: (i32, i32, i32),
+        /// Weight for growing upward (Y+)
+        weight_up: f32,
+        /// Weight for growing into the wall (opposite of wall_normal)
+        weight_into: f32,
+        /// Weight for lateral spread (horizontal, perpendicular to wall_normal)
+        weight_lateral: f32,
+        /// Weight for growing downward (Y-)
+        weight_down: f32,
+        /// Weight for growing toward air (same as wall_normal)
+        weight_toward_air: f32,
+    },
 }
 
 /// Parameters for growing a connected vein deposit.
@@ -268,17 +280,12 @@ pub fn grow_vein(
                     }
                     VeinBias::Compact => 1.0,
                     VeinBias::Branching => 1.0,
-                    VeinBias::WallClimbing { wall_normal } => {
-                        // Y+ (up): primary climbing direction
-                        if dy > 0 { 3.0 }
-                        // Into wall (opposite of wall_normal): depth into rock
-                        else if dx == -wall_normal.0 && dy == -wall_normal.1 && dz == -wall_normal.2 { 2.0 }
-                        // Lateral (horizontal, perpendicular to wall_normal): width on wall face
-                        else if dy == 0 && (dx != wall_normal.0 || dz != wall_normal.2) { 1.5 }
-                        // Y- (down): rarely descend
-                        else if dy < 0 { 0.3 }
-                        // Toward air (same as wall_normal): avoid growing outward
-                        else if dx == wall_normal.0 && dy == wall_normal.1 && dz == wall_normal.2 { 0.1 }
+                    VeinBias::WallClimbing { wall_normal, weight_up, weight_into, weight_lateral, weight_down, weight_toward_air } => {
+                        if dy > 0 { *weight_up }
+                        else if dx == -wall_normal.0 && dy == -wall_normal.1 && dz == -wall_normal.2 { *weight_into }
+                        else if dy == 0 && (dx != wall_normal.0 || dz != wall_normal.2) { *weight_lateral }
+                        else if dy < 0 { *weight_down }
+                        else if dx == wall_normal.0 && dy == wall_normal.1 && dz == wall_normal.2 { *weight_toward_air }
                         else { 1.0 }
                     },
                 };

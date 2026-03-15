@@ -326,6 +326,12 @@ pub struct AureoleConfig {
     pub aureole_rock_depth_max: u32,
     /// Surface exposure: min air-face neighbors required for seed eligibility (higher = more visible)
     pub aureole_min_surface_exposure: u32,
+    // Wall-climbing directional weights
+    pub aureole_weight_up: f32,
+    pub aureole_weight_into: f32,
+    pub aureole_weight_lateral: f32,
+    pub aureole_weight_down: f32,
+    pub aureole_weight_toward_air: f32,
     // ── Lava volume scaling for aureole ──
     /// Radius to count lava cells for zone volume scaling
     pub aureole_lava_volume_max_cells: u32,
@@ -397,6 +403,11 @@ impl Default for AureoleConfig {
             aureole_rock_depth_min: 1,
             aureole_rock_depth_max: 3,
             aureole_min_surface_exposure: 1,
+            aureole_weight_up: 3.0,
+            aureole_weight_into: 2.0,
+            aureole_weight_lateral: 1.5,
+            aureole_weight_down: 0.3,
+            aureole_weight_toward_air: 0.1,
             aureole_vein_spread: 0.5,
             aureole_lava_volume_max_cells: 50,
             aureole_lava_deposit_mult: 1.0,
@@ -508,6 +519,12 @@ pub struct VeinConfig {
     pub lava_volume_amount_mult: f32,
     /// Vein seed spread factor (0.0 = random, 1.0 = max spread apart)
     pub vein_spread: f32,
+    // Wall-climbing directional weights
+    pub vein_weight_up: f32,
+    pub vein_weight_into: f32,
+    pub vein_weight_lateral: f32,
+    pub vein_weight_down: f32,
+    pub vein_weight_toward_air: f32,
     // Spike/tendril intrusions ("centipede" look)
     /// Enable spikey tendrils radiating from vein bodies
     pub spike_enabled: bool,
@@ -570,6 +587,11 @@ impl Default for VeinConfig {
             lava_volume_vein_mult: 0.5,
             lava_volume_amount_mult: 0.5,
             vein_spread: 0.5,
+            vein_weight_up: 3.0,
+            vein_weight_into: 2.0,
+            vein_weight_lateral: 1.5,
+            vein_weight_down: 0.3,
+            vein_weight_toward_air: 0.1,
             spike_enabled: true,
             spike_count_min: 4,
             spike_count_max: 10,

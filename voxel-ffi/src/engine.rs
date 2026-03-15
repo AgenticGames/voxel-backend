@@ -1750,6 +1750,11 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
             aureole_rock_depth_min: if c.sleep_aureole_rock_depth_min > 0 { c.sleep_aureole_rock_depth_min } else { 1 },
             aureole_rock_depth_max: if c.sleep_aureole_rock_depth_max > 0 { c.sleep_aureole_rock_depth_max } else { 3 },
             aureole_min_surface_exposure: if c.sleep_aureole_min_surface_exposure > 0 { c.sleep_aureole_min_surface_exposure } else { 1 },
+            aureole_weight_up: if c.sleep_aureole_weight_up > 0.0 { c.sleep_aureole_weight_up } else { 3.0 },
+            aureole_weight_into: if c.sleep_aureole_weight_into > 0.0 { c.sleep_aureole_weight_into } else { 2.0 },
+            aureole_weight_lateral: if c.sleep_aureole_weight_lateral > 0.0 { c.sleep_aureole_weight_lateral } else { 1.5 },
+            aureole_weight_down: c.sleep_aureole_weight_down,
+            aureole_weight_toward_air: c.sleep_aureole_weight_toward_air,
         },
         veins: VeinConfig {
             vein_deposition_prob: if c.sleep_vein_deposition_prob > 0.0 { c.sleep_vein_deposition_prob } else { 0.85 },
@@ -1802,6 +1807,11 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
             spike_length_max: if c.sleep_spike_length_max > 0 { c.sleep_spike_length_max } else { 5 },
             spike_taper: if c.sleep_spike_taper > 0.0 { c.sleep_spike_taper } else { 0.7 },
             vein_spread: c.sleep_vein_spread,
+            vein_weight_up: if c.sleep_vein_weight_up > 0.0 { c.sleep_vein_weight_up } else { 3.0 },
+            vein_weight_into: if c.sleep_vein_weight_into > 0.0 { c.sleep_vein_weight_into } else { 2.0 },
+            vein_weight_lateral: if c.sleep_vein_weight_lateral > 0.0 { c.sleep_vein_weight_lateral } else { 1.5 },
+            vein_weight_down: c.sleep_vein_weight_down,
+            vein_weight_toward_air: c.sleep_vein_weight_toward_air,
         },
         deeptime: DeepTimeConfig {
             enrichment_prob: if c.sleep_enrichment_prob > 0.0 { c.sleep_enrichment_prob } else { 0.90 },

@@ -900,8 +900,20 @@ pub struct FfiEngineConfig {
     pub sleep_aureole_rock_depth_min: u32,
     pub sleep_aureole_rock_depth_max: u32,
     pub sleep_aureole_min_surface_exposure: u32,
+    // Aureole wall-climbing weights
+    pub sleep_aureole_weight_up: f32,
+    pub sleep_aureole_weight_into: f32,
+    pub sleep_aureole_weight_lateral: f32,
+    pub sleep_aureole_weight_down: f32,
+    pub sleep_aureole_weight_toward_air: f32,
     // Hydrothermal vein spread
     pub sleep_vein_spread: f32,
+    // Hydrothermal wall-climbing weights
+    pub sleep_vein_weight_up: f32,
+    pub sleep_vein_weight_into: f32,
+    pub sleep_vein_weight_lateral: f32,
+    pub sleep_vein_weight_down: f32,
+    pub sleep_vein_weight_toward_air: f32,
 }
 
 #[repr(C)]

@@ -2296,8 +2296,20 @@ mod tests {
             sleep_aureole_rock_depth_min: 1,
             sleep_aureole_rock_depth_max: 3,
             sleep_aureole_min_surface_exposure: 1,
+            // Aureole wall-climbing weights
+            sleep_aureole_weight_up: 3.0,
+            sleep_aureole_weight_into: 2.0,
+            sleep_aureole_weight_lateral: 1.5,
+            sleep_aureole_weight_down: 0.3,
+            sleep_aureole_weight_toward_air: 0.1,
             // Hydrothermal vein spread
             sleep_vein_spread: 0.5,
+            // Hydrothermal wall-climbing weights
+            sleep_vein_weight_up: 3.0,
+            sleep_vein_weight_into: 2.0,
+            sleep_vein_weight_lateral: 1.5,
+            sleep_vein_weight_down: 0.3,
+            sleep_vein_weight_toward_air: 0.1,
         }
     }
 

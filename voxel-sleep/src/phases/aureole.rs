@@ -560,7 +560,14 @@ fn place_slate_veins(
                 })
                 .copied()
                 .unwrap_or((0, 1, 0));
-            ((geo_target * 8) / 10, geo_target, VeinBias::WallClimbing { wall_normal })
+            ((geo_target * 8) / 10, geo_target, VeinBias::WallClimbing {
+                        wall_normal,
+                        weight_up: config.aureole_weight_up,
+                        weight_into: config.aureole_weight_into,
+                        weight_lateral: config.aureole_weight_lateral,
+                        weight_down: config.aureole_weight_down,
+                        weight_toward_air: config.aureole_weight_toward_air,
+                    })
         } else {
             (min_sz, max_sz, default_vein_bias(ore, rng))
         };
@@ -656,7 +663,14 @@ fn place_limestone_veins(
                 })
                 .copied()
                 .unwrap_or((0, 1, 0));
-            ((geo_target * 8) / 10, geo_target, VeinBias::WallClimbing { wall_normal })
+            ((geo_target * 8) / 10, geo_target, VeinBias::WallClimbing {
+                        wall_normal,
+                        weight_up: config.aureole_weight_up,
+                        weight_into: config.aureole_weight_into,
+                        weight_lateral: config.aureole_weight_lateral,
+                        weight_down: config.aureole_weight_down,
+                        weight_toward_air: config.aureole_weight_toward_air,
+                    })
         } else {
             (vein_min, vein_max, default_vein_bias(ore, rng))
         };
