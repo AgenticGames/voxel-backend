@@ -874,6 +874,23 @@ pub struct FfiEngineConfig {
     pub sleep_spike_taper: f32,
     // Ore global scale
     pub ore_global_scale: f32,
+    // ── Aureole deposit detail settings ──
+    pub sleep_aureole_vein_count: u32,
+    pub sleep_aureole_vein_min: u32,
+    pub sleep_aureole_vein_max: u32,
+    pub sleep_garnet_compact_size: u32,
+    pub sleep_diopside_compact_size: u32,
+    pub sleep_garnet_pocket_count: u32,
+    pub sleep_diopside_pocket_count: u32,
+    pub sleep_aureole_vein_spread: f32,
+    // Aureole lava volume scaling
+    pub sleep_aureole_lava_max_cells: u32,
+    pub sleep_aureole_lava_deposit_mult: f32,
+    pub sleep_aureole_lava_count_mult: f32,
+    // Aureole water boost exposure
+    pub sleep_aureole_water_search_radius: u32,
+    pub sleep_aureole_water_max_cells: u32,
+    pub sleep_aureole_water_deposit_mult: f32,
 }
 
 #[repr(C)]

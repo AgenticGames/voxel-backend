@@ -218,41 +218,60 @@ fn determine_aureole_type(
 // Water Boost
 // ──────────────────────────────────────────────────────────────
 
-/// Compute water boost multiplier by counting water cells adjacent to lava cells.
+/// Compute water boost multiplier by counting water cells near lava cells.
+/// Uses configurable search radius and max cell cap for exposed scaling.
 fn compute_water_boost(
     zone: &LavaZone,
     fluid_snapshot: &FluidSnapshot,
-    max_boost: f32,
-) -> f32 {
+    config: &AureoleConfig,
+) -> (f32, f32) {
     let cs = fluid_snapshot.chunk_size;
-    let lava_count = zone.cells.len() as u32;
     let mut water_count = 0u32;
+    let search_r = config.aureole_water_search_radius.max(1) as i32;
+    let max_cells = config.aureole_water_max_cells.max(1);
 
-    // Check face-neighbors of each lava cell for water in the fluid snapshot
+    // Deduplicate: only check unique positions within search_r of any lava cell
+    let mut checked: HashSet<(i32, i32, i32)> = HashSet::new();
+    let lava_set: HashSet<(i32, i32, i32)> = zone.cells.iter().copied().collect();
+
     for &(lx, ly, lz) in &zone.cells {
-        for &(dx, dy, dz) in &FACE_OFFSETS {
-            let wx = lx + dx;
-            let wy = ly + dy;
-            let wz = lz + dz;
-            let fck = (
-                wx.div_euclid(cs as i32),
-                wy.div_euclid(cs as i32),
-                wz.div_euclid(cs as i32),
-            );
-            let flx = wx.rem_euclid(cs as i32) as usize;
-            let fly = wy.rem_euclid(cs as i32) as usize;
-            let flz = wz.rem_euclid(cs as i32) as usize;
-            let fidx = flz * cs * cs + fly * cs + flx;
-            if let Some(cells) = fluid_snapshot.chunks.get(&fck) {
-                if fidx < cells.len() && cells[fidx].fluid_type.is_water() && cells[fidx].level > 0.001 {
-                    water_count += 1;
+        // Search within radius around each lava cell
+        for wdx in -search_r..=search_r {
+            for wdy in -search_r..=search_r {
+                for wdz in -search_r..=search_r {
+                    if wdx * wdx + wdy * wdy + wdz * wdz > search_r * search_r { continue; }
+                    let wp = (lx + wdx, ly + wdy, lz + wdz);
+                    if lava_set.contains(&wp) { continue; }
+                    if !checked.insert(wp) { continue; }
+
+                    let fck = (
+                        wp.0.div_euclid(cs as i32),
+                        wp.1.div_euclid(cs as i32),
+                        wp.2.div_euclid(cs as i32),
+                    );
+                    let flx = wp.0.rem_euclid(cs as i32) as usize;
+                    let fly = wp.1.rem_euclid(cs as i32) as usize;
+                    let flz = wp.2.rem_euclid(cs as i32) as usize;
+                    let fidx = flz * cs * cs + fly * cs + flx;
+                    if let Some(cells) = fluid_snapshot.chunks.get(&fck) {
+                        if fidx < cells.len() && cells[fidx].fluid_type.is_water() && cells[fidx].level > 0.001 {
+                            water_count += 1;
+                            if water_count >= max_cells { break; }
+                        }
+                    }
                 }
+                if water_count >= max_cells { break; }
             }
+            if water_count >= max_cells { break; }
         }
+        if water_count >= max_cells { break; }
     }
 
-    let ratio = (water_count as f32 / lava_count.max(1) as f32).min(1.0);
-    1.0 + ratio * max_boost
+    let water_frac = (water_count.min(max_cells) as f32) / (max_cells as f32);
+    // Two return values: legacy boost (for shell radius) and deposit multiplier
+    let legacy_boost = 1.0 + water_frac * config.water_boost_max;
+    let deposit_mult = 1.0 + water_frac * config.aureole_water_deposit_mult;
+    (legacy_boost, deposit_mult)
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -362,6 +381,7 @@ fn find_aureole_boundary_seeds(
     chunk_size: usize,
     count: usize,
     rng: &mut ChaCha8Rng,
+    spread: f32,
 ) -> Vec<(i32, i32, i32)> {
     // Collect boundary candidates with air-neighbor count for weighting
     let mut candidates: Vec<((i32, i32, i32), u32)> = Vec::new();
@@ -399,21 +419,37 @@ fn find_aureole_boundary_seeds(
         return candidates.into_iter().map(|(pos, _)| pos).collect();
     }
 
-    // Weighted random selection preferring higher air-neighbor count (more visible)
-    let mut selected = Vec::with_capacity(count);
+    // Weighted random selection with spread-based repulsion
+    let mut selected: Vec<(i32, i32, i32)> = Vec::with_capacity(count);
     let mut remaining = candidates;
     for _ in 0..count {
         if remaining.is_empty() {
             break;
         }
-        let total_weight: f32 = remaining.iter().map(|(_, w)| *w as f32).sum();
+        // Compute weights: base air-count + spread repulsion from already-selected
+        let weights: Vec<f32> = remaining.iter().map(|&(pos, air_w)| {
+            let mut w = air_w as f32;
+            if spread > 0.0 && !selected.is_empty() {
+                // Find min distance to any selected seed
+                let min_dist = selected.iter().map(|&s| {
+                    let dx = (pos.0 - s.0) as f32;
+                    let dy = (pos.1 - s.1) as f32;
+                    let dz = (pos.2 - s.2) as f32;
+                    (dx * dx + dy * dy + dz * dz).sqrt()
+                }).fold(f32::MAX, f32::min);
+                // Boost weight by distance (further = better) scaled by spread factor
+                w *= 1.0 + spread * min_dist * 0.5;
+            }
+            w.max(0.01)
+        }).collect();
+        let total_weight: f32 = weights.iter().sum();
         if total_weight <= 0.0 {
             break;
         }
         let mut roll = rng.gen::<f32>() * total_weight;
         let mut chosen = 0;
-        for (i, &(_, w)) in remaining.iter().enumerate() {
-            roll -= w as f32;
+        for (i, &w) in weights.iter().enumerate() {
+            roll -= w;
             if roll <= 0.0 {
                 chosen = i;
                 break;
@@ -473,55 +509,50 @@ fn scaled_vein_size(base: u32, heat_level: f32, large: bool) -> (u32, u32) {
 /// Place ore veins for a Slate-hosted aureole zone.
 fn place_slate_veins(
     converted: &HashSet<(i32, i32, i32)>,
-    heat_level: f32,
     config: &AureoleConfig,
     density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
     chunk_size: usize,
     manifest: &mut ChangeManifest,
     rng: &mut ChaCha8Rng,
     skarn_count: u32,
+    deposit_mult: f32,
+    count_mult: f32,
 ) -> u32 {
-    let seeds = find_aureole_boundary_seeds(converted, density_fields, chunk_size, 8, rng);
+    let vein_count = ((config.aureole_vein_count as f32 * count_mult).round() as usize).max(1);
+    let seeds = find_aureole_boundary_seeds(converted, density_fields, chunk_size, vein_count, rng, config.aureole_vein_spread);
     if seeds.is_empty() {
         return 0;
     }
 
     let ores = [Material::Copper, Material::Iron, Material::Tin];
-    // Pick 2 of 3
     let skip = rng.gen_range(0..3usize);
     let ore_a = ores[(skip + 1) % 3];
     let ore_b = ores[(skip + 2) % 3];
 
-    let (large_min, large_max) = scaled_vein_size(config.large_vein_base_size, heat_level, true);
-    let (small_min, small_max) = scaled_vein_size(config.small_vein_base_size, heat_level, false);
+    let vein_min = ((config.aureole_vein_min as f32 * deposit_mult).round() as u32).max(2);
+    let vein_max = ((config.aureole_vein_max as f32 * deposit_mult).round() as u32).max(vein_min + 1);
+    let small_min = ((config.small_vein_base_size as f32 * deposit_mult).round() as u32).max(2);
+    let small_max = ((small_min as f32 * 1.5).round() as u32).max(small_min + 1);
 
     let mut total_placed = 0u32;
-    let assignments: Vec<(Material, u32, u32)> = vec![
-        (ore_a, large_min, large_max),  // seed 0
-        (ore_a, large_min, large_max),  // seed 1
-        (ore_a, large_min, large_max),  // seed 2
-        (ore_b, large_min, large_max),  // seed 3
-        (ore_b, large_min, large_max),  // seed 4
-        (Material::Pyrite, small_min, small_max), // seed 5
-        (Material::Pyrite, small_min, small_max), // seed 6
-        (Material::Pyrite, small_min, small_max), // seed 7
-    ];
 
     for (i, &seed) in seeds.iter().enumerate() {
-        if i >= assignments.len() {
-            break;
-        }
-        let (ore, min_sz, max_sz) = assignments[i];
+        // First 60% ore_a, next 20% ore_b, last 20% pyrite
+        let (ore, min_sz, max_sz) = if (i as f32) < (seeds.len() as f32 * 0.6) {
+            (ore_a, vein_min, vein_max)
+        } else if (i as f32) < (seeds.len() as f32 * 0.8) {
+            (ore_b, vein_min, vein_max)
+        } else {
+            (Material::Pyrite, small_min, small_max)
+        };
         let bias = default_vein_bias(ore, rng);
         let params = VeinGrowthParams { ore, min_size: min_sz, max_size: max_sz, bias, exclude_aureole: false };
         let positions = grow_vein(density_fields, seed, &params, chunk_size, rng);
         total_placed += apply_vein_to_world(&positions, ore, density_fields, chunk_size, manifest);
     }
 
-    // Bonus: if skarn exists (slate aureole reached limestone), place Garnet/Diopside pockets
+    // Bonus: if skarn exists (slate aureole reached limestone), place compact Garnet/Diopside pockets
     if skarn_count > 0 {
-        let (pocket_min, pocket_max) = scaled_vein_size(config.garnet_pocket_size, heat_level, false);
-        // Filter converted set for Skarn voxels
         let mut skarn_seeds: Vec<(i32, i32, i32)> = converted.iter()
             .filter(|&&pos| {
                 sample_material(density_fields, pos.0, pos.1, pos.2, chunk_size)
@@ -531,28 +562,33 @@ fn place_slate_veins(
             .collect();
         skarn_seeds.sort();
         if !skarn_seeds.is_empty() {
-            let garnet_seed = skarn_seeds[rng.gen_range(0..skarn_seeds.len())];
-            let params = VeinGrowthParams {
-                ore: Material::Garnet,
-                min_size: pocket_min,
-                max_size: pocket_max,
-                bias: VeinBias::Compact,
-                exclude_aureole: false,
-            };
-            let positions = grow_vein(density_fields, garnet_seed, &params, chunk_size, rng);
-            total_placed += apply_vein_to_world(&positions, Material::Garnet, density_fields, chunk_size, manifest);
+            let g_size = ((config.garnet_compact_size as f32 * deposit_mult).round() as u32).max(3);
+            for _ in 0..config.garnet_pocket_count {
+                let garnet_seed = skarn_seeds[rng.gen_range(0..skarn_seeds.len())];
+                let params = VeinGrowthParams {
+                    ore: Material::Garnet,
+                    min_size: (g_size * 8) / 10,
+                    max_size: g_size,
+                    bias: VeinBias::Compact,
+                    exclude_aureole: false,
+                };
+                let positions = grow_vein(density_fields, garnet_seed, &params, chunk_size, rng);
+                total_placed += apply_vein_to_world(&positions, Material::Garnet, density_fields, chunk_size, manifest);
+            }
 
-            let diopside_seed = skarn_seeds[rng.gen_range(0..skarn_seeds.len())];
-            let (dp_min, dp_max) = scaled_vein_size(config.diopside_pocket_size, heat_level, false);
-            let params = VeinGrowthParams {
-                ore: Material::Diopside,
-                min_size: dp_min,
-                max_size: dp_max,
-                bias: VeinBias::Compact,
-                exclude_aureole: false,
-            };
-            let positions = grow_vein(density_fields, diopside_seed, &params, chunk_size, rng);
-            total_placed += apply_vein_to_world(&positions, Material::Diopside, density_fields, chunk_size, manifest);
+            let d_size = ((config.diopside_compact_size as f32 * deposit_mult).round() as u32).max(3);
+            for _ in 0..config.diopside_pocket_count {
+                let diopside_seed = skarn_seeds[rng.gen_range(0..skarn_seeds.len())];
+                let params = VeinGrowthParams {
+                    ore: Material::Diopside,
+                    min_size: (d_size * 8) / 10,
+                    max_size: d_size,
+                    bias: VeinBias::Compact,
+                    exclude_aureole: false,
+                };
+                let positions = grow_vein(density_fields, diopside_seed, &params, chunk_size, rng);
+                total_placed += apply_vein_to_world(&positions, Material::Diopside, density_fields, chunk_size, manifest);
+            }
         }
     }
 
@@ -562,14 +598,17 @@ fn place_slate_veins(
 /// Place ore veins for a Limestone-hosted (Skarn) aureole zone.
 fn place_limestone_veins(
     converted: &HashSet<(i32, i32, i32)>,
-    heat_level: f32,
     config: &AureoleConfig,
     density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
     chunk_size: usize,
     manifest: &mut ChangeManifest,
     rng: &mut ChaCha8Rng,
+    deposit_mult: f32,
+    count_mult: f32,
 ) -> u32 {
-    let seeds = find_aureole_boundary_seeds(converted, density_fields, chunk_size, 8, rng);
+    // Ore veins at boundary seeds
+    let ore_count = ((config.aureole_vein_count as f32 * count_mult * 0.6).round() as usize).max(1);
+    let seeds = find_aureole_boundary_seeds(converted, density_fields, chunk_size, ore_count, rng, config.aureole_vein_spread);
     if seeds.is_empty() {
         return 0;
     }
@@ -579,31 +618,56 @@ fn place_limestone_veins(
     let ore_a = ores[(skip + 1) % 3];
     let ore_b = ores[(skip + 2) % 3];
 
-    let (large_min, large_max) = scaled_vein_size(config.large_vein_base_size, heat_level, true);
-    let (garnet_min, garnet_max) = scaled_vein_size(config.garnet_pocket_size, heat_level, false);
-    let (diopside_min, diopside_max) = scaled_vein_size(config.diopside_pocket_size, heat_level, false);
+    let vein_min = ((config.aureole_vein_min as f32 * deposit_mult).round() as u32).max(2);
+    let vein_max = ((config.aureole_vein_max as f32 * deposit_mult).round() as u32).max(vein_min + 1);
 
     let mut total_placed = 0u32;
 
-    // Assignments: 3 ore_a (large) + 2 ore_b (large) + 2 Garnet (inner) + 1 Diopside (outer)
     for (i, &seed) in seeds.iter().enumerate() {
-        if i >= 8 {
-            break;
-        }
-        let (ore, min_sz, max_sz) = match i {
-            0..=2 => (ore_a, large_min, large_max),
-            3..=4 => (ore_b, large_min, large_max),
-            5..=6 => (Material::Garnet, garnet_min, garnet_max),
-            _ => (Material::Diopside, diopside_min, diopside_max),
-        };
-        let bias = if ore == Material::Garnet || ore == Material::Diopside {
-            VeinBias::Compact
-        } else {
-            default_vein_bias(ore, rng)
-        };
-        let params = VeinGrowthParams { ore, min_size: min_sz, max_size: max_sz, bias, exclude_aureole: false };
+        let ore = if (i as f32) < (seeds.len() as f32 * 0.6) { ore_a } else { ore_b };
+        let bias = default_vein_bias(ore, rng);
+        let params = VeinGrowthParams { ore, min_size: vein_min, max_size: vein_max, bias, exclude_aureole: false };
         let positions = grow_vein(density_fields, seed, &params, chunk_size, rng);
         total_placed += apply_vein_to_world(&positions, ore, density_fields, chunk_size, manifest);
+    }
+
+    // Compact Garnet + Diopside pockets (placed into skarn zones)
+    let mut skarn_seeds: Vec<(i32, i32, i32)> = converted.iter()
+        .filter(|&&pos| {
+            sample_material(density_fields, pos.0, pos.1, pos.2, chunk_size)
+                .map_or(false, |m| m == Material::Skarn)
+        })
+        .copied()
+        .collect();
+    skarn_seeds.sort();
+    if !skarn_seeds.is_empty() {
+        let g_size = ((config.garnet_compact_size as f32 * deposit_mult).round() as u32).max(3);
+        for _ in 0..config.garnet_pocket_count {
+            let seed = skarn_seeds[rng.gen_range(0..skarn_seeds.len())];
+            let params = VeinGrowthParams {
+                ore: Material::Garnet,
+                min_size: (g_size * 8) / 10,
+                max_size: g_size,
+                bias: VeinBias::Compact,
+                exclude_aureole: false,
+            };
+            let positions = grow_vein(density_fields, seed, &params, chunk_size, rng);
+            total_placed += apply_vein_to_world(&positions, Material::Garnet, density_fields, chunk_size, manifest);
+        }
+
+        let d_size = ((config.diopside_compact_size as f32 * deposit_mult).round() as u32).max(3);
+        for _ in 0..config.diopside_pocket_count {
+            let seed = skarn_seeds[rng.gen_range(0..skarn_seeds.len())];
+            let params = VeinGrowthParams {
+                ore: Material::Diopside,
+                min_size: (d_size * 8) / 10,
+                max_size: d_size,
+                bias: VeinBias::Compact,
+                exclude_aureole: false,
+            };
+            let positions = grow_vein(density_fields, seed, &params, chunk_size, rng);
+            total_placed += apply_vein_to_world(&positions, Material::Diopside, density_fields, chunk_size, manifest);
+        }
     }
 
     total_placed
@@ -650,8 +714,16 @@ pub fn apply_aureole(
             let base_depth = (cell_count.ln().max(1.0) * config.radius_scale * config.heat_multiplier)
                 .min(config.max_radius)
                 .max(2.0);
-            let water_boost = compute_water_boost(zone, fluid_snapshot, config.water_boost_max);
+            let (water_boost, water_deposit_mult) = compute_water_boost(zone, fluid_snapshot, config);
             let final_depth = (base_depth * water_boost).ceil() as i32;
+
+            // Lava volume scaling: fraction of zone cells vs max_cells cap
+            let lava_max = config.aureole_lava_volume_max_cells.max(1);
+            let lava_frac = (cell_count.min(lava_max as f32)) / (lava_max as f32);
+            let lava_deposit_mult = 1.0 + lava_frac * config.aureole_lava_deposit_mult;
+            let lava_count_mult = 1.0 + lava_frac * config.aureole_lava_count_mult;
+            let combined_deposit_mult = lava_deposit_mult * water_deposit_mult;
+            let combined_count_mult = lava_count_mult;
 
             if final_depth < 1 {
                 continue;
@@ -722,15 +794,16 @@ pub fn apply_aureole(
             }
 
             // Pass 2: ore veins + pockets (grow into just-placed metamorphic rock)
-            let heat_level = cell_count * config.heat_multiplier;
             let veins_placed = match aureole_type {
                 AureoleType::Slate => place_slate_veins(
-                    &converted, heat_level, config,
+                    &converted, config,
                     density_fields, chunk_size, &mut result.manifest, rng, skarn_n,
+                    combined_deposit_mult, combined_count_mult,
                 ),
                 AureoleType::Limestone => place_limestone_veins(
-                    &converted, heat_level, config,
+                    &converted, config,
                     density_fields, chunk_size, &mut result.manifest, rng,
+                    combined_deposit_mult, combined_count_mult,
                 ),
             };
             result.veins_placed += veins_placed;

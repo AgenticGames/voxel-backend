@@ -294,6 +294,37 @@ pub struct AureoleConfig {
     /// Maximum base radius for aureole metamorphic sphere (before water boost).
     #[serde(default = "default_max_aureole_radius")]
     pub max_radius: f32,
+    // ── Aureole deposit detail settings ──
+    /// Number of ore vein seed points per zone (was hardcoded 8)
+    pub aureole_vein_count: u32,
+    /// Min vein size for aureole ore deposits
+    pub aureole_vein_min: u32,
+    /// Max vein size for aureole ore deposits
+    pub aureole_vein_max: u32,
+    /// Garnet compact deposit radius (Compact bias target size)
+    pub garnet_compact_size: u32,
+    /// Diopside compact deposit radius
+    pub diopside_compact_size: u32,
+    /// Number of garnet pockets per zone
+    pub garnet_pocket_count: u32,
+    /// Number of diopside pockets per zone
+    pub diopside_pocket_count: u32,
+    // ── Lava volume scaling for aureole ──
+    /// Radius to count lava cells for zone volume scaling
+    pub aureole_lava_volume_max_cells: u32,
+    /// Deposit size multiplier bonus at max lava volume
+    pub aureole_lava_deposit_mult: f32,
+    /// Vein count multiplier bonus at max lava volume
+    pub aureole_lava_count_mult: f32,
+    /// Vein seed spread factor (0.0 = random placement, 1.0 = max spread apart)
+    pub aureole_vein_spread: f32,
+    // ── Water boost exposure ──
+    /// Radius for water search around lava zone (in voxels, 0 = face-neighbor only)
+    pub aureole_water_search_radius: u32,
+    /// Max water cells counted before diminishing returns
+    pub aureole_water_max_cells: u32,
+    /// Deposit size multiplier bonus at max water
+    pub aureole_water_deposit_mult: f32,
 }
 
 impl Default for AureoleConfig {
@@ -334,6 +365,20 @@ impl Default for AureoleConfig {
             garnet_pocket_size: 4,
             diopside_pocket_size: 4,
             max_radius: 10.0,
+            aureole_vein_count: 8,
+            aureole_vein_min: 6,
+            aureole_vein_max: 20,
+            garnet_compact_size: 8,
+            diopside_compact_size: 8,
+            garnet_pocket_count: 2,
+            diopside_pocket_count: 1,
+            aureole_vein_spread: 0.5,
+            aureole_lava_volume_max_cells: 50,
+            aureole_lava_deposit_mult: 1.0,
+            aureole_lava_count_mult: 0.5,
+            aureole_water_search_radius: 3,
+            aureole_water_max_cells: 30,
+            aureole_water_deposit_mult: 0.5,
         }
     }
 }

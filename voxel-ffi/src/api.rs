@@ -2258,6 +2258,21 @@ mod tests {
             sleep_spike_length_max: 5,
             sleep_spike_taper: 0.7,
             ore_global_scale: 1.0,
+            // Aureole deposit detail
+            sleep_aureole_vein_count: 8,
+            sleep_aureole_vein_min: 6,
+            sleep_aureole_vein_max: 20,
+            sleep_garnet_compact_size: 8,
+            sleep_diopside_compact_size: 8,
+            sleep_garnet_pocket_count: 2,
+            sleep_diopside_pocket_count: 1,
+            sleep_aureole_vein_spread: 0.5,
+            sleep_aureole_lava_max_cells: 50,
+            sleep_aureole_lava_deposit_mult: 1.0,
+            sleep_aureole_lava_count_mult: 0.5,
+            sleep_aureole_water_search_radius: 3,
+            sleep_aureole_water_max_cells: 30,
+            sleep_aureole_water_deposit_mult: 0.5,
         }
     }
 
