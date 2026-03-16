@@ -117,6 +117,10 @@ pub struct SleepResult {
     pub aureole_glimpse_pos: Option<(i32, i32, i32)>,
     /// Exact world voxel position of the most intense vein deposit (for montage camera)
     pub vein_glimpse_pos: Option<(i32, i32, i32)>,
+    /// 2x2x2 block of chunk coords around aureole glimpse (for showcase montage)
+    pub aureole_showcase_block: Option<[(i32, i32, i32); 8]>,
+    /// 2x2x2 block of chunk coords around vein glimpse (for showcase montage)
+    pub vein_showcase_block: Option<[(i32, i32, i32); 8]>,
     /// Detailed log of transformations for UI display
     pub transform_log: Vec<TransformEntry>,
     /// Change manifest recording all modifications for persistence
@@ -484,6 +488,8 @@ pub fn execute_sleep(
     let mut aureole_debug_lines: Vec<String> = Vec::new();
     let mut aureole_glimpse_pos: Option<(i32, i32, i32)> = None;
     let mut vein_glimpse_pos: Option<(i32, i32, i32)> = None;
+    let mut aureole_showcase_block: Option<[(i32, i32, i32); 8]> = None;
+    let mut vein_showcase_block: Option<[(i32, i32, i32); 8]> = None;
 
     // ═══ Phase 1: The Aureole (100,000 years) ═══
     // Aureole runs BEFORE reaction so metamorphic minerals (marble, garnet, diopside)
@@ -505,6 +511,14 @@ pub fn execute_sleep(
         aureole_debug_zones = aureole_result.debug_zones;
         aureole_debug_lines = aureole_result.debug_lines;
         aureole_glimpse_pos = aureole_result.glimpse_pos;
+        aureole_showcase_block = aureole_glimpse_pos.map(|(wx, wy, wz)| {
+            let cs = chunk_size as i32;
+            let gx = wx.div_euclid(cs);
+            let gy = wy.div_euclid(cs);
+            let gz = wz.div_euclid(cs);
+            [(gx, gy, gz), (gx+1, gy, gz), (gx, gy+1, gz), (gx+1, gy+1, gz),
+             (gx, gy, gz+1), (gx+1, gy, gz+1), (gx, gy+1, gz+1), (gx+1, gy+1, gz+1)]
+        });
         result_manifest.merge_sleep_changes(&aureole_result.manifest);
         transform_log.extend(aureole_result.transform_log);
         for key in aureole_result.manifest.chunk_deltas.keys() {
@@ -565,6 +579,14 @@ pub fn execute_sleep(
         total_formations += vein_result.formations_grown;
         diag_veins = vein_result.diagnostics;
         vein_glimpse_pos = vein_result.glimpse_pos;
+        vein_showcase_block = vein_glimpse_pos.map(|(wx, wy, wz)| {
+            let cs = chunk_size as i32;
+            let gx = wx.div_euclid(cs);
+            let gy = wy.div_euclid(cs);
+            let gz = wz.div_euclid(cs);
+            [(gx, gy, gz), (gx+1, gy, gz), (gx, gy+1, gz), (gx+1, gy+1, gz),
+             (gx, gy, gz+1), (gx+1, gy, gz+1), (gx, gy+1, gz+1), (gx+1, gy+1, gz+1)]
+        });
         result_manifest.merge_sleep_changes(&vein_result.manifest);
         transform_log.extend(vein_result.transform_log);
         for key in vein_result.manifest.chunk_deltas.keys() {
@@ -837,6 +859,8 @@ pub fn execute_sleep(
         collapse_events: all_collapse_events,
         aureole_glimpse_pos,
         vein_glimpse_pos,
+        aureole_showcase_block,
+        vein_showcase_block,
         transform_log,
         manifest: result_manifest,
         profile_report,
@@ -1372,6 +1396,15 @@ pub fn execute_aureole_only(
         collapse_events: Vec::new(),
         aureole_glimpse_pos: aureole_result.glimpse_pos,
         vein_glimpse_pos: None,
+        aureole_showcase_block: aureole_result.glimpse_pos.map(|(wx, wy, wz)| {
+            let cs = chunk_size as i32;
+            let gx = wx.div_euclid(cs);
+            let gy = wy.div_euclid(cs);
+            let gz = wz.div_euclid(cs);
+            [(gx, gy, gz), (gx+1, gy, gz), (gx, gy+1, gz), (gx+1, gy+1, gz),
+             (gx, gy, gz+1), (gx+1, gy, gz+1), (gx, gy+1, gz+1), (gx+1, gy+1, gz+1)]
+        }),
+        vein_showcase_block: None,
         transform_log,
         manifest: result_manifest,
         profile_report,

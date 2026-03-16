@@ -52,6 +52,16 @@ pub struct SleepCompleteData {
     pub profile_report: String,
     pub aureole_glimpse_pos: Option<(i32, i32, i32)>,
     pub vein_glimpse_pos: Option<(i32, i32, i32)>,
+    pub aureole_showcase_block: Option<[(i32, i32, i32); 8]>,
+    pub vein_showcase_block: Option<[(i32, i32, i32); 8]>,
+    pub manifest_json: String,
+}
+
+/// Internal morph step result (Rust side, before FFI conversion).
+pub struct MorphStepResult {
+    pub step: u32,
+    pub total_steps: u32,
+    pub meshes: Vec<crate::types::ConvertedMesh>,
 }
 
 pub struct VoxelEngine {
@@ -74,6 +84,9 @@ pub struct VoxelEngine {
 
     // Sleep
     sleep_complete: Arc<Mutex<Option<SleepCompleteData>>>,
+
+    // Morph
+    morph_results: Arc<Mutex<std::collections::VecDeque<MorphStepResult>>>,
 
     // World Scan
     scan_complete: Arc<Mutex<Option<String>>>,
@@ -196,6 +209,7 @@ impl VoxelEngine {
             generation_counters,
             shutdown,
             sleep_complete: Arc::new(Mutex::new(None)),
+            morph_results: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             scan_complete: Arc::new(Mutex::new(None)),
             force_spawn_complete: Arc::new(Mutex::new(None)),
             profiler,
@@ -292,6 +306,9 @@ impl VoxelEngine {
                 profile_report,
                 aureole_glimpse_pos,
                 vein_glimpse_pos,
+                aureole_showcase_block,
+                vein_showcase_block,
+                manifest_json,
             }) => {
                 if let Ok(mut sc) = self.sleep_complete.lock() {
                     *sc = Some(SleepCompleteData {
@@ -315,9 +332,18 @@ impl VoxelEngine {
                         profile_report,
                         aureole_glimpse_pos,
                         vein_glimpse_pos,
+                        aureole_showcase_block,
+                        vein_showcase_block,
+                        manifest_json,
                     });
                 }
                 // Don't expose to the FfiResult pipeline; UE polls via voxel_poll_sleep_result
+                None
+            }
+            Ok(WorkerResult::MorphMeshes { step, total_steps, meshes }) => {
+                if let Ok(mut mq) = self.morph_results.lock() {
+                    mq.push_back(MorphStepResult { step, total_steps, meshes });
+                }
                 None
             }
             Ok(WorkerResult::ScanComplete { json_report }) => {
@@ -383,6 +409,32 @@ impl VoxelEngine {
     pub fn poll_sleep_complete(&self) -> Option<SleepCompleteData> {
         let mut sc = self.sleep_complete.lock().ok()?;
         sc.take()
+    }
+
+    /// Request a morph step. Sent through the generate channel (read lock only).
+    /// Returns 1 on success, 0 if queue full.
+    pub fn request_morph_step(
+        &self,
+        chunks: Vec<(i32, i32, i32)>,
+        manifest_json: String,
+        step: u32,
+        total_steps: u32,
+    ) -> u32 {
+        match self.generate_tx.try_send(WorkerRequest::MorphStep {
+            chunks,
+            manifest_json,
+            step,
+            total_steps,
+        }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
+    /// Poll for a completed morph step result. Returns None if no morph has completed yet.
+    pub fn poll_morph_result(&self) -> Option<MorphStepResult> {
+        let mut mq = self.morph_results.lock().ok()?;
+        mq.pop_front()
     }
 
     /// Request a world scan. Sent through the mine channel for immediate processing.

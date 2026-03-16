@@ -218,6 +218,10 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                 // Intercepted by engine.poll_result(); ignore if it reaches here.
                 ptr::null_mut()
             }
+            WorkerResult::MorphMeshes { .. } => {
+                // Intercepted by engine.poll_result(); ignore if it reaches here.
+                ptr::null_mut()
+            }
         },
     }
 }
@@ -734,6 +738,7 @@ pub unsafe extern "C" fn voxel_start_aureole_only(
 /// pipeline; this function only returns the summary statistics.
 #[no_mangle]
 pub unsafe extern "C" fn voxel_poll_sleep_result(engine: *mut c_void) -> FfiSleepResult {
+    let empty_coord = FfiChunkCoord { x: 0, y: 0, z: 0 };
     let empty = FfiSleepResult {
         success: 0,
         chunks_changed: 0,
@@ -763,6 +768,12 @@ pub unsafe extern "C" fn voxel_poll_sleep_result(engine: *mut c_void) -> FfiSlee
         aureole_glimpse_x: 0, aureole_glimpse_y: 0, aureole_glimpse_z: 0,
         has_vein_glimpse: 0,
         vein_glimpse_x: 0, vein_glimpse_y: 0, vein_glimpse_z: 0,
+        has_aureole_block: 0,
+        aureole_block: [empty_coord; 8],
+        has_vein_block: 0,
+        vein_block: [empty_coord; 8],
+        manifest_json: ptr::null_mut(),
+        manifest_json_length: 0,
     };
     if engine.is_null() {
         return empty;
@@ -771,11 +782,16 @@ pub unsafe extern "C" fn voxel_poll_sleep_result(engine: *mut c_void) -> FfiSlee
     match engine.poll_sleep_complete() {
         Some(data) => {
             // Strip any interior null bytes so CString::new() cannot fail.
-            // A null byte in the profile report (e.g. from a botched format or
-            // Material::display_name()) would silently produce a 0-byte file in UE5.
             let sanitized_report: String = data.profile_report.replace('\0', "");
             let (report_ptr, report_len) = {
                 let cstr = CString::new(sanitized_report).unwrap_or_default();
+                let len = cstr.as_bytes().len() as u32;
+                (cstr.into_raw(), len)
+            };
+            let (manifest_ptr, manifest_len) = if data.manifest_json.is_empty() {
+                (ptr::null_mut(), 0u32)
+            } else {
+                let cstr = CString::new(data.manifest_json).unwrap_or_default();
                 let len = cstr.as_bytes().len() as u32;
                 (cstr.into_raw(), len)
             };
@@ -812,6 +828,18 @@ pub unsafe extern "C" fn voxel_poll_sleep_result(engine: *mut c_void) -> FfiSlee
                 vein_glimpse_x: data.vein_glimpse_pos.map_or(0, |p| p.0),
                 vein_glimpse_y: data.vein_glimpse_pos.map_or(0, |p| p.1),
                 vein_glimpse_z: data.vein_glimpse_pos.map_or(0, |p| p.2),
+                has_aureole_block: if data.aureole_showcase_block.is_some() { 1 } else { 0 },
+                aureole_block: data.aureole_showcase_block.map_or(
+                    [FfiChunkCoord { x: 0, y: 0, z: 0 }; 8],
+                    |b| b.map(|(x, y, z)| FfiChunkCoord { x, y, z }),
+                ),
+                has_vein_block: if data.vein_showcase_block.is_some() { 1 } else { 0 },
+                vein_block: data.vein_showcase_block.map_or(
+                    [FfiChunkCoord { x: 0, y: 0, z: 0 }; 8],
+                    |b| b.map(|(x, y, z)| FfiChunkCoord { x, y, z }),
+                ),
+                manifest_json: manifest_ptr,
+                manifest_json_length: manifest_len,
             }
         },
         None => empty,
@@ -940,6 +968,145 @@ pub unsafe extern "C" fn voxel_free_sleep_result(result: *mut FfiSleepResult) {
     }
     if !r.profile_report.is_null() {
         drop(CString::from_raw(r.profile_report));
+    }
+    if !r.manifest_json.is_null() {
+        drop(CString::from_raw(r.manifest_json));
+    }
+}
+
+// ── Morph Step ──
+
+/// Request a morph step for progressive showcase morphing.
+/// chunks: pointer to array of FfiChunkCoord (Rust chunk coords)
+/// chunk_count: number of chunks (typically 8)
+/// manifest_json: C string of the compacted manifest JSON
+/// manifest_len: byte length of the manifest string
+/// step: current step (0..total_steps)
+/// total_steps: total number of morph steps
+/// Returns 1 on success, 0 if queue full.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_request_morph_step(
+    engine: *mut c_void,
+    chunks: *const FfiChunkCoord,
+    chunk_count: u32,
+    manifest_json: *const std::ffi::c_char,
+    manifest_len: u32,
+    step: u32,
+    total_steps: u32,
+) -> u32 {
+    if engine.is_null() || chunks.is_null() || manifest_json.is_null() || chunk_count == 0 {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+
+    // Convert chunk coords
+    let chunk_slice = std::slice::from_raw_parts(chunks, chunk_count as usize);
+    let chunk_vec: Vec<(i32, i32, i32)> = chunk_slice.iter()
+        .map(|c| (c.x, c.y, c.z))
+        .collect();
+
+    // Convert manifest JSON
+    let json_bytes = std::slice::from_raw_parts(manifest_json as *const u8, manifest_len as usize);
+    let json_str = match std::str::from_utf8(json_bytes) {
+        Ok(s) => s.to_string(),
+        Err(_) => return 0,
+    };
+
+    engine.request_morph_step(chunk_vec, json_str, step, total_steps)
+}
+
+/// Poll for a completed morph step result.
+/// Returns null if no result ready, or a heap-allocated FfiMorphResult.
+/// Caller MUST call voxel_free_morph_result when done.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_poll_morph_result(engine: *mut c_void) -> *mut FfiMorphResult {
+    if engine.is_null() {
+        return ptr::null_mut();
+    }
+    let engine = &*(engine as *const VoxelEngine);
+
+    match engine.poll_morph_result() {
+        Some(result) => {
+            let chunk_count = result.meshes.len() as u32;
+
+            // Allocate array of FfiMeshData
+            let mut mesh_array: Vec<FfiMeshData> = Vec::with_capacity(result.meshes.len());
+            for converted in result.meshes {
+                let vert_count = converted.positions.len() as u32;
+                let idx_count = converted.indices.len() as u32;
+                let sub_count = converted.submeshes.len() as u32;
+
+                let mut positions = converted.positions.into_boxed_slice();
+                let mut normals = converted.normals.into_boxed_slice();
+                let mut material_ids = converted.material_ids.into_boxed_slice();
+                let mut indices = converted.indices.into_boxed_slice();
+                let mut submeshes = converted.submeshes.into_boxed_slice();
+
+                let mesh = FfiMeshData {
+                    positions: positions.as_mut_ptr(),
+                    normals: normals.as_mut_ptr(),
+                    material_ids: material_ids.as_mut_ptr(),
+                    vertex_count: vert_count,
+                    indices: indices.as_mut_ptr(),
+                    index_count: idx_count,
+                    submeshes: submeshes.as_mut_ptr(),
+                    submesh_count: sub_count,
+                };
+
+                // Leak the boxes so FFI owns them
+                std::mem::forget(positions);
+                std::mem::forget(normals);
+                std::mem::forget(material_ids);
+                std::mem::forget(indices);
+                std::mem::forget(submeshes);
+
+                mesh_array.push(mesh);
+            }
+
+            let mut mesh_box = mesh_array.into_boxed_slice();
+            let meshes_ptr = mesh_box.as_mut_ptr();
+            std::mem::forget(mesh_box);
+
+            let ffi_result = Box::new(FfiMorphResult {
+                step: result.step,
+                total_steps: result.total_steps,
+                chunk_count,
+                meshes: meshes_ptr,
+            });
+            Box::into_raw(ffi_result)
+        }
+        None => ptr::null_mut(),
+    }
+}
+
+/// Free a morph result and all its internal mesh data.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_free_morph_result(result: *mut FfiMorphResult) {
+    if result.is_null() {
+        return;
+    }
+    let r = Box::from_raw(result);
+    if !r.meshes.is_null() && r.chunk_count > 0 {
+        let mesh_slice = std::slice::from_raw_parts_mut(r.meshes, r.chunk_count as usize);
+        for mesh in mesh_slice.iter() {
+            if !mesh.positions.is_null() && mesh.vertex_count > 0 {
+                let _ = Vec::from_raw_parts(mesh.positions, mesh.vertex_count as usize, mesh.vertex_count as usize);
+            }
+            if !mesh.normals.is_null() && mesh.vertex_count > 0 {
+                let _ = Vec::from_raw_parts(mesh.normals, mesh.vertex_count as usize, mesh.vertex_count as usize);
+            }
+            if !mesh.material_ids.is_null() && mesh.vertex_count > 0 {
+                let _ = Vec::from_raw_parts(mesh.material_ids, mesh.vertex_count as usize, mesh.vertex_count as usize);
+            }
+            if !mesh.indices.is_null() && mesh.index_count > 0 {
+                let _ = Vec::from_raw_parts(mesh.indices, mesh.index_count as usize, mesh.index_count as usize);
+            }
+            if !mesh.submeshes.is_null() && mesh.submesh_count > 0 {
+                let _ = Vec::from_raw_parts(mesh.submeshes, mesh.submesh_count as usize, mesh.submesh_count as usize);
+            }
+        }
+        // Free the mesh array itself
+        let _ = Vec::from_raw_parts(r.meshes, r.chunk_count as usize, r.chunk_count as usize);
     }
 }
 

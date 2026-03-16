@@ -1264,6 +1264,11 @@ fn handle_request(
             let _ = writeln!(report, "  GRAND TOTAL (worker): {:.2} ms", dur_ms(t_worker_total));
             let _ = writeln!(report, "═══════════════════════════════════════════════════════");
 
+            // Compact & serialize manifest for morph system
+            let mut compact_manifest = sleep_result.manifest.clone();
+            compact_manifest.compact();
+            let manifest_json = compact_manifest.to_json().unwrap_or_default();
+
             // Send sleep completion stats (intercepted by engine.poll_result)
             let _ = result_tx.send(WorkerResult::SleepComplete {
                 chunks_changed: sleep_result.chunks_changed,
@@ -1286,6 +1291,9 @@ fn handle_request(
                 profile_report: report,
                 aureole_glimpse_pos: sleep_result.aureole_glimpse_pos,
                 vein_glimpse_pos: sleep_result.vein_glimpse_pos,
+                aureole_showcase_block: sleep_result.aureole_showcase_block,
+                vein_showcase_block: sleep_result.vein_showcase_block,
+                manifest_json,
             });
         }
         WorkerRequest::AureoleOnly { player_chunk, sleep_config: sc } => {
@@ -1386,6 +1394,82 @@ fn handle_request(
                 profile_report: report,
                 aureole_glimpse_pos: sleep_result.aureole_glimpse_pos,
                 vein_glimpse_pos: sleep_result.vein_glimpse_pos,
+                aureole_showcase_block: sleep_result.aureole_showcase_block,
+                vein_showcase_block: sleep_result.vein_showcase_block,
+                manifest_json: String::new(), // Aureole-only doesn't need morph
+            });
+        }
+        WorkerRequest::MorphStep { chunks, manifest_json, step, total_steps } => {
+            let cfg = config.read().unwrap().clone();
+
+            // Deserialize manifest
+            let manifest = match voxel_sleep::ChangeManifest::from_json(&manifest_json) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("[MORPH] Failed to deserialize manifest: {}", e);
+                    let _ = result_tx.send(WorkerResult::MorphMeshes {
+                        step, total_steps, meshes: Vec::new(),
+                    });
+                    return;
+                }
+            };
+
+            let t = if total_steps > 0 { step as f32 / total_steps as f32 } else { 1.0 };
+            let s = store.read().unwrap();
+            let mut meshes = Vec::with_capacity(chunks.len());
+
+            for &key in &chunks {
+                let density = match s.density_fields.get(&key) {
+                    Some(d) => d,
+                    None => {
+                        // Missing chunk — emit empty mesh
+                        meshes.push(crate::types::ConvertedMesh {
+                            positions: Vec::new(),
+                            normals: Vec::new(),
+                            material_ids: Vec::new(),
+                            indices: Vec::new(),
+                            submeshes: Vec::new(),
+                        });
+                        continue;
+                    }
+                };
+
+                // Clone the post-sleep density field
+                let mut df = density.clone();
+
+                // Reverse all changes to get "before" state, then interpolate to t
+                if let Some(delta) = manifest.chunk_deltas.get(&key) {
+                    for change in &delta.voxel_changes {
+                        let sample = df.get_mut(change.lx, change.ly, change.lz);
+                        // Interpolate density
+                        let old_d = change.old_density;
+                        let new_d = change.new_density;
+                        sample.density = old_d + (new_d - old_d) * t;
+                        // Snap material at t=0.5
+                        let old_mat = voxel_core::material::Material::from_u8(change.old_material);
+                        let new_mat = voxel_core::material::Material::from_u8(change.new_material);
+                        sample.material = if t >= 0.5 { new_mat } else { old_mat };
+                    }
+                }
+
+                // Mesh the interpolated density field
+                let h = voxel_gen::hermite_extract::extract_hermite_data(&df);
+                let cell_size = df.size - 1;
+                let dc_vertices = voxel_core::dual_contouring::solve::solve_dc_vertices(&h, cell_size);
+                let mut mesh = voxel_core::dual_contouring::mesh_gen::generate_mesh(&h, &dc_vertices, cell_size);
+                mesh.smooth(cfg.mesh_smooth_iterations, cfg.mesh_smooth_strength, cfg.mesh_boundary_smooth, Some(cell_size));
+                if cfg.mesh_recalc_normals > 0 { mesh.recalculate_normals(); }
+
+                let mut converted = convert_mesh_to_ue_scaled(&mesh, cfg.voxel_scale(), world_scale);
+                crate::convert::bucket_mesh_by_material(&mut converted);
+                meshes.push(converted);
+            }
+
+            drop(s);
+            eprintln!("[MORPH] Step {}/{}: meshed {} chunks", step, total_steps, meshes.len());
+
+            let _ = result_tx.send(WorkerResult::MorphMeshes {
+                step, total_steps, meshes,
             });
         }
         WorkerRequest::WorldScan => {

@@ -1024,6 +1024,24 @@ pub struct FfiSleepResult {
     pub vein_glimpse_x: i32,
     pub vein_glimpse_y: i32,
     pub vein_glimpse_z: i32,
+    // Showcase block coords (8 Rust chunk coords for 2x2x2 block)
+    pub has_aureole_block: u32,
+    pub aureole_block: [FfiChunkCoord; 8],
+    pub has_vein_block: u32,
+    pub vein_block: [FfiChunkCoord; 8],
+    // Compacted manifest JSON for morph system
+    pub manifest_json: *mut std::ffi::c_char,
+    pub manifest_json_length: u32,
+}
+
+/// Morph step result: 8 meshes (one per showcase chunk) for progressive morphing.
+/// Heap-allocated array of FfiMeshData — caller must free via voxel_free_morph_result.
+#[repr(C)]
+pub struct FfiMorphResult {
+    pub step: u32,
+    pub total_steps: u32,
+    pub chunk_count: u32,
+    pub meshes: *mut FfiMeshData,  // heap array, length = chunk_count
 }
 
 // ── Internal (non-FFI) types ──
@@ -1116,6 +1134,12 @@ pub enum WorkerRequest {
         fluid_type: u8,
         world_scale: f32,
     },
+    MorphStep {
+        chunks: Vec<(i32, i32, i32)>,
+        manifest_json: String,
+        step: u32,
+        total_steps: u32,
+    },
 }
 
 /// Results sent back from worker threads.
@@ -1169,6 +1193,14 @@ pub enum WorkerResult {
         profile_report: String,
         aureole_glimpse_pos: Option<(i32, i32, i32)>,
         vein_glimpse_pos: Option<(i32, i32, i32)>,
+        aureole_showcase_block: Option<[(i32, i32, i32); 8]>,
+        vein_showcase_block: Option<[(i32, i32, i32); 8]>,
+        manifest_json: String,
+    },
+    MorphMeshes {
+        step: u32,
+        total_steps: u32,
+        meshes: Vec<ConvertedMesh>,
     },
     ScanComplete {
         json_report: String,
