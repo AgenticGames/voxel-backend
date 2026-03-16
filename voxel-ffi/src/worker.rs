@@ -1416,13 +1416,105 @@ fn handle_request(
 
             let t = if total_steps > 0 { step as f32 / total_steps as f32 } else { 1.0 };
             let s = store.read().unwrap();
-            let mut meshes = Vec::with_capacity(chunks.len());
 
+            // Phase 1: Clone all density fields and apply manifest interpolation
+            let mut density_fields: Vec<Option<voxel_core::density::DensityField>> = Vec::with_capacity(chunks.len());
             for &key in &chunks {
-                let density = match s.density_fields.get(&key) {
-                    Some(d) => d,
+                match s.density_fields.get(&key) {
+                    Some(d) => {
+                        let mut df = d.clone();
+                        if let Some(delta) = manifest.chunk_deltas.get(&key) {
+                            for change in &delta.voxel_changes {
+                                let sample = df.get_mut(change.lx, change.ly, change.lz);
+                                let old_d = change.old_density;
+                                let new_d = change.new_density;
+                                sample.density = old_d + (new_d - old_d) * t;
+                                let old_mat = voxel_core::material::Material::from_u8(change.old_material);
+                                let new_mat = voxel_core::material::Material::from_u8(change.new_material);
+                                sample.material = if t >= 0.5 { new_mat } else { old_mat };
+                            }
+                        }
+                        density_fields.push(Some(df));
+                    }
+                    None => density_fields.push(None),
+                }
+            }
+            drop(s);
+
+            // Phase 2: Sync boundaries between adjacent chunks in the 2x2x2 block.
+            // Block layout: i=0..(gx,gy,gz) i=1..(gx+1,gy,gz) i=2..(gx,gy+1,gz) etc.
+            // X-adjacent: (0,1),(2,3),(4,5),(6,7)  — copy a's x=cs face → b's x=0
+            // Y-adjacent: (0,2),(1,3),(4,6),(5,7)  — copy a's y=cs face → b's y=0
+            // Z-adjacent: (0,4),(1,5),(2,6),(3,7)  — copy a's z=cs face → b's z=0
+            if density_fields.len() == 8 {
+                let cs = density_fields.iter().flatten().next()
+                    .map(|df| df.size - 1).unwrap_or(16);
+                let sz = cs + 1; // grid size (17)
+
+                // Helper: copy boundary face from src to dst
+                // axis: 0=X, 1=Y, 2=Z. src_idx=cs face, dst_idx=0 face.
+                let sync_face = |dfs: &mut [Option<voxel_core::density::DensityField>], a: usize, b: usize, axis: usize| {
+                    // Collect boundary from a
+                    let boundary: Vec<(usize, usize, f32, voxel_core::material::Material)> = {
+                        let src = match &dfs[a] { Some(d) => d, None => return };
+                        let mut out = Vec::with_capacity(sz * sz);
+                        for u in 0..sz {
+                            for v in 0..sz {
+                                let s = match axis {
+                                    0 => src.get(cs, u, v),
+                                    1 => src.get(u, cs, v),
+                                    _ => src.get(u, v, cs),
+                                };
+                                out.push((u, v, s.density, s.material));
+                            }
+                        }
+                        out
+                    };
+                    // Write to b
+                    if let Some(dst) = &mut dfs[b] {
+                        for &(u, v, density, material) in &boundary {
+                            let s = match axis {
+                                0 => dst.get_mut(0, u, v),
+                                1 => dst.get_mut(u, 0, v),
+                                _ => dst.get_mut(u, v, 0),
+                            };
+                            s.density = density;
+                            s.material = material;
+                        }
+                    }
+                };
+
+                // X-adjacent pairs
+                for &(a, b) in &[(0,1), (2,3), (4,5), (6,7)] {
+                    sync_face(&mut density_fields, a, b, 0);
+                }
+                // Y-adjacent pairs
+                for &(a, b) in &[(0,2), (1,3), (4,6), (5,7)] {
+                    sync_face(&mut density_fields, a, b, 1);
+                }
+                // Z-adjacent pairs
+                for &(a, b) in &[(0,4), (1,5), (2,6), (3,7)] {
+                    sync_face(&mut density_fields, a, b, 2);
+                }
+            }
+
+            // Phase 3: Mesh all density fields
+            let mut meshes = Vec::with_capacity(chunks.len());
+            for df_opt in &density_fields {
+                match df_opt {
+                    Some(df) => {
+                        let h = voxel_gen::hermite_extract::extract_hermite_data(df);
+                        let cell_size = df.size - 1;
+                        let dc_vertices = voxel_core::dual_contouring::solve::solve_dc_vertices(&h, cell_size);
+                        let mut mesh = voxel_core::dual_contouring::mesh_gen::generate_mesh(&h, &dc_vertices, cell_size);
+                        mesh.smooth(cfg.mesh_smooth_iterations, cfg.mesh_smooth_strength, cfg.mesh_boundary_smooth, Some(cell_size));
+                        if cfg.mesh_recalc_normals > 0 { mesh.recalculate_normals(); }
+
+                        let mut converted = convert_mesh_to_ue_scaled(&mesh, cfg.voxel_scale(), world_scale);
+                        crate::convert::bucket_mesh_by_material(&mut converted);
+                        meshes.push(converted);
+                    }
                     None => {
-                        // Missing chunk — emit empty mesh
                         meshes.push(crate::types::ConvertedMesh {
                             positions: Vec::new(),
                             normals: Vec::new(),
@@ -1430,42 +1522,10 @@ fn handle_request(
                             indices: Vec::new(),
                             submeshes: Vec::new(),
                         });
-                        continue;
-                    }
-                };
-
-                // Clone the post-sleep density field
-                let mut df = density.clone();
-
-                // Reverse all changes to get "before" state, then interpolate to t
-                if let Some(delta) = manifest.chunk_deltas.get(&key) {
-                    for change in &delta.voxel_changes {
-                        let sample = df.get_mut(change.lx, change.ly, change.lz);
-                        // Interpolate density
-                        let old_d = change.old_density;
-                        let new_d = change.new_density;
-                        sample.density = old_d + (new_d - old_d) * t;
-                        // Snap material at t=0.5
-                        let old_mat = voxel_core::material::Material::from_u8(change.old_material);
-                        let new_mat = voxel_core::material::Material::from_u8(change.new_material);
-                        sample.material = if t >= 0.5 { new_mat } else { old_mat };
                     }
                 }
-
-                // Mesh the interpolated density field
-                let h = voxel_gen::hermite_extract::extract_hermite_data(&df);
-                let cell_size = df.size - 1;
-                let dc_vertices = voxel_core::dual_contouring::solve::solve_dc_vertices(&h, cell_size);
-                let mut mesh = voxel_core::dual_contouring::mesh_gen::generate_mesh(&h, &dc_vertices, cell_size);
-                mesh.smooth(cfg.mesh_smooth_iterations, cfg.mesh_smooth_strength, cfg.mesh_boundary_smooth, Some(cell_size));
-                if cfg.mesh_recalc_normals > 0 { mesh.recalculate_normals(); }
-
-                let mut converted = convert_mesh_to_ue_scaled(&mesh, cfg.voxel_scale(), world_scale);
-                crate::convert::bucket_mesh_by_material(&mut converted);
-                meshes.push(converted);
             }
 
-            drop(s);
             eprintln!("[MORPH] Step {}/{}: meshed {} chunks", step, total_steps, meshes.len());
 
             let _ = result_tx.send(WorkerResult::MorphMeshes {
