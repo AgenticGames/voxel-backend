@@ -451,7 +451,10 @@ pub fn apply_veins(
                                         } else {
                                             0.0
                                         };
-                                        let heat_score = 1.0 + config.heat_direction_bias * dot;
+                                        // Water proximity: prefer sites closer to directly above water
+                                        let xz_dist = ((site_dx * site_dx + site_dz * site_dz).sqrt()).max(1.0);
+                                        let proximity_bonus = config.water_proximity_bias / xz_dist;
+                                        let heat_score = 1.0 + config.heat_direction_bias * dot + proximity_bonus;
 
                                         candidates.push(WallSite {
                                             pos: (wx, wy, wz),

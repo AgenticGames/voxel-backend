@@ -431,6 +431,8 @@ pub struct VeinConfig {
     /// Preference for heat-facing walls (0.0 = none, 1.0 = strong)
     #[serde(default = "default_heat_direction_bias")]
     pub heat_direction_bias: f32,
+    /// Preference for wall sites closer to directly above water (0.0 = none, higher = stronger)
+    pub water_proximity_bias: f32,
     /// Min distance between processed water cells (spatial deduplication)
     #[serde(default = "default_convergence_spacing")]
     pub convergence_spacing: u32,
@@ -518,6 +520,7 @@ impl Default for VeinConfig {
             vein_size_min: 8,
             vein_size_max: 30,
             heat_direction_bias: 0.3,
+            water_proximity_bias: 2.0,
             convergence_spacing: 25,
             epithermal_rarity: 0.55,
             crystal_growth_enabled: true,

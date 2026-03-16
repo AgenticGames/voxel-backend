@@ -906,6 +906,8 @@ pub struct FfiEngineConfig {
     pub sleep_vein_weight_depth: f32,
     pub sleep_vein_weight_lateral: f32,
     pub sleep_vein_surface_ratio: f32,
+    // Water proximity bias
+    pub sleep_water_proximity_bias: f32,
 }
 
 #[repr(C)]

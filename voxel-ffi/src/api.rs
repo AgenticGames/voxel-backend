@@ -2301,6 +2301,7 @@ mod tests {
             sleep_vein_weight_depth: 2.0,
             sleep_vein_weight_lateral: 1.5,
             sleep_vein_surface_ratio: 0.5,
+            sleep_water_proximity_bias: 2.0,
         }
     }
 

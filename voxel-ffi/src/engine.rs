@@ -1799,6 +1799,7 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
             vein_weight_depth: if c.sleep_vein_weight_depth > 0.0 { c.sleep_vein_weight_depth } else { 2.0 },
             vein_weight_lateral: if c.sleep_vein_weight_lateral > 0.0 { c.sleep_vein_weight_lateral } else { 1.5 },
             vein_surface_ratio: if c.sleep_vein_surface_ratio > 0.0 { c.sleep_vein_surface_ratio } else { 0.5 },
+            water_proximity_bias: c.sleep_water_proximity_bias,
         },
         deeptime: DeepTimeConfig {
             enrichment_prob: if c.sleep_enrichment_prob > 0.0 { c.sleep_enrichment_prob } else { 0.90 },
