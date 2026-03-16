@@ -61,62 +61,67 @@ fn select_ore_by_zone_and_host(
     host_rock: Material,
     rng: &mut ChaCha8Rng,
 ) -> Material {
+    // Ore selection by temperature zone and host rock.
+    // Each zone has a DISTINCT signature so the player can read what they're looking at:
+    //   Hypothermal (deep/hot):  Tin + Iron dominant — the "industrial metals" zone
+    //   Mesothermal (mid):       Copper + Quartz dominant — the "mid-depth" zone
+    //   Epithermal (shallow/cool): Gold + Sulfide dominant — the "precious metals" zone
     if config.host_rock_ore_enabled {
         match host_rock {
             Material::Limestone | Material::Garnet | Material::Diopside | Material::Marble => {
                 match zone {
                     TemperatureZone::Hypothermal => {
+                        // Tin 35%, Iron 35%, Copper 15%, Pyrite 15%
                         let r = rng.gen::<f32>();
-                        if r < 0.07 { return Material::Tin; }
-                        else if r < 0.42 { return Material::Copper; }
-                        else if r < 0.67 { return Material::Iron; }
-                        else if r < 0.77 { return Material::Sulfide; }
+                        if r < 0.35 { return Material::Tin; }
+                        else if r < 0.70 { return Material::Iron; }
+                        else if r < 0.85 { return Material::Copper; }
                         else { return Material::Pyrite; }
                     }
                     TemperatureZone::Mesothermal => {
+                        // Copper 40%, Quartz 25%, Iron 15%, Pyrite 15%, Tin 5%
                         let r = rng.gen::<f32>();
-                        if r < 0.04 { return Material::Tin; }
-                        else if r < 0.31 { return Material::Copper; }
-                        else if r < 0.56 { return Material::Iron; }
-                        else if r < 0.71 { return Material::Sulfide; }
-                        else { return Material::Pyrite; }
+                        if r < 0.40 { return Material::Copper; }
+                        else if r < 0.65 { return Material::Quartz; }
+                        else if r < 0.80 { return Material::Iron; }
+                        else if r < 0.95 { return Material::Pyrite; }
+                        else { return Material::Tin; }
                     }
                     TemperatureZone::Epithermal => {
+                        // Gold 30%, Sulfide 35%, Pyrite 25%, Quartz 10%
                         let r = rng.gen::<f32>();
-                        if r < 0.10 { return Material::Gold; }
-                        else if r < 0.25 { return Material::Copper; }
-                        else if r < 0.40 { return Material::Iron; }
-                        else if r < 0.55 { return Material::Sulfide; }
-                        else { return Material::Pyrite; }
+                        if r < 0.30 { return Material::Gold; }
+                        else if r < 0.65 { return Material::Sulfide; }
+                        else if r < 0.90 { return Material::Pyrite; }
+                        else { return Material::Quartz; }
                     }
                 }
             },
             Material::Slate | Material::Hornfels => {
                 match zone {
                     TemperatureZone::Hypothermal => {
+                        // Tin 40%, Iron 30%, Copper 15%, Pyrite 15%
                         let r = rng.gen::<f32>();
-                        if r < 0.30 { return Material::Tin; }
-                        else if r < 0.60 { return Material::Copper; }
-                        else if r < 0.80 { return Material::Iron; }
-                        else if r < 0.90 { return Material::Quartz; }
+                        if r < 0.40 { return Material::Tin; }
+                        else if r < 0.70 { return Material::Iron; }
+                        else if r < 0.85 { return Material::Copper; }
                         else { return Material::Pyrite; }
                     }
                     TemperatureZone::Mesothermal => {
+                        // Copper 35%, Quartz 25%, Iron 15%, Tin 10%, Pyrite 15%
                         let r = rng.gen::<f32>();
-                        if r < 0.25 { return Material::Copper; }
-                        else if r < 0.50 { return Material::Iron; }
-                        else if r < 0.70 { return Material::Sulfide; }
-                        else if r < 0.80 { return Material::Tin; }
-                        else if r < 0.90 { return Material::Quartz; }
-                        else { return Material::Gold; }
+                        if r < 0.35 { return Material::Copper; }
+                        else if r < 0.60 { return Material::Quartz; }
+                        else if r < 0.75 { return Material::Iron; }
+                        else if r < 0.85 { return Material::Tin; }
+                        else { return Material::Pyrite; }
                     }
                     TemperatureZone::Epithermal => {
+                        // Gold 25%, Sulfide 30%, Quartz 20%, Pyrite 25%
                         let r = rng.gen::<f32>();
-                        if r < 0.15 { return Material::Gold; }
-                        else if r < 0.35 { return Material::Sulfide; }
-                        else if r < 0.50 { return Material::Copper; }
-                        else if r < 0.65 { return Material::Iron; }
-                        else if r < 0.80 { return Material::Quartz; }
+                        if r < 0.25 { return Material::Gold; }
+                        else if r < 0.55 { return Material::Sulfide; }
+                        else if r < 0.75 { return Material::Quartz; }
                         else { return Material::Pyrite; }
                     }
                 }
@@ -125,24 +130,27 @@ fn select_ore_by_zone_and_host(
         }
     }
 
-    // Default behavior (all other hosts)
+    // Default behavior (all other hosts — Granite/Sandstone/Basalt)
     match zone {
         TemperatureZone::Hypothermal => {
+            // Tin 40%, Iron 30%, Pyrite 30%
             let r = rng.gen::<f32>();
-            if r < 0.35 { Material::Tin }
-            else if r < 0.65 { Material::Quartz }
+            if r < 0.40 { Material::Tin }
+            else if r < 0.70 { Material::Iron }
             else { Material::Pyrite }
         }
         TemperatureZone::Mesothermal => {
+            // Copper 40%, Quartz 30%, Pyrite 30%
             let r = rng.gen::<f32>();
             if r < 0.40 { Material::Copper }
-            else if r < 0.75 { Material::Iron }
+            else if r < 0.70 { Material::Quartz }
             else { Material::Pyrite }
         }
         TemperatureZone::Epithermal => {
+            // Gold 35%, Sulfide 35%, Pyrite 30%
             let r = rng.gen::<f32>();
-            if r < 0.30 { Material::Gold }
-            else if r < 0.55 { Material::Sulfide }
+            if r < 0.35 { Material::Gold }
+            else if r < 0.70 { Material::Sulfide }
             else { Material::Pyrite }
         }
     }
