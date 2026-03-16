@@ -49,6 +49,8 @@ pub struct AureoleResult {
     pub veins_placed: u32,
     pub manifest: ChangeManifest,
     pub glimpse_chunk: Option<(i32, i32, i32)>,
+    /// Exact world voxel position of the most intense aureole zone centroid
+    pub glimpse_pos: Option<(i32, i32, i32)>,
     pub transform_log: Vec<TransformEntry>,
     pub diagnostics: PhaseDiagnostics,
     /// Debug: lava zone centroids and BFS depths (voxel coords) for visualization.
@@ -822,11 +824,17 @@ pub fn apply_aureole(
                 }
             }
 
-            if result.glimpse_chunk.is_none() && (hornfels_n > 0 || skarn_n > 0) {
-                let (key, _, _, _) = world_to_chunk_local(
-                    zone.centroid.0, zone.centroid.1, zone.centroid.2, chunk_size,
-                );
-                result.glimpse_chunk = Some(key);
+            if hornfels_n > 0 || skarn_n > 0 {
+                let zone_total = hornfels_n + skarn_n;
+                let prev_total = result.glimpse_pos.map_or(0, |_| result.hornfels_placed + result.skarn_placed - zone_total);
+                // Keep the zone with the most metamorphism
+                if result.glimpse_pos.is_none() || zone_total > prev_total {
+                    result.glimpse_pos = Some(zone.centroid);
+                    let (key, _, _, _) = world_to_chunk_local(
+                        zone.centroid.0, zone.centroid.1, zone.centroid.2, chunk_size,
+                    );
+                    result.glimpse_chunk = Some(key);
+                }
             }
 
             // Pass 2: ore veins + pockets (grow into just-placed metamorphic rock)

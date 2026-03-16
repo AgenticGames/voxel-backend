@@ -760,9 +760,9 @@ pub unsafe extern "C" fn voxel_poll_sleep_result(engine: *mut c_void) -> FfiSlee
         profile_report: ptr::null_mut(),
         profile_report_length: 0,
         has_aureole_glimpse: 0,
-        aureole_glimpse: FfiChunkCoord { x: 0, y: 0, z: 0 },
+        aureole_glimpse_x: 0, aureole_glimpse_y: 0, aureole_glimpse_z: 0,
         has_vein_glimpse: 0,
-        vein_glimpse: FfiChunkCoord { x: 0, y: 0, z: 0 },
+        vein_glimpse_x: 0, vein_glimpse_y: 0, vein_glimpse_z: 0,
     };
     if engine.is_null() {
         return empty;
@@ -804,16 +804,14 @@ pub unsafe extern "C" fn voxel_poll_sleep_result(engine: *mut c_void) -> FfiSlee
                 collapse_event_count: 0,
                 profile_report: report_ptr,
                 profile_report_length: report_len,
-                has_aureole_glimpse: if data.aureole_glimpse.is_some() { 1 } else { 0 },
-                aureole_glimpse: match data.aureole_glimpse {
-                    Some((x, y, z)) => FfiChunkCoord { x, y, z },
-                    None => FfiChunkCoord { x: 0, y: 0, z: 0 },
-                },
-                has_vein_glimpse: if data.vein_glimpse.is_some() { 1 } else { 0 },
-                vein_glimpse: match data.vein_glimpse {
-                    Some((x, y, z)) => FfiChunkCoord { x, y, z },
-                    None => FfiChunkCoord { x: 0, y: 0, z: 0 },
-                },
+                has_aureole_glimpse: if data.aureole_glimpse_pos.is_some() { 1 } else { 0 },
+                aureole_glimpse_x: data.aureole_glimpse_pos.map_or(0, |p| p.0),
+                aureole_glimpse_y: data.aureole_glimpse_pos.map_or(0, |p| p.1),
+                aureole_glimpse_z: data.aureole_glimpse_pos.map_or(0, |p| p.2),
+                has_vein_glimpse: if data.vein_glimpse_pos.is_some() { 1 } else { 0 },
+                vein_glimpse_x: data.vein_glimpse_pos.map_or(0, |p| p.0),
+                vein_glimpse_y: data.vein_glimpse_pos.map_or(0, |p| p.1),
+                vein_glimpse_z: data.vein_glimpse_pos.map_or(0, |p| p.2),
             }
         },
         None => empty,

@@ -113,10 +113,10 @@ pub struct SleepResult {
     pub lava_solidified: u32,
     pub dirty_chunks: Vec<(i32, i32, i32)>,
     pub collapse_events: Vec<voxel_core::stress::CollapseEvent>,
-    /// Chunk where the most intense aureole transformation happened (for montage camera)
-    pub aureole_glimpse: Option<(i32, i32, i32)>,
-    /// Chunk where the most intense hydrothermal vein deposition happened (for montage camera)
-    pub vein_glimpse: Option<(i32, i32, i32)>,
+    /// Exact world voxel position of the most intense aureole zone centroid (for montage camera)
+    pub aureole_glimpse_pos: Option<(i32, i32, i32)>,
+    /// Exact world voxel position of the most intense vein deposit (for montage camera)
+    pub vein_glimpse_pos: Option<(i32, i32, i32)>,
     /// Detailed log of transformations for UI display
     pub transform_log: Vec<TransformEntry>,
     /// Change manifest recording all modifications for persistence
@@ -482,8 +482,8 @@ pub fn execute_sleep(
     let mut diag_deeptime = PhaseDiagnostics::default();
     let mut aureole_debug_zones: Vec<(i32, i32, i32, i32)> = Vec::new();
     let mut aureole_debug_lines: Vec<String> = Vec::new();
-    let mut aureole_glimpse: Option<(i32, i32, i32)> = None;
-    let mut vein_glimpse: Option<(i32, i32, i32)> = None;
+    let mut aureole_glimpse_pos: Option<(i32, i32, i32)> = None;
+    let mut vein_glimpse_pos: Option<(i32, i32, i32)> = None;
 
     // ═══ Phase 1: The Aureole (100,000 years) ═══
     // Aureole runs BEFORE reaction so metamorphic minerals (marble, garnet, diopside)
@@ -504,7 +504,7 @@ pub fn execute_sleep(
         diag_aureole = aureole_result.diagnostics;
         aureole_debug_zones = aureole_result.debug_zones;
         aureole_debug_lines = aureole_result.debug_lines;
-        aureole_glimpse = aureole_result.glimpse_chunk;
+        aureole_glimpse_pos = aureole_result.glimpse_pos;
         result_manifest.merge_sleep_changes(&aureole_result.manifest);
         transform_log.extend(aureole_result.transform_log);
         for key in aureole_result.manifest.chunk_deltas.keys() {
@@ -564,7 +564,7 @@ pub fn execute_sleep(
         total_veins = vein_result.veins_deposited;
         total_formations += vein_result.formations_grown;
         diag_veins = vein_result.diagnostics;
-        vein_glimpse = vein_result.glimpse_chunk;
+        vein_glimpse_pos = vein_result.glimpse_pos;
         result_manifest.merge_sleep_changes(&vein_result.manifest);
         transform_log.extend(vein_result.transform_log);
         for key in vein_result.manifest.chunk_deltas.keys() {
@@ -805,7 +805,9 @@ pub fn execute_sleep(
     }
     // Append basalt box and other tagged diagnostic lines from transform_log
     for entry in &transform_log {
-        if entry.description.starts_with("[BASALT_BOX]") || entry.description.starts_with("[CENTROID_PT]") {
+        if entry.description.starts_with("[BASALT_BOX]") || entry.description.starts_with("[CENTROID_PT]")
+            || entry.description.starts_with("[VEIN_COORD_DEBUG]")
+        {
             let _ = writeln!(profile_report, "{}", entry.description);
         }
     }
@@ -833,8 +835,8 @@ pub fn execute_sleep(
         lava_solidified: total_lava_solidified,
         dirty_chunks,
         collapse_events: all_collapse_events,
-        aureole_glimpse,
-        vein_glimpse,
+        aureole_glimpse_pos,
+        vein_glimpse_pos,
         transform_log,
         manifest: result_manifest,
         profile_report,
@@ -1368,8 +1370,8 @@ pub fn execute_aureole_only(
         lava_solidified,
         dirty_chunks,
         collapse_events: Vec::new(),
-        aureole_glimpse: aureole_result.glimpse_chunk,
-        vein_glimpse: None,
+        aureole_glimpse_pos: aureole_result.glimpse_pos,
+        vein_glimpse_pos: None,
         transform_log,
         manifest: result_manifest,
         profile_report,

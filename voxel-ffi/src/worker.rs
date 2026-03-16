@@ -1284,8 +1284,8 @@ fn handle_request(
                 corpses_fossilized: sleep_result.corpses_fossilized,
                 lava_solidified: sleep_result.lava_solidified,
                 profile_report: report,
-                aureole_glimpse: sleep_result.aureole_glimpse,
-                vein_glimpse: sleep_result.vein_glimpse,
+                aureole_glimpse_pos: sleep_result.aureole_glimpse_pos,
+                vein_glimpse_pos: sleep_result.vein_glimpse_pos,
             });
         }
         WorkerRequest::AureoleOnly { player_chunk, sleep_config: sc } => {
@@ -1384,8 +1384,8 @@ fn handle_request(
                 corpses_fossilized: 0,
                 lava_solidified: sleep_result.lava_solidified,
                 profile_report: report,
-                aureole_glimpse: sleep_result.aureole_glimpse,
-                vein_glimpse: sleep_result.vein_glimpse,
+                aureole_glimpse_pos: sleep_result.aureole_glimpse_pos,
+                vein_glimpse_pos: sleep_result.vein_glimpse_pos,
             });
         }
         WorkerRequest::WorldScan => {

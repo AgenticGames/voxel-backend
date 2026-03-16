@@ -29,6 +29,8 @@ pub struct VeinResult {
     pub formations_grown: u32,
     pub manifest: ChangeManifest,
     pub glimpse_chunk: Option<(i32, i32, i32)>,
+    /// Exact world voxel position of the most intense vein deposit
+    pub glimpse_pos: Option<(i32, i32, i32)>,
     pub transform_log: Vec<TransformEntry>,
     pub diagnostics: PhaseDiagnostics,
 }
@@ -187,6 +189,16 @@ pub fn apply_veins(
     let mut theoretical_max = 0u32;
     let mut convergence_count = 0u32;
 
+    // Diagnostic: capture first few water/heat/vein/wall-site positions for debugging
+    let mut diag_water_positions: Vec<(i32, i32, i32)> = Vec::new();
+    let mut diag_heat_positions: Vec<(i32, i32, i32)> = Vec::new();
+    let mut diag_vein_positions: Vec<(i32, i32, i32)> = Vec::new();
+    let mut diag_water_raw: Vec<((i32, i32, i32), usize, usize, usize)> = Vec::new();
+    let mut diag_wall_sites: Vec<((i32,i32,i32), (i32,i32,i32), Material, f32)> = Vec::new(); // (pos, normal, host, score)
+    let mut diag_total_wall_sites: u32 = 0;
+    let diag_chunk_size = chunk_size;
+    let diag_fluid_cs = fluid_snapshot.chunk_size;
+
     // --- Water-Heat Convergence Vein Deposition ---
     if config.vein_enabled && !heat_map.is_empty() && !fluid_snapshot.chunks.is_empty() {
         let convergence_radius = config.convergence_radius;
@@ -273,6 +285,11 @@ pub fn apply_veins(
                         }
 
                         if let Some(heat_pos) = nearest_heat {
+                            if diag_water_positions.len() < 3 {
+                                diag_water_raw.push((*fchunk, x, y, z));
+                                diag_water_positions.push((wx, wy, wz));
+                                diag_heat_positions.push(heat_pos);
+                            }
                             activated.push(ActivatedWater { pos: (wx, wy, wz), heat_pos });
                         }
                     }
@@ -577,6 +594,9 @@ pub fn apply_veins(
                                 new_material: ore,
                             });
                             global_deposited.insert(vpos);
+                            if diag_vein_positions.len() < 5 {
+                                diag_vein_positions.push(vpos);
+                            }
                         }
                     }
 
@@ -816,8 +836,15 @@ pub fn apply_veins(
             c.new_material, c.old_density,
         );
 
-        if result.glimpse_chunk.is_none() {
+        if result.glimpse_pos.is_none() {
             result.glimpse_chunk = Some(c.chunk_key);
+            // Exact world voxel position of this deposit
+            let (cx, cy, cz) = c.chunk_key;
+            result.glimpse_pos = Some((
+                cx * chunk_size as i32 + c.lx as i32,
+                cy * chunk_size as i32 + c.ly as i32,
+                cz * chunk_size as i32 + c.lz as i32,
+            ));
         }
 
         result.veins_deposited += 1;
@@ -1069,6 +1096,64 @@ pub fn apply_veins(
                 ambient_flowstone_count
             ),
             count: ambient_flowstone_count,
+        });
+    }
+
+    // --- Coordinate Debug ---
+    if !diag_water_positions.is_empty() || !diag_wall_sites.is_empty() {
+        let mut dbg = format!(
+            "[VEIN_COORD_DEBUG] chunk_size={} fluid_cs={} activated_count={} total_wall_sites={} total_veins={}\n",
+            diag_chunk_size, diag_fluid_cs, convergence_count, diag_total_wall_sites, result.veins_deposited
+        );
+        for (i, ((wpos, hpos), raw)) in diag_water_positions.iter()
+            .zip(diag_heat_positions.iter())
+            .zip(diag_water_raw.iter())
+            .enumerate()
+        {
+            dbg.push_str(&format!(
+                "  water[{}]: fluid_chunk=({},{},{}) local=({},{},{}) -> world=({},{},{})\n",
+                i, raw.0.0, raw.0.1, raw.0.2, raw.1, raw.2, raw.3, wpos.0, wpos.1, wpos.2
+            ));
+            dbg.push_str(&format!(
+                "  heat[{}]: world=({},{},{})\n",
+                i, hpos.0, hpos.1, hpos.2
+            ));
+        }
+        // Scan box info
+        if let Some(first_water) = diag_water_positions.first() {
+            let spread = config.horizontal_spread as i32;
+            dbg.push_str(&format!(
+                "  scan_box: X=[{},{}] Z=[{},{}] (spread={})\n",
+                first_water.0 - spread, first_water.0 + spread,
+                first_water.2 - spread, first_water.2 + spread, spread
+            ));
+        }
+        for (i, ws) in diag_wall_sites.iter().enumerate() {
+            dbg.push_str(&format!(
+                "  wall_site[{}]: world=({},{},{}) normal=({},{},{}) host={:?} score={:.2}\n",
+                i, ws.0.0, ws.0.1, ws.0.2, ws.1.0, ws.1.1, ws.1.2, ws.2, ws.3
+            ));
+        }
+        for (i, vpos) in diag_vein_positions.iter().enumerate() {
+            let (ck, lx, ly, lz) = world_to_chunk_local(vpos.0, vpos.1, vpos.2, chunk_size);
+            dbg.push_str(&format!(
+                "  vein[{}]: world=({},{},{}) -> density_chunk=({},{},{}) local=({},{},{})\n",
+                i, vpos.0, vpos.1, vpos.2, ck.0, ck.1, ck.2, lx, ly, lz
+            ));
+        }
+        // Density field keys present
+        let mut dk: Vec<(i32,i32,i32)> = density_fields.keys().copied().collect();
+        dk.sort();
+        dbg.push_str(&format!("  density_keys: {:?}\n", &dk[..dk.len().min(20)]));
+        // Heat map summary
+        dbg.push_str(&format!("  heat_map: {} sources", heat_map.len()));
+        if let Some(first) = heat_map.first() {
+            dbg.push_str(&format!(", first=({},{},{})", first.pos.0, first.pos.1, first.pos.2));
+        }
+        dbg.push_str("\n");
+        result.transform_log.push(TransformEntry {
+            description: dbg,
+            count: 1,
         });
     }
 

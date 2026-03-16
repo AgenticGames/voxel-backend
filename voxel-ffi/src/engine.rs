@@ -50,8 +50,8 @@ pub struct SleepCompleteData {
     pub corpses_fossilized: u32,
     pub lava_solidified: u32,
     pub profile_report: String,
-    pub aureole_glimpse: Option<(i32, i32, i32)>,
-    pub vein_glimpse: Option<(i32, i32, i32)>,
+    pub aureole_glimpse_pos: Option<(i32, i32, i32)>,
+    pub vein_glimpse_pos: Option<(i32, i32, i32)>,
 }
 
 pub struct VoxelEngine {
@@ -290,8 +290,8 @@ impl VoxelEngine {
                 corpses_fossilized,
                 lava_solidified,
                 profile_report,
-                aureole_glimpse,
-                vein_glimpse,
+                aureole_glimpse_pos,
+                vein_glimpse_pos,
             }) => {
                 if let Ok(mut sc) = self.sleep_complete.lock() {
                     *sc = Some(SleepCompleteData {
@@ -313,8 +313,8 @@ impl VoxelEngine {
                         corpses_fossilized,
                         lava_solidified,
                         profile_report,
-                        aureole_glimpse,
-                        vein_glimpse,
+                        aureole_glimpse_pos,
+                        vein_glimpse_pos,
                     });
                 }
                 // Don't expose to the FfiResult pipeline; UE polls via voxel_poll_sleep_result

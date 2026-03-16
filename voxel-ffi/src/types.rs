@@ -1006,9 +1006,13 @@ pub struct FfiSleepResult {
     pub profile_report: *mut std::ffi::c_char,
     pub profile_report_length: u32,
     pub has_aureole_glimpse: u32,
-    pub aureole_glimpse: FfiChunkCoord,
+    pub aureole_glimpse_x: i32,
+    pub aureole_glimpse_y: i32,
+    pub aureole_glimpse_z: i32,
     pub has_vein_glimpse: u32,
-    pub vein_glimpse: FfiChunkCoord,
+    pub vein_glimpse_x: i32,
+    pub vein_glimpse_y: i32,
+    pub vein_glimpse_z: i32,
 }
 
 // ── Internal (non-FFI) types ──
@@ -1152,8 +1156,8 @@ pub enum WorkerResult {
         corpses_fossilized: u32,
         lava_solidified: u32,
         profile_report: String,
-        aureole_glimpse: Option<(i32, i32, i32)>,
-        vein_glimpse: Option<(i32, i32, i32)>,
+        aureole_glimpse_pos: Option<(i32, i32, i32)>,
+        vein_glimpse_pos: Option<(i32, i32, i32)>,
     },
     ScanComplete {
         json_report: String,
