@@ -545,14 +545,9 @@ fn place_slate_veins(
         } else {
             (Material::Pyrite, small_min, small_max)
         };
+        let s_min = ((vein_min as f32 * deposit_mult).round() as u32).max(2);
+        let s_max = ((vein_max as f32 * deposit_mult).round() as u32).max(s_min + 1);
         let (actual_min, actual_max, bias) = if config.aureole_wall_climbing {
-            // Compute target from geometry params (like hydrothermal)
-            let height = rng.gen_range(config.aureole_climb_height_min..=config.aureole_climb_height_max);
-            let width = rng.gen_range(config.aureole_wall_width_min..=config.aureole_wall_width_max);
-            let depth = rng.gen_range(config.aureole_rock_depth_min..=config.aureole_rock_depth_max);
-            let geo_target = (((height * width * depth) as f32 / 4.0) * deposit_mult).round() as u32;
-            let geo_target = geo_target.max(4).min(120);
-            // Find wall normal from seed
             let wall_normal = FACE_OFFSETS.iter()
                 .find(|&&(dx, dy, dz)| {
                     sample_material(density_fields, seed.0 + dx, seed.1 + dy, seed.2 + dz, chunk_size)
@@ -560,16 +555,15 @@ fn place_slate_veins(
                 })
                 .copied()
                 .unwrap_or((0, 1, 0));
-            ((geo_target * 8) / 10, geo_target, VeinBias::WallClimbing {
-                        wall_normal,
-                        weight_up: config.aureole_weight_up,
-                        weight_into: config.aureole_weight_into,
-                        weight_lateral: config.aureole_weight_lateral,
-                        weight_down: config.aureole_weight_down,
-                        weight_toward_air: config.aureole_weight_toward_air,
-                    })
+            (s_min, s_max, VeinBias::WallClimbing {
+                wall_normal,
+                weight_up: config.aureole_weight_up,
+                weight_depth: config.aureole_weight_depth,
+                weight_lateral: config.aureole_weight_lateral,
+                surface_ratio: config.aureole_surface_ratio,
+            })
         } else {
-            (min_sz, max_sz, default_vein_bias(ore, rng))
+            (s_min, s_max, default_vein_bias(ore, rng))
         };
         let params = VeinGrowthParams { ore, min_size: actual_min, max_size: actual_max, bias, exclude_aureole: false };
         let positions = grow_vein(density_fields, seed, &params, chunk_size, rng);
@@ -651,11 +645,6 @@ fn place_limestone_veins(
     for (i, &seed) in seeds.iter().enumerate() {
         let ore = if (i as f32) < (seeds.len() as f32 * 0.6) { ore_a } else { ore_b };
         let (actual_min, actual_max, bias) = if config.aureole_wall_climbing {
-            let height = rng.gen_range(config.aureole_climb_height_min..=config.aureole_climb_height_max);
-            let width = rng.gen_range(config.aureole_wall_width_min..=config.aureole_wall_width_max);
-            let depth = rng.gen_range(config.aureole_rock_depth_min..=config.aureole_rock_depth_max);
-            let geo_target = (((height * width * depth) as f32 / 4.0) * deposit_mult).round() as u32;
-            let geo_target = geo_target.max(4).min(120);
             let wall_normal = FACE_OFFSETS.iter()
                 .find(|&&(dx, dy, dz)| {
                     sample_material(density_fields, seed.0 + dx, seed.1 + dy, seed.2 + dz, chunk_size)
@@ -663,14 +652,13 @@ fn place_limestone_veins(
                 })
                 .copied()
                 .unwrap_or((0, 1, 0));
-            ((geo_target * 8) / 10, geo_target, VeinBias::WallClimbing {
-                        wall_normal,
-                        weight_up: config.aureole_weight_up,
-                        weight_into: config.aureole_weight_into,
-                        weight_lateral: config.aureole_weight_lateral,
-                        weight_down: config.aureole_weight_down,
-                        weight_toward_air: config.aureole_weight_toward_air,
-                    })
+            (vein_min, vein_max, VeinBias::WallClimbing {
+                wall_normal,
+                weight_up: config.aureole_weight_up,
+                weight_depth: config.aureole_weight_depth,
+                weight_lateral: config.aureole_weight_lateral,
+                surface_ratio: config.aureole_surface_ratio,
+            })
         } else {
             (vein_min, vein_max, default_vein_bias(ore, rng))
         };

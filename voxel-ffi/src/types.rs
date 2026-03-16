@@ -794,6 +794,7 @@ pub struct FfiEngineConfig {
     pub sleep_epithermal_height: u32,
     pub sleep_horizontal_spread: u32,
     pub sleep_veins_per_zone_min: u32,
+    // DEPRECATED: replaced by sleep_vein_size_min/max at end of struct (kept for ABI padding)
     pub sleep_vein_climb_height_min: u32,
     pub sleep_vein_climb_height_max: u32,
     pub sleep_vein_wall_width_min: u32,
@@ -891,29 +892,20 @@ pub struct FfiEngineConfig {
     pub sleep_aureole_water_search_radius: u32,
     pub sleep_aureole_water_max_cells: u32,
     pub sleep_aureole_water_deposit_mult: f32,
-    // Aureole vein geometry
+    // Aureole vein shape
     pub sleep_aureole_wall_climbing: u8,
-    pub sleep_aureole_climb_height_min: u32,
-    pub sleep_aureole_climb_height_max: u32,
-    pub sleep_aureole_wall_width_min: u32,
-    pub sleep_aureole_wall_width_max: u32,
-    pub sleep_aureole_rock_depth_min: u32,
-    pub sleep_aureole_rock_depth_max: u32,
-    pub sleep_aureole_min_surface_exposure: u32,
-    // Aureole wall-climbing weights
     pub sleep_aureole_weight_up: f32,
-    pub sleep_aureole_weight_into: f32,
+    pub sleep_aureole_weight_depth: f32,
     pub sleep_aureole_weight_lateral: f32,
-    pub sleep_aureole_weight_down: f32,
-    pub sleep_aureole_weight_toward_air: f32,
-    // Hydrothermal vein spread
+    pub sleep_aureole_surface_ratio: f32,
+    // Hydrothermal vein shape
     pub sleep_vein_spread: f32,
-    // Hydrothermal wall-climbing weights
+    pub sleep_vein_size_min: u32,
+    pub sleep_vein_size_max: u32,
     pub sleep_vein_weight_up: f32,
-    pub sleep_vein_weight_into: f32,
+    pub sleep_vein_weight_depth: f32,
     pub sleep_vein_weight_lateral: f32,
-    pub sleep_vein_weight_down: f32,
-    pub sleep_vein_weight_toward_air: f32,
+    pub sleep_vein_surface_ratio: f32,
 }
 
 #[repr(C)]

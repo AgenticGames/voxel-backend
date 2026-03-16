@@ -2287,29 +2287,20 @@ mod tests {
             sleep_aureole_water_search_radius: 3,
             sleep_aureole_water_max_cells: 30,
             sleep_aureole_water_deposit_mult: 0.5,
-            // Aureole vein geometry
+            // Aureole vein shape
             sleep_aureole_wall_climbing: 1,
-            sleep_aureole_climb_height_min: 4,
-            sleep_aureole_climb_height_max: 10,
-            sleep_aureole_wall_width_min: 2,
-            sleep_aureole_wall_width_max: 3,
-            sleep_aureole_rock_depth_min: 1,
-            sleep_aureole_rock_depth_max: 3,
-            sleep_aureole_min_surface_exposure: 1,
-            // Aureole wall-climbing weights
             sleep_aureole_weight_up: 3.0,
-            sleep_aureole_weight_into: 2.0,
+            sleep_aureole_weight_depth: 2.0,
             sleep_aureole_weight_lateral: 1.5,
-            sleep_aureole_weight_down: 0.3,
-            sleep_aureole_weight_toward_air: 0.1,
-            // Hydrothermal vein spread
+            sleep_aureole_surface_ratio: 0.5,
+            // Hydrothermal vein shape
             sleep_vein_spread: 0.5,
-            // Hydrothermal wall-climbing weights
+            sleep_vein_size_min: 8,
+            sleep_vein_size_max: 30,
             sleep_vein_weight_up: 3.0,
-            sleep_vein_weight_into: 2.0,
+            sleep_vein_weight_depth: 2.0,
             sleep_vein_weight_lateral: 1.5,
-            sleep_vein_weight_down: 0.3,
-            sleep_vein_weight_toward_air: 0.1,
+            sleep_vein_surface_ratio: 0.5,
         }
     }
 

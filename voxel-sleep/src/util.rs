@@ -199,19 +199,17 @@ pub enum VeinBias {
     Planar(u8),
     /// Gold/Sulfide: tight spherical clusters
     Compact,
-    /// Veins grow on wall faces with configurable directional weights
+    /// Veins grow on wall faces with 3 configurable shape weights + surface ratio
     WallClimbing {
         wall_normal: (i32, i32, i32),
         /// Weight for growing upward (Y+)
         weight_up: f32,
         /// Weight for growing into the wall (opposite of wall_normal)
-        weight_into: f32,
+        weight_depth: f32,
         /// Weight for lateral spread (horizontal, perpendicular to wall_normal)
         weight_lateral: f32,
-        /// Weight for growing downward (Y-)
-        weight_down: f32,
-        /// Weight for growing toward air (same as wall_normal)
-        weight_toward_air: f32,
+        /// Fraction of voxels that must have at least one air-face neighbor (0.0-1.0)
+        surface_ratio: f32,
     },
 }
 
@@ -242,6 +240,13 @@ pub fn grow_vein(
     let mut visited: HashSet<(i32, i32, i32)> = HashSet::new();
     visited.insert(seed);
     let mut frontier: Vec<(i32, i32, i32)> = vec![seed];
+    // Track surface voxel count for WallClimbing surface_ratio enforcement
+    let mut surface_count = 0u32;
+    let seed_has_air = FACE_OFFSETS.iter().any(|&(ax, ay, az)| {
+        sample_material(density_fields, seed.0 + ax, seed.1 + ay, seed.2 + az, chunk_size)
+            .map_or(false, |m| !m.is_solid())
+    });
+    if seed_has_air { surface_count += 1; }
 
     while result.len() < target_size && !frontier.is_empty() {
         // Pick frontier voxel
@@ -280,13 +285,22 @@ pub fn grow_vein(
                     }
                     VeinBias::Compact => 1.0,
                     VeinBias::Branching => 1.0,
-                    VeinBias::WallClimbing { wall_normal, weight_up, weight_into, weight_lateral, weight_down, weight_toward_air } => {
-                        if dy > 0 { *weight_up }
-                        else if dx == -wall_normal.0 && dy == -wall_normal.1 && dz == -wall_normal.2 { *weight_into }
+                    VeinBias::WallClimbing { wall_normal, weight_up, weight_depth, weight_lateral, surface_ratio } => {
+                        // Surface ratio enforcement: penalize buried candidates when below target
+                        let has_air = FACE_OFFSETS.iter().any(|&(ax, ay, az)| {
+                            sample_material(density_fields, n.0 + ax, n.1 + ay, n.2 + az, chunk_size)
+                                .map_or(false, |m| !m.is_solid())
+                        });
+                        let current_ratio = if result.is_empty() { 1.0 } else { surface_count as f32 / result.len() as f32 };
+                        let surface_penalty = if !has_air && current_ratio < *surface_ratio { 0.05 } else { 1.0 };
+
+                        let base = if dy > 0 { *weight_up }
+                        else if dx == -wall_normal.0 && dy == -wall_normal.1 && dz == -wall_normal.2 { *weight_depth }
                         else if dy == 0 && (dx != wall_normal.0 || dz != wall_normal.2) { *weight_lateral }
-                        else if dy < 0 { *weight_down }
-                        else if dx == wall_normal.0 && dy == wall_normal.1 && dz == wall_normal.2 { *weight_toward_air }
-                        else { 1.0 }
+                        else if dy < 0 { 0.3 }  // down: hardcoded low
+                        else if dx == wall_normal.0 && dy == wall_normal.1 && dz == wall_normal.2 { 0.1 }  // toward air: hardcoded low
+                        else { 1.0 };
+                        base * surface_penalty
                     },
                 };
                 candidates.push((n, weight));
@@ -324,6 +338,12 @@ pub fn grow_vein(
             }
             let (pos, _) = candidates.remove(chosen_idx);
             visited.insert(pos);
+            // Track surface count for WallClimbing surface_ratio
+            let pos_has_air = FACE_OFFSETS.iter().any(|&(ax, ay, az)| {
+                sample_material(density_fields, pos.0 + ax, pos.1 + ay, pos.2 + az, chunk_size)
+                    .map_or(false, |m| !m.is_solid())
+            });
+            if pos_has_air { surface_count += 1; }
             result.push(pos);
             frontier.push(pos);
         }

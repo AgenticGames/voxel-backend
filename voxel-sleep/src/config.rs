@@ -11,12 +11,6 @@ fn default_epithermal_height() -> u32 { 65 }
 fn default_horizontal_spread() -> u32 { 20 }
 fn default_veins_per_zone_min() -> u32 { 2 }
 fn default_veins_per_zone_max() -> u32 { 4 }
-fn default_vein_climb_height_min() -> u32 { 6 }
-fn default_vein_climb_height_max() -> u32 { 12 }
-fn default_vein_wall_width_min() -> u32 { 2 }
-fn default_vein_wall_width_max() -> u32 { 3 }
-fn default_vein_rock_depth_min() -> u32 { 1 }
-fn default_vein_rock_depth_max() -> u32 { 3 }
 fn default_heat_direction_bias() -> f32 { 0.3 }
 fn default_convergence_spacing() -> u32 { 25 }
 fn default_enrichment_cluster_min() -> u32 { 2 }
@@ -309,29 +303,17 @@ pub struct AureoleConfig {
     pub garnet_pocket_count: u32,
     /// Number of diopside pockets per zone
     pub diopside_pocket_count: u32,
-    // ── Aureole vein geometry (wall-climbing, like hydrothermal) ──
-    /// Use wall-climbing bias for aureole ore veins (0/1). When enabled, veins streak up walls.
+    // ── Aureole vein shape ──
+    /// Use wall-climbing bias for aureole ore veins (0/1)
     pub aureole_wall_climbing: bool,
-    /// Min height of aureole wall-climbing veins
-    pub aureole_climb_height_min: u32,
-    /// Max height of aureole wall-climbing veins
-    pub aureole_climb_height_max: u32,
-    /// Min visible width on wall face
-    pub aureole_wall_width_min: u32,
-    /// Max visible width on wall face
-    pub aureole_wall_width_max: u32,
-    /// Min depth into solid rock behind wall
-    pub aureole_rock_depth_min: u32,
-    /// Max depth into solid rock behind wall
-    pub aureole_rock_depth_max: u32,
-    /// Surface exposure: min air-face neighbors required for seed eligibility (higher = more visible)
-    pub aureole_min_surface_exposure: u32,
-    // Wall-climbing directional weights
+    /// Weight for growing upward (Y+)
     pub aureole_weight_up: f32,
-    pub aureole_weight_into: f32,
+    /// Weight for growing into rock behind wall
+    pub aureole_weight_depth: f32,
+    /// Weight for lateral spread on wall face
     pub aureole_weight_lateral: f32,
-    pub aureole_weight_down: f32,
-    pub aureole_weight_toward_air: f32,
+    /// Fraction of vein voxels that must touch air (0.0-1.0)
+    pub aureole_surface_ratio: f32,
     // ── Lava volume scaling for aureole ──
     /// Radius to count lava cells for zone volume scaling
     pub aureole_lava_volume_max_cells: u32,
@@ -396,18 +378,10 @@ impl Default for AureoleConfig {
             garnet_pocket_count: 2,
             diopside_pocket_count: 1,
             aureole_wall_climbing: true,
-            aureole_climb_height_min: 4,
-            aureole_climb_height_max: 10,
-            aureole_wall_width_min: 2,
-            aureole_wall_width_max: 3,
-            aureole_rock_depth_min: 1,
-            aureole_rock_depth_max: 3,
-            aureole_min_surface_exposure: 1,
             aureole_weight_up: 3.0,
-            aureole_weight_into: 2.0,
+            aureole_weight_depth: 2.0,
             aureole_weight_lateral: 1.5,
-            aureole_weight_down: 0.3,
-            aureole_weight_toward_air: 0.1,
+            aureole_surface_ratio: 0.5,
             aureole_vein_spread: 0.5,
             aureole_lava_volume_max_cells: 50,
             aureole_lava_deposit_mult: 1.0,
@@ -450,24 +424,10 @@ pub struct VeinConfig {
     /// Max veins to place per temperature zone per convergence area
     #[serde(default = "default_veins_per_zone_max")]
     pub veins_per_zone_max: u32,
-    /// Min height of individual wall-climbing veins
-    #[serde(default = "default_vein_climb_height_min")]
-    pub vein_climb_height_min: u32,
-    /// Max height of individual wall-climbing veins
-    #[serde(default = "default_vein_climb_height_max")]
-    pub vein_climb_height_max: u32,
-    /// Min visible width on wall face
-    #[serde(default = "default_vein_wall_width_min")]
-    pub vein_wall_width_min: u32,
-    /// Max visible width on wall face
-    #[serde(default = "default_vein_wall_width_max")]
-    pub vein_wall_width_max: u32,
-    /// Min depth into solid rock behind wall
-    #[serde(default = "default_vein_rock_depth_min")]
-    pub vein_rock_depth_min: u32,
-    /// Max depth into solid rock behind wall
-    #[serde(default = "default_vein_rock_depth_max")]
-    pub vein_rock_depth_max: u32,
+    /// Min vein size (total voxels)
+    pub vein_size_min: u32,
+    /// Max vein size (total voxels)
+    pub vein_size_max: u32,
     /// Preference for heat-facing walls (0.0 = none, 1.0 = strong)
     #[serde(default = "default_heat_direction_bias")]
     pub heat_direction_bias: f32,
@@ -519,12 +479,15 @@ pub struct VeinConfig {
     pub lava_volume_amount_mult: f32,
     /// Vein seed spread factor (0.0 = random, 1.0 = max spread apart)
     pub vein_spread: f32,
-    // Wall-climbing directional weights
+    // Wall-climbing shape
+    /// Weight for growing upward (Y+)
     pub vein_weight_up: f32,
-    pub vein_weight_into: f32,
+    /// Weight for growing into rock behind wall
+    pub vein_weight_depth: f32,
+    /// Weight for lateral spread on wall face
     pub vein_weight_lateral: f32,
-    pub vein_weight_down: f32,
-    pub vein_weight_toward_air: f32,
+    /// Fraction of vein voxels that must touch air (0.0-1.0)
+    pub vein_surface_ratio: f32,
     // Spike/tendril intrusions ("centipede" look)
     /// Enable spikey tendrils radiating from vein bodies
     pub spike_enabled: bool,
@@ -552,12 +515,8 @@ impl Default for VeinConfig {
             horizontal_spread: 20,
             veins_per_zone_min: 2,
             veins_per_zone_max: 4,
-            vein_climb_height_min: 6,
-            vein_climb_height_max: 12,
-            vein_wall_width_min: 2,
-            vein_wall_width_max: 3,
-            vein_rock_depth_min: 1,
-            vein_rock_depth_max: 3,
+            vein_size_min: 8,
+            vein_size_max: 30,
             heat_direction_bias: 0.3,
             convergence_spacing: 25,
             epithermal_rarity: 0.55,
@@ -588,10 +547,9 @@ impl Default for VeinConfig {
             lava_volume_amount_mult: 0.5,
             vein_spread: 0.5,
             vein_weight_up: 3.0,
-            vein_weight_into: 2.0,
+            vein_weight_depth: 2.0,
             vein_weight_lateral: 1.5,
-            vein_weight_down: 0.3,
-            vein_weight_toward_air: 0.1,
+            vein_surface_ratio: 0.5,
             spike_enabled: true,
             spike_count_min: 4,
             spike_count_max: 10,

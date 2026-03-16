@@ -542,24 +542,20 @@ pub fn apply_veins(
                         continue;
                     }
 
-                    // Compute climbing vein target size (~25% fill of bounding box, scaled by water/lava volume)
-                    let height = rng.gen_range(config.vein_climb_height_min..=config.vein_climb_height_max);
-                    let width = rng.gen_range(config.vein_wall_width_min..=config.vein_wall_width_max);
-                    let depth = rng.gen_range(config.vein_rock_depth_min..=config.vein_rock_depth_max);
-                    let base_target = ((height * width * depth) / 4).max(4).min(60);
-                    let target = ((base_target as f32 * volume_vein_mult).round() as u32).max(4).min(120);
+                    // Vein size from config, scaled by water/lava volume
+                    let base_min = ((config.vein_size_min as f32 * volume_vein_mult).round() as u32).max(2);
+                    let base_max = ((config.vein_size_max as f32 * volume_vein_mult).round() as u32).max(base_min + 1);
 
                     let params = VeinGrowthParams {
                         ore,
-                        min_size: (target * 8) / 10,
-                        max_size: target,
+                        min_size: base_min,
+                        max_size: base_max,
                         bias: VeinBias::WallClimbing {
                             wall_normal: chosen.wall_normal,
                             weight_up: config.vein_weight_up,
-                            weight_into: config.vein_weight_into,
+                            weight_depth: config.vein_weight_depth,
                             weight_lateral: config.vein_weight_lateral,
-                            weight_down: config.vein_weight_down,
-                            weight_toward_air: config.vein_weight_toward_air,
+                            surface_ratio: config.vein_surface_ratio,
                         },
                         exclude_aureole: true,
                     };
