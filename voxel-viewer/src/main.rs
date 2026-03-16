@@ -82,6 +82,7 @@ fn main() {
             ("GET", path) if path.starts_with("/api/obj/") => serve_obj(request, path, &output_dir),
             ("POST", "/api/generate") => serve_generate(request, &state),
             ("POST", "/api/mine") => serve_mine(request, &state),
+            ("POST", "/api/place-water") => serve_place_water(request, &state),
             ("POST", "/api/sleep") => serve_sleep(request, &state),
             ("POST", "/api/run-batch") => serve_run_batch(request, &output_dir),
             _ => serve_not_found(request),
@@ -777,10 +778,10 @@ fn serve_generate(
 
     // Build sleep config from UI overrides (stress settings embedded in sleep config)
     let mut sleep_cfg = SleepConfig::default();
-    // AUREOLE-ONLY MODE: disable all phases except aureole (phase2)
+    // Enable aureole + veins for testing, disable reaction/deeptime/accumulation
     sleep_cfg.phase1_enabled = false;  // reaction OFF
     sleep_cfg.phase2_enabled = true;   // aureole ON
-    sleep_cfg.phase3_enabled = false;  // veins OFF
+    sleep_cfg.phase3_enabled = true;   // veins ON
     sleep_cfg.phase4_enabled = false;  // deeptime OFF
     sleep_cfg.accumulation_enabled = false; // accumulation OFF
     // Stress tuning
@@ -957,6 +958,46 @@ fn serve_mine(
         "pools": surviving_pools,
     });
 
+    let json_str = serde_json::to_string(&response_json)?;
+    let header = tiny_http::Header::from_bytes(b"Content-Type", b"application/json")
+        .map_err(|_| "invalid header")?;
+    let response = tiny_http::Response::from_string(json_str).with_header(header);
+    request.respond(response)?;
+    Ok(())
+}
+
+/// Place water endpoint: inject water cells at a world position for hydrothermal testing.
+fn serve_place_water(
+    mut request: tiny_http::Request,
+    state: &Arc<Mutex<AppState>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut body = String::new();
+    request.as_reader().read_to_string(&mut body)?;
+
+    let params: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| format!("Invalid JSON: {e}"))?;
+
+    let x = params["x"].as_f64().unwrap_or(0.0) as f32;
+    let y = params["y"].as_f64().unwrap_or(0.0) as f32;
+    let z = params["z"].as_f64().unwrap_or(0.0) as f32;
+    let radius = params["radius"].as_f64().unwrap_or(3.0) as f32;
+
+    let mut app = state.lock().unwrap();
+    let region = match app.region.as_mut() {
+        Some(r) => r,
+        None => {
+            drop(app);
+            return serve_error(request, 400, "No region generated yet. Generate first.");
+        }
+    };
+
+    let count = region.place_water(x, y, z, radius);
+
+    let response_json = serde_json::json!({
+        "placed": count,
+        "position": [x, y, z],
+        "radius": radius,
+    });
     let json_str = serde_json::to_string(&response_json)?;
     let header = tiny_http::Header::from_bytes(b"Content-Type", b"application/json")
         .map_err(|_| "invalid header")?;

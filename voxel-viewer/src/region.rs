@@ -27,6 +27,8 @@ pub struct GeneratedRegion {
     pub support_fields: HashMap<(i32, i32, i32), SupportField>,
     pub pool_descriptors: Vec<PoolDescriptor>,
     pub fluid_seeds: Vec<FluidSeed>,
+    /// Manually placed water cells (world x, y, z) for hydrothermal testing
+    pub placed_water: Vec<(i32, i32, i32)>,
 }
 
 pub struct MineResult {
@@ -183,7 +185,43 @@ impl GeneratedRegion {
             support_fields,
             pool_descriptors,
             fluid_seeds,
+            placed_water: Vec::new(),
         }
+    }
+
+    /// Place water cells at a world position (sphere of radius r).
+    pub fn place_water(&mut self, wx: f32, wy: f32, wz: f32, radius: f32) -> u32 {
+        let cs = self.config.chunk_size;
+        let r = radius as i32;
+        let cx = wx as i32;
+        let cy = wy as i32;
+        let cz = wz as i32;
+        let mut count = 0u32;
+        for dz in -r..=r {
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    if dx*dx + dy*dy + dz*dz > r*r { continue; }
+                    let px = cx + dx;
+                    let py = cy + dy;
+                    let pz = cz + dz;
+                    // Check this is an air voxel (water fills air)
+                    let chunk_key = (
+                        px.div_euclid(cs as i32),
+                        py.div_euclid(cs as i32),
+                        pz.div_euclid(cs as i32),
+                    );
+                    let lx = px.rem_euclid(cs as i32) as usize;
+                    let ly = py.rem_euclid(cs as i32) as usize;
+                    let lz = pz.rem_euclid(cs as i32) as usize;
+                    if self.density_fields.contains_key(&chunk_key) {
+                        self.placed_water.push((px, py, pz));
+                        count += 1;
+                    }
+                }
+            }
+        }
+        eprintln!("Placed {} water cells at ({},{},{}) r={}", count, cx, cy, cz, radius);
+        count
     }
 
     /// Run a deep sleep cycle on this region.
@@ -194,8 +232,11 @@ impl GeneratedRegion {
         let player_chunk = (0, 0, 0);
 
         // Build FluidSnapshot from generation fluid seeds (lava pools, water springs)
-        let mut fluid = voxel_fluid::FluidSnapshot::default();
         let cs = self.config.chunk_size;
+        let mut fluid = voxel_fluid::FluidSnapshot {
+            chunks: std::collections::HashMap::new(),
+            chunk_size: cs,
+        };
         let mut lava_count = 0u32;
         let mut water_count = 0u32;
         for fs in &self.fluid_seeds {
@@ -223,7 +264,45 @@ impl GeneratedRegion {
                 };
             }
         }
-        eprintln!("Sleep: Injected {} lava + {} water fluid seeds from generation", lava_count, water_count);
+        // Inject manually placed water cells
+        let mut placed_water_count = 0u32;
+        for &(px, py, pz) in &self.placed_water {
+            let chunk_key = (
+                px.div_euclid(cs as i32),
+                py.div_euclid(cs as i32),
+                pz.div_euclid(cs as i32),
+            );
+            let lx = px.rem_euclid(cs as i32) as usize;
+            let ly = py.rem_euclid(cs as i32) as usize;
+            let lz = pz.rem_euclid(cs as i32) as usize;
+            let cells = fluid.chunks.entry(chunk_key).or_insert_with(|| {
+                vec![voxel_fluid::cell::FluidCell {
+                    level: 0.0,
+                    fluid_type: voxel_fluid::cell::FluidType::Water,
+                    is_source: false,
+                    grace_ticks: 0,
+                    stagnant_ticks: 0,
+                }; cs * cs * cs]
+            });
+            let idx = lz * cs * cs + ly * cs + lx;
+            if idx < cells.len() {
+                cells[idx] = voxel_fluid::cell::FluidCell {
+                    level: 1.0,
+                    fluid_type: voxel_fluid::cell::FluidType::Water,
+                    is_source: true,
+                    grace_ticks: 0,
+                    stagnant_ticks: 0,
+                };
+                placed_water_count += 1;
+            }
+        }
+        eprintln!("Sleep: Injected {} lava + {} water fluid seeds from generation + {} placed water (from {} stored positions)",
+            lava_count, water_count, placed_water_count, self.placed_water.len());
+        if !self.placed_water.is_empty() {
+            let first = self.placed_water[0];
+            let ck = (first.0.div_euclid(cs as i32), first.1.div_euclid(cs as i32), first.2.div_euclid(cs as i32));
+            eprintln!("  First placed water: world=({},{},{}) -> chunk=({},{},{})", first.0, first.1, first.2, ck.0, ck.1, ck.2);
+        }
 
         // If no lava from generation, inject ONE continuous diagonal lava tube
         // using world coordinates to avoid per-chunk duplication

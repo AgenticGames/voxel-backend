@@ -301,6 +301,42 @@ pub fn apply_veins(
         activated.sort_by(|a, b| a.pos.cmp(&b.pos));
         convergence_count = activated.len() as u32;
 
+        // Diagnostic: always log water/heat stats even if 0 activations
+        {
+            let total_water_cells: u32 = fluid_snapshot.chunks.values()
+                .map(|cells| cells.iter().filter(|c| c.level > 0.001 && c.fluid_type.is_water()).count() as u32)
+                .sum();
+            let total_heat = heat_map.len();
+            let first_water = fluid_snapshot.chunks.iter()
+                .flat_map(|(&ck, cells)| {
+                    let cs_i = cs as i32;
+                    cells.iter().enumerate().filter(|(_, c)| c.level > 0.001 && c.fluid_type.is_water())
+                        .map(move |(idx, _)| {
+                            let lx = idx % cs;
+                            let ly = (idx / cs) % cs;
+                            let lz = idx / (cs * cs);
+                            (ck.0 * cs_i + lx as i32, ck.1 * cs_i + ly as i32, ck.2 * cs_i + lz as i32)
+                        })
+                }).next();
+            let first_heat = heat_map.first().map(|h| h.pos);
+            let dist = match (first_water, first_heat) {
+                (Some(w), Some(h)) => {
+                    let dx = (w.0 - h.0) as f32;
+                    let dy = (w.1 - h.1) as f32;
+                    let dz = (w.2 - h.2) as f32;
+                    (dx*dx + dy*dy + dz*dz).sqrt()
+                }
+                _ => -1.0,
+            };
+            result.transform_log.push(TransformEntry {
+                description: format!(
+                    "[VEIN_COORD_DEBUG] PRE-ACTIVATION: water_cells={} heat_sources={} activated={} convergence_radius={:.0} spacing={} first_water={:?} first_heat={:?} dist={:.1}",
+                    total_water_cells, total_heat, convergence_count, convergence_radius, spacing, first_water, first_heat, dist
+                ),
+                count: 1,
+            });
+        }
+
         // 3. For each activated water cell, deposit veins above
         let mut global_deposited: HashSet<(i32, i32, i32)> = HashSet::new();
         let zones = [TemperatureZone::Hypothermal, TemperatureZone::Mesothermal, TemperatureZone::Epithermal];
@@ -410,9 +446,57 @@ pub fn apply_veins(
                 let chunk_z_min = scan_z_min.div_euclid(chunk_size as i32);
                 let chunk_z_max = scan_z_max.div_euclid(chunk_size as i32);
 
-                'scan: for ckx in chunk_x_min..=chunk_x_max {
+                // Diagnostic: log scan chunk range for first activated water
+                if diag_water_positions.len() <= 1 && diag_wall_sites.is_empty() {
+                    let mut scan_found = Vec::new();
+                    let mut scan_missing = Vec::new();
+                    for sx in chunk_x_min..=chunk_x_max {
+                        for sy in chunk_y_min..=chunk_y_max {
+                            for sz in chunk_z_min..=chunk_z_max {
+                                if density_fields.contains_key(&(sx, sy, sz)) {
+                                    scan_found.push((sx, sy, sz));
+                                } else {
+                                    scan_missing.push((sx, sy, sz));
+                                }
+                            }
+                        }
+                    }
+                    if !diag_water_positions.is_empty() {
+                        // Store as a transform_log entry directly
+                        result.transform_log.push(TransformEntry {
+                            description: format!(
+                                "[VEIN_COORD_DEBUG] scan_range: X=[{}..{}] Y=[{}..{}] Z=[{}..{}] found={} missing={} scan_world: X=[{},{}] Y=[{},{}] Z=[{},{}]",
+                                chunk_x_min, chunk_x_max, chunk_y_min, chunk_y_max, chunk_z_min, chunk_z_max,
+                                scan_found.len(), scan_missing.len(),
+                                scan_x_min, scan_x_max, scan_y_min, scan_y_max, scan_z_min, scan_z_max
+                            ),
+                            count: 1,
+                        });
+                    }
+                }
+
+                // Build chunk list sorted by distance from water (closest first)
+                // so the max_candidates cap doesn't bias toward low-coordinate chunks
+                let water_chunk = (
+                    water_x.div_euclid(chunk_size as i32),
+                    water_y.div_euclid(chunk_size as i32),
+                    water_z.div_euclid(chunk_size as i32),
+                );
+                let mut scan_chunks: Vec<(i32, i32, i32)> = Vec::new();
+                for ckx in chunk_x_min..=chunk_x_max {
                     for cky in chunk_y_min..=chunk_y_max {
                         for ckz in chunk_z_min..=chunk_z_max {
+                            scan_chunks.push((ckx, cky, ckz));
+                        }
+                    }
+                }
+                scan_chunks.sort_by(|a, b| {
+                    let da = (a.0 - water_chunk.0).pow(2) + (a.1 - water_chunk.1).pow(2) + (a.2 - water_chunk.2).pow(2);
+                    let db = (b.0 - water_chunk.0).pow(2) + (b.1 - water_chunk.1).pow(2) + (b.2 - water_chunk.2).pow(2);
+                    da.cmp(&db)
+                });
+
+                'scan: for &(ckx, cky, ckz) in &scan_chunks {
                             let ck = (ckx, cky, ckz);
                             let df = match density_fields.get(&ck) {
                                 Some(df) => df,
@@ -486,8 +570,6 @@ pub fn apply_veins(
                                     }
                                 }
                             }
-                        }
-                    }
                 }
 
                 if candidates.is_empty() { continue; }
@@ -529,6 +611,10 @@ pub fn apply_veins(
                     let chosen = candidates.swap_remove(chosen_idx);
                     chosen_positions.push(chosen.pos);
                     selected.push(0); // placeholder, we process immediately
+                    diag_total_wall_sites += 1;
+                    if diag_wall_sites.len() < 5 {
+                        diag_wall_sites.push((chosen.pos, chosen.wall_normal, chosen.host_rock, chosen.heat_score));
+                    }
 
                     // Remove candidates too close to chosen
                     candidates.retain(|s| {

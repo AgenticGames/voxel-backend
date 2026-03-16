@@ -571,6 +571,40 @@
             var mode = mineMode.value;
             var radius = parseInt(mineRadius.value, 10);
 
+            if (mode === "water-place") {
+                // Mine first (carve sphere), then fill with water
+                var mineBody = JSON.stringify({
+                    x: originalPoint.x, y: originalPoint.y, z: originalPoint.z,
+                    mode: "sphere", radius: radius, nx: nx, ny: ny, nz: nz
+                });
+                meshInfo.textContent = "Carving + placing water...";
+                fetch("/api/mine", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: mineBody
+                })
+                .then(function (resp) { return resp.json(); })
+                .then(function (mineData) {
+                    displayJsonMesh(mineData.mesh, { resetCamera: false, reuseTransform: true });
+                    // Now place water in the carved area
+                    var waterBody = JSON.stringify({
+                        x: originalPoint.x, y: originalPoint.y, z: originalPoint.z, radius: radius
+                    });
+                    return fetch("/api/place-water", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: waterBody
+                    });
+                })
+                .then(function (resp) { return resp.json(); })
+                .then(function (data) {
+                    meshInfo.textContent = "Carved + placed " + data.placed + " water cells at (" +
+                        data.position[0].toFixed(1) + ", " + data.position[1].toFixed(1) + ", " + data.position[2].toFixed(1) + ")";
+                })
+                .catch(function (err) { meshInfo.textContent = "Water carve error: " + err; });
+                return;
+            }
+
             var body = JSON.stringify({
                 x: originalPoint.x,
                 y: originalPoint.y,
