@@ -303,6 +303,14 @@ pub struct AureoleConfig {
     pub garnet_pocket_count: u32,
     /// Number of diopside pockets per zone
     pub diopside_pocket_count: u32,
+    /// Extra ore veins per N lava cells (linear scaling, no cap). 0 = disabled.
+    pub aureole_veins_per_n_cells: f32,
+    /// Extra garnet pockets per N lava cells. 0 = disabled.
+    pub aureole_garnet_per_n_cells: f32,
+    /// Extra diopside pockets per N lava cells. 0 = disabled.
+    pub aureole_diopside_per_n_cells: f32,
+    /// N value: how many lava cells per extra vein/pocket (e.g. 10 = 1 extra per 10 cells)
+    pub aureole_cells_per_extra: u32,
     // ── Aureole vein shape ──
     /// Use wall-climbing bias for aureole ore veins (0/1)
     pub aureole_wall_climbing: bool,
@@ -312,6 +320,8 @@ pub struct AureoleConfig {
     pub aureole_weight_depth: f32,
     /// Weight for lateral spread on wall face
     pub aureole_weight_lateral: f32,
+    /// Weight for growing downward (Y-)
+    pub aureole_weight_down: f32,
     /// Fraction of vein voxels that must touch air (0.0-1.0)
     pub aureole_surface_ratio: f32,
     /// Min existing vein neighbors for new voxel (1=loose, 2=compact)
@@ -379,10 +389,15 @@ impl Default for AureoleConfig {
             diopside_compact_size: 8,
             garnet_pocket_count: 2,
             diopside_pocket_count: 1,
+            aureole_veins_per_n_cells: 1.0,
+            aureole_garnet_per_n_cells: 0.5,
+            aureole_diopside_per_n_cells: 0.3,
+            aureole_cells_per_extra: 20,
             aureole_wall_climbing: true,
             aureole_weight_up: 3.0,
             aureole_weight_depth: 2.0,
             aureole_weight_lateral: 1.5,
+            aureole_weight_down: 1.5,
             aureole_surface_ratio: 0.5,
             aureole_min_connectivity: 1,
             aureole_vein_spread: 0.5,
@@ -491,6 +506,8 @@ pub struct VeinConfig {
     pub vein_weight_depth: f32,
     /// Weight for lateral spread on wall face
     pub vein_weight_lateral: f32,
+    /// Weight for growing downward (Y-)
+    pub vein_weight_down: f32,
     /// Fraction of vein voxels that must touch air (0.0-1.0)
     pub vein_surface_ratio: f32,
     /// Min existing vein neighbors for new voxel (1=loose, 2=compact, 3=very tight)
@@ -557,6 +574,7 @@ impl Default for VeinConfig {
             vein_weight_up: 3.0,
             vein_weight_depth: 2.0,
             vein_weight_lateral: 1.5,
+            vein_weight_down: 0.3,
             vein_surface_ratio: 0.5,
             vein_min_connectivity: 1,
             spike_enabled: true,

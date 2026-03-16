@@ -2302,6 +2302,12 @@ mod tests {
             sleep_water_proximity_bias: 2.0,
             sleep_vein_min_connectivity: 1,
             sleep_aureole_min_connectivity: 1,
+            sleep_vein_weight_down: 0.3,
+            sleep_aureole_weight_down: 1.5,
+            sleep_aureole_veins_per_n_cells: 1.0,
+            sleep_aureole_garnet_per_n_cells: 0.5,
+            sleep_aureole_diopside_per_n_cells: 0.3,
+            sleep_aureole_cells_per_extra: 20,
         }
     }
 

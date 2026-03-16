@@ -666,6 +666,7 @@ pub fn apply_veins(
                             weight_up: config.vein_weight_up,
                             weight_depth: config.vein_weight_depth,
                             weight_lateral: config.vein_weight_lateral,
+                            weight_down: config.vein_weight_down,
                             surface_ratio: config.vein_surface_ratio,
                         },
                         exclude_aureole: true,

@@ -519,8 +519,14 @@ fn place_slate_veins(
     skarn_count: u32,
     deposit_mult: f32,
     count_mult: f32,
+    zone_cells: u32,
 ) -> u32 {
-    let vein_count = ((config.aureole_vein_count as f32 * count_mult).round() as usize).max(1);
+    // Base count + linear scaling from zone size
+    let n = config.aureole_cells_per_extra.max(1) as f32;
+    let extra_veins = if config.aureole_veins_per_n_cells > 0.0 {
+        (zone_cells as f32 / n * config.aureole_veins_per_n_cells).floor() as usize
+    } else { 0 };
+    let vein_count = (((config.aureole_vein_count as f32 * count_mult).round() as usize) + extra_veins).max(1);
     let seeds = find_aureole_boundary_seeds(converted, density_fields, chunk_size, vein_count, rng, config.aureole_vein_spread);
     if seeds.is_empty() {
         return 0;
@@ -562,6 +568,7 @@ fn place_slate_veins(
                 weight_up: config.aureole_weight_up,
                 weight_depth: config.aureole_weight_depth,
                 weight_lateral: config.aureole_weight_lateral,
+                weight_down: config.aureole_weight_down,
                 surface_ratio: config.aureole_surface_ratio,
             })
         } else {
@@ -584,7 +591,10 @@ fn place_slate_veins(
         skarn_seeds.sort();
         if !skarn_seeds.is_empty() {
             let g_size = ((config.garnet_compact_size as f32 * deposit_mult).round() as u32).max(3);
-            for _ in 0..config.garnet_pocket_count {
+            let extra_garnet = if config.aureole_garnet_per_n_cells > 0.0 {
+                (zone_cells as f32 / n * config.aureole_garnet_per_n_cells).floor() as u32
+            } else { 0 };
+            for _ in 0..(config.garnet_pocket_count + extra_garnet) {
                 let garnet_seed = skarn_seeds[rng.gen_range(0..skarn_seeds.len())];
                 let params = VeinGrowthParams {
                     ore: Material::Garnet,
@@ -599,7 +609,10 @@ fn place_slate_veins(
             }
 
             let d_size = ((config.diopside_compact_size as f32 * deposit_mult).round() as u32).max(3);
-            for _ in 0..config.diopside_pocket_count {
+            let extra_diopside = if config.aureole_diopside_per_n_cells > 0.0 {
+                (zone_cells as f32 / n * config.aureole_diopside_per_n_cells).floor() as u32
+            } else { 0 };
+            for _ in 0..(config.diopside_pocket_count + extra_diopside) {
                 let diopside_seed = skarn_seeds[rng.gen_range(0..skarn_seeds.len())];
                 let params = VeinGrowthParams {
                     ore: Material::Diopside,
@@ -628,9 +641,14 @@ fn place_limestone_veins(
     rng: &mut ChaCha8Rng,
     deposit_mult: f32,
     count_mult: f32,
+    zone_cells: u32,
 ) -> u32 {
-    // Ore veins at boundary seeds
-    let ore_count = ((config.aureole_vein_count as f32 * count_mult * 0.6).round() as usize).max(1);
+    // Ore veins at boundary seeds — base + linear scaling from zone size
+    let n = config.aureole_cells_per_extra.max(1) as f32;
+    let extra_veins = if config.aureole_veins_per_n_cells > 0.0 {
+        (zone_cells as f32 / n * config.aureole_veins_per_n_cells).floor() as usize
+    } else { 0 };
+    let ore_count = (((config.aureole_vein_count as f32 * count_mult * 0.6).round() as usize) + extra_veins).max(1);
     let seeds = find_aureole_boundary_seeds(converted, density_fields, chunk_size, ore_count, rng, config.aureole_vein_spread);
     if seeds.is_empty() {
         return 0;
@@ -661,6 +679,7 @@ fn place_limestone_veins(
                 weight_up: config.aureole_weight_up,
                 weight_depth: config.aureole_weight_depth,
                 weight_lateral: config.aureole_weight_lateral,
+                weight_down: config.aureole_weight_down,
                 surface_ratio: config.aureole_surface_ratio,
             })
         } else {
@@ -682,7 +701,10 @@ fn place_limestone_veins(
     skarn_seeds.sort();
     if !skarn_seeds.is_empty() {
         let g_size = ((config.garnet_compact_size as f32 * deposit_mult).round() as u32).max(3);
-        for _ in 0..config.garnet_pocket_count {
+        let extra_garnet = if config.aureole_garnet_per_n_cells > 0.0 {
+            (zone_cells as f32 / n * config.aureole_garnet_per_n_cells).floor() as u32
+        } else { 0 };
+        for _ in 0..(config.garnet_pocket_count + extra_garnet) {
             let seed = skarn_seeds[rng.gen_range(0..skarn_seeds.len())];
             let params = VeinGrowthParams {
                 ore: Material::Garnet,
@@ -697,7 +719,10 @@ fn place_limestone_veins(
         }
 
         let d_size = ((config.diopside_compact_size as f32 * deposit_mult).round() as u32).max(3);
-        for _ in 0..config.diopside_pocket_count {
+        let extra_diopside = if config.aureole_diopside_per_n_cells > 0.0 {
+            (zone_cells as f32 / n * config.aureole_diopside_per_n_cells).floor() as u32
+        } else { 0 };
+        for _ in 0..(config.diopside_pocket_count + extra_diopside) {
             let seed = skarn_seeds[rng.gen_range(0..skarn_seeds.len())];
             let params = VeinGrowthParams {
                 ore: Material::Diopside,
@@ -842,16 +867,17 @@ pub fn apply_aureole(
             }
 
             // Pass 2: ore veins + pockets (grow into just-placed metamorphic rock)
+            let zone_cell_count = zone.cells.len() as u32;
             let veins_placed = match aureole_type {
                 AureoleType::Slate => place_slate_veins(
                     &converted, config,
                     density_fields, chunk_size, &mut result.manifest, rng, skarn_n,
-                    combined_deposit_mult, combined_count_mult,
+                    combined_deposit_mult, combined_count_mult, zone_cell_count,
                 ),
                 AureoleType::Limestone => place_limestone_veins(
                     &converted, config,
                     density_fields, chunk_size, &mut result.manifest, rng,
-                    combined_deposit_mult, combined_count_mult,
+                    combined_deposit_mult, combined_count_mult, zone_cell_count,
                 ),
             };
             result.veins_placed += veins_placed;

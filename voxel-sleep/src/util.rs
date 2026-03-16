@@ -199,7 +199,7 @@ pub enum VeinBias {
     Planar(u8),
     /// Gold/Sulfide: tight spherical clusters
     Compact,
-    /// Veins grow on wall faces with 3 configurable shape weights + surface ratio
+    /// Veins grow on wall faces with configurable shape weights + surface ratio
     WallClimbing {
         wall_normal: (i32, i32, i32),
         /// Weight for growing upward (Y+)
@@ -208,6 +208,8 @@ pub enum VeinBias {
         weight_depth: f32,
         /// Weight for lateral spread (horizontal, perpendicular to wall_normal)
         weight_lateral: f32,
+        /// Weight for growing downward (Y-)
+        weight_down: f32,
         /// Fraction of voxels that must have at least one air-face neighbor (0.0-1.0)
         surface_ratio: f32,
     },
@@ -326,7 +328,7 @@ pub fn grow_vein(
                     }
                     VeinBias::Compact => 1.0,
                     VeinBias::Branching => 1.0,
-                    VeinBias::WallClimbing { wall_normal, weight_up, weight_depth, weight_lateral, surface_ratio } => {
+                    VeinBias::WallClimbing { wall_normal, weight_up, weight_depth, weight_lateral, weight_down, surface_ratio } => {
                         // Surface ratio enforcement
                         let is_exposed = is_surface_exposed(density_fields, n, chunk_size, aureole_surface_mode);
                         let current_ratio = if result.is_empty() { 1.0 } else { surface_count as f32 / result.len() as f32 };
@@ -335,22 +337,28 @@ pub fn grow_vein(
                         let base = if dy > 0 { *weight_up }
                         else if dx == -wall_normal.0 && dy == -wall_normal.1 && dz == -wall_normal.2 { *weight_depth }
                         else if dy == 0 && (dx != wall_normal.0 || dz != wall_normal.2) { *weight_lateral }
-                        else if dy < 0 { 0.3 }  // down: hardcoded low
+                        else if dy < 0 { *weight_down }
                         else if dx == wall_normal.0 && dy == wall_normal.1 && dz == wall_normal.2 { 0.1 }  // toward air: hardcoded low
                         else { 1.0 };
                         base * surface_penalty
                     },
                 };
-                // Connectivity check: count how many existing vein voxels are face-neighbors
-                if params.min_connectivity > 1 {
+                // Connectivity weighting: strongly prefer candidates with more existing vein neighbors
+                let connectivity_mult = if params.min_connectivity > 1 {
                     let vein_neighbors = FACE_OFFSETS.iter()
                         .filter(|&&(ax, ay, az)| visited.contains(&(n.0 + ax, n.1 + ay, n.2 + az)))
                         .count() as u32;
-                    if vein_neighbors < params.min_connectivity {
-                        continue;
+                    if vein_neighbors >= params.min_connectivity {
+                        // Meets threshold: full weight + bonus for extra connections
+                        1.0 + (vein_neighbors - 1) as f32 * 0.5
+                    } else {
+                        // Below threshold: heavy penalty but still possible (keeps vein growing)
+                        0.05
                     }
-                }
-                candidates.push((n, weight));
+                } else {
+                    1.0
+                };
+                candidates.push((n, weight * connectivity_mult));
             }
         }
 

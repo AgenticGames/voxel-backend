@@ -911,6 +911,14 @@ pub struct FfiEngineConfig {
     // Min connectivity
     pub sleep_vein_min_connectivity: u32,
     pub sleep_aureole_min_connectivity: u32,
+    // Weight down
+    pub sleep_vein_weight_down: f32,
+    pub sleep_aureole_weight_down: f32,
+    // Aureole per-N-cells scaling
+    pub sleep_aureole_veins_per_n_cells: f32,
+    pub sleep_aureole_garnet_per_n_cells: f32,
+    pub sleep_aureole_diopside_per_n_cells: f32,
+    pub sleep_aureole_cells_per_extra: u32,
 }
 
 #[repr(C)]
