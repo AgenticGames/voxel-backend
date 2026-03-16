@@ -427,7 +427,7 @@ pub fn apply_veins(
 
                 let base_veins = rng.gen_range(config.veins_per_zone_min..=config.veins_per_zone_max);
                 let num_veins = ((base_veins as f32 * volume_amount_mult).round() as u32).max(1);
-                let max_candidates = (num_veins * 10) as usize;
+                // No candidate cap — scan box is already bounded by horizontal_spread
 
                 // Find wall sites: scan box above water
                 let mut candidates: Vec<WallSite> = Vec::new();
@@ -496,7 +496,7 @@ pub fn apply_veins(
                     da.cmp(&db)
                 });
 
-                'scan: for &(ckx, cky, ckz) in &scan_chunks {
+                for &(ckx, cky, ckz) in &scan_chunks {
                             let ck = (ckx, cky, ckz);
                             let df = match density_fields.get(&ck) {
                                 Some(df) => df,
@@ -564,9 +564,6 @@ pub fn apply_veins(
                                             heat_score,
                                         });
 
-                                        if candidates.len() >= max_candidates {
-                                            break 'scan;
-                                        }
                                     }
                                 }
                             }
