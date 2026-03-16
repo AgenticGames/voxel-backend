@@ -1498,16 +1498,48 @@ fn handle_request(
                 }
             }
 
-            // Phase 3: Mesh all density fields
-            let mut meshes = Vec::with_capacity(chunks.len());
-            for df_opt in &density_fields {
+            // Phase 3: Mesh all density fields + build seam data
+            let chunk_size = cfg.chunk_size;
+            let mut base_meshes: Vec<Option<voxel_core::mesh::Mesh>> = Vec::with_capacity(chunks.len());
+            let mut seam_data_map: std::collections::HashMap<(i32,i32,i32), ChunkSeamData> =
+                std::collections::HashMap::new();
+
+            for (i, df_opt) in density_fields.iter().enumerate() {
                 match df_opt {
                     Some(df) => {
-                        let h = voxel_gen::hermite_extract::extract_hermite_data(df);
+                        let h = extract_hermite_data(df);
                         let cell_size = df.size - 1;
-                        let dc_vertices = voxel_core::dual_contouring::solve::solve_dc_vertices(&h, cell_size);
-                        let mut mesh = voxel_core::dual_contouring::mesh_gen::generate_mesh(&h, &dc_vertices, cell_size);
+                        let dc_verts = solve_dc_vertices(&h, cell_size);
+                        let mut mesh = generate_mesh(&h, &dc_verts, cell_size);
                         mesh.smooth(cfg.mesh_smooth_iterations, cfg.mesh_smooth_strength, cfg.mesh_boundary_smooth, Some(cell_size));
+
+                        // Store seam data for this chunk (using real chunk coords as keys)
+                        let boundary_edges = region_gen::extract_boundary_edges(&h, chunk_size);
+                        seam_data_map.insert(chunks[i], ChunkSeamData {
+                            dc_vertices: dc_verts,
+                            world_origin: glam::Vec3::ZERO,
+                            boundary_edges,
+                        });
+
+                        base_meshes.push(Some(mesh));
+                    }
+                    None => {
+                        base_meshes.push(None);
+                    }
+                }
+            }
+
+            // Phase 4: Generate seam quads and append to base meshes, then convert
+            let mut meshes = Vec::with_capacity(chunks.len());
+            for (i, base_opt) in base_meshes.into_iter().enumerate() {
+                match base_opt {
+                    Some(mut mesh) => {
+                        // Generate seam quads for this chunk using neighbors in the block
+                        let seam_mesh = region_gen::generate_chunk_seam_quads(
+                            chunks[i], &seam_data_map, chunk_size);
+                        if !seam_mesh.triangles.is_empty() {
+                            mesh.append(seam_mesh);
+                        }
                         if cfg.mesh_recalc_normals > 0 { mesh.recalculate_normals(); }
 
                         let mut converted = convert_mesh_to_ue_scaled(&mesh, cfg.voxel_scale(), world_scale);
