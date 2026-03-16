@@ -224,6 +224,43 @@ pub struct VeinGrowthParams {
     pub exclude_aureole: bool,
 }
 
+/// Check if a voxel qualifies as "surface-exposed" for surface_ratio.
+///
+/// For aureole veins (exclude_aureole=false): requires air neighbor adjacent to
+/// Hornfels/Skarn. This prevents veins from gaming the ratio by poking through
+/// random thin walls away from the aureole contact zone.
+///
+/// For hydrothermal veins (exclude_aureole=true): any air face neighbor counts,
+/// since these veins ARE the primary deposit on cave walls.
+fn is_surface_exposed(
+    density_fields: &HashMap<(i32, i32, i32), DensityField>,
+    pos: (i32, i32, i32),
+    chunk_size: usize,
+    aureole_only: bool,
+) -> bool {
+    for &(dx, dy, dz) in &FACE_OFFSETS {
+        let n = (pos.0 + dx, pos.1 + dy, pos.2 + dz);
+        let mat = sample_material(density_fields, n.0, n.1, n.2, chunk_size);
+        if mat.map_or(false, |m| !m.is_solid()) {
+            if !aureole_only {
+                // Hydrothermal: any air neighbor counts
+                return true;
+            }
+            // Aureole: air must be adjacent to Hornfels/Skarn
+            for &(ax, ay, az) in &FACE_OFFSETS {
+                let an = (n.0 + ax, n.1 + ay, n.2 + az);
+                if an == pos { continue; }
+                if let Some(am) = sample_material(density_fields, an.0, an.1, an.2, chunk_size) {
+                    if am == Material::Hornfels || am == Material::Skarn {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Grow a connected ore vein FROM a seed point INTO surrounding host rock.
 ///
 /// Returns world-coordinate positions to convert to ore. The seed itself
@@ -240,13 +277,14 @@ pub fn grow_vein(
     let mut visited: HashSet<(i32, i32, i32)> = HashSet::new();
     visited.insert(seed);
     let mut frontier: Vec<(i32, i32, i32)> = vec![seed];
-    // Track surface voxel count for WallClimbing surface_ratio enforcement
+    // Track surface voxel count for WallClimbing surface_ratio enforcement.
+    // "Surface" = has an air neighbor that's adjacent to Hornfels/Skarn (aureole contact zone).
+    // This prevents veins from gaming the ratio by poking through random thin walls.
     let mut surface_count = 0u32;
-    let seed_has_air = FACE_OFFSETS.iter().any(|&(ax, ay, az)| {
-        sample_material(density_fields, seed.0 + ax, seed.1 + ay, seed.2 + az, chunk_size)
-            .map_or(false, |m| !m.is_solid())
-    });
-    if seed_has_air { surface_count += 1; }
+    let aureole_surface_mode = !params.exclude_aureole; // aureole veins require Hornfels/Skarn adjacency
+    if is_surface_exposed(density_fields, seed, chunk_size, aureole_surface_mode) {
+        surface_count += 1;
+    }
 
     while result.len() < target_size && !frontier.is_empty() {
         // Pick frontier voxel
@@ -286,13 +324,10 @@ pub fn grow_vein(
                     VeinBias::Compact => 1.0,
                     VeinBias::Branching => 1.0,
                     VeinBias::WallClimbing { wall_normal, weight_up, weight_depth, weight_lateral, surface_ratio } => {
-                        // Surface ratio enforcement: penalize buried candidates when below target
-                        let has_air = FACE_OFFSETS.iter().any(|&(ax, ay, az)| {
-                            sample_material(density_fields, n.0 + ax, n.1 + ay, n.2 + az, chunk_size)
-                                .map_or(false, |m| !m.is_solid())
-                        });
+                        // Surface ratio enforcement
+                        let is_exposed = is_surface_exposed(density_fields, n, chunk_size, aureole_surface_mode);
                         let current_ratio = if result.is_empty() { 1.0 } else { surface_count as f32 / result.len() as f32 };
-                        let surface_penalty = if !has_air && current_ratio < *surface_ratio { 0.05 } else { 1.0 };
+                        let surface_penalty = if !is_exposed && current_ratio < *surface_ratio { 0.05 } else { 1.0 };
 
                         let base = if dy > 0 { *weight_up }
                         else if dx == -wall_normal.0 && dy == -wall_normal.1 && dz == -wall_normal.2 { *weight_depth }
@@ -338,12 +373,10 @@ pub fn grow_vein(
             }
             let (pos, _) = candidates.remove(chosen_idx);
             visited.insert(pos);
-            // Track surface count for WallClimbing surface_ratio
-            let pos_has_air = FACE_OFFSETS.iter().any(|&(ax, ay, az)| {
-                sample_material(density_fields, pos.0 + ax, pos.1 + ay, pos.2 + az, chunk_size)
-                    .map_or(false, |m| !m.is_solid())
-            });
-            if pos_has_air { surface_count += 1; }
+            // Track surface-exposed count for WallClimbing surface_ratio
+            if is_surface_exposed(density_fields, pos, chunk_size, aureole_surface_mode) {
+                surface_count += 1;
+            }
             result.push(pos);
             frontier.push(pos);
         }
