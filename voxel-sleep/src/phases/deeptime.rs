@@ -184,6 +184,7 @@ pub fn apply_deeptime(
                                         max_size: sv_max,
                                         bias,
                                         exclude_aureole: false,
+                                        min_connectivity: 1,
                                     };
                                     let cluster = grow_vein(density_fields, (wx, above_y, wz), &params, chunk_size, rng);
                                     for &pos in &cluster {
@@ -338,6 +339,7 @@ pub fn apply_deeptime(
                                 max_size: sv_max,
                                 bias,
                                 exclude_aureole: false,
+                                min_connectivity: 1,
                             };
                             let cluster = grow_vein(density_fields, (wx, wy, wz), &params, chunk_size, rng);
                             for &pos in &cluster {

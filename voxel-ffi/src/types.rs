@@ -908,6 +908,9 @@ pub struct FfiEngineConfig {
     pub sleep_vein_surface_ratio: f32,
     // Water proximity bias
     pub sleep_water_proximity_bias: f32,
+    // Min connectivity
+    pub sleep_vein_min_connectivity: u32,
+    pub sleep_aureole_min_connectivity: u32,
 }
 
 #[repr(C)]

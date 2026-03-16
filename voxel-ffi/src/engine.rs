@@ -1747,6 +1747,7 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
             aureole_weight_depth: if c.sleep_aureole_weight_depth > 0.0 { c.sleep_aureole_weight_depth } else { 2.0 },
             aureole_weight_lateral: if c.sleep_aureole_weight_lateral > 0.0 { c.sleep_aureole_weight_lateral } else { 1.5 },
             aureole_surface_ratio: if c.sleep_aureole_surface_ratio > 0.0 { c.sleep_aureole_surface_ratio } else { 0.5 },
+            aureole_min_connectivity: if c.sleep_aureole_min_connectivity > 0 { c.sleep_aureole_min_connectivity } else { 1 },
         },
         veins: VeinConfig {
             vein_deposition_prob: if c.sleep_vein_deposition_prob > 0.0 { c.sleep_vein_deposition_prob } else { 0.85 },
@@ -1799,6 +1800,7 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
             vein_weight_depth: if c.sleep_vein_weight_depth > 0.0 { c.sleep_vein_weight_depth } else { 2.0 },
             vein_weight_lateral: if c.sleep_vein_weight_lateral > 0.0 { c.sleep_vein_weight_lateral } else { 1.5 },
             vein_surface_ratio: if c.sleep_vein_surface_ratio > 0.0 { c.sleep_vein_surface_ratio } else { 0.5 },
+            vein_min_connectivity: if c.sleep_vein_min_connectivity > 0 { c.sleep_vein_min_connectivity } else { 1 },
             water_proximity_bias: c.sleep_water_proximity_bias,
         },
         deeptime: DeepTimeConfig {

@@ -567,7 +567,7 @@ fn place_slate_veins(
         } else {
             (s_min, s_max, default_vein_bias(ore, rng))
         };
-        let params = VeinGrowthParams { ore, min_size: actual_min, max_size: actual_max, bias, exclude_aureole: false };
+        let params = VeinGrowthParams { ore, min_size: actual_min, max_size: actual_max, bias, exclude_aureole: false, min_connectivity: config.aureole_min_connectivity };
         let positions = grow_vein(density_fields, seed, &params, chunk_size, rng);
         total_placed += apply_vein_to_world(&positions, ore, density_fields, chunk_size, manifest);
     }
@@ -592,6 +592,7 @@ fn place_slate_veins(
                     max_size: g_size,
                     bias: VeinBias::Compact,
                     exclude_aureole: false,
+                    min_connectivity: 1,
                 };
                 let positions = grow_vein(density_fields, garnet_seed, &params, chunk_size, rng);
                 total_placed += apply_vein_to_world(&positions, Material::Garnet, density_fields, chunk_size, manifest);
@@ -606,6 +607,7 @@ fn place_slate_veins(
                     max_size: d_size,
                     bias: VeinBias::Compact,
                     exclude_aureole: false,
+                    min_connectivity: 1,
                 };
                 let positions = grow_vein(density_fields, diopside_seed, &params, chunk_size, rng);
                 total_placed += apply_vein_to_world(&positions, Material::Diopside, density_fields, chunk_size, manifest);
@@ -664,7 +666,7 @@ fn place_limestone_veins(
         } else {
             (vein_min, vein_max, default_vein_bias(ore, rng))
         };
-        let params = VeinGrowthParams { ore, min_size: actual_min, max_size: actual_max, bias, exclude_aureole: false };
+        let params = VeinGrowthParams { ore, min_size: actual_min, max_size: actual_max, bias, exclude_aureole: false, min_connectivity: config.aureole_min_connectivity };
         let positions = grow_vein(density_fields, seed, &params, chunk_size, rng);
         total_placed += apply_vein_to_world(&positions, ore, density_fields, chunk_size, manifest);
     }
@@ -688,6 +690,7 @@ fn place_limestone_veins(
                 max_size: g_size,
                 bias: VeinBias::Compact,
                 exclude_aureole: false,
+                min_connectivity: 1,
             };
             let positions = grow_vein(density_fields, seed, &params, chunk_size, rng);
             total_placed += apply_vein_to_world(&positions, Material::Garnet, density_fields, chunk_size, manifest);
@@ -702,6 +705,7 @@ fn place_limestone_veins(
                 max_size: d_size,
                 bias: VeinBias::Compact,
                 exclude_aureole: false,
+                min_connectivity: 1,
             };
             let positions = grow_vein(density_fields, seed, &params, chunk_size, rng);
             total_placed += apply_vein_to_world(&positions, Material::Diopside, density_fields, chunk_size, manifest);

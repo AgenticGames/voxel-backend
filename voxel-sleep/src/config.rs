@@ -314,6 +314,8 @@ pub struct AureoleConfig {
     pub aureole_weight_lateral: f32,
     /// Fraction of vein voxels that must touch air (0.0-1.0)
     pub aureole_surface_ratio: f32,
+    /// Min existing vein neighbors for new voxel (1=loose, 2=compact)
+    pub aureole_min_connectivity: u32,
     // ── Lava volume scaling for aureole ──
     /// Radius to count lava cells for zone volume scaling
     pub aureole_lava_volume_max_cells: u32,
@@ -382,6 +384,7 @@ impl Default for AureoleConfig {
             aureole_weight_depth: 2.0,
             aureole_weight_lateral: 1.5,
             aureole_surface_ratio: 0.5,
+            aureole_min_connectivity: 1,
             aureole_vein_spread: 0.5,
             aureole_lava_volume_max_cells: 50,
             aureole_lava_deposit_mult: 1.0,
@@ -490,6 +493,8 @@ pub struct VeinConfig {
     pub vein_weight_lateral: f32,
     /// Fraction of vein voxels that must touch air (0.0-1.0)
     pub vein_surface_ratio: f32,
+    /// Min existing vein neighbors for new voxel (1=loose, 2=compact, 3=very tight)
+    pub vein_min_connectivity: u32,
     // Spike/tendril intrusions ("centipede" look)
     /// Enable spikey tendrils radiating from vein bodies
     pub spike_enabled: bool,
@@ -553,6 +558,7 @@ impl Default for VeinConfig {
             vein_weight_depth: 2.0,
             vein_weight_lateral: 1.5,
             vein_surface_ratio: 0.5,
+            vein_min_connectivity: 1,
             spike_enabled: true,
             spike_count_min: 4,
             spike_count_max: 10,

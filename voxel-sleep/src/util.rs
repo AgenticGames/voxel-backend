@@ -222,6 +222,9 @@ pub struct VeinGrowthParams {
     pub bias: VeinBias,
     /// Skip Hornfels/Skarn during growth (Phase 3 veins should not invade aureole).
     pub exclude_aureole: bool,
+    /// Min number of existing vein neighbors a candidate must have to be added (1=loose, 2+=compact).
+    /// Higher values produce tighter, more solid-looking deposits.
+    pub min_connectivity: u32,
 }
 
 /// Check if a voxel qualifies as "surface-exposed" for surface_ratio.
@@ -338,6 +341,15 @@ pub fn grow_vein(
                         base * surface_penalty
                     },
                 };
+                // Connectivity check: count how many existing vein voxels are face-neighbors
+                if params.min_connectivity > 1 {
+                    let vein_neighbors = FACE_OFFSETS.iter()
+                        .filter(|&&(ax, ay, az)| visited.contains(&(n.0 + ax, n.1 + ay, n.2 + az)))
+                        .count() as u32;
+                    if vein_neighbors < params.min_connectivity {
+                        continue;
+                    }
+                }
                 candidates.push((n, weight));
             }
         }

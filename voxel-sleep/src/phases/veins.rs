@@ -669,6 +669,7 @@ pub fn apply_veins(
                             surface_ratio: config.vein_surface_ratio,
                         },
                         exclude_aureole: true,
+                        min_connectivity: config.vein_min_connectivity,
                     };
                     let vein_positions = grow_vein(density_fields, chosen.pos, &params, chunk_size, rng);
 
@@ -718,11 +719,20 @@ pub fn apply_veins(
                         // Grow each spike as a thin tendril into host rock
                         for origin in spike_origins {
                             let spike_len = rng.gen_range(config.spike_length_min..=config.spike_length_max);
-                            // Pick a random direction (prefer directions away from vein center & into rock)
-                            let mut dirs: Vec<(i32, i32, i32)> = FACE_OFFSETS.iter()
+                            // Pick a direction toward air (visible to player)
+                            // Only allow directions where there's air within 2 voxels
+                            let dirs: Vec<(i32, i32, i32)> = FACE_OFFSETS.iter()
                                 .filter(|&&(dx, dy, dz)| {
                                     let nb = (origin.0 + dx, origin.1 + dy, origin.2 + dz);
-                                    !vein_set.contains(&nb) && !global_deposited.contains(&nb)
+                                    if vein_set.contains(&nb) || global_deposited.contains(&nb) { return false; }
+                                    // Check if there's air within 2 steps in this direction
+                                    for step in 1..=2 {
+                                        let probe = (origin.0 + dx * step, origin.1 + dy * step, origin.2 + dz * step);
+                                        if let Some(mat) = sample_material(density_fields, probe.0, probe.1, probe.2, chunk_size) {
+                                            if !mat.is_solid() { return true; }
+                                        }
+                                    }
+                                    false
                                 })
                                 .copied()
                                 .collect();
@@ -847,6 +857,7 @@ pub fn apply_veins(
                                         max_size: 3,
                                         bias: VeinBias::Compact,
                                         exclude_aureole: true,
+                                        min_connectivity: 1,
                                     };
                                     let pyrite_vein = grow_vein(density_fields, (pnx, pny, pnz), &pyrite_params, chunk_size, rng);
                                     for &pvpos in &pyrite_vein {
@@ -887,6 +898,7 @@ pub fn apply_veins(
                                         max_size: 3,
                                         bias: VeinBias::Planar(rng.gen_range(0..3)),
                                         exclude_aureole: true,
+                                        min_connectivity: 1,
                                     };
                                     let quartz_vein = grow_vein(density_fields, (qnx, qny, qnz), &quartz_params, chunk_size, rng);
                                     for &qvpos in &quartz_vein {
