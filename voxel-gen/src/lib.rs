@@ -54,7 +54,9 @@ pub fn generate_density(coord: ChunkCoord, config: &GenerationConfig) -> (Densit
     );
 
     // Step 3: Generate worm paths and carve into density
+    // Only carve worms whose path endpoint lands within 50 voxels (2000 UU) of the target cavern
     let junction_radius = config.worm.radius_max * 1.5;
+    let max_endpoint_drift = 50.0; // voxels (= 2000 UU at scale 40)
     for (i, (start, end)) in connections.iter().enumerate() {
         let worm_seed = c_seed.wrapping_add(i as u64 * 1000);
         let segments = worm::path::generate_worm_path(
@@ -66,6 +68,12 @@ pub fn generate_density(coord: ChunkCoord, config: &GenerationConfig) -> (Densit
             config.worm.radius_min,
             config.worm.radius_max,
         );
+        // Validate: path must actually reach near the target cavern
+        if let Some(last) = segments.last() {
+            if last.position.distance(*end) > max_endpoint_drift {
+                continue; // Worm drifted too far — discard
+            }
+        }
         worm::carve::carve_worm_into_density(
             &mut density,
             &segments,

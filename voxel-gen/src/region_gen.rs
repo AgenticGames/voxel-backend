@@ -140,6 +140,13 @@ pub fn generate_region_densities(
             continue;
         }
 
+        // Validate: path endpoint must land within 50 voxels (2000 UU) of target cavern
+        if let Some(last) = segments.last() {
+            if last.position.distance(*worm_end) > 50.0 {
+                continue;
+            }
+        }
+
         // Find bounding box of worm path to limit chunk iteration
         let (path_min, path_max) = worm_path_aabb(&segments);
 
