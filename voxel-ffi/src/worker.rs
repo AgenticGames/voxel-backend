@@ -1412,21 +1412,19 @@ fn handle_request(
 
             let t = if total_steps > 0 { step as f32 / total_steps as f32 } else { 1.0 };
 
-            // Pre-compute which chunks have meaningful changes (skip inactive ones)
-            let change_counts: Vec<usize> = chunks.iter()
-                .map(|key| manifest.chunk_deltas.get(key).map_or(0, |d| d.voxel_changes.len()))
+            // Pre-compute which chunks have visually meaningful changes.
+            // Only count aureole/vein changes (spread_distance > 0) — non-aureole
+            // scattered changes aren't worth re-meshing 30 times for.
+            let spread_counts: Vec<usize> = chunks.iter()
+                .map(|key| manifest.chunk_deltas.get(key).map_or(0, |d|
+                    d.voxel_changes.iter().filter(|c| c.spread_distance > 0.0).count()))
                 .collect();
-            let max_changes = change_counts.iter().copied().max().unwrap_or(0);
-            let threshold = (max_changes as f32 * 0.05) as usize;
-            let active: Vec<bool> = change_counts.iter()
-                .map(|&c| c > threshold || step == 0)  // always mesh all at step 0
+            let max_spread = spread_counts.iter().copied().max().unwrap_or(0);
+            let threshold = ((max_spread as f32 * 0.05) as usize).max(1);
+            let active: Vec<bool> = spread_counts.iter()
+                .map(|&c| c >= threshold || step == 0)  // always mesh all at step 0
                 .collect();
-
             let active_count = active.iter().filter(|&&a| a).count();
-            if active_count < chunks.len() {
-                eprintln!("[MORPH] Step {}/{}: meshing {}/{} active chunks (threshold: {} changes)",
-                    step, total_steps, active_count, chunks.len(), threshold);
-            }
 
             let s = store.read().unwrap();
 
