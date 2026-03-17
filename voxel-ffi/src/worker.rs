@@ -766,11 +766,11 @@ fn handle_request(
                 let _ = incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
             }
         }
-        WorkerRequest::BuildingFlatten { base_x, mut base_y, base_z, host_material } => {
+        WorkerRequest::BuildingFlatten { base_x, mut base_y, base_z, host_material, footprint_voxels } => {
             let cfg = config.read().unwrap().clone();
             let mat = voxel_core::material::Material::from_u8(host_material);
             let mut s = store.write().unwrap();
-            let bts = building_terrace_size_for_scale(world_scale);
+            let bts = footprint_voxels.max(1);
             let cs = cfg.chunk_size as i32;
 
             // Surface correction: if base_y is inside solid rock, scan upward
@@ -1424,10 +1424,15 @@ fn handle_request(
                                 let sample = df.get_mut(change.lx, change.ly, change.lz);
                                 let old_d = change.old_density;
                                 let new_d = change.new_density;
-                                sample.density = old_d + (new_d - old_d) * t;
+                                // Per-voxel spreading: voxels near heat source (spread=0)
+                                // transform first, farthest (spread=1) start at t=0.6
+                                let delay_factor = 0.6_f32;
+                                let voxel_delay = change.spread_distance * delay_factor;
+                                let voxel_t = ((t - voxel_delay) / (1.0 - voxel_delay)).clamp(0.0, 1.0);
+                                sample.density = old_d + (new_d - old_d) * voxel_t;
                                 let old_mat = voxel_core::material::Material::from_u8(change.old_material);
                                 let new_mat = voxel_core::material::Material::from_u8(change.new_material);
-                                sample.material = if t >= 0.5 { new_mat } else { old_mat };
+                                sample.material = if voxel_t >= 0.5 { new_mat } else { old_mat };
                             }
                         }
                         density_fields.push(Some(df));

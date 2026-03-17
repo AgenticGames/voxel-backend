@@ -15,6 +15,10 @@ pub struct VoxelChange {
     pub old_density: f32,
     pub new_material: u8,
     pub new_density: f32,
+    /// Normalized distance from heat source (0.0 = at source, 1.0 = farthest).
+    /// Controls spreading morph animation order during sleep montage.
+    #[serde(default)]
+    pub spread_distance: f32,
 }
 
 /// Records a single support change.
@@ -86,13 +90,25 @@ impl ChangeManifest {
         Self::default()
     }
 
-    /// Record a voxel change in the manifest.
+    /// Record a voxel change in the manifest (spread_distance defaults to 0.0).
     pub fn record_voxel_change(
         &mut self,
         chunk: (i32, i32, i32),
         lx: usize, ly: usize, lz: usize,
         old_material: Material, old_density: f32,
         new_material: Material, new_density: f32,
+    ) {
+        self.record_voxel_change_with_spread(chunk, lx, ly, lz, old_material, old_density, new_material, new_density, 0.0);
+    }
+
+    /// Record a voxel change with explicit spread_distance for morph animation ordering.
+    pub fn record_voxel_change_with_spread(
+        &mut self,
+        chunk: (i32, i32, i32),
+        lx: usize, ly: usize, lz: usize,
+        old_material: Material, old_density: f32,
+        new_material: Material, new_density: f32,
+        spread_distance: f32,
     ) {
         let delta = self.chunk_deltas.entry(chunk).or_default();
         delta.voxel_changes.push(VoxelChange {
@@ -101,6 +117,7 @@ impl ChangeManifest {
             old_density,
             new_material: new_material as u8,
             new_density,
+            spread_distance,
         });
     }
 

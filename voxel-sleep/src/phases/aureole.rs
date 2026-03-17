@@ -353,8 +353,9 @@ fn place_metamorphic_shell(
             };
 
             // Convert with boundary sync
+            let spread = if max_depth > 0 { next_dist as f32 / max_depth as f32 } else { 0.0 };
             set_voxel_synced(density_fields, key, lx, ly, lz, new_mat, None, chunk_size);
-            manifest.record_voxel_change(key, lx, ly, lz, mat, density, new_mat, density);
+            manifest.record_voxel_change_with_spread(key, lx, ly, lz, mat, density, new_mat, density, spread);
             converted.insert(n);
 
             if new_mat == Material::Skarn {
@@ -494,7 +495,8 @@ fn apply_vein_to_world(
         }
 
         set_voxel_synced(density_fields, key, lx, ly, lz, material, None, chunk_size);
-        manifest.record_voxel_change(key, lx, ly, lz, old_mat, old_density, material, old_density);
+        // Veins appear mid-sequence (spread 0.5) — after aureole shell, before outermost
+        manifest.record_voxel_change_with_spread(key, lx, ly, lz, old_mat, old_density, material, old_density, 0.5);
         count += 1;
     }
     count
