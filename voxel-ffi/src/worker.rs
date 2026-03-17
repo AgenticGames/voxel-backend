@@ -746,10 +746,7 @@ fn handle_request(
                 let _ = result_tx.send(WorkerResult::ChunkMesh { chunk: key, mesh, generation: 0, crystal_data });
             }
 
-            // Regenerate seams for dirty chunks and their neighbors (matches mining path)
-            for key in dirty_keys {
-                let _ = incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
-            }
+            batched_seam_pass(&dirty_keys, &cfg, store, result_tx, world_scale);
         }
         WorkerRequest::FlattenBatch { tiles } => {
             let cfg = config.read().unwrap().clone();
@@ -762,9 +759,7 @@ fn handle_request(
                 let crystal_data = retrieve_crystal_data(store, key, cfg.voxel_scale(), world_scale);
                 let _ = result_tx.send(WorkerResult::ChunkMesh { chunk: key, mesh, generation: 0, crystal_data });
             }
-            for key in dirty_keys {
-                let _ = incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
-            }
+            batched_seam_pass(&dirty_keys, &cfg, store, result_tx, world_scale);
         }
         WorkerRequest::BuildingFlatten { base_x, base_y, base_z, host_material, footprint_voxels, clearance_voxels } => {
             let cfg = config.read().unwrap().clone();
@@ -786,9 +781,7 @@ fn handle_request(
                 let _ = result_tx.send(WorkerResult::ChunkMesh { chunk: key, mesh, generation: 0, crystal_data });
             }
 
-            for key in dirty_keys {
-                let _ = incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
-            }
+            batched_seam_pass(&dirty_keys, &cfg, store, result_tx, world_scale);
         }
         WorkerRequest::Mine { request } => {
             let cfg = config.read().unwrap().clone();
@@ -889,10 +882,7 @@ fn handle_request(
                 }
             }
 
-            // Regenerate seams for dirty chunks and their neighbors
-            for key in dirty_keys {
-                let _ = incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
-            }
+            batched_seam_pass(&dirty_keys, &cfg, store, result_tx, world_scale);
         }
         WorkerRequest::MineAndFillFluid { world_x, world_y, world_z, radius, fluid_type, world_scale: ws } => {
             let cfg = config.read().unwrap().clone();
@@ -1038,9 +1028,7 @@ fn handle_request(
             }
 
             // Step 6: Regenerate seams
-            for key in dirty_keys {
-                let _ = incremental_seam_pass(key, &cfg, store, result_tx, ws);
-            }
+            batched_seam_pass(&dirty_keys, &cfg, store, result_tx, ws);
         }
         WorkerRequest::Unload { chunk } => {
             let mut s = store.write().unwrap();
@@ -1212,9 +1200,7 @@ fn handle_request(
             // Regenerate seams for dirty chunks
             let t_seam = Instant::now();
             let seam_count = sleep_result.dirty_chunks.len();
-            for &key in &sleep_result.dirty_chunks {
-                let _ = incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
-            }
+            batched_seam_pass(&sleep_result.dirty_chunks, &cfg, store, result_tx, world_scale);
             let t_seam_elapsed = t_seam.elapsed();
 
             // Build combined profile report with worker timings appended
@@ -1840,5 +1826,66 @@ fn incremental_seam_pass(
         convert: t_convert,
         candidates_tried,
         candidates_sent,
+    }
+}
+
+/// Deduplicated seam pass for multiple dirty chunks.
+/// Computes the union of all 27-neighborhoods and runs each candidate exactly once,
+/// avoiding the N× duplication when overlapping neighborhoods re-generate the same seams.
+fn batched_seam_pass(
+    dirty_keys: &[(i32, i32, i32)],
+    cfg: &GenerationConfig,
+    store: &Arc<RwLock<ChunkStore>>,
+    result_tx: &Sender<WorkerResult>,
+    world_scale: f32,
+) {
+    let mut candidates: HashSet<(i32, i32, i32)> = HashSet::new();
+    for &key in dirty_keys {
+        for dx in -1..=1i32 {
+            for dy in -1..=1i32 {
+                for dz in -1..=1i32 {
+                    candidates.insert((key.0 + dx, key.1 + dy, key.2 + dz));
+                }
+            }
+        }
+    }
+
+    let mut to_send: Vec<((i32, i32, i32), voxel_core::mesh::Mesh)> = Vec::new();
+    {
+        let s = store.read().unwrap();
+        for &target in &candidates {
+            if !s.chunk_seam_data.contains_key(&target) {
+                continue;
+            }
+            let seam_mesh = region_gen::generate_chunk_seam_quads(target, &s.chunk_seam_data, cfg.chunk_size);
+            if seam_mesh.triangles.is_empty() {
+                continue;
+            }
+            let base = match s.base_meshes.get(&target) {
+                Some(m) => m.clone(),
+                None => continue,
+            };
+            let mut mesh = base;
+            mesh.append(seam_mesh);
+            if cfg.mesh_recalc_normals > 0 {
+                mesh.recalculate_normals();
+            }
+            to_send.push((target, mesh));
+        }
+    }
+
+    for (target, combined) in to_send {
+        let mut converted = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
+        crate::convert::bucket_mesh_by_material(&mut converted);
+        if converted.indices.is_empty() {
+            continue;
+        }
+        let crystal_data = retrieve_crystal_data(store, target, cfg.voxel_scale(), world_scale);
+        let _ = result_tx.send(WorkerResult::ChunkMesh {
+            chunk: target,
+            mesh: converted,
+            generation: 0,
+            crystal_data,
+        });
     }
 }
