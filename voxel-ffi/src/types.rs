@@ -1027,6 +1027,9 @@ pub struct FfiSleepResult {
     // Compacted manifest JSON for morph system
     pub manifest_json: *mut std::ffi::c_char,
     pub manifest_json_length: u32,
+    // Lava cell world voxel positions (for montage lava mesh)
+    pub lava_cells: *mut FfiChunkCoord,
+    pub lava_cell_count: u32,
 }
 
 /// Morph step result: 8 meshes (one per showcase chunk) for progressive morphing.
@@ -1191,6 +1194,7 @@ pub enum WorkerResult {
         aureole_glimpse_pos: Option<(i32, i32, i32)>,
         aureole_showcase_block: Option<Vec<(i32, i32, i32)>>,
         manifest_json: String,
+        lava_cells: Vec<(i32, i32, i32)>,
     },
     MorphMeshes {
         step: u32,

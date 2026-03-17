@@ -111,6 +111,8 @@ pub struct SleepResult {
     pub corpses_fossilized: u32,
     pub gypsum_deposited: u32,
     pub lava_solidified: u32,
+    /// World voxel positions of lava cells (for montage lava mesh visualization)
+    pub lava_cells: Vec<(i32, i32, i32)>,
     pub dirty_chunks: Vec<(i32, i32, i32)>,
     pub collapse_events: Vec<voxel_core::stress::CollapseEvent>,
     /// Exact world voxel position of the most intense aureole zone centroid (for montage camera)
@@ -826,6 +828,24 @@ pub fn execute_sleep(
         }
     }
 
+    // Extract lava cell world positions from heat map, filtered to showcase block bounds
+    let lava_cells: Vec<(i32, i32, i32)> = if let Some(ref block) = aureole_showcase_block {
+        let block_set: HashSet<(i32, i32, i32)> = block.iter().copied().collect();
+        let cs = chunk_size as i32;
+        heat_map.iter()
+            .filter(|h| h.source_type == crate::phases::aureole::HeatSourceType::Lava)
+            .map(|h| h.pos)
+            .filter(|&(wx, wy, wz)| {
+                let cx = wx.div_euclid(cs);
+                let cy = wy.div_euclid(cs);
+                let cz = wz.div_euclid(cs);
+                block_set.contains(&(cx, cy, cz))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     SleepResult {
         success: true,
         chunks_changed: dirty_chunks.len() as u32,
@@ -847,6 +867,7 @@ pub fn execute_sleep(
         corpses_fossilized: total_corpses_fossilized,
         gypsum_deposited: total_gypsum_deposited,
         lava_solidified: total_lava_solidified,
+        lava_cells,
         dirty_chunks,
         collapse_events: all_collapse_events,
         aureole_glimpse_pos,
@@ -1385,21 +1406,50 @@ pub fn execute_aureole_only(
         dirty_chunks,
         collapse_events: Vec::new(),
         aureole_glimpse_pos: aureole_result.glimpse_pos,
-        aureole_showcase_block: aureole_result.glimpse_pos.map(|(wx, wy, wz)| {
-            let cs = chunk_size as i32;
-            let gx = wx.div_euclid(cs);
-            let gy = wy.div_euclid(cs);
-            let gz = wz.div_euclid(cs);
-            let mut block = Vec::with_capacity(27);
-            for dz in -1..=1 {
-                for dy in -1..=1 {
-                    for dx in -1..=1 {
-                        block.push((gx + dx, gy + dy, gz + dz));
+        aureole_showcase_block: {
+            let block = aureole_result.glimpse_pos.map(|(wx, wy, wz)| {
+                let cs = chunk_size as i32;
+                let gx = wx.div_euclid(cs);
+                let gy = wy.div_euclid(cs);
+                let gz = wz.div_euclid(cs);
+                let mut block = Vec::with_capacity(27);
+                for dz in -1..=1 {
+                    for dy in -1..=1 {
+                        for dx in -1..=1 {
+                            block.push((gx + dx, gy + dy, gz + dz));
+                        }
                     }
                 }
-            }
+                block
+            });
             block
-        }),
+        },
+        lava_cells: {
+            // Extract lava cells filtered to showcase block bounds
+            if let Some(ref block) = aureole_result.glimpse_pos.map(|(wx, wy, wz)| {
+                let cs = chunk_size as i32;
+                let gx = wx.div_euclid(cs);
+                let gy = wy.div_euclid(cs);
+                let gz = wz.div_euclid(cs);
+                let mut block = Vec::with_capacity(27);
+                for dz in -1..=1 { for dy in -1..=1 { for dx in -1..=1 {
+                    block.push((gx + dx, gy + dy, gz + dz));
+                }}}
+                block
+            }) {
+                let block_set: HashSet<(i32,i32,i32)> = block.iter().copied().collect();
+                let cs = chunk_size as i32;
+                heat_map.iter()
+                    .filter(|h| h.source_type == crate::phases::aureole::HeatSourceType::Lava)
+                    .map(|h| h.pos)
+                    .filter(|&(wx, wy, wz)| {
+                        block_set.contains(&(wx.div_euclid(cs), wy.div_euclid(cs), wz.div_euclid(cs)))
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        },
         transform_log,
         manifest: result_manifest,
         profile_report,

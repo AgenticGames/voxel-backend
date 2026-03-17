@@ -48,6 +48,7 @@ pub struct SleepCompleteData {
     pub aureole_glimpse_pos: Option<(i32, i32, i32)>,
     pub aureole_showcase_block: Option<Vec<(i32, i32, i32)>>,
     pub manifest_json: String,
+    pub lava_cells: Vec<(i32, i32, i32)>,
 }
 
 /// Internal morph step result (Rust side, before FFI conversion).
@@ -300,6 +301,7 @@ impl VoxelEngine {
                 aureole_glimpse_pos,
                 aureole_showcase_block,
                 manifest_json,
+                lava_cells,
             }) => {
                 if let Ok(mut sc) = self.sleep_complete.lock() {
                     *sc = Some(SleepCompleteData {
@@ -324,6 +326,7 @@ impl VoxelEngine {
                         aureole_glimpse_pos,
                         aureole_showcase_block,
                         manifest_json,
+                        lava_cells,
                     });
                 }
                 // Don't expose to the FfiResult pipeline; UE polls via voxel_poll_sleep_result

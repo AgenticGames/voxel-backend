@@ -770,6 +770,8 @@ pub unsafe extern "C" fn voxel_poll_sleep_result(engine: *mut c_void) -> FfiSlee
         aureole_block_count: 0,
         manifest_json: ptr::null_mut(),
         manifest_json_length: 0,
+        lava_cells: ptr::null_mut(),
+        lava_cell_count: 0,
     };
     if engine.is_null() {
         return empty;
@@ -835,6 +837,17 @@ pub unsafe extern "C" fn voxel_poll_sleep_result(engine: *mut c_void) -> FfiSlee
                 aureole_block_count: data.aureole_showcase_block.as_ref().map_or(0, |b| b.len() as u32),
                 manifest_json: manifest_ptr,
                 manifest_json_length: manifest_len,
+                lava_cells: if data.lava_cells.is_empty() {
+                    ptr::null_mut()
+                } else {
+                    let mut coords: Vec<FfiChunkCoord> = data.lava_cells.iter()
+                        .map(|&(x, y, z)| FfiChunkCoord { x, y, z })
+                        .collect();
+                    let ptr = coords.as_mut_ptr();
+                    std::mem::forget(coords);
+                    ptr
+                },
+                lava_cell_count: data.lava_cells.len() as u32,
             }
         },
         None => empty,
@@ -972,6 +985,13 @@ pub unsafe extern "C" fn voxel_free_sleep_result(result: *mut FfiSleepResult) {
             r.aureole_block,
             r.aureole_block_count as usize,
             r.aureole_block_count as usize,
+        );
+    }
+    if !r.lava_cells.is_null() && r.lava_cell_count > 0 {
+        let _ = Vec::from_raw_parts(
+            r.lava_cells,
+            r.lava_cell_count as usize,
+            r.lava_cell_count as usize,
         );
     }
 }
