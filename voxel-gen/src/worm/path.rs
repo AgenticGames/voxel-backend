@@ -58,12 +58,9 @@ pub fn generate_worm_path(
             yaw.sin() * pitch.cos(),
         );
 
-        // Quadratic ramp: 0% guided early, 100% guided at final step
-        let steer_t = if max_steps > 1 {
-            (step as f32 / (max_steps - 1) as f32).powi(2)
-        } else {
-            1.0
-        };
+        // Steering ramp: free wander for first 40%, then ramp linearly 0→1 over remaining 60%
+        let progress = if max_steps > 1 { step as f32 / (max_steps - 1) as f32 } else { 1.0 };
+        let steer_t = ((progress - 0.4) / 0.6).clamp(0.0, 1.0);
 
         let to_target = end - pos;
         let dir = if to_target.length_squared() > 1e-6 {
