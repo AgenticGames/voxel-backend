@@ -738,7 +738,6 @@ pub unsafe extern "C" fn voxel_start_aureole_only(
 /// pipeline; this function only returns the summary statistics.
 #[no_mangle]
 pub unsafe extern "C" fn voxel_poll_sleep_result(engine: *mut c_void) -> FfiSleepResult {
-    let empty_coord = FfiChunkCoord { x: 0, y: 0, z: 0 };
     let empty = FfiSleepResult {
         success: 0,
         chunks_changed: 0,
@@ -766,12 +765,9 @@ pub unsafe extern "C" fn voxel_poll_sleep_result(engine: *mut c_void) -> FfiSlee
         profile_report_length: 0,
         has_aureole_glimpse: 0,
         aureole_glimpse_x: 0, aureole_glimpse_y: 0, aureole_glimpse_z: 0,
-        has_vein_glimpse: 0,
-        vein_glimpse_x: 0, vein_glimpse_y: 0, vein_glimpse_z: 0,
         has_aureole_block: 0,
-        aureole_block: [empty_coord; 8],
-        has_vein_block: 0,
-        vein_block: [empty_coord; 8],
+        aureole_block: ptr::null_mut(),
+        aureole_block_count: 0,
         manifest_json: ptr::null_mut(),
         manifest_json_length: 0,
     };
@@ -824,20 +820,19 @@ pub unsafe extern "C" fn voxel_poll_sleep_result(engine: *mut c_void) -> FfiSlee
                 aureole_glimpse_x: data.aureole_glimpse_pos.map_or(0, |p| p.0),
                 aureole_glimpse_y: data.aureole_glimpse_pos.map_or(0, |p| p.1),
                 aureole_glimpse_z: data.aureole_glimpse_pos.map_or(0, |p| p.2),
-                has_vein_glimpse: if data.vein_glimpse_pos.is_some() { 1 } else { 0 },
-                vein_glimpse_x: data.vein_glimpse_pos.map_or(0, |p| p.0),
-                vein_glimpse_y: data.vein_glimpse_pos.map_or(0, |p| p.1),
-                vein_glimpse_z: data.vein_glimpse_pos.map_or(0, |p| p.2),
                 has_aureole_block: if data.aureole_showcase_block.is_some() { 1 } else { 0 },
-                aureole_block: data.aureole_showcase_block.map_or(
-                    [FfiChunkCoord { x: 0, y: 0, z: 0 }; 8],
-                    |b| b.map(|(x, y, z)| FfiChunkCoord { x, y, z }),
+                aureole_block: data.aureole_showcase_block.as_ref().map_or(
+                    ptr::null_mut(),
+                    |b| {
+                        let mut coords: Vec<FfiChunkCoord> = b.iter()
+                            .map(|&(x, y, z)| FfiChunkCoord { x, y, z })
+                            .collect();
+                        let ptr = coords.as_mut_ptr();
+                        std::mem::forget(coords);
+                        ptr
+                    },
                 ),
-                has_vein_block: if data.vein_showcase_block.is_some() { 1 } else { 0 },
-                vein_block: data.vein_showcase_block.map_or(
-                    [FfiChunkCoord { x: 0, y: 0, z: 0 }; 8],
-                    |b| b.map(|(x, y, z)| FfiChunkCoord { x, y, z }),
-                ),
+                aureole_block_count: data.aureole_showcase_block.as_ref().map_or(0, |b| b.len() as u32),
                 manifest_json: manifest_ptr,
                 manifest_json_length: manifest_len,
             }
@@ -971,6 +966,13 @@ pub unsafe extern "C" fn voxel_free_sleep_result(result: *mut FfiSleepResult) {
     }
     if !r.manifest_json.is_null() {
         drop(CString::from_raw(r.manifest_json));
+    }
+    if !r.aureole_block.is_null() && r.aureole_block_count > 0 {
+        let _ = Vec::from_raw_parts(
+            r.aureole_block,
+            r.aureole_block_count as usize,
+            r.aureole_block_count as usize,
+        );
     }
 }
 

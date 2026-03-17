@@ -1020,15 +1020,10 @@ pub struct FfiSleepResult {
     pub aureole_glimpse_x: i32,
     pub aureole_glimpse_y: i32,
     pub aureole_glimpse_z: i32,
-    pub has_vein_glimpse: u32,
-    pub vein_glimpse_x: i32,
-    pub vein_glimpse_y: i32,
-    pub vein_glimpse_z: i32,
-    // Showcase block coords (8 Rust chunk coords for 2x2x2 block)
+    // Showcase block coords (heap-allocated, 27 entries for 3x3x3 block)
     pub has_aureole_block: u32,
-    pub aureole_block: [FfiChunkCoord; 8],
-    pub has_vein_block: u32,
-    pub vein_block: [FfiChunkCoord; 8],
+    pub aureole_block: *mut FfiChunkCoord,
+    pub aureole_block_count: u32,
     // Compacted manifest JSON for morph system
     pub manifest_json: *mut std::ffi::c_char,
     pub manifest_json_length: u32,
@@ -1192,9 +1187,7 @@ pub enum WorkerResult {
         lava_solidified: u32,
         profile_report: String,
         aureole_glimpse_pos: Option<(i32, i32, i32)>,
-        vein_glimpse_pos: Option<(i32, i32, i32)>,
-        aureole_showcase_block: Option<[(i32, i32, i32); 8]>,
-        vein_showcase_block: Option<[(i32, i32, i32); 8]>,
+        aureole_showcase_block: Option<Vec<(i32, i32, i32)>>,
         manifest_json: String,
     },
     MorphMeshes {

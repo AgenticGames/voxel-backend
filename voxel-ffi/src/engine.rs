@@ -51,9 +51,7 @@ pub struct SleepCompleteData {
     pub lava_solidified: u32,
     pub profile_report: String,
     pub aureole_glimpse_pos: Option<(i32, i32, i32)>,
-    pub vein_glimpse_pos: Option<(i32, i32, i32)>,
-    pub aureole_showcase_block: Option<[(i32, i32, i32); 8]>,
-    pub vein_showcase_block: Option<[(i32, i32, i32); 8]>,
+    pub aureole_showcase_block: Option<Vec<(i32, i32, i32)>>,
     pub manifest_json: String,
 }
 
@@ -305,9 +303,7 @@ impl VoxelEngine {
                 lava_solidified,
                 profile_report,
                 aureole_glimpse_pos,
-                vein_glimpse_pos,
                 aureole_showcase_block,
-                vein_showcase_block,
                 manifest_json,
             }) => {
                 if let Ok(mut sc) = self.sleep_complete.lock() {
@@ -331,9 +327,7 @@ impl VoxelEngine {
                         lava_solidified,
                         profile_report,
                         aureole_glimpse_pos,
-                        vein_glimpse_pos,
                         aureole_showcase_block,
-                        vein_showcase_block,
                         manifest_json,
                     });
                 }

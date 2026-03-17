@@ -1290,9 +1290,7 @@ fn handle_request(
                 lava_solidified: sleep_result.lava_solidified,
                 profile_report: report,
                 aureole_glimpse_pos: sleep_result.aureole_glimpse_pos,
-                vein_glimpse_pos: sleep_result.vein_glimpse_pos,
                 aureole_showcase_block: sleep_result.aureole_showcase_block,
-                vein_showcase_block: sleep_result.vein_showcase_block,
                 manifest_json,
             });
         }
@@ -1393,9 +1391,7 @@ fn handle_request(
                 lava_solidified: sleep_result.lava_solidified,
                 profile_report: report,
                 aureole_glimpse_pos: sleep_result.aureole_glimpse_pos,
-                vein_glimpse_pos: sleep_result.vein_glimpse_pos,
                 aureole_showcase_block: sleep_result.aureole_showcase_block,
-                vein_showcase_block: sleep_result.vein_showcase_block,
                 manifest_json: String::new(), // Aureole-only doesn't need morph
             });
         }
@@ -1441,25 +1437,19 @@ fn handle_request(
             }
             drop(s);
 
-            // Phase 2: Sync boundaries between adjacent chunks in the 2x2x2 block.
-            // Block layout: i=0..(gx,gy,gz) i=1..(gx+1,gy,gz) i=2..(gx,gy+1,gz) etc.
-            // X-adjacent: (0,1),(2,3),(4,5),(6,7)  — copy a's x=cs face → b's x=0
-            // Y-adjacent: (0,2),(1,3),(4,6),(5,7)  — copy a's y=cs face → b's y=0
-            // Z-adjacent: (0,4),(1,5),(2,6),(3,7)  — copy a's z=cs face → b's z=0
-            if density_fields.len() == 8 {
-                let cs = density_fields.iter().flatten().next()
+            // Phase 2: Sync boundaries between adjacent chunks in the block.
+            // Generalized boundary sync: for each pair of chunks that are adjacent
+            // (differ by 1 in exactly one axis), sync the shared face.
+            {
+                let cs_val = density_fields.iter().flatten().next()
                     .map(|df| df.size - 1).unwrap_or(16);
-                let sz = cs + 1; // grid size (17)
 
-                // Helper: copy boundary face from src to dst
-                // axis: 0=X, 1=Y, 2=Z. src_idx=cs face, dst_idx=0 face.
-                let sync_face = |dfs: &mut [Option<voxel_core::density::DensityField>], a: usize, b: usize, axis: usize| {
-                    // Collect boundary from a
+                let sync_face = |dfs: &mut [Option<voxel_core::density::DensityField>], a: usize, b: usize, axis: usize, cs: usize| {
                     let boundary: Vec<(usize, usize, f32, voxel_core::material::Material)> = {
                         let src = match &dfs[a] { Some(d) => d, None => return };
-                        let mut out = Vec::with_capacity(sz * sz);
-                        for u in 0..sz {
-                            for v in 0..sz {
+                        let mut out = Vec::with_capacity((cs + 1) * (cs + 1));
+                        for u in 0..=cs {
+                            for v in 0..=cs {
                                 let s = match axis {
                                     0 => src.get(cs, u, v),
                                     1 => src.get(u, cs, v),
@@ -1470,7 +1460,6 @@ fn handle_request(
                         }
                         out
                     };
-                    // Write to b
                     if let Some(dst) = &mut dfs[b] {
                         for &(u, v, density, material) in &boundary {
                             let s = match axis {
@@ -1484,17 +1473,23 @@ fn handle_request(
                     }
                 };
 
-                // X-adjacent pairs
-                for &(a, b) in &[(0,1), (2,3), (4,5), (6,7)] {
-                    sync_face(&mut density_fields, a, b, 0);
-                }
-                // Y-adjacent pairs
-                for &(a, b) in &[(0,2), (1,3), (4,6), (5,7)] {
-                    sync_face(&mut density_fields, a, b, 1);
-                }
-                // Z-adjacent pairs
-                for &(a, b) in &[(0,4), (1,5), (2,6), (3,7)] {
-                    sync_face(&mut density_fields, a, b, 2);
+                // Find adjacent pairs: chunks[a] and chunks[b] are adjacent if they
+                // differ by exactly 1 in one axis and 0 in the others
+                for a in 0..chunks.len() {
+                    for b in (a + 1)..chunks.len() {
+                        let (ax, ay, az) = chunks[a];
+                        let (bx, by, bz) = chunks[b];
+                        let dx = bx - ax;
+                        let dy = by - ay;
+                        let dz = bz - az;
+                        if dx == 1 && dy == 0 && dz == 0 {
+                            sync_face(&mut density_fields, a, b, 0, cs_val);
+                        } else if dx == 0 && dy == 1 && dz == 0 {
+                            sync_face(&mut density_fields, a, b, 1, cs_val);
+                        } else if dx == 0 && dy == 0 && dz == 1 {
+                            sync_face(&mut density_fields, a, b, 2, cs_val);
+                        }
+                    }
                 }
             }
 
