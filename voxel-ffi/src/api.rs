@@ -1249,8 +1249,9 @@ pub unsafe extern "C" fn voxel_query_terrace(
     }
 }
 
-/// Query floor support for a building placement (4x4 footprint).
-/// Writes solid_count, total_columns, and host material to out pointers.
+/// Query floor support for a building placement.
+/// footprint_voxels controls the NxN footprint (e.g. 4 = 4x4, 2 = 2x2).
+/// Writes solid_count, total_columns, host material, and authoritative snapped UE position.
 /// Returns 1 on success, 0 if engine null.
 #[no_mangle]
 pub unsafe extern "C" fn voxel_query_building_support(
@@ -1259,22 +1260,31 @@ pub unsafe extern "C" fn voxel_query_building_support(
     y: f32,
     z: f32,
     scale: f32,
+    footprint_voxels: i32,
     out_solid: *mut u8,
     out_total: *mut u8,
     out_mat: *mut u8,
+    out_x: *mut f32,
+    out_y: *mut f32,
+    out_z: *mut f32,
 ) -> u32 {
     if engine.is_null() {
         return 0;
     }
     let engine = &*(engine as *const VoxelEngine);
-    let (solid, total, mat) = engine.query_building_support(x, y, z, scale);
+    let (solid, total, mat, sx, sy, sz) = engine.query_building_support(x, y, z, scale, footprint_voxels);
     if !out_solid.is_null() { *out_solid = solid; }
     if !out_total.is_null() { *out_total = total; }
     if !out_mat.is_null() { *out_mat = mat; }
+    if !out_x.is_null() { *out_x = sx; }
+    if !out_y.is_null() { *out_y = sy; }
+    if !out_z.is_null() { *out_z = sz; }
     1
 }
 
-/// Request auto-terrace for a building placement (4x4 footprint).
+/// Request auto-terrace for a building placement.
+/// footprint_voxels controls the NxN footprint (e.g. 4 = 4x4, 2 = 2x2).
+/// clearance_voxels controls how many air voxels to carve above the floor.
 /// Returns 1 on success, 0 if queue full.
 #[no_mangle]
 pub unsafe extern "C" fn voxel_request_building_flatten(
@@ -1283,12 +1293,14 @@ pub unsafe extern "C" fn voxel_request_building_flatten(
     y: f32,
     z: f32,
     scale: f32,
+    footprint_voxels: i32,
+    clearance_voxels: i32,
 ) -> u32 {
     if engine.is_null() {
         return 0;
     }
     let engine = &*(engine as *const VoxelEngine);
-    engine.request_building_flatten(x, y, z, scale)
+    engine.request_building_flatten(x, y, z, scale, footprint_voxels, clearance_voxels)
 }
 
 /// Query floor support for a flatten ghost preview.

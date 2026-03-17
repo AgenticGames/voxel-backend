@@ -25,11 +25,6 @@ pub(crate) fn terrace_size_for_scale(scale: f32) -> i32 {
     (80.0f32 / scale).round().max(1.0) as i32
 }
 
-/// Compute building terrace size in voxels from world scale, targeting ~160 UU (4 voxels).
-pub(crate) fn building_terrace_size_for_scale(scale: f32) -> i32 {
-    (160.0f32 / scale).round().max(1.0) as i32
-}
-
 /// Data returned when a sleep cycle completes.
 pub struct SleepCompleteData {
     pub chunks_changed: u32,
@@ -874,40 +869,101 @@ impl VoxelEngine {
         (count, clearance, snapped_ue_x, snapped_ue_y, snapped_ue_z)
     }
 
-    /// Query floor support for a building placement (4x4 footprint).
-    /// Returns (solid_count, total_columns, host_mat_u8).
-    pub fn query_building_support(&self, ue_x: f32, ue_y: f32, ue_z: f32, scale: f32) -> (u8, u8, u8) {
+    /// Query floor support for a building placement.
+    /// footprint_voxels controls the NxN footprint (e.g. 4 = 4x4, 2 = 2x2).
+    /// Returns (solid_count, total_columns, host_mat_u8, snapped_ue_x, snapped_ue_y, snapped_ue_z).
+    /// The returned UE position is the authoritative floor surface center.
+    pub fn query_building_support(&self, ue_x: f32, ue_y: f32, ue_z: f32, scale: f32, footprint_voxels: i32) -> (u8, u8, u8, f32, f32, f32) {
         let rust_x = ue_x / scale;
         let rust_y = ue_z / scale;
         let rust_z = -ue_y / scale;
 
-        let bts = building_terrace_size_for_scale(scale);
-        let ts = terrace_size_for_scale(scale);
-        let base_x = (rust_x as i32).div_euclid(bts) * bts;
-        let base_y = (rust_y as i32).div_euclid(ts) * ts;
-        let base_z = (rust_z as i32).div_euclid(bts) * bts;
+        let bts = footprint_voxels.max(1);
+        // Center the footprint on the building position (UE already snapped XY)
+        let base_x = rust_x.round() as i32 - bts / 2;
+        let base_z = rust_z.round() as i32 - bts / 2;
 
         let cs = { self.config.read().unwrap().chunk_size as i32 };
         let store = match self.store.try_read() {
             Ok(s) => s,
-            Err(_) => return (0, 0, 0),
+            Err(_) => return (0, 0, 0, ue_x, ue_y, ue_z),
         };
+
+        // Find actual surface Y at footprint center by scanning density field
+        let center_x = base_x + bts / 2;
+        let center_z = base_z + bts / 2;
+        let approx_y = rust_y.round() as i32;
+        let mut surface_y = approx_y;
+
+        let probe_cx = center_x.div_euclid(cs);
+        let probe_cz = center_z.div_euclid(cs);
+        let probe_lx = center_x.rem_euclid(cs) as usize;
+        let probe_lz = center_z.rem_euclid(cs) as usize;
+
+        let probe_cy = approx_y.div_euclid(cs);
+        let probe_ly = approx_y.rem_euclid(cs) as usize;
+
+        let is_solid_at_approx = store.density_fields
+            .get(&(probe_cx, probe_cy, probe_cz))
+            .map(|df| df.get(probe_lx, probe_ly, probe_lz).density > 0.0)
+            .unwrap_or(false);
+
+        if is_solid_at_approx {
+            // Inside solid — scan UP to find first air
+            for dy in 1..=8i32 {
+                let sy = approx_y + dy;
+                let scy = sy.div_euclid(cs);
+                let sly = sy.rem_euclid(cs) as usize;
+                if let Some(df) = store.density_fields.get(&(probe_cx, scy, probe_cz)) {
+                    if df.get(probe_lx, sly, probe_lz).density <= 0.0 {
+                        surface_y = sy - 1; // Last solid voxel before air
+                        break;
+                    }
+                }
+            }
+        } else {
+            // In air — scan DOWN to find first solid
+            for dy in 1..=8i32 {
+                let sy = approx_y - dy;
+                let scy = sy.div_euclid(cs);
+                let sly = sy.rem_euclid(cs) as usize;
+                if let Some(df) = store.density_fields.get(&(probe_cx, scy, probe_cz)) {
+                    if df.get(probe_lx, sly, probe_lz).density > 0.0 {
+                        surface_y = sy; // Top solid voxel
+                        break;
+                    }
+                }
+            }
+        }
+
+        let base_y = surface_y;
         let (solid, total, mat) = crate::terrain_ops::query_building_support(&*store, glam::IVec3::new(base_x, base_y, base_z), cs, bts);
-        (solid, total, mat as u8)
+
+        // Convert footprint center + surface back to UE coords
+        let center_vx = base_x as f32 + bts as f32 / 2.0;
+        let center_vz = base_z as f32 + bts as f32 / 2.0;
+        let snapped_ue_x = center_vx * scale;
+        let snapped_ue_y = -(center_vz * scale);
+        let snapped_ue_z = base_y as f32 * scale;
+
+        (solid, total, mat as u8, snapped_ue_x, snapped_ue_y, snapped_ue_z)
     }
 
-    /// Request auto-terrace for a building placement (4x4 footprint).
+    /// Request auto-terrace for a building placement.
+    /// footprint_voxels controls the NxN footprint (e.g. 4 = 4x4, 2 = 2x2).
+    /// clearance_voxels controls how many air voxels to carve above the floor.
     /// Returns 1 on success, 0 if queue full.
-    pub fn request_building_flatten(&self, ue_x: f32, ue_y: f32, ue_z: f32, scale: f32) -> u32 {
+    pub fn request_building_flatten(&self, ue_x: f32, ue_y: f32, ue_z: f32, scale: f32, footprint_voxels: i32, clearance_voxels: i32) -> u32 {
         let rust_x = ue_x / scale;
         let rust_y = ue_z / scale;
         let rust_z = -ue_y / scale;
 
-        let bts = building_terrace_size_for_scale(scale);
-        let ts = terrace_size_for_scale(scale);
-        let base_x = (rust_x as i32).div_euclid(bts) * bts;
-        let base_y = (rust_y as i32).div_euclid(ts) * ts;
-        let base_z = (rust_z as i32).div_euclid(bts) * bts;
+        let bts = footprint_voxels.max(1);
+        // Center the footprint on the building position (UE already snapped)
+        let base_x = rust_x.round() as i32 - bts / 2;
+        // Use exact surface Y (no terrace grid snap) — UE already Z-snapped nearby buildings
+        let base_y = rust_y.round() as i32;
+        let base_z = rust_z.round() as i32 - bts / 2;
 
         let host_material = {
             let cfg = self.config.read().unwrap();
@@ -919,6 +975,8 @@ impl VoxelEngine {
             base_y,
             base_z,
             host_material,
+            footprint_voxels: bts,
+            clearance_voxels: clearance_voxels.max(2),
         }, std::time::Duration::from_millis(100)) {
             Ok(()) => 1,
             Err(e) => {
@@ -948,7 +1006,7 @@ impl VoxelEngine {
 
         let store = self.store.try_read().ok()?;
         let search_radius = 10;
-        let max_y_diff = 3;
+        let max_y_diff = 6; // 6 voxels = 240 UU at scale 40
         crate::terrain_ops::query_nearby_terrace_y(&*store, base_x, base_z, approx_y, search_radius, max_y_diff)
             .map(|found_y| {
                 let snap_ue_x = base_x as f32 * scale;

@@ -7,7 +7,7 @@ use crate::store::{sync_boundary_density, ChunkStore};
 use crate::types::ConvertedMesh;
 
 /// Flatten a terrace footprint for building placement.
-/// Sets the floor layer to solid host_material, clears 2 layers above for clearance,
+/// Sets the floor layer to solid host_material, clears `clearance_voxels` layers above,
 /// and fills down up to 2 voxels below to connect the platform to the cave floor.
 /// Returns the re-meshed dirty chunks (in UE coords).
 pub fn flatten_terrace(
@@ -17,8 +17,10 @@ pub fn flatten_terrace(
     config: &GenerationConfig,
     world_scale: f32,
     terrace_size: i32,
+    clearance_voxels: i32,
 ) -> Vec<((i32, i32, i32), ConvertedMesh)> {
     let cs = config.chunk_size as i32;
+    let clear = clearance_voxels.max(2); // at least 2 voxels of air
 
     let mut dirty_set: HashSet<(i32, i32, i32)> = HashSet::new();
     let mut changed_count = 0u32;
@@ -29,8 +31,8 @@ pub fn flatten_terrace(
             let wy = base.y;
             let wz = base.z + dz;
 
-            // Process 3 vertical layers: floor (y+0), clearance (y+1, y+2)
-            for dy in 0..3i32 {
+            // Process vertical layers: floor (y+0), clearance (y+1 .. y+clear)
+            for dy in 0..=clear {
                 let vy = wy + dy;
                 let cx = wx.div_euclid(cs);
                 let cy = vy.div_euclid(cs);
@@ -95,8 +97,8 @@ pub fn flatten_terrace(
         }
     }
 
-    eprintln!("[voxel] flatten_terrace: base=({},{},{}), size={}, changed={} voxels, dirty={} chunks",
-        base.x, base.y, base.z, terrace_size, changed_count, dirty_set.len());
+    eprintln!("[voxel] flatten_terrace: base=({},{},{}), size={}, clearance={}, changed={} voxels, dirty={} chunks",
+        base.x, base.y, base.z, terrace_size, clear, changed_count, dirty_set.len());
 
     // Build dirty chunks with full-chunk bounds for remeshing
     let chunk_size = config.chunk_size;

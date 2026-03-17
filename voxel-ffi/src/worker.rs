@@ -19,7 +19,7 @@ use voxel_gen::region_gen::{
 };
 
 use crate::convert::{convert_mesh_to_ue_scaled, from_ue_normal, from_ue_world_pos};
-use crate::engine::{terrace_size_for_scale, building_terrace_size_for_scale};
+use crate::engine::terrace_size_for_scale;
 use crate::profiler::{ChunkTimings, StreamingProfiler};
 use crate::store::ChunkStore;
 use crate::types::{FfiCollapseEvent, FfiCrystalPlacement, WorkerRequest, WorkerResult};
@@ -735,7 +735,7 @@ fn handle_request(
             let mat = voxel_core::material::Material::from_u8(host_material);
             let mut s = store.write().unwrap();
             let ts = terrace_size_for_scale(world_scale);
-            let meshes = crate::terrain_ops::flatten_terrace(&mut s, glam::IVec3::new(base_x, base_y, base_z), mat, &cfg, world_scale, ts);
+            let meshes = crate::terrain_ops::flatten_terrace(&mut s, glam::IVec3::new(base_x, base_y, base_z), mat, &cfg, world_scale, ts, 2);
 
             // Collect dirty chunk keys for seam regeneration
             let dirty_keys: Vec<(i32, i32, i32)> = meshes.iter().map(|(k, _)| *k).collect();
@@ -766,7 +766,7 @@ fn handle_request(
                 let _ = incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
             }
         }
-        WorkerRequest::BuildingFlatten { base_x, mut base_y, base_z, host_material, footprint_voxels } => {
+        WorkerRequest::BuildingFlatten { base_x, mut base_y, base_z, host_material, footprint_voxels, clearance_voxels } => {
             let cfg = config.read().unwrap().clone();
             let mat = voxel_core::material::Material::from_u8(host_material);
             let mut s = store.write().unwrap();
@@ -805,7 +805,7 @@ fn handle_request(
                 }
             }
 
-            let meshes = crate::terrain_ops::flatten_terrace(&mut s, glam::IVec3::new(base_x, base_y, base_z), mat, &cfg, world_scale, bts);
+            let meshes = crate::terrain_ops::flatten_terrace(&mut s, glam::IVec3::new(base_x, base_y, base_z), mat, &cfg, world_scale, bts, clearance_voxels);
 
             let dirty_keys: Vec<(i32, i32, i32)> = meshes.iter().map(|(k, _)| *k).collect();
 

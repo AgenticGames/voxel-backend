@@ -1087,6 +1087,8 @@ pub enum WorkerRequest {
         base_y: i32,
         base_z: i32,
         host_material: u8,
+        footprint_voxels: i32,
+        clearance_voxels: i32,
     },
     Unload {
         chunk: (i32, i32, i32),
