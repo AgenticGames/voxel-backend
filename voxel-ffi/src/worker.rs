@@ -766,44 +766,15 @@ fn handle_request(
                 let _ = incremental_seam_pass(key, &cfg, store, result_tx, world_scale);
             }
         }
-        WorkerRequest::BuildingFlatten { base_x, mut base_y, base_z, host_material, footprint_voxels, clearance_voxels } => {
+        WorkerRequest::BuildingFlatten { base_x, base_y, base_z, host_material, footprint_voxels, clearance_voxels } => {
             let cfg = config.read().unwrap().clone();
             let mat = voxel_core::material::Material::from_u8(host_material);
             let mut s = store.write().unwrap();
             let bts = footprint_voxels.max(1);
-            let cs = cfg.chunk_size as i32;
 
-            // Surface correction: if base_y is inside solid rock, scan upward
-            // to find the actual surface (first air voxel above solid)
-            let check_x = base_x + bts / 2;
-            let check_z = base_z + bts / 2;
-            let cx = check_x.div_euclid(cs);
-            let cz = check_z.div_euclid(cs);
-            let lx = check_x.rem_euclid(cs) as usize;
-            let lz = check_z.rem_euclid(cs) as usize;
-
-            let cy0 = base_y.div_euclid(cs);
-            let ly0 = base_y.rem_euclid(cs) as usize;
-            if let Some(df) = s.density_fields.get(&(cx, cy0, cz)) {
-                if df.get(lx, ly0, lz).density > 0.0 {
-                    // Inside solid rock — scan up to find air
-                    let original_y = base_y;
-                    for dy in 1..=4 {
-                        let sy = base_y + dy;
-                        let scy = sy.div_euclid(cs);
-                        let sly = sy.rem_euclid(cs) as usize;
-                        if let Some(df2) = s.density_fields.get(&(cx, scy, cz)) {
-                            if df2.get(lx, sly, lz).density <= 0.0 {
-                                base_y = sy - 1; // Surface is one below first air
-                                break;
-                            }
-                        }
-                    }
-                    if base_y != original_y {
-                        eprintln!("[voxel] BuildingFlatten: surface-corrected base_y {} -> {}", original_y, base_y);
-                    }
-                }
-            }
+            // No surface correction — UE-side QueryBuildingSupport already found the
+            // correct surface Y. Double-correcting here causes inconsistent floor heights
+            // when adjacent placements have different terrain at their center columns.
 
             let meshes = crate::terrain_ops::flatten_terrace(&mut s, glam::IVec3::new(base_x, base_y, base_z), mat, &cfg, world_scale, bts, clearance_voxels);
 
