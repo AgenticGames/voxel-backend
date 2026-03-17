@@ -736,15 +736,8 @@ fn handle_request(
             let mut s = store.write().unwrap();
             let ts = terrace_size_for_scale(world_scale);
             let meshes = crate::terrain_ops::flatten_terrace(&mut s, glam::IVec3::new(base_x, base_y, base_z), mat, &cfg, world_scale, ts, 2);
-
-            // Collect dirty chunk keys for seam regeneration
-            let dirty_keys: Vec<(i32, i32, i32)> = meshes.iter().map(|(k, _)| *k).collect();
-
+            let dirty_keys: Vec<(i32, i32, i32)> = meshes.into_iter().map(|(k, _)| k).collect();
             drop(s);
-            for (key, mesh) in meshes {
-                let crystal_data = retrieve_crystal_data(store, key, cfg.voxel_scale(), world_scale);
-                let _ = result_tx.send(WorkerResult::ChunkMesh { chunk: key, mesh, generation: 0, crystal_data });
-            }
 
             batched_seam_pass(&dirty_keys, &cfg, store, result_tx, world_scale);
         }
@@ -753,12 +746,8 @@ fn handle_request(
             let mut s = store.write().unwrap();
             let ts = terrace_size_for_scale(world_scale);
             let meshes = crate::terrain_ops::flatten_terrace_batch(&mut s, &tiles, &cfg, world_scale, ts);
-            let dirty_keys: Vec<_> = meshes.iter().map(|(k, _)| *k).collect();
+            let dirty_keys: Vec<_> = meshes.into_iter().map(|(k, _)| k).collect();
             drop(s);
-            for (key, mesh) in meshes {
-                let crystal_data = retrieve_crystal_data(store, key, cfg.voxel_scale(), world_scale);
-                let _ = result_tx.send(WorkerResult::ChunkMesh { chunk: key, mesh, generation: 0, crystal_data });
-            }
             batched_seam_pass(&dirty_keys, &cfg, store, result_tx, world_scale);
         }
         WorkerRequest::BuildingFlatten { base_x, base_y, base_z, host_material, footprint_voxels, clearance_voxels } => {
@@ -772,14 +761,8 @@ fn handle_request(
             // when adjacent placements have different terrain at their center columns.
 
             let meshes = crate::terrain_ops::flatten_terrace(&mut s, glam::IVec3::new(base_x, base_y, base_z), mat, &cfg, world_scale, bts, clearance_voxels);
-
-            let dirty_keys: Vec<(i32, i32, i32)> = meshes.iter().map(|(k, _)| *k).collect();
-
+            let dirty_keys: Vec<(i32, i32, i32)> = meshes.into_iter().map(|(k, _)| k).collect();
             drop(s);
-            for (key, mesh) in meshes {
-                let crystal_data = retrieve_crystal_data(store, key, cfg.voxel_scale(), world_scale);
-                let _ = result_tx.send(WorkerResult::ChunkMesh { chunk: key, mesh, generation: 0, crystal_data });
-            }
 
             batched_seam_pass(&dirty_keys, &cfg, store, result_tx, world_scale);
         }
@@ -803,35 +786,22 @@ fn handle_request(
             };
             drop(s);
 
-            // Collect dirty chunk keys for seam regeneration
-            let dirty_keys: Vec<(i32, i32, i32)> = meshes.iter().map(|(k, _)| *k).collect();
+            // Collect dirty chunk keys — don't send meshes yet (seam pass will send
+            // them with seam quads included, avoiding a seamless→seamed flash)
+            let dirty_keys: Vec<(i32, i32, i32)> = meshes.into_iter().map(|(k, _)| k).collect();
 
-            // Send each dirty chunk mesh individually so UE can update existing actors
-            for (key, mesh) in meshes {
-                // Recompute crystal placements from post-mine density so newly
-                // exposed ore surfaces get crystals and mined-away surfaces lose them.
-                let crystal_data = {
-                    let s = store.read().unwrap();
-                    if let Some(density) = s.density_fields.get(&key) {
-                        let coord = voxel_core::chunk::ChunkCoord::new(key.0, key.1, key.2);
-                        let placements = voxel_gen::compute_crystals(coord, density, &cfg);
-                        let ue_crystals = crate::convert::convert_crystals_to_ue(
-                            &placements, cfg.voxel_scale(), world_scale,
-                        );
-                        drop(s);
-                        store.write().unwrap().crystal_placements.insert(key, placements);
-                        ue_crystals
-                    } else {
-                        drop(s);
-                        Vec::new()
-                    }
-                };
-                let _ = result_tx.send(WorkerResult::ChunkMesh {
-                    chunk: key,
-                    mesh,
-                    generation: 0,
-                    crystal_data,
-                });
+            // Recompute crystal placements for dirty chunks so batched_seam_pass
+            // picks up the updated data via retrieve_crystal_data
+            for &key in &dirty_keys {
+                let s = store.read().unwrap();
+                if let Some(density) = s.density_fields.get(&key) {
+                    let coord = voxel_core::chunk::ChunkCoord::new(key.0, key.1, key.2);
+                    let placements = voxel_gen::compute_crystals(coord, density, &cfg);
+                    drop(s);
+                    store.write().unwrap().crystal_placements.insert(key, placements);
+                } else {
+                    drop(s);
+                }
             }
 
             // Send mined material counts separately
@@ -896,8 +866,7 @@ fn handle_request(
             let (meshes, mined) = crate::mining::mine_sphere(&mut s, center, rust_radius, &cfg, ws);
             drop(s);
 
-            // Collect dirty chunk keys for seam regeneration
-            let dirty_keys: Vec<(i32, i32, i32)> = meshes.iter().map(|(k, _)| *k).collect();
+            let dirty_keys: Vec<(i32, i32, i32)> = meshes.into_iter().map(|(k, _)| k).collect();
 
             // Step 2: Fill bottom half with non-source fluid
             {
@@ -957,30 +926,17 @@ fn handle_request(
                 }
             }
 
-            // Step 3: Send each dirty chunk mesh + crystal recompute
-            for (key, mesh) in meshes {
-                let crystal_data = {
-                    let s = store.read().unwrap();
-                    if let Some(density) = s.density_fields.get(&key) {
-                        let coord = voxel_core::chunk::ChunkCoord::new(key.0, key.1, key.2);
-                        let placements = voxel_gen::compute_crystals(coord, density, &cfg);
-                        let ue_crystals = crate::convert::convert_crystals_to_ue(
-                            &placements, cfg.voxel_scale(), ws,
-                        );
-                        drop(s);
-                        store.write().unwrap().crystal_placements.insert(key, placements);
-                        ue_crystals
-                    } else {
-                        drop(s);
-                        Vec::new()
-                    }
-                };
-                let _ = result_tx.send(WorkerResult::ChunkMesh {
-                    chunk: key,
-                    mesh,
-                    generation: 0,
-                    crystal_data,
-                });
+            // Step 3: Store updated crystal data (seam pass will pick it up)
+            for &key in &dirty_keys {
+                let s = store.read().unwrap();
+                if let Some(density) = s.density_fields.get(&key) {
+                    let coord = voxel_core::chunk::ChunkCoord::new(key.0, key.1, key.2);
+                    let placements = voxel_gen::compute_crystals(coord, density, &cfg);
+                    drop(s);
+                    store.write().unwrap().crystal_placements.insert(key, placements);
+                } else {
+                    drop(s);
+                }
             }
 
             // Step 4: Send mined material counts
