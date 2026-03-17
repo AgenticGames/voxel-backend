@@ -58,12 +58,13 @@ pub fn generate_worm_path(
             yaw.sin() * pitch.cos(),
         );
 
-        // Steering ramp: free wander for first 40%, then ramp linearly 0→1 over remaining 60%
+        // Steering ramp: free wander for first 15%, then ramp linearly 0→1 over remaining 85%
         let progress = if max_steps > 1 { step as f32 / (max_steps - 1) as f32 } else { 1.0 };
-        let steer_t = ((progress - 0.4) / 0.6).clamp(0.0, 1.0);
+        let steer_t = ((progress - 0.15) / 0.85).clamp(0.0, 1.0);
 
         let to_target = end - pos;
-        let dir = if to_target.length_squared() > 1e-6 {
+        let dist_to_target = to_target.length();
+        let dir = if dist_to_target > 1e-3 {
             noise_dir.lerp(to_target.normalize(), steer_t).normalize_or_zero()
         } else {
             noise_dir
@@ -74,9 +75,10 @@ pub fn generate_worm_path(
         let r_t = radius_noise.sample(t * 0.5, 0.0, 0.0) as f32;
         let base_radius = radius_min + (radius_max - radius_min) * (r_t * 0.5 + 0.5).clamp(0.0, 1.0);
 
-        // Taper at both ends: smoothstep ramp from 0→1 at start, 1→0 at end
+        // Taper: smoothstep ramp at start, and based on remaining steps for end
+        let remaining = (max_steps - 1 - step) as f32;
         let start_fade = (step as f32 / taper_steps).clamp(0.0, 1.0);
-        let end_fade = ((max_steps - 1 - step) as f32 / taper_steps).clamp(0.0, 1.0);
+        let end_fade = (remaining / taper_steps).clamp(0.0, 1.0);
         let taper = (start_fade * start_fade * (3.0 - 2.0 * start_fade))
                    * (end_fade * end_fade * (3.0 - 2.0 * end_fade));
 
@@ -86,6 +88,11 @@ pub fn generate_worm_path(
             position: pos,
             radius: base_radius * taper_clamped,
         });
+
+        // Early termination: stop if we've reached the target (within radius_max)
+        if dist_to_target < radius_max && step > 0 {
+            break;
+        }
 
         pos += dir * step_length;
     }
