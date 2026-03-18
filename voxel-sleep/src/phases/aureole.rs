@@ -857,18 +857,6 @@ pub fn apply_aureole(
                 }
             }
 
-            if hornfels_n > 0 || skarn_n > 0 {
-                let zone_total = hornfels_n + skarn_n;
-                if zone_total > best_glimpse_score {
-                    best_glimpse_score = zone_total;
-                    result.glimpse_pos = Some(zone.centroid);
-                    let (key, _, _, _) = world_to_chunk_local(
-                        zone.centroid.0, zone.centroid.1, zone.centroid.2, chunk_size,
-                    );
-                    result.glimpse_chunk = Some(key);
-                }
-            }
-
             // Pass 2: ore veins + pockets (grow into just-placed metamorphic rock)
             let zone_cell_count = zone.cells.len() as u32;
             let veins_placed = match aureole_type {
@@ -884,6 +872,18 @@ pub fn apply_aureole(
                 ),
             };
             result.veins_placed += veins_placed;
+
+            // Glimpse selection: pick the zone with the most total transformation
+            // (metamorphic shell + ore veins) for the montage showcase
+            let zone_total = hornfels_n + skarn_n + veins_placed;
+            if zone_total > best_glimpse_score {
+                best_glimpse_score = zone_total;
+                result.glimpse_pos = Some(zone.centroid);
+                let (key, _, _, _) = world_to_chunk_local(
+                    zone.centroid.0, zone.centroid.1, zone.centroid.2, chunk_size,
+                );
+                result.glimpse_chunk = Some(key);
+            }
         }
 
         // Add transform log entry for zone metamorphism
