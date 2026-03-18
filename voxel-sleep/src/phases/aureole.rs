@@ -776,6 +776,8 @@ pub fn apply_aureole(
         let zones = cluster_lava_zones(heat_map, config.min_lava_zone_size);
         result.lava_zones_found = zones.len() as u32;
 
+        let mut best_glimpse_score: u32 = 0;
+
         for zone in &zones {
             // Compute BFS depth from zone size using ln() for sensible shell thicknesses
             // 5 cells→2, 50→4, 200→5, 958→7 voxels
@@ -857,9 +859,8 @@ pub fn apply_aureole(
 
             if hornfels_n > 0 || skarn_n > 0 {
                 let zone_total = hornfels_n + skarn_n;
-                let prev_total = result.glimpse_pos.map_or(0, |_| result.hornfels_placed + result.skarn_placed - zone_total);
-                // Keep the zone with the most metamorphism
-                if result.glimpse_pos.is_none() || zone_total > prev_total {
+                if zone_total > best_glimpse_score {
+                    best_glimpse_score = zone_total;
                     result.glimpse_pos = Some(zone.centroid);
                     let (key, _, _, _) = world_to_chunk_local(
                         zone.centroid.0, zone.centroid.1, zone.centroid.2, chunk_size,
