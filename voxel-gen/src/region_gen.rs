@@ -475,10 +475,17 @@ pub fn generate_seam_mesh(
                     }
                     let pos = neighbor.dc_vertices[cell_idx];
                     if pos.x.is_nan() {
-                        valid = false;
-                        break;
+                        // Cell has no sign changes (entirely solid or air).
+                        // Use cell center as fallback to cap the surface.
+                        let fallback = Vec3::new(
+                            lx as f32 + 0.5,
+                            ly as f32 + 0.5,
+                            lz as f32 + 0.5,
+                        );
+                        positions[i] = fallback + neighbor.world_origin;
+                    } else {
+                        positions[i] = pos + neighbor.world_origin;
                     }
-                    positions[i] = pos + neighbor.world_origin;
                 } else {
                     valid = false;
                     break;
@@ -601,17 +608,25 @@ pub fn generate_chunk_seam_quads(
                     break;
                 }
                 let pos = neighbor.dc_vertices[cell_idx];
-                if pos.x.is_nan() {
-                    valid = false;
-                    break;
-                }
                 // Offset neighbor DC vertex into THIS chunk's local space
                 let offset = Vec3::new(
                     chunk_dx as f32 * gs_f,
                     chunk_dy as f32 * gs_f,
                     chunk_dz as f32 * gs_f,
                 );
-                positions[i] = pos + offset;
+                if pos.x.is_nan() {
+                    // Cell has no sign changes (entirely solid or air).
+                    // Use cell center as fallback to cap the surface at the
+                    // chunk boundary instead of leaving a hole.
+                    let fallback = Vec3::new(
+                        lx as f32 + 0.5,
+                        ly as f32 + 0.5,
+                        lz as f32 + 0.5,
+                    );
+                    positions[i] = fallback + offset;
+                } else {
+                    positions[i] = pos + offset;
+                }
             } else {
                 valid = false;
                 break;

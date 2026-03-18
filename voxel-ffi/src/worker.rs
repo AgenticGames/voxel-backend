@@ -1788,6 +1788,9 @@ fn incremental_seam_pass(
 /// Deduplicated seam pass for multiple dirty chunks.
 /// Computes the union of all 27-neighborhoods and runs each candidate exactly once,
 /// avoiding the N× duplication when overlapping neighborhoods re-generate the same seams.
+///
+/// Dirty chunks are guaranteed to have their mesh sent even if they have no seam quads,
+/// since callers rely on this function as the sole sender for mine/flatten results.
 fn batched_seam_pass(
     dirty_keys: &[(i32, i32, i32)],
     cfg: &GenerationConfig,
@@ -1795,6 +1798,8 @@ fn batched_seam_pass(
     result_tx: &Sender<WorkerResult>,
     world_scale: f32,
 ) {
+    let dirty_set: HashSet<(i32, i32, i32)> = dirty_keys.iter().copied().collect();
+
     let mut candidates: HashSet<(i32, i32, i32)> = HashSet::new();
     for &key in dirty_keys {
         for dx in -1..=1i32 {
@@ -1807,6 +1812,7 @@ fn batched_seam_pass(
     }
 
     let mut to_send: Vec<((i32, i32, i32), voxel_core::mesh::Mesh)> = Vec::new();
+    let mut sent_keys: HashSet<(i32, i32, i32)> = HashSet::new();
     {
         let s = store.read().unwrap();
         for &target in &candidates {
@@ -1814,19 +1820,44 @@ fn batched_seam_pass(
                 continue;
             }
             let seam_mesh = region_gen::generate_chunk_seam_quads(target, &s.chunk_seam_data, cfg.chunk_size);
-            if seam_mesh.triangles.is_empty() {
-                continue;
-            }
             let base = match s.base_meshes.get(&target) {
                 Some(m) => m.clone(),
                 None => continue,
             };
+            if seam_mesh.triangles.is_empty() {
+                // No seam quads — only send the base mesh if this is a dirty chunk
+                // (must still receive its updated mesh after mine/flatten)
+                if dirty_set.contains(&target) {
+                    let mut mesh = base;
+                    if cfg.mesh_recalc_normals > 0 {
+                        mesh.recalculate_normals();
+                    }
+                    to_send.push((target, mesh));
+                    sent_keys.insert(target);
+                }
+                continue;
+            }
             let mut mesh = base;
             mesh.append(seam_mesh);
             if cfg.mesh_recalc_normals > 0 {
                 mesh.recalculate_normals();
             }
             to_send.push((target, mesh));
+            sent_keys.insert(target);
+        }
+
+        // Fallback: dirty chunks that have a base mesh but no seam data entry at all
+        for &key in dirty_keys {
+            if sent_keys.contains(&key) {
+                continue;
+            }
+            if let Some(base) = s.base_meshes.get(&key) {
+                let mut mesh = base.clone();
+                if cfg.mesh_recalc_normals > 0 {
+                    mesh.recalculate_normals();
+                }
+                to_send.push((key, mesh));
+            }
         }
     }
 
