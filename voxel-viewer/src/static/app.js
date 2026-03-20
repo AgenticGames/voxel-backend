@@ -1055,6 +1055,7 @@
 
     // ── Report loading ──────────────────────────────────────────────
     async function loadReport() {
+        if (!resultsBody) return; // Test results panel removed in demo mode
         try {
             var resp = await fetch(apiUrl("/api/report"));
             if (!resp.ok) throw new Error("Failed to fetch report");
@@ -1062,13 +1063,16 @@
             renderSummary();
             renderTable();
         } catch (err) {
-            resultsBody.innerHTML =
-                '<tr><td colspan="4" style="color:#e94560;padding:20px">Error loading report: ' +
-                err.message + "</td></tr>";
+            if (resultsBody) {
+                resultsBody.innerHTML =
+                    '<tr><td colspan="4" style="color:#e94560;padding:20px">Error loading report: ' +
+                    err.message + "</td></tr>";
+            }
         }
     }
 
     function renderSummary() {
+        if (!summaryTotal) return; // Stats bar removed in demo mode
         summaryTotal.textContent = report.total_seeds;
         summaryPassed.textContent = report.passed;
         summaryFailed.textContent = report.failed;
@@ -1079,6 +1083,7 @@
     }
 
     function renderTable() {
+        if (!resultsBody) return; // Test results panel removed in demo mode
         // Support both new format (results array) and legacy (failures only)
         var allResults = report.results && report.results.length > 0
             ? report.results
