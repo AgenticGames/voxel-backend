@@ -1543,6 +1543,17 @@
         return d.innerHTML;
     }
 
+    // ── Advanced Settings Toggle ────────────────────────────────────
+    const advToggle = document.getElementById('advanced-toggle');
+    const advPanel = document.getElementById('advanced-settings');
+    if (advToggle && advPanel) {
+        advToggle.addEventListener('click', () => {
+            const visible = advPanel.style.display !== 'none';
+            advPanel.style.display = visible ? 'none' : 'block';
+            advToggle.textContent = visible ? 'Show Advanced Settings' : 'Hide Advanced Settings';
+        });
+    }
+
     // ── Init ────────────────────────────────────────────────────────
     initThree();
     loadReport();

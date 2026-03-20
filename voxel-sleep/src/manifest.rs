@@ -166,34 +166,64 @@ impl ChangeManifest {
         }
     }
 
-    /// Compact: coalesce multiple changes to the same voxel, keeping only the final state.
+    /// Compact: coalesce multiple changes to the same voxel into one entry.
+    /// Keeps the FIRST change's old_material/old_density (true pre-sleep state)
+    /// and the LAST change's new_material/new_density (final post-sleep state).
+    /// spread_distance is taken from the first change (aureole-driven spread order).
     pub fn compact(&mut self) {
         for delta in self.chunk_deltas.values_mut() {
-            // For voxel changes: keep only the last change per (lx, ly, lz)
-            let mut seen: HashMap<(usize, usize, usize), usize> = HashMap::new();
-            let mut compacted = Vec::new();
+            // For voxel changes: merge first.old + last.new per (lx, ly, lz)
+            let mut first_idx: HashMap<(usize, usize, usize), usize> = HashMap::new();
+            let mut last_idx: HashMap<(usize, usize, usize), usize> = HashMap::new();
             for (i, change) in delta.voxel_changes.iter().enumerate() {
                 let key = (change.lx, change.ly, change.lz);
-                seen.insert(key, i);
+                first_idx.entry(key).or_insert(i);
+                last_idx.insert(key, i);
             }
-            let mut indices: Vec<usize> = seen.values().copied().collect();
-            indices.sort();
-            for i in indices {
-                compacted.push(delta.voxel_changes[i].clone());
+            let mut keys: Vec<(usize, usize, usize)> = first_idx.keys().copied().collect();
+            keys.sort();
+            let mut compacted = Vec::with_capacity(keys.len());
+            for key in keys {
+                let fi = first_idx[&key];
+                let li = last_idx[&key];
+                let first = &delta.voxel_changes[fi];
+                let last = &delta.voxel_changes[li];
+                compacted.push(VoxelChange {
+                    lx: first.lx,
+                    ly: first.ly,
+                    lz: first.lz,
+                    old_material: first.old_material,
+                    old_density: first.old_density,
+                    new_material: last.new_material,
+                    new_density: last.new_density,
+                    spread_distance: first.spread_distance,
+                });
             }
             delta.voxel_changes = compacted;
 
-            // Same for support changes
-            let mut seen_s: HashMap<(usize, usize, usize), usize> = HashMap::new();
-            let mut compacted_s = Vec::new();
+            // Same for support changes: keep first.old + last.new
+            let mut first_s: HashMap<(usize, usize, usize), usize> = HashMap::new();
+            let mut last_s: HashMap<(usize, usize, usize), usize> = HashMap::new();
             for (i, change) in delta.support_changes.iter().enumerate() {
                 let key = (change.lx, change.ly, change.lz);
-                seen_s.insert(key, i);
+                first_s.entry(key).or_insert(i);
+                last_s.insert(key, i);
             }
-            let mut indices_s: Vec<usize> = seen_s.values().copied().collect();
-            indices_s.sort();
-            for i in indices_s {
-                compacted_s.push(delta.support_changes[i].clone());
+            let mut keys_s: Vec<(usize, usize, usize)> = first_s.keys().copied().collect();
+            keys_s.sort();
+            let mut compacted_s = Vec::with_capacity(keys_s.len());
+            for key in keys_s {
+                let fi = first_s[&key];
+                let li = last_s[&key];
+                let first = &delta.support_changes[fi];
+                let last = &delta.support_changes[li];
+                compacted_s.push(SupportChange {
+                    lx: first.lx,
+                    ly: first.ly,
+                    lz: first.lz,
+                    old_support: first.old_support,
+                    new_support: last.new_support,
+                });
             }
             delta.support_changes = compacted_s;
         }
@@ -240,7 +270,7 @@ mod tests {
     #[test]
     fn test_compact() {
         let mut manifest = ChangeManifest::new();
-        // Two changes to same voxel -- compact should keep only the last
+        // Two changes to same voxel -- compact should keep first.old + last.new
         manifest.record_voxel_change(
             (0, 0, 0), 3, 3, 3,
             Material::Limestone, 1.0,
@@ -255,7 +285,12 @@ mod tests {
         manifest.compact();
         let delta = manifest.chunk_deltas.get(&(0, 0, 0)).unwrap();
         assert_eq!(delta.voxel_changes.len(), 1);
+        // old_material from FIRST change (true pre-sleep state)
+        assert_eq!(delta.voxel_changes[0].old_material, Material::Limestone as u8);
+        assert_eq!(delta.voxel_changes[0].old_density, 1.0);
+        // new_material from LAST change (final post-sleep state)
         assert_eq!(delta.voxel_changes[0].new_material, Material::Marble as u8);
+        assert_eq!(delta.voxel_changes[0].new_density, 0.8);
     }
 
     #[test]

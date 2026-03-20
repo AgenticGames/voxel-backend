@@ -3,22 +3,19 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Voxel Batch Test Dashboard</title>
+    <title>Mithril — Procedural Cave Explorer</title>
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
     <div id="app">
         <div id="summary-bar">
-            <h1>Voxel Test Dashboard</h1>
-            <div class="stat">Total: <span id="stat-total" class="stat-value blue">--</span></div>
-            <div class="stat">Passed: <span id="stat-passed" class="stat-value green">--</span></div>
-            <div class="stat">Failed: <span id="stat-failed" class="stat-value red">--</span></div>
-            <div class="stat">Pass rate: <span id="stat-rate" class="stat-value blue">--</span></div>
+            <h1>Mithril — Procedural Cave Explorer</h1>
+            <span class="subtitle">Rust voxel engine · dual contouring · 27 geological materials</span>
         </div>
 
         <div id="left-panel">
             <div id="generate-panel">
-                <h2>Multi-Chunk Generator</h2>
+                <h2>Cave Generator</h2>
                 <div class="gen-form">
                     <div class="gen-row">
                         <label>Seed <input type="number" id="gen-seed" value="1" min="0"></label>
@@ -27,12 +24,6 @@
                         <label>X <input type="number" id="gen-x" value="3" min="1" max="8"></label>
                         <label>Y <input type="number" id="gen-y" value="3" min="1" max="8"></label>
                         <label>Z <input type="number" id="gen-z" value="1" min="1" max="8"></label>
-                    </div>
-                    <div class="gen-row">
-                        <label class="toggle-label">
-                            <input type="checkbox" id="gen-closed"> Closed Boundary
-                            <span class="toggle-hint">(seal outer faces for watertight testing)</span>
-                        </label>
                     </div>
                     <div class="gen-row">
                         <label class="toggle-label">
@@ -55,6 +46,11 @@
                         <button id="preset-delete" title="Delete the selected preset">Del</button>
                         <button id="preset-reset" title="Clear all settings back to defaults">Reset</button>
                     </div>
+
+                    <div id="advanced-toggle-bar">
+                        <button id="advanced-toggle" class="action-btn">Show Advanced Settings</button>
+                    </div>
+                    <div id="advanced-settings" style="display:none;">
 
                     <details class="settings-section">
                         <summary>Noise Settings</summary>
@@ -392,6 +388,8 @@
                         </div>
                     </details>
 
+                    </div><!-- end #advanced-settings -->
+
                     <div class="sleep-section">
                         <h3 class="sleep-heading">Deep Sleep</h3>
                         <div class="gen-row">
@@ -406,19 +404,7 @@
                 <div id="custom-exports"></div>
             </div>
 
-            <h2>Test Results</h2>
-            <table id="results-table">
-                <thead>
-                    <tr>
-                        <th>Seed</th>
-                        <th>Status</th>
-                        <th>Reason</th>
-                        <th></th>
-                    </tr>
-                </thead>
-                <tbody id="results-body">
-                </tbody>
-            </table>
+            <!-- Test Results removed for public demo -->
         </div>
 
         <div id="right-panel">
@@ -471,12 +457,9 @@
                 <span class="legend-item"><span class="legend-swatch" style="background:rgba(255,80,20,0.5);border:1px solid #ff5014;"></span>Lava Pool</span>
             </div>
             <div id="viewer-container">
-                <div id="viewer-placeholder">Select a failed seed to view its mesh</div>
+                <div id="viewer-placeholder">Click Generate to create a cave</div>
             </div>
-            <div id="run-batch-bar">
-                <button id="run-batch-btn">Run Batch Test</button>
-                <span id="batch-status"></span>
-            </div>
+            <!-- Batch test bar removed for public demo -->
         </div>
     </div>
 

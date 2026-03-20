@@ -754,6 +754,7 @@ pub fn execute_sleep(
     }
 
     transform_log.retain(|e| e.count > 0);
+    result_manifest.compact(); // Merge multi-phase changes per voxel: first.old + last.new
     result_manifest.sleep_count = sleep_count;
     let dirty_chunks: Vec<(i32, i32, i32)> = all_dirty.into_iter().collect();
     let t_agg_elapsed = t_agg.elapsed();
@@ -828,23 +829,14 @@ pub fn execute_sleep(
         }
     }
 
-    // Extract lava cell world positions from heat map, filtered to showcase block bounds
-    let lava_cells: Vec<(i32, i32, i32)> = if let Some(ref block) = aureole_showcase_block {
-        let block_set: HashSet<(i32, i32, i32)> = block.iter().copied().collect();
-        let cs = chunk_size as i32;
-        heat_map.iter()
-            .filter(|h| h.source_type == crate::phases::aureole::HeatSourceType::Lava)
-            .map(|h| h.pos)
-            .filter(|&(wx, wy, wz)| {
-                let cx = wx.div_euclid(cs);
-                let cy = wy.div_euclid(cs);
-                let cz = wz.div_euclid(cs);
-                block_set.contains(&(cx, cy, cz))
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
+    // Extract ALL lava cell world positions from heat map.
+    // UE side filters to its own AureoleBlock in SpawnLavaMesh — no need to pre-filter here.
+    // (Pre-filtering to Rust's aureole_showcase_block caused mismatches in cinematic mode
+    // where UE uses a player-aimed block that differs from Rust's computed block.)
+    let lava_cells: Vec<(i32, i32, i32)> = heat_map.iter()
+        .filter(|h| h.source_type == crate::phases::aureole::HeatSourceType::Lava)
+        .map(|h| h.pos)
+        .collect();
 
     SleepResult {
         success: true,
@@ -1451,7 +1443,7 @@ pub fn execute_aureole_only(
             }
         },
         transform_log,
-        manifest: result_manifest,
+        manifest: { result_manifest.compact(); result_manifest },
         profile_report,
         timings: SleepTimings::default(),
         minerals_grown: 0,
