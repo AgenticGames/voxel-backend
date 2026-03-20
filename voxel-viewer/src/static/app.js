@@ -145,7 +145,7 @@
     // UE5-matching generation config (from VoxelConfig.json + FormationConfig.json)
     var UE5_PRESET_SETTINGS = {
         // Noise
-        "gen-cavern-freq": "0.004",
+        "gen-cavern-freq": "0.002",
         "gen-cavern-threshold": "0.75",
         "gen-detail-octaves": "12",
         "gen-detail-persistence": "0.5",
@@ -1645,7 +1645,7 @@
             var parts = [
                 "seed=12348",
                 "chunks_x=6", "chunks_y=6", "chunks_z=6",
-                "cavern_freq=0.004",
+                "cavern_freq=0.002",
                 "cavern_threshold=0.75",
                 "detail_octaves=12",
                 "detail_persistence=0.5",
