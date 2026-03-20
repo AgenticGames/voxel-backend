@@ -671,15 +671,32 @@
             sleepLog.style.display = "none";
             return;
         }
+        var shown = 0;
         for (var i = 0; i < transformLog.length; i++) {
             var entry = transformLog[i];
+            // Filter out debug/internal log entries
+            if (entry.description && (
+                entry.description.indexOf("[") === 0 ||
+                entry.description.indexOf("PRE-ACTIVATION") >= 0 ||
+                entry.description.indexOf("Fluid snapshot") >= 0 ||
+                entry.description.indexOf("COORD") >= 0 ||
+                entry.description.indexOf("dist=") >= 0
+            )) continue;
             var div = document.createElement("div");
             div.className = "sleep-log-entry";
             div.innerHTML = '<span class="sleep-log-count">' + entry.count + 'x</span> ' + escapeHtml(entry.description);
             sleepLog.appendChild(div);
+            shown++;
         }
-        sleepLog.style.display = "block";
+        sleepLog.style.display = shown > 0 ? "block" : "none";
     }
+
+    var MATERIAL_NAMES = [
+        "Air", "Sandstone", "Limestone", "Granite", "Basalt", "Slate", "Marble",
+        "Iron", "Copper", "Malachite", "Tin", "Gold", "Diamond", "Sulfide",
+        "Pyrite", "Quartz", "Kimberlite", "Amethyst", "Crystal", "Coal",
+        "Graphite", "Opal", "Hornfels", "Garnet", "Diopside", "Gypsum", "Skarn"
+    ];
 
     function renderSleepDiff(materialDiff) {
         sleepDiff.innerHTML = "";
@@ -688,31 +705,31 @@
             return;
         }
 
-        // Sort materials: losses first (negative), then gains (positive)
+        // Build entries with resolved names, filter out zeros and Air
         var entries = [];
         for (var mat in materialDiff) {
-            if (materialDiff.hasOwnProperty(mat)) {
-                entries.push({ name: mat, diff: materialDiff[mat] });
-            }
+            if (!materialDiff.hasOwnProperty(mat)) continue;
+            var diff = materialDiff[mat];
+            if (diff === 0) continue;
+            var idx = parseInt(mat);
+            var name = (!isNaN(idx) && MATERIAL_NAMES[idx]) ? MATERIAL_NAMES[idx] : mat;
+            if (name === "Air") continue;
+            entries.push({ name: name, diff: diff });
         }
-        entries.sort(function (a, b) {
-            return a.diff - b.diff; // negatives first
-        });
+
+        if (entries.length === 0) {
+            sleepDiff.style.display = "none";
+            return;
+        }
+
+        // Sort: losses first (negative), then gains (positive)
+        entries.sort(function (a, b) { return a.diff - b.diff; });
 
         var html = '<table><thead><tr><th>Material</th><th>Change</th></tr></thead><tbody>';
         for (var i = 0; i < entries.length; i++) {
             var e = entries[i];
-            var diffClass, diffText;
-            if (e.diff > 0) {
-                diffClass = "diff-positive";
-                diffText = "+" + e.diff;
-            } else if (e.diff < 0) {
-                diffClass = "diff-negative";
-                diffText = String(e.diff);
-            } else {
-                diffClass = "diff-zero";
-                diffText = "0";
-            }
+            var diffClass = e.diff > 0 ? "diff-positive" : "diff-negative";
+            var diffText = e.diff > 0 ? "+" + e.diff : String(e.diff);
             html += '<tr><td>' + escapeHtml(e.name) + '</td>'
                 + '<td class="' + diffClass + '">' + diffText + '</td></tr>';
         }
