@@ -128,7 +128,12 @@
         try {
             var raw = localStorage.getItem(PRESET_KEY);
             var presets = raw ? JSON.parse(raw) : {};
-            // Auto-seed preset 5 (slot 4) with UE5-matching config if not yet saved
+            // Auto-seed preset 1 (slot 0) with UE5-matching config if not yet saved
+            if (!presets[0]) {
+                presets[0] = { name: "UE5 Match", settings: UE5_PRESET_SETTINGS };
+                localStorage.setItem(PRESET_KEY, JSON.stringify(presets));
+            }
+            // Also keep in slot 5 (slot 4) for backwards compat
             if (!presets[4]) {
                 presets[4] = { name: "UE5 Match", settings: UE5_PRESET_SETTINGS };
                 localStorage.setItem(PRESET_KEY, JSON.stringify(presets));
@@ -372,6 +377,16 @@
     });
 
     refreshPresetSlots();
+
+    // Auto-apply preset 1 (UE5 Match) on first load so Generate uses good defaults
+    {
+        var presets = loadPresetsFromStorage();
+        if (presets[0] && presets[0].settings) {
+            applySettings(presets[0].settings);
+            activePresetSlot = 0;
+            refreshPresetSlots();
+        }
+    }
 
     // ── Mine mode UI wiring ──────────────────────────────────────────
     mineMode.addEventListener("change", function () {
