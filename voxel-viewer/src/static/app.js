@@ -795,14 +795,12 @@
                 displayJsonMesh(data.mesh, { resetCamera: false, reuseTransform: true });
             }
 
-            // Render transform log
-            renderSleepLog(data.transform_log);
-
-            // Render stats
-            renderSleepStats(data.stats);
-
-            // Render material diff
-            renderSleepDiff(data.material_diff);
+            // Sleep log, stats, and diff hidden for demo — the Before/After
+            // toggle is the meaningful reviewer interaction
+            sleepLog.style.display = "none";
+            sleepDiff.style.display = "none";
+            var oldStats = document.querySelector(".sleep-stats");
+            if (oldStats) oldStats.parentNode.removeChild(oldStats);
 
             // Show the before/after toggle if we have a pre-sleep snapshot
             if (preSleepMeshData) {
