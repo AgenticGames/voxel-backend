@@ -408,7 +408,7 @@
         scene = new THREE.Scene();
 
         camera = new THREE.PerspectiveCamera(50, 1, 0.1, 2000);
-        camera.position.set(30, 25, 30);
+        camera.position.set(-30, 25, -30);
         camera.lookAt(0, 0, 0);
 
         renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -1004,7 +1004,7 @@
 
         // Only reset camera on initial load, not during mining
         if (resetCam) {
-            camera.position.set(30, 25, 30);
+            camera.position.set(-30, 25, -30);
             camera.lookAt(0, 0, 0);
             euler.setFromQuaternion(camera.quaternion);
         }
@@ -1074,7 +1074,7 @@
         scene.add(obj);
         currentMesh = obj;
 
-        camera.position.set(30, 25, 30);
+        camera.position.set(-30, 25, -30);
         camera.lookAt(0, 0, 0);
         euler.setFromQuaternion(camera.quaternion);
 
