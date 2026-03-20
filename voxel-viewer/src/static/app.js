@@ -1601,7 +1601,7 @@
             // Build request with curated settings for a visually rich cave
             var parts = [
                 "seed=12348",
-                "grid_x=7", "grid_y=7", "grid_z=7",
+                "grid_x=6", "grid_y=6", "grid_z=6",
                 "cavern_freq=0.004",
                 "cavern_threshold=0.75",
                 "detail_octaves=12",
