@@ -1,6 +1,9 @@
 (function () {
     "use strict";
 
+    // Resolve API URLs via origin to avoid Firefox "embedded credentials" error on bare IPs
+    function apiUrl(path) { return new URL(path, window.location.origin).href; }
+
     // State
     var report = null;
     var scene, camera, renderer;
@@ -578,7 +581,7 @@
                     mode: "sphere", radius: radius, nx: nx, ny: ny, nz: nz
                 });
                 meshInfo.textContent = "Carving + placing water...";
-                fetch("/api/mine", {
+                fetch(apiUrl("/api/mine"), {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: mineBody
@@ -590,7 +593,7 @@
                     var waterBody = JSON.stringify({
                         x: originalPoint.x, y: originalPoint.y, z: originalPoint.z, radius: radius
                     });
-                    return fetch("/api/place-water", {
+                    return fetch(apiUrl("/api/place-water"), {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
                         body: waterBody
@@ -617,7 +620,7 @@
             });
 
             meshInfo.textContent = "Mining...";
-            fetch("/api/mine", {
+            fetch(apiUrl("/api/mine"), {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: body
@@ -741,7 +744,7 @@
         toggleBeforeAfterBtn.textContent = "Before/After";
 
         try {
-            var resp = await fetch("/api/sleep", {
+            var resp = await fetch(apiUrl("/api/sleep"), {
                 method: "POST",
                 headers: { "Content-Type": "application/json" }
             });
@@ -1053,7 +1056,7 @@
     // ── Report loading ──────────────────────────────────────────────
     async function loadReport() {
         try {
-            var resp = await fetch("/api/report");
+            var resp = await fetch(apiUrl("/api/report"));
             if (!resp.ok) throw new Error("Failed to fetch report");
             report = await resp.json();
             renderSummary();
@@ -1147,7 +1150,7 @@
         viewerPlaceholder.style.display = "none";
 
         try {
-            var resp = await fetch("/api/obj/" + seed);
+            var resp = await fetch(apiUrl("/api/obj/" + seed));
             if (!resp.ok) throw new Error("OBJ not found for seed " + seed);
             var text = await resp.text();
             displayObjText(text, "Seed " + seed);
@@ -1168,7 +1171,7 @@
         viewerPlaceholder.style.display = "none";
 
         try {
-            var resp = await fetch("/api/obj-file/" + encodeURIComponent(filename));
+            var resp = await fetch(apiUrl("/api/obj-file/" + encodeURIComponent(filename)));
             if (!resp.ok) throw new Error("File not found: " + filename);
             var text = await resp.text();
             displayObjText(text, filename);
@@ -1194,7 +1197,7 @@
     // ── Load file list and render custom exports ─────────────────────
     async function loadCustomExports() {
         try {
-            var resp = await fetch("/api/obj-files");
+            var resp = await fetch(apiUrl("/api/obj-files"));
             if (!resp.ok) return;
             var files = await resp.json();
             renderCustomExports(files);
@@ -1233,7 +1236,7 @@
                 var filename = this.getAttribute("data-file");
                 if (!confirm("Delete " + filename + "?")) return;
                 try {
-                    var resp = await fetch("/api/obj-file/" + encodeURIComponent(filename), {
+                    var resp = await fetch(apiUrl("/api/obj-file/" + encodeURIComponent(filename)), {
                         method: "DELETE"
                     });
                     if (resp.ok) {
@@ -1461,7 +1464,7 @@
             appendCheckbox(parts, "coal_shallow_ceiling", "gen-coal-shallow-ceiling");
             appendCheckbox(parts, "coal_depth_enrichment", "gen-coal-depth-enrichment");
             var body = parts.join("&");
-            var resp = await fetch("/api/generate", {
+            var resp = await fetch(apiUrl("/api/generate"), {
                 method: "POST",
                 headers: { "Content-Type": "application/x-www-form-urlencoded" },
                 body: body,
@@ -1523,7 +1526,7 @@
         runBatchBtn.disabled = true;
         batchStatus.textContent = "Running batch test...";
         try {
-            var resp = await fetch("/api/run-batch", { method: "POST" });
+            var resp = await fetch(apiUrl("/api/run-batch"), { method: "POST" });
             if (!resp.ok) throw new Error("Batch run failed");
             await resp.text();
             batchStatus.textContent = "Batch complete. Reloading...";
