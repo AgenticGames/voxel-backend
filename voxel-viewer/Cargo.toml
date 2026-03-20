@@ -16,6 +16,7 @@ voxel-gen = { path = "../voxel-gen" }
 voxel-sleep = { path = "../voxel-sleep" }
 voxel-fluid = { path = "../voxel-fluid" }
 crossbeam-channel.workspace = true
+chrono = "0.4"
 
 [[bin]]
 name = "voxel-viewer"

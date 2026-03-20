@@ -70,6 +70,15 @@ fn main() {
     for request in server.incoming_requests() {
         let url = request.url().to_string();
         let method = request.method().to_string();
+        let remote = request.remote_addr()
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        // Log non-static requests (page loads + API calls)
+        if url == "/" || url.starts_with("/api/") {
+            let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+            println!("[{now}] {remote} {method} {url}");
+        }
 
         let result = match (method.as_str(), url.as_str()) {
             ("GET", "/") => serve_static(request, INDEX_HTML, "text/html"),
