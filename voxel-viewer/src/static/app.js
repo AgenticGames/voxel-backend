@@ -1513,6 +1513,19 @@
                 var oldStats = document.querySelector(".sleep-stats");
                 if (oldStats) oldStats.parentNode.removeChild(oldStats);
                 genStatus.textContent = "";
+
+                // Pre-warm: fire a tiny silent mine at mesh center to warm CPU paths
+                // so the user's first real click is fast
+                if (meshCenter) {
+                    fetch(apiUrl("/api/mine"), {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            x: meshCenter.x, y: meshCenter.y, z: meshCenter.z,
+                            radius: 0.1, mode: "sphere"
+                        })
+                    }).catch(function () {}); // fire and forget
+                }
             } else {
                 // Fallback: old OBJ file path (backward compat)
                 await loadCustomExports();
