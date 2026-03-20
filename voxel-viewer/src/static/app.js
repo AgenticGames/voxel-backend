@@ -1592,8 +1592,122 @@
         });
     }
 
+    // ── Pre-generate showcase cave on page load ───────────────────
+    async function preGenerateShowcase() {
+        genStatus.textContent = "Generating showcase cave...";
+        viewerPlaceholder.style.display = "none";
+        genBtn.disabled = true;
+        try {
+            // Build request with curated settings for a visually rich cave
+            var parts = [
+                "seed=12348",
+                "grid_x=7", "grid_y=7", "grid_z=7",
+                "cavern_freq=0.004",
+                "cavern_threshold=0.75",
+                "detail_octaves=12",
+                "detail_persistence=0.5",
+                "warp_amplitude=2.0",
+                "worms_per_region=0",
+                "chunk_size=16",
+                "max_edge_length=4.0",
+                "sandstone_depth=250",
+                "granite_depth=-100",
+                "basalt_depth=-200",
+                "slate_depth=130",
+                "iron_band_freq=0.2",
+                "iron_noise_freq=0.11",
+                "iron_perturbation=1.0",
+                "iron_threshold=1.25",
+                "copper_freq=0.011",
+                "copper_threshold=0.85",
+                "quartz_freq=0.01",
+                "quartz_threshold=0.81",
+                "gold_threshold=0.92",
+                "formations_enabled=true",
+                "form_placement_frequency=0.26",
+                "form_placement_threshold=0.22",
+                "form_stalactite_chance=0.31",
+                "form_stalagmite_chance=0.22",
+                "form_flowstone_chance=0.02",
+                "form_column_chance=1.0",
+                "form_column_max_gap=200",
+                "form_length_min=5.0",
+                "form_length_max=8.0",
+                "form_radius_min=1.9",
+                "form_radius_max=2.4",
+                "form_max_radius=3.1",
+                "form_column_radius_min=15.5",
+                "form_column_radius_max=27.5",
+                "form_flowstone_length_min=2.7",
+                "form_flowstone_length_max=4.5",
+                "form_flowstone_thickness=1.1",
+                "form_min_air_gap=3",
+                "form_min_clearance=4",
+                "form_smoothness=4.0",
+                "form_mega_column_chance=0.30",
+                "form_mega_column_min_gap=12",
+                "form_mega_column_radius_min=16.0",
+                "form_mega_column_radius_max=26.0",
+                "form_mega_column_noise_strength=0.3",
+                "form_mega_column_ring_frequency=0.8",
+                "form_drapery_chance=0.02",
+                "form_drapery_length_min=5.0",
+                "form_drapery_length_max=6.0",
+                "form_drapery_wave_frequency=3.5",
+                "form_drapery_wave_amplitude=1.8",
+                "form_rimstone_chance=0.06",
+                "form_rimstone_dam_height_min=1.2",
+                "form_rimstone_dam_height_max=2.1",
+                "form_rimstone_pool_depth=1.0",
+                "form_rimstone_min_slope=0.15",
+                "form_shield_chance=0.41",
+                "form_shield_radius_min=5.0",
+                "form_shield_radius_max=8.0",
+                "form_shield_max_tilt=35.0",
+                "form_shield_stalactite_chance=0.5",
+                "stress_gravity=1.0",
+                "stress_lateral=0.3",
+                "stress_vertical=0.5",
+                "stress_prop_radius=4",
+                "stress_max_collapse=50",
+            ];
+            var resp = await fetch(apiUrl("/api/generate"), {
+                method: "POST",
+                headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                body: parts.join("&"),
+            });
+            if (!resp.ok) throw new Error("Showcase generate failed");
+            var result = await resp.json();
+            if (!result.ok) throw new Error(result.error || "Unknown error");
+
+            if (result.mesh) {
+                displayJsonMesh(result.mesh, { resetCamera: true });
+                renderPoolSurfaces(result.pools);
+                preSleepMeshData = result.mesh;
+                genStatus.textContent = "";
+
+                // Pre-warm mine + generate paths so user's first interaction is fast
+                if (meshCenter) {
+                    fetch(apiUrl("/api/mine"), {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            x: meshCenter.x, y: meshCenter.y, z: meshCenter.z,
+                            radius: 0.1, mode: "sphere"
+                        })
+                    }).catch(function () {});
+                }
+            }
+        } catch (err) {
+            genStatus.textContent = "Showcase: " + err.message;
+        } finally {
+            genBtn.disabled = false;
+        }
+    }
+
     // ── Init ────────────────────────────────────────────────────────
     initThree();
     loadReport();
     loadCustomExports();
+    preGenerateShowcase();
 })();
