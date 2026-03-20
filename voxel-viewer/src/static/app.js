@@ -476,6 +476,9 @@
             }
         }
 
+        // Arrow key orbit (independent of fly mode)
+        if (window._tickArrowOrbit) window._tickArrowOrbit(dt);
+
         renderer.render(scene, camera);
     }
 
@@ -547,6 +550,39 @@
             flySpeed = Math.max(1, Math.min(200, flySpeed));
             e.preventDefault();
         }, { passive: false });
+
+        // Arrow keys: orbit camera around mesh center (no right-click needed)
+        var arrowKeys = { ArrowLeft: false, ArrowRight: false, ArrowUp: false, ArrowDown: false };
+        document.addEventListener("keydown", function (e) {
+            if (e.key in arrowKeys) { arrowKeys[e.key] = true; e.preventDefault(); }
+        });
+        document.addEventListener("keyup", function (e) {
+            if (e.key in arrowKeys) { arrowKeys[e.key] = false; }
+        });
+
+        function tickArrowOrbit(dt) {
+            var speed = 1.5; // radians per second
+            var dx = 0, dy = 0;
+            if (arrowKeys.ArrowLeft) dx -= speed * dt;
+            if (arrowKeys.ArrowRight) dx += speed * dt;
+            if (arrowKeys.ArrowUp) dy += speed * dt;
+            if (arrowKeys.ArrowDown) dy -= speed * dt;
+            if (dx === 0 && dy === 0) return;
+            var target = meshCenter || new THREE.Vector3(0, 0, 0);
+            var offset = camera.position.clone().sub(target);
+            var radius = offset.length();
+            var theta = Math.atan2(offset.x, offset.z) + dx;
+            var phi = Math.acos(Math.max(-0.99, Math.min(0.99, offset.y / radius))) - dy;
+            phi = Math.max(0.1, Math.min(Math.PI - 0.1, phi));
+            offset.x = radius * Math.sin(phi) * Math.sin(theta);
+            offset.y = radius * Math.cos(phi);
+            offset.z = radius * Math.sin(phi) * Math.cos(theta);
+            camera.position.copy(target).add(offset);
+            camera.lookAt(target);
+        }
+
+        // Expose for animate loop
+        window._tickArrowOrbit = tickArrowOrbit;
     }
 
     // ── Mining interaction ────────────────────────────────────────────
