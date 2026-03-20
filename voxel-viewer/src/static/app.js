@@ -1526,23 +1526,25 @@
         }
     });
 
-    // ── Run batch ───────────────────────────────────────────────────
-    runBatchBtn.addEventListener("click", async function () {
-        runBatchBtn.disabled = true;
-        batchStatus.textContent = "Running batch test...";
-        try {
-            var resp = await fetch(apiUrl("/api/run-batch"), { method: "POST" });
-            if (!resp.ok) throw new Error("Batch run failed");
-            await resp.text();
-            batchStatus.textContent = "Batch complete. Reloading...";
-            await loadReport();
-            batchStatus.textContent = "Done.";
-        } catch (err) {
-            batchStatus.textContent = "Error: " + err.message;
-        } finally {
-            runBatchBtn.disabled = false;
-        }
-    });
+    // ── Run batch (only if button exists — removed in demo mode) ───
+    if (runBatchBtn) {
+        runBatchBtn.addEventListener("click", async function () {
+            runBatchBtn.disabled = true;
+            batchStatus.textContent = "Running batch test...";
+            try {
+                var resp = await fetch(apiUrl("/api/run-batch"), { method: "POST" });
+                if (!resp.ok) throw new Error("Batch run failed");
+                await resp.text();
+                batchStatus.textContent = "Batch complete. Reloading...";
+                await loadReport();
+                batchStatus.textContent = "Done.";
+            } catch (err) {
+                batchStatus.textContent = "Error: " + err.message;
+            } finally {
+                runBatchBtn.disabled = false;
+            }
+        });
+    }
 
     // ── Helpers ─────────────────────────────────────────────────────
     function escapeHtml(s) {
