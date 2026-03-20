@@ -9,8 +9,8 @@
 <body>
     <div id="app">
         <div id="summary-bar">
-            <h1>Mithril — Procedural Cave Explorer</h1>
-            <span class="subtitle">Rust voxel engine</span>
+            <h1>Mithril</h1>
+            <span class="subtitle">Real-time procedural geology: 27 minerals, structural physics, and million-year simulation — pure Rust, running in your browser</span>
         </div>
 
         <div id="left-panel">
@@ -45,6 +45,25 @@
                         <button id="preset-save" title="Save current settings to the selected preset slot">Save</button>
                         <button id="preset-delete" title="Delete the selected preset">Del</button>
                         <button id="preset-reset" title="Clear all settings back to defaults">Reset</button>
+                    </div>
+
+                    <div class="explore-instructions">
+                        <strong>HOW TO EXPLORE</strong>
+                        <kbd>Left-click</kbd> on the cave to mine (carve rock)<br>
+                        <kbd>Right-click</kbd> + drag to orbit camera<br>
+                        <kbd>Scroll</kbd> to zoom in/out<br>
+                        Change seed and hit <kbd>Generate</kbd> for a new cave
+                    </div>
+
+                    <div class="mode-bar">
+                        <label>Tool</label>
+                        <select id="mine-mode">
+                            <option value="sphere">Mine (Sphere)</option>
+                            <option value="peel">Mine (Surface)</option>
+                            <option value="lava-carve">Place Lava</option>
+                            <option value="water-place">Place Water</option>
+                        </select>
+                        <label>Size <input type="range" id="mine-radius" min="1" max="10" value="3" style="width:60px"><span id="mine-radius-val">3</span></label>
                     </div>
 
                     <div id="advanced-toggle-bar">
@@ -391,10 +410,12 @@
                     </div><!-- end #advanced-settings -->
 
                     <div class="sleep-section">
-                        <h3 class="sleep-heading">Deep Sleep</h3>
+                        <h3 class="sleep-heading">Geological Time Simulation</h3>
+                        <p class="sleep-description">Simulates 1.25 million years of geological processes: metamorphism, hydrothermal veins, contact aureoles, acid dissolution, and structural collapse.</p>
+                        <p class="sleep-hint">Tip: Place some lava using the Tool selector above, then run the simulation to see how heat transforms surrounding rock into new minerals.</p>
                         <div class="gen-row">
-                            <button id="sleep-btn" class="action-btn" title="Simulate geological deep sleep: metamorphism, mineral growth, structural collapse">Deep Sleep</button>
-                            <button id="toggle-before-after-btn" class="action-btn" style="display:none;" title="Toggle between pre-sleep and post-sleep mesh">Before/After</button>
+                            <button id="sleep-btn" class="action-btn" title="Simulate 1.25 million years of geological processes">Simulate 1.25M Years</button>
+                            <button id="toggle-before-after-btn" class="action-btn" style="display:none;" title="Toggle between pre-sleep and post-sleep mesh">Before / After</button>
                             <span id="sleep-status"></span>
                         </div>
                         <div id="sleep-log" style="display:none;"></div>
@@ -411,20 +432,6 @@
             <div id="viewer-toolbar">
                 <label>
                     <input type="checkbox" id="wireframe-toggle"> Wireframe
-                </label>
-                <label>
-                    Mode
-                    <select id="mine-mode">
-                        <option value="sphere">Sphere Carve (r=5)</option>
-                        <option value="peel">Surface Peel (r=2)</option>
-                        <option value="lava-carve">Lava Carve (mine + fill lava)</option>
-                        <option value="water-place">Water Place (inject water)</option>
-                    </select>
-                </label>
-                <label>
-                    Radius
-                    <input type="range" id="mine-radius" min="1" max="10" value="3">
-                    <span id="mine-radius-val">3</span>
                 </label>
                 <span id="mesh-info"></span>
             </div>
@@ -457,7 +464,12 @@
                 <span class="legend-item"><span class="legend-swatch" style="background:rgba(255,80,20,0.5);border:1px solid #ff5014;"></span>Lava Pool</span>
             </div>
             <div id="viewer-container">
-                <div id="viewer-placeholder">Loading showcase cave...</div>
+                <div id="viewer-placeholder">
+                    <div class="loading-spinner"></div>
+                    <div>Generating a 6×6×6 procedural cave (216 chunks)</div>
+                    <div id="gen-elapsed"></div>
+                    <div id="loading-fact" class="loading-fact"></div>
+                </div>
             </div>
             <!-- Batch test bar removed for public demo -->
         </div>

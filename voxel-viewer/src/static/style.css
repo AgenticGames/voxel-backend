@@ -14,7 +14,7 @@ body {
 
 #app {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 320px 1fr;
     grid-template-rows: auto 1fr;
     height: 100vh;
 }
@@ -60,6 +60,103 @@ body {
 #advanced-toggle:hover {
     color: #4fc3f7;
     border-color: #4fc3f7;
+}
+
+/* Instructions box */
+.explore-instructions {
+    margin: 12px 0 8px;
+    padding: 10px 12px;
+    border-left: 3px solid #0f3460;
+    background: rgba(15, 52, 96, 0.15);
+    font-size: 11px;
+    line-height: 1.7;
+    color: #8a9ab5;
+}
+.explore-instructions strong {
+    color: #4fc3f7;
+    font-size: 10px;
+    letter-spacing: 1px;
+    display: block;
+    margin-bottom: 4px;
+}
+.explore-instructions kbd {
+    background: #0f3460;
+    color: #c0d0e0;
+    padding: 1px 5px;
+    border-radius: 2px;
+    font-size: 10px;
+    font-family: inherit;
+}
+
+/* Mode switcher highlight */
+.mode-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    margin: 10px 0 6px;
+    background: rgba(15, 52, 96, 0.25);
+    border: 1px solid #0f3460;
+    border-radius: 4px;
+}
+.mode-bar label {
+    font-size: 11px;
+    color: #8a9ab5;
+}
+.mode-bar select {
+    flex: 1;
+}
+
+/* Loading spinner */
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+.loading-spinner {
+    display: inline-block;
+    width: 32px;
+    height: 32px;
+    border: 3px solid #0f3460;
+    border-top: 3px solid #4fc3f7;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    margin-bottom: 12px;
+}
+
+/* Loading overlay in viewer */
+#viewer-placeholder {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    text-align: center;
+    color: #7a8ba0;
+    font-size: 13px;
+    line-height: 1.8;
+    padding: 20px;
+}
+#viewer-placeholder .loading-fact {
+    font-size: 11px;
+    color: #5a6a80;
+    font-style: italic;
+    margin-top: 8px;
+    min-height: 16px;
+    transition: opacity 0.4s;
+}
+
+/* Sleep section rework */
+.sleep-description {
+    font-size: 11px;
+    color: #8a9ab5;
+    margin-bottom: 8px;
+    line-height: 1.5;
+}
+.sleep-hint {
+    font-size: 10px;
+    color: #6a7a90;
+    margin-top: 6px;
+    font-style: italic;
 }
 
 .stat {

@@ -1593,10 +1593,38 @@
     }
 
     // ── Pre-generate showcase cave on page load ───────────────────
+    var GEOLOGICAL_FACTS = [
+        "Simulating 27 geological materials with realistic depth layering",
+        "Carving worm tunnels through limestone and granite",
+        "Growing stalactites, mega-columns, and flowstone formations",
+        "Running structural stress propagation across the mesh",
+        "Placing ore deposits: banded iron, copper dendrites, kimberlite pipes",
+        "Solving QEF vertex placement with Jacobi SVD decomposition",
+        "Stitching seamless chunk boundaries with batched seam passes",
+        "Building cave shields, rimstone dams, and drapery formations",
+    ];
+
     async function preGenerateShowcase() {
-        genStatus.textContent = "Generating showcase cave...";
-        viewerPlaceholder.style.display = "none";
         genBtn.disabled = true;
+        // Show placeholder with spinner (it's already visible in HTML)
+        var elapsedEl = document.getElementById("gen-elapsed");
+        var factEl = document.getElementById("loading-fact");
+        var startTime = Date.now();
+        var factIndex = 0;
+
+        // Rotating geological facts during load
+        if (factEl) factEl.textContent = GEOLOGICAL_FACTS[0];
+        var factTimer = setInterval(function () {
+            factIndex = (factIndex + 1) % GEOLOGICAL_FACTS.length;
+            if (factEl) factEl.textContent = GEOLOGICAL_FACTS[factIndex];
+        }, 3500);
+
+        // Elapsed time counter
+        var elapsedTimer = setInterval(function () {
+            var secs = Math.round((Date.now() - startTime) / 1000);
+            if (elapsedEl) elapsedEl.textContent = "Elapsed: " + secs + "s";
+        }, 1000);
+
         try {
             // Build request with curated settings for a visually rich cave
             var parts = [
@@ -1680,26 +1708,41 @@
             var result = await resp.json();
             if (!result.ok) throw new Error(result.error || "Unknown error");
 
+            clearInterval(factTimer);
+            clearInterval(elapsedTimer);
+
             if (result.mesh) {
+                viewerPlaceholder.style.display = "none";
                 displayJsonMesh(result.mesh, { resetCamera: true });
                 renderPoolSurfaces(result.pools);
                 preSleepMeshData = result.mesh;
                 genStatus.textContent = "";
 
-                // Pre-warm mine + generate paths so user's first interaction is fast
+                // Pre-warm mine path with real radius so first click is fast
                 if (meshCenter) {
                     fetch(apiUrl("/api/mine"), {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({
                             x: meshCenter.x, y: meshCenter.y, z: meshCenter.z,
-                            radius: 0.1, mode: "sphere"
+                            radius: 3, mode: "sphere"
                         })
-                    }).catch(function () {});
+                    })
+                    .then(function (r) { return r.json(); })
+                    .then(function (data) {
+                        // Display the pre-warmed result (hole is in mesh interior, invisible)
+                        if (data && data.mesh) {
+                            displayJsonMesh(data.mesh, { resetCamera: false, reuseTransform: true });
+                            preSleepMeshData = data.mesh;
+                        }
+                    })
+                    .catch(function () {});
                 }
             }
         } catch (err) {
-            genStatus.textContent = "Showcase: " + err.message;
+            clearInterval(factTimer);
+            clearInterval(elapsedTimer);
+            genStatus.textContent = "Error: " + err.message;
         } finally {
             genBtn.disabled = false;
         }
