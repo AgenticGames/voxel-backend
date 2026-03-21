@@ -551,13 +551,24 @@
     }
 
     // ── Mining interaction ────────────────────────────────────────────
+    var miningInFlight = false;
+    var mineOverlay = document.getElementById("mine-status-overlay");
+
+    function showMineOverlay(text) {
+        if (mineOverlay) { mineOverlay.textContent = text; mineOverlay.classList.add("visible"); }
+    }
+    function hideMineOverlay() {
+        if (mineOverlay) { mineOverlay.classList.remove("visible"); }
+    }
+
     function initMining() {
         var canvas = renderer.domElement;
 
         canvas.addEventListener("click", function (e) {
-            // Only mine on left-click when NOT flying
+            // Only mine on left-click when NOT flying, and not while a request is pending
             if (flyActive) return;
             if (!currentMesh) return;
+            if (miningInFlight) return;
 
             var rect = canvas.getBoundingClientRect();
             mouseNDC.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
@@ -596,7 +607,8 @@
                     x: originalPoint.x, y: originalPoint.y, z: originalPoint.z,
                     mode: "sphere", radius: radius, nx: nx, ny: ny, nz: nz
                 });
-                meshInfo.textContent = "Carving + placing water...";
+                showMineOverlay("Placing...");
+                miningInFlight = true;
                 fetch(apiUrl("/api/mine"), {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -617,10 +629,10 @@
                 })
                 .then(function (resp) { return resp.json(); })
                 .then(function (data) {
-                    meshInfo.textContent = "Carved + placed " + data.placed + " water cells at (" +
-                        data.position[0].toFixed(1) + ", " + data.position[1].toFixed(1) + ", " + data.position[2].toFixed(1) + ")";
+                    hideMineOverlay();
+                    miningInFlight = false;
                 })
-                .catch(function (err) { meshInfo.textContent = "Water carve error: " + err; });
+                .catch(function (err) { hideMineOverlay(); miningInFlight = false; });
                 return;
             }
 
@@ -635,7 +647,8 @@
                 nz: nz
             });
 
-            meshInfo.textContent = "Mining...";
+            showMineOverlay("Mining...");
+            miningInFlight = true;
             fetch(apiUrl("/api/mine"), {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -649,9 +662,12 @@
                 displayJsonMesh(data.mesh, { resetCamera: false, reuseTransform: true });
                 renderPoolSurfaces(data.pools);
                 showMineToast(data.mined);
+                hideMineOverlay();
+                miningInFlight = false;
             })
             .catch(function (err) {
-                meshInfo.textContent = "Mine error: " + err.message;
+                hideMineOverlay();
+                miningInFlight = false;
             });
         });
     }
