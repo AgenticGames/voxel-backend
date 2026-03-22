@@ -454,18 +454,29 @@
     var cinemaMode = false;
     var cinemaAngle = 0;
     var cinemaSpeed = 0.15; // radians per second
-    var cinemaTilt = 0.6; // camera elevation angle
-    var cinemaCenter = null; // locked to camera position when C is pressed
+    var cinemaCenter = null; // set by anchor click
+    var anchorMode = false; // waiting for click to set anchor
+    var anchorMarker = null; // visual indicator sphere
 
+    // A key — enter anchor placement mode
     document.addEventListener("keydown", function (e) {
+        if ((e.key === "a" || e.key === "A") && !flyActive && !cinemaMode) {
+            anchorMode = !anchorMode;
+            meshInfo.textContent = anchorMode ? "Click mesh to set orbit anchor..." : "";
+        }
         if (e.key === "c" || e.key === "C") {
-            if (flyActive) return; // don't toggle during fly
+            if (flyActive) return;
+            if (!cinemaCenter) {
+                meshInfo.textContent = "Press A first, click mesh to set anchor, then C to orbit";
+                return;
+            }
             cinemaMode = !cinemaMode;
             if (cinemaMode) {
-                // Lock orbit center to where the camera is currently looking
-                var lookDir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-                cinemaCenter = camera.position.clone().add(lookDir.multiplyScalar(meshScale ? meshScale * 0.5 : 15));
                 cinemaAngle = Math.atan2(camera.position.x - cinemaCenter.x, camera.position.z - cinemaCenter.z);
+            } else {
+                // Exiting cinema — remove anchor marker
+                if (anchorMarker) { scene.remove(anchorMarker); anchorMarker = null; }
+                cinemaCenter = null;
             }
             // Toggle UI visibility
             var leftPanel = document.getElementById("left-panel");
@@ -477,7 +488,6 @@
             if (toolbar) toolbar.style.display = cinemaMode ? "none" : "";
             if (legend) legend.style.display = cinemaMode ? "none" : "";
             if (window._viewerGrid) window._viewerGrid.visible = !cinemaMode;
-            // In cinema mode, make viewer fill the screen
             var app = document.getElementById("app");
             if (app) app.style.gridTemplateColumns = cinemaMode ? "0px 1fr" : "320px 1fr";
             if (typeof resizeViewer === "function") resizeViewer();
@@ -617,11 +627,33 @@
             // Only mine on left-click when NOT flying, and not while a request is pending
             if (flyActive) return;
             if (!currentMesh) return;
-            if (miningInFlight) return;
 
             var rect = canvas.getBoundingClientRect();
             mouseNDC.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
             mouseNDC.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+            // Anchor mode — set orbit point instead of mining
+            if (anchorMode) {
+                raycaster.setFromCamera(mouseNDC, camera);
+                var meshes = [];
+                currentMesh.traverse(function (child) { if (child.isMesh) meshes.push(child); });
+                var hits = raycaster.intersectObjects(meshes, false);
+                if (hits.length > 0) {
+                    cinemaCenter = hits[0].point.clone();
+                    // Show a small marker sphere at the anchor point
+                    if (anchorMarker) scene.remove(anchorMarker);
+                    var geo = new THREE.SphereGeometry(0.3, 8, 8);
+                    var mat = new THREE.MeshBasicMaterial({ color: 0x4fc3f7, transparent: true, opacity: 0.6 });
+                    anchorMarker = new THREE.Mesh(geo, mat);
+                    anchorMarker.position.copy(cinemaCenter);
+                    scene.add(anchorMarker);
+                    meshInfo.textContent = "Anchor set — press C to start orbit";
+                }
+                anchorMode = false;
+                return;
+            }
+
+            if (miningInFlight) return;
 
             raycaster.setFromCamera(mouseNDC, camera);
 
