@@ -453,13 +453,20 @@
     // ── Cinema Mode (C key) — auto-orbit, hide UI ─────────────────
     var cinemaMode = false;
     var cinemaAngle = 0;
-    var cinemaSpeed = 0.3; // radians per second
+    var cinemaSpeed = 0.15; // radians per second
     var cinemaTilt = 0.6; // camera elevation angle
+    var cinemaCenter = null; // locked to camera position when C is pressed
 
     document.addEventListener("keydown", function (e) {
         if (e.key === "c" || e.key === "C") {
             if (flyActive) return; // don't toggle during fly
             cinemaMode = !cinemaMode;
+            if (cinemaMode) {
+                // Lock orbit center to where the camera is currently looking
+                var lookDir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+                cinemaCenter = camera.position.clone().add(lookDir.multiplyScalar(meshScale ? meshScale * 0.5 : 15));
+                cinemaAngle = Math.atan2(camera.position.x - cinemaCenter.x, camera.position.z - cinemaCenter.z);
+            }
             // Toggle UI visibility
             var leftPanel = document.getElementById("left-panel");
             var summaryBar = document.getElementById("summary-bar");
@@ -483,15 +490,16 @@
         var dt = (now - prevTime) / 1000;
         prevTime = now;
 
-        // Cinema mode auto-orbit
-        if (cinemaMode && meshCenter) {
+        // Cinema mode auto-orbit around locked center point
+        if (cinemaMode && cinemaCenter) {
             cinemaAngle += cinemaSpeed * dt;
-            var target = meshCenter;
-            var radius = meshScale ? meshScale * 1.8 : 30;
+            var target = cinemaCenter;
+            var radius = camera.position.distanceTo(target);
+            var height = camera.position.y;
             camera.position.set(
-                target.x + radius * Math.sin(cinemaAngle) * Math.cos(cinemaTilt),
-                target.y + radius * Math.sin(cinemaTilt),
-                target.z + radius * Math.cos(cinemaAngle) * Math.cos(cinemaTilt)
+                target.x + radius * Math.sin(cinemaAngle),
+                height,
+                target.z + radius * Math.cos(cinemaAngle)
             );
             camera.lookAt(target);
         }
