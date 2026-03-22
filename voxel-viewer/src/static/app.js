@@ -454,6 +454,8 @@
     var cinemaMode = false;
     var cinemaAngle = 0;
     var cinemaSpeed = 0.15; // radians per second
+    var cinemaRadius = 0; // locked when C pressed, scroll to adjust
+    var cinemaHeight = 0; // locked when C pressed
     var cinemaCenter = null; // set by anchor click
     var anchorMode = false; // waiting for click to set anchor
     var anchorMarker = null; // visual indicator sphere
@@ -473,6 +475,10 @@
             cinemaMode = !cinemaMode;
             if (cinemaMode) {
                 cinemaAngle = Math.atan2(camera.position.x - cinemaCenter.x, camera.position.z - cinemaCenter.z);
+                var dx = camera.position.x - cinemaCenter.x;
+                var dz = camera.position.z - cinemaCenter.z;
+                cinemaRadius = Math.sqrt(dx * dx + dz * dz);
+                cinemaHeight = camera.position.y;
             } else {
                 // Exiting cinema — remove anchor marker
                 if (anchorMarker) { scene.remove(anchorMarker); anchorMarker = null; }
@@ -503,15 +509,12 @@
         // Cinema mode auto-orbit around locked center point
         if (cinemaMode && cinemaCenter) {
             cinemaAngle += cinemaSpeed * dt;
-            var target = cinemaCenter;
-            var radius = camera.position.distanceTo(target);
-            var height = camera.position.y;
             camera.position.set(
-                target.x + radius * Math.sin(cinemaAngle),
-                height,
-                target.z + radius * Math.cos(cinemaAngle)
+                cinemaCenter.x + cinemaRadius * Math.sin(cinemaAngle),
+                cinemaHeight,
+                cinemaCenter.z + cinemaRadius * Math.cos(cinemaAngle)
             );
-            camera.lookAt(target);
+            camera.lookAt(cinemaCenter);
         }
 
         // Fly camera movement
@@ -602,8 +605,14 @@
 
         // Scroll wheel to adjust fly speed
         canvas.addEventListener("wheel", function (e) {
-            flySpeed += (e.deltaY > 0 ? -5 : 5);
-            flySpeed = Math.max(1, Math.min(200, flySpeed));
+            if (cinemaMode) {
+                // Scroll adjusts orbit radius in cinema mode
+                cinemaRadius += (e.deltaY > 0 ? 2 : -2);
+                cinemaRadius = Math.max(3, cinemaRadius);
+            } else {
+                flySpeed += (e.deltaY > 0 ? -5 : 5);
+                flySpeed = Math.max(1, Math.min(200, flySpeed));
+            }
             e.preventDefault();
         }, { passive: false });
 
