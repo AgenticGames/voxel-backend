@@ -961,6 +961,7 @@ pub unsafe extern "C" fn voxel_free_sleep_result(result: *mut FfiSleepResult) {
     }
     let r = &*result;
     if !r.dirty_chunks.is_null() && r.dirty_chunk_count > 0 {
+        // Reclaim FFI-allocated memory
         let _ = Vec::from_raw_parts(
             r.dirty_chunks,
             r.dirty_chunk_count as usize,
@@ -968,6 +969,7 @@ pub unsafe extern "C" fn voxel_free_sleep_result(result: *mut FfiSleepResult) {
         );
     }
     if !r.collapse_events.is_null() && r.collapse_event_count > 0 {
+        // Reclaim FFI-allocated memory
         let _ = Vec::from_raw_parts(
             r.collapse_events,
             r.collapse_event_count as usize,
@@ -981,6 +983,7 @@ pub unsafe extern "C" fn voxel_free_sleep_result(result: *mut FfiSleepResult) {
         drop(CString::from_raw(r.manifest_json));
     }
     if !r.aureole_block.is_null() && r.aureole_block_count > 0 {
+        // Reclaim FFI-allocated memory
         let _ = Vec::from_raw_parts(
             r.aureole_block,
             r.aureole_block_count as usize,
@@ -988,6 +991,7 @@ pub unsafe extern "C" fn voxel_free_sleep_result(result: *mut FfiSleepResult) {
         );
     }
     if !r.lava_cells.is_null() && r.lava_cell_count > 0 {
+        // Reclaim FFI-allocated memory
         let _ = Vec::from_raw_parts(
             r.lava_cells,
             r.lava_cell_count as usize,
@@ -1110,6 +1114,7 @@ pub unsafe extern "C" fn voxel_free_morph_result(result: *mut FfiMorphResult) {
     let r = Box::from_raw(result);
     if !r.meshes.is_null() && r.chunk_count > 0 {
         let mesh_slice = std::slice::from_raw_parts_mut(r.meshes, r.chunk_count as usize);
+        // Reclaim FFI-allocated memory for each mesh's buffers
         for mesh in mesh_slice.iter() {
             if !mesh.positions.is_null() && mesh.vertex_count > 0 {
                 let _ = Vec::from_raw_parts(mesh.positions, mesh.vertex_count as usize, mesh.vertex_count as usize);
@@ -1127,7 +1132,7 @@ pub unsafe extern "C" fn voxel_free_morph_result(result: *mut FfiMorphResult) {
                 let _ = Vec::from_raw_parts(mesh.submeshes, mesh.submesh_count as usize, mesh.submesh_count as usize);
             }
         }
-        // Free the mesh array itself
+        // Reclaim the mesh array itself
         let _ = Vec::from_raw_parts(r.meshes, r.chunk_count as usize, r.chunk_count as usize);
     }
 }

@@ -210,9 +210,9 @@ impl GeneratedRegion {
                         py.div_euclid(cs as i32),
                         pz.div_euclid(cs as i32),
                     );
-                    let lx = px.rem_euclid(cs as i32) as usize;
-                    let ly = py.rem_euclid(cs as i32) as usize;
-                    let lz = pz.rem_euclid(cs as i32) as usize;
+                    let _lx = px.rem_euclid(cs as i32) as usize;
+                    let _ly = py.rem_euclid(cs as i32) as usize;
+                    let _lz = pz.rem_euclid(cs as i32) as usize;
                     if self.density_fields.contains_key(&chunk_key) {
                         self.placed_water.push((px, py, pz));
                         count += 1;

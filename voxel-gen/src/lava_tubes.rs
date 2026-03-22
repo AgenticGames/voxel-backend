@@ -26,7 +26,7 @@ pub fn carve_lava_tubes(
     config: &LavaTubeConfig,
     world_origin: (f64, f64, f64),
     global_seed: u64,
-    chunk_seed: u64,
+    _chunk_seed: u64,
 ) -> Vec<LavaDescriptor> {
     if !config.enabled {
         return Vec::new();

@@ -548,7 +548,7 @@ fn place_slate_veins(
 
     for (i, &seed) in seeds.iter().enumerate() {
         // First 60% ore_a, next 20% ore_b, last 20% pyrite
-        let (ore, min_sz, max_sz) = if (i as f32) < (seeds.len() as f32 * 0.6) {
+        let (ore, _min_sz, _max_sz) = if (i as f32) < (seeds.len() as f32 * 0.6) {
             (ore_a, vein_min, vein_max)
         } else if (i as f32) < (seeds.len() as f32 * 0.8) {
             (ore_b, vein_min, vein_max)

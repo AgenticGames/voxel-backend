@@ -1339,7 +1339,7 @@ fn handle_request(
             let active: Vec<bool> = spread_counts.iter()
                 .map(|&c| c >= threshold || step == 0)  // always mesh all at step 0
                 .collect();
-            let active_count = active.iter().filter(|&&a| a).count();
+            let _active_count = active.iter().filter(|&&a| a).count();
 
             let s = store.read().unwrap();
 
