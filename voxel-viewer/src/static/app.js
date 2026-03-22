@@ -429,6 +429,7 @@
         // Grid
         var grid = new THREE.GridHelper(100, 40, 0x0f3460, 0x0a0a1a);
         scene.add(grid);
+        window._viewerGrid = grid;
 
         // Initialize euler from camera
         euler.setFromQuaternion(camera.quaternion);
@@ -449,11 +450,51 @@
         renderer.setSize(w, h);
     }
 
+    // ── Cinema Mode (C key) — auto-orbit, hide UI ─────────────────
+    var cinemaMode = false;
+    var cinemaAngle = 0;
+    var cinemaSpeed = 0.3; // radians per second
+    var cinemaTilt = 0.6; // camera elevation angle
+
+    document.addEventListener("keydown", function (e) {
+        if (e.key === "c" || e.key === "C") {
+            if (flyActive) return; // don't toggle during fly
+            cinemaMode = !cinemaMode;
+            // Toggle UI visibility
+            var leftPanel = document.getElementById("left-panel");
+            var summaryBar = document.getElementById("summary-bar");
+            var toolbar = document.getElementById("viewer-toolbar");
+            var legend = document.getElementById("material-legend");
+            if (leftPanel) leftPanel.style.display = cinemaMode ? "none" : "";
+            if (summaryBar) summaryBar.style.display = cinemaMode ? "none" : "";
+            if (toolbar) toolbar.style.display = cinemaMode ? "none" : "";
+            if (legend) legend.style.display = cinemaMode ? "none" : "";
+            if (window._viewerGrid) window._viewerGrid.visible = !cinemaMode;
+            // In cinema mode, make viewer fill the screen
+            var app = document.getElementById("app");
+            if (app) app.style.gridTemplateColumns = cinemaMode ? "0px 1fr" : "320px 1fr";
+            if (typeof resizeViewer === "function") resizeViewer();
+        }
+    });
+
     function animate() {
         requestAnimationFrame(animate);
         var now = performance.now();
         var dt = (now - prevTime) / 1000;
         prevTime = now;
+
+        // Cinema mode auto-orbit
+        if (cinemaMode && meshCenter) {
+            cinemaAngle += cinemaSpeed * dt;
+            var target = meshCenter;
+            var radius = meshScale ? meshScale * 1.8 : 30;
+            camera.position.set(
+                target.x + radius * Math.sin(cinemaAngle) * Math.cos(cinemaTilt),
+                target.y + radius * Math.sin(cinemaTilt),
+                target.z + radius * Math.cos(cinemaAngle) * Math.cos(cinemaTilt)
+            );
+            camera.lookAt(target);
+        }
 
         // Fly camera movement
         if (flyActive) {
