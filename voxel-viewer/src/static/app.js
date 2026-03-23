@@ -391,8 +391,8 @@
     // ── Mine mode UI wiring ──────────────────────────────────────────
     mineMode.addEventListener("change", function () {
         if (mineMode.value === "sphere") {
-            mineRadius.value = 5;
-            mineRadiusVal.textContent = "5";
+            mineRadius.value = 10;
+            mineRadiusVal.textContent = "10";
         } else {
             mineRadius.value = 2;
             mineRadiusVal.textContent = "2";
