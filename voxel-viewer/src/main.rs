@@ -12,6 +12,7 @@ use crate::region::GeneratedRegion;
 const INDEX_HTML: &str = include_str!("static/index.html");
 const APP_JS: &str = include_str!("static/app.js");
 const STYLE_CSS: &str = include_str!("static/style.css");
+const LOGO_PNG: &[u8] = include_bytes!("static/logo.png");
 
 /// Shared state across requests
 struct AppState {
@@ -84,6 +85,7 @@ fn main() {
             ("GET", "/") => serve_static(request, INDEX_HTML, "text/html"),
             ("GET", "/static/app.js") => serve_static(request, APP_JS, "application/javascript"),
             ("GET", "/static/style.css") => serve_static(request, STYLE_CSS, "text/css"),
+            ("GET", "/static/logo.png") => serve_binary(request, LOGO_PNG, "image/png"),
             ("GET", "/api/report") => serve_report(request, &output_dir),
             ("GET", "/api/obj-files") => serve_obj_file_list(request, &output_dir),
             ("GET", path) if path.starts_with("/api/obj-file/") => serve_obj_by_name(request, path, &output_dir),
@@ -111,6 +113,18 @@ fn serve_static(
     let header = tiny_http::Header::from_bytes(b"Content-Type", content_type.as_bytes())
         .map_err(|_| "invalid header")?;
     let response = tiny_http::Response::from_string(body).with_header(header);
+    request.respond(response)?;
+    Ok(())
+}
+
+fn serve_binary(
+    request: tiny_http::Request,
+    body: &[u8],
+    content_type: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let header = tiny_http::Header::from_bytes(b"Content-Type", content_type.as_bytes())
+        .map_err(|_| "invalid header")?;
+    let response = tiny_http::Response::from_data(body.to_vec()).with_header(header);
     request.respond(response)?;
     Ok(())
 }
