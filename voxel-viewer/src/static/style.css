@@ -6,8 +6,8 @@
 
 body {
     font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-    background: #1a1a2e;
-    color: #e0e0e0;
+    background: #0a0612;
+    color: #e4dff0;
     height: 100vh;
     overflow: hidden;
 }
@@ -26,8 +26,8 @@ body {
     align-items: center;
     gap: 24px;
     padding: 12px 24px;
-    background: #16213e;
-    border-bottom: 1px solid #0f3460;
+    background: #0e091c;
+    border-bottom: 1px solid #251d3d;
 }
 
 .header-logo {
@@ -47,28 +47,28 @@ body {
     flex: 1;
 }
 .site-link {
-    color: #4fc3f7;
+    color: #2dd4bf;
     text-decoration: none;
     font-size: 12px;
     padding: 4px 12px;
-    border: 1px solid #0f3460;
+    border: 1px solid #251d3d;
     border-radius: 3px;
     white-space: nowrap;
 }
 .site-link:hover {
-    border-color: #4fc3f7;
+    border-color: #2dd4bf;
     background: rgba(79, 195, 247, 0.1);
 }
 #summary-bar h1 {
     font-size: 18px;
     font-weight: 600;
-    color: #e94560;
+    color: #2dd4bf;
     margin: 0;
 }
 
 .subtitle {
     font-size: 12px;
-    color: #7a8ba0;
+    color: #7b6f96;
     letter-spacing: 0.5px;
 }
 
@@ -79,37 +79,37 @@ body {
 #advanced-toggle {
     font-size: 11px;
     padding: 4px 12px;
-    background: #1a1a2e;
-    border: 1px solid #0f3460;
-    color: #7a8ba0;
+    background: #0a0612;
+    border: 1px solid #251d3d;
+    color: #7b6f96;
     cursor: pointer;
     border-radius: 3px;
 }
 
 #advanced-toggle:hover {
-    color: #4fc3f7;
-    border-color: #4fc3f7;
+    color: #2dd4bf;
+    border-color: #2dd4bf;
 }
 
 /* Instructions box */
 .explore-instructions {
     margin: 12px 0 8px;
     padding: 10px 12px;
-    border-left: 3px solid #0f3460;
+    border-left: 3px solid #251d3d;
     background: rgba(15, 52, 96, 0.15);
     font-size: 11px;
     line-height: 1.7;
-    color: #8a9ab5;
+    color: #7b6f96;
 }
 .explore-instructions strong {
-    color: #4fc3f7;
+    color: #2dd4bf;
     font-size: 10px;
     letter-spacing: 1px;
     display: block;
     margin-bottom: 4px;
 }
 .explore-instructions kbd {
-    background: #0f3460;
+    background: #251d3d;
     color: #c0d0e0;
     padding: 1px 5px;
     border-radius: 2px;
@@ -125,12 +125,12 @@ body {
     padding: 8px 12px;
     margin: 10px 0 6px;
     background: rgba(15, 52, 96, 0.25);
-    border: 1px solid #0f3460;
+    border: 1px solid #251d3d;
     border-radius: 4px;
 }
 .mode-bar label {
     font-size: 11px;
-    color: #8a9ab5;
+    color: #7b6f96;
 }
 .mode-bar select {
     flex: 1;
@@ -145,8 +145,8 @@ body {
     display: inline-block;
     width: 32px;
     height: 32px;
-    border: 3px solid #0f3460;
-    border-top: 3px solid #4fc3f7;
+    border: 3px solid #251d3d;
+    border-top: 3px solid #2dd4bf;
     border-radius: 50%;
     animation: spin 1s linear infinite;
     margin-bottom: 12px;
@@ -160,7 +160,7 @@ body {
     justify-content: center;
     height: 100%;
     text-align: center;
-    color: #7a8ba0;
+    color: #7b6f96;
     font-size: 13px;
     line-height: 1.8;
     padding: 20px;
@@ -177,7 +177,7 @@ body {
 /* Sleep section rework */
 .sleep-description {
     font-size: 11px;
-    color: #8a9ab5;
+    color: #7b6f96;
     margin-bottom: 8px;
     line-height: 1.5;
 }
@@ -194,7 +194,7 @@ body {
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
-    color: #4fc3f7;
+    color: #2dd4bf;
     font-size: 14px;
     letter-spacing: 1px;
     pointer-events: none;
@@ -219,14 +219,14 @@ body {
 }
 
 .stat-value.green { color: #4ecca3; }
-.stat-value.red { color: #e94560; }
-.stat-value.blue { color: #4fc3f7; }
+.stat-value.red { color: #2dd4bf; }
+.stat-value.blue { color: #2dd4bf; }
 
 /* Left panel: results table */
 #left-panel {
     overflow-y: auto;
     padding: 16px;
-    border-right: 1px solid #0f3460;
+    border-right: 1px solid #251d3d;
 }
 
 #left-panel h2 {
@@ -244,10 +244,10 @@ body {
 #results-table thead th {
     position: sticky;
     top: 0;
-    background: #16213e;
+    background: #0e091c;
     text-align: left;
     padding: 8px 10px;
-    border-bottom: 2px solid #0f3460;
+    border-bottom: 2px solid #251d3d;
     color: #a0a0b8;
     font-weight: 600;
     font-size: 12px;
@@ -294,14 +294,14 @@ body {
 
 .badge-fail {
     background: rgba(233, 69, 96, 0.15);
-    color: #e94560;
+    color: #2dd4bf;
 }
 
 .btn-view {
     padding: 3px 10px;
-    background: #0f3460;
-    color: #4fc3f7;
-    border: 1px solid #4fc3f7;
+    background: #251d3d;
+    color: #2dd4bf;
+    border: 1px solid #2dd4bf;
     border-radius: 3px;
     font-size: 11px;
     cursor: pointer;
@@ -309,8 +309,8 @@ body {
 }
 
 .btn-view:hover {
-    background: #4fc3f7;
-    color: #1a1a2e;
+    background: #2dd4bf;
+    color: #0a0612;
 }
 
 /* Right panel: 3D viewer */
@@ -318,7 +318,7 @@ body {
     display: flex;
     flex-direction: column;
     position: relative;
-    background: #12121f;
+    background: #0a0612;
 }
 
 #viewer-toolbar {
@@ -326,8 +326,8 @@ body {
     align-items: center;
     gap: 12px;
     padding: 10px 16px;
-    background: #16213e;
-    border-bottom: 1px solid #0f3460;
+    background: #0e091c;
+    border-bottom: 1px solid #251d3d;
     font-size: 13px;
     flex-wrap: wrap;
 }
@@ -342,9 +342,9 @@ body {
 
 #viewer-toolbar select {
     padding: 2px 6px;
-    background: #1a1a2e;
-    color: #e0e0e0;
-    border: 1px solid #0f3460;
+    background: #0a0612;
+    color: #e4dff0;
+    border: 1px solid #251d3d;
     border-radius: 3px;
     font-size: 12px;
     cursor: pointer;
@@ -356,7 +356,7 @@ body {
 }
 
 #mine-radius-val {
-    color: #4fc3f7;
+    color: #2dd4bf;
     font-weight: 600;
     min-width: 16px;
     text-align: center;
@@ -374,8 +374,8 @@ body {
     align-items: center;
     gap: 12px;
     padding: 6px 16px;
-    background: #16213e;
-    border-bottom: 1px solid #0f3460;
+    background: #0e091c;
+    border-bottom: 1px solid #251d3d;
     font-size: 12px;
     flex-wrap: wrap;
 }
@@ -419,14 +419,14 @@ body {
     align-items: center;
     gap: 12px;
     padding: 8px 16px;
-    background: #16213e;
-    border-top: 1px solid #0f3460;
+    background: #0e091c;
+    border-top: 1px solid #251d3d;
     font-size: 13px;
 }
 
 #run-batch-bar button {
     padding: 5px 14px;
-    background: #e94560;
+    background: #2dd4bf;
     color: white;
     border: none;
     border-radius: 3px;
@@ -452,7 +452,7 @@ body {
 #generate-panel {
     margin-bottom: 16px;
     padding-bottom: 16px;
-    border-bottom: 1px solid #0f3460;
+    border-bottom: 1px solid #251d3d;
 }
 
 #generate-panel h2 {
@@ -484,17 +484,17 @@ body {
 .gen-row input[type="number"] {
     width: 60px;
     padding: 4px 6px;
-    background: #16213e;
-    color: #e0e0e0;
-    border: 1px solid #0f3460;
+    background: #0e091c;
+    color: #e4dff0;
+    border: 1px solid #251d3d;
     border-radius: 3px;
     font-size: 13px;
 }
 
 #gen-btn {
     padding: 5px 14px;
-    background: #4fc3f7;
-    color: #1a1a2e;
+    background: #2dd4bf;
+    color: #0a0612;
     border: none;
     border-radius: 3px;
     font-size: 12px;
@@ -534,7 +534,7 @@ body {
 /* Collapsible settings sections */
 .settings-section {
     margin-top: 8px;
-    border: 1px solid #0f3460;
+    border: 1px solid #251d3d;
     border-radius: 4px;
     overflow: hidden;
 }
@@ -544,7 +544,7 @@ body {
     font-size: 12px;
     font-weight: 600;
     color: #a0a0b8;
-    background: #16213e;
+    background: #0e091c;
     cursor: pointer;
     user-select: none;
     list-style: none;
@@ -590,16 +590,16 @@ body {
 .settings-grid input[type="number"] {
     width: 70px;
     padding: 3px 5px;
-    background: #1a1a2e;
-    color: #e0e0e0;
-    border: 1px solid #0f3460;
+    background: #0a0612;
+    color: #e4dff0;
+    border: 1px solid #251d3d;
     border-radius: 3px;
     font-size: 12px;
 }
 
 .settings-grid input[type="number"]:focus {
     outline: none;
-    border-color: #4fc3f7;
+    border-color: #2dd4bf;
     box-shadow: 0 0 4px rgba(79, 195, 247, 0.3);
 }
 
@@ -657,12 +657,12 @@ body {
 }
 
 .export-item span {
-    color: #4fc3f7;
+    color: #2dd4bf;
 }
 
 .export-item.selected {
     background: rgba(79, 195, 247, 0.15);
-    border-color: #4fc3f7;
+    border-color: #2dd4bf;
 }
 
 .export-actions {
@@ -674,8 +674,8 @@ body {
 .btn-delete {
     padding: 3px 8px;
     background: transparent;
-    color: #e94560;
-    border: 1px solid #e94560;
+    color: #2dd4bf;
+    border: 1px solid #2dd4bf;
     border-radius: 3px;
     font-size: 13px;
     cursor: pointer;
@@ -684,8 +684,8 @@ body {
 }
 
 .btn-delete:hover {
-    background: #e94560;
-    color: #1a1a2e;
+    background: #2dd4bf;
+    color: #0a0612;
 }
 
 .settings-grid label[title],
@@ -713,9 +713,9 @@ body {
     width: 28px;
     height: 24px;
     padding: 0;
-    background: #16213e;
+    background: #0e091c;
     color: #555;
-    border: 1px solid #0f3460;
+    border: 1px solid #251d3d;
     border-radius: 3px;
     font-size: 11px;
     font-weight: 600;
@@ -724,13 +724,13 @@ body {
 }
 
 .preset-slot:hover {
-    border-color: #4fc3f7;
+    border-color: #2dd4bf;
     color: #a0a0b8;
 }
 
 .preset-slot.active {
-    border-color: #4fc3f7;
-    color: #4fc3f7;
+    border-color: #2dd4bf;
+    color: #2dd4bf;
     background: rgba(79, 195, 247, 0.1);
 }
 
@@ -749,9 +749,9 @@ body {
 #preset-delete,
 #preset-reset {
     padding: 3px 8px;
-    background: #16213e;
+    background: #0e091c;
     color: #a0a0b8;
-    border: 1px solid #0f3460;
+    border: 1px solid #251d3d;
     border-radius: 3px;
     font-size: 11px;
     cursor: pointer;
@@ -765,8 +765,8 @@ body {
 }
 
 #preset-delete:hover {
-    border-color: #e94560;
-    color: #e94560;
+    border-color: #2dd4bf;
+    color: #2dd4bf;
 }
 
 #preset-reset:hover {
@@ -784,7 +784,7 @@ body {
 }
 
 #left-panel::-webkit-scrollbar-thumb {
-    background: #0f3460;
+    background: #251d3d;
     border-radius: 3px;
 }
 
@@ -801,7 +801,7 @@ body {
     background: rgba(79,195,247,0.9);
     padding: 8px 20px;
     border-radius: 4px;
-    color: #1a1a2e;
+    color: #0a0612;
     font-weight: 600;
     font-size: 13px;
     margin-top: 4px;
@@ -819,7 +819,7 @@ body {
 .sleep-section {
     margin-top: 12px;
     padding-top: 10px;
-    border-top: 1px solid #0f3460;
+    border-top: 1px solid #251d3d;
 }
 
 .sleep-heading {
@@ -831,9 +831,9 @@ body {
 
 .action-btn {
     padding: 5px 14px;
-    background: #0f3460;
-    color: #e0e0e0;
-    border: 1px solid #4fc3f7;
+    background: #251d3d;
+    color: #e4dff0;
+    border: 1px solid #2dd4bf;
     border-radius: 3px;
     font-size: 12px;
     cursor: pointer;
@@ -842,8 +842,8 @@ body {
 }
 
 .action-btn:hover {
-    background: #4fc3f7;
-    color: #1a1a2e;
+    background: #2dd4bf;
+    color: #0a0612;
 }
 
 .action-btn:disabled {
@@ -852,14 +852,14 @@ body {
 }
 
 #toggle-before-after-btn {
-    background: #16213e;
+    background: #0e091c;
     border-color: #a0a0b8;
     color: #a0a0b8;
 }
 
 #toggle-before-after-btn:hover {
     background: #a0a0b8;
-    color: #1a1a2e;
+    color: #0a0612;
 }
 
 #toggle-before-after-btn.showing-before {
@@ -869,7 +869,7 @@ body {
 
 #toggle-before-after-btn.showing-before:hover {
     background: #ffb74d;
-    color: #1a1a2e;
+    color: #0a0612;
 }
 
 #sleep-status {
@@ -883,7 +883,7 @@ body {
     max-height: 200px;
     overflow-y: auto;
     background: #111122;
-    border: 1px solid #0f3460;
+    border: 1px solid #251d3d;
     border-radius: 4px;
     padding: 8px 10px;
     font-family: 'Consolas', 'Courier New', monospace;
@@ -899,7 +899,7 @@ body {
 }
 
 #sleep-log::-webkit-scrollbar-thumb {
-    background: #0f3460;
+    background: #251d3d;
     border-radius: 3px;
 }
 
@@ -914,7 +914,7 @@ body {
 }
 
 .sleep-log-count {
-    color: #4fc3f7;
+    color: #2dd4bf;
     font-weight: 600;
     margin-right: 4px;
 }
@@ -940,7 +940,7 @@ body {
 }
 
 .sleep-stat-value {
-    color: #4fc3f7;
+    color: #2dd4bf;
     font-weight: 600;
 }
 
@@ -958,13 +958,13 @@ body {
 #sleep-diff thead th {
     text-align: left;
     padding: 4px 8px;
-    background: #16213e;
+    background: #0e091c;
     color: #a0a0b8;
     font-weight: 600;
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.3px;
-    border-bottom: 1px solid #0f3460;
+    border-bottom: 1px solid #251d3d;
 }
 
 #sleep-diff tbody td {
@@ -983,7 +983,7 @@ body {
 }
 
 .diff-negative {
-    color: #e94560;
+    color: #2dd4bf;
     font-weight: 600;
 }
 

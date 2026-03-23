@@ -412,7 +412,7 @@
         camera.lookAt(0, 0, 0);
 
         renderer = new THREE.WebGLRenderer({ antialias: true });
-        renderer.setClearColor(0x12121f);
+        renderer.setClearColor(0x0a0612);
         renderer.setPixelRatio(window.devicePixelRatio);
         viewerContainer.appendChild(renderer.domElement);
 
@@ -1202,7 +1202,7 @@
         } catch (err) {
             if (resultsBody) {
                 resultsBody.innerHTML =
-                    '<tr><td colspan="4" style="color:#e94560;padding:20px">Error loading report: ' +
+                    '<tr><td colspan="4" style="color:#2dd4bf;padding:20px">Error loading report: ' +
                     err.message + "</td></tr>";
             }
         }
