@@ -24,18 +24,14 @@
                 <h2>Generate</h2>
                 <div class="gen-form">
                     <div class="gen-row">
-                        <label>Seed <input type="number" id="gen-seed" value="12348" min="0"></label>
+                        <label>Seed <input type="number" id="gen-seed" value="12348" min="0" style="width:90px"></label>
                     </div>
                     <div class="gen-row">
                         <label>X <input type="number" id="gen-x" value="6" min="1" max="8"></label>
                         <label>Y <input type="number" id="gen-y" value="6" min="1" max="8"></label>
                         <label>Z <input type="number" id="gen-z" value="6" min="1" max="8"></label>
                     </div>
-                    <div class="gen-row">
-                        <label class="toggle-label">
-                            <input type="checkbox" id="gen-keep-camera" checked> Keep Camera Position
-                        </label>
-                    </div>
+                    <input type="checkbox" id="gen-keep-camera" checked style="display:none">
                     <div class="gen-row">
                         <button id="gen-btn">Generate</button>
                         <span id="gen-status"></span>
@@ -43,22 +39,14 @@
 
                     <div class="preset-bar">
                         <span class="preset-label">Presets</span>
-                        <button class="preset-slot" data-slot="0" title="Empty — click to load, select then Save to store">1</button>
-                        <button class="preset-slot" data-slot="1" title="Empty — click to load, select then Save to store">2</button>
-                        <button class="preset-slot" data-slot="2" title="Empty — click to load, select then Save to store">3</button>
-                        <button class="preset-slot" data-slot="3" title="Empty — click to load, select then Save to store">4</button>
-                        <button class="preset-slot" data-slot="4" title="Empty — click to load, select then Save to store">5</button>
-                        <button id="preset-save" title="Save current settings to the selected preset slot">Save</button>
-                        <button id="preset-delete" title="Delete the selected preset">Del</button>
-                        <button id="preset-reset" title="Clear all settings back to defaults">Reset</button>
-                    </div>
-
-                    <div class="explore-instructions">
-                        <strong>HOW TO EXPLORE</strong>
-                        <kbd>Left-click</kbd> on the cave to mine (carve rock)<br>
-                        <kbd>Right-click</kbd> + drag to orbit camera<br>
-                        <kbd>Scroll</kbd> to zoom in/out<br>
-                        Change seed and hit <kbd>Generate</kbd> for a new cave
+                        <button class="preset-slot" data-slot="0" title="Load preset 1">1</button>
+                        <button class="preset-slot" data-slot="1" title="Load preset 2">2</button>
+                        <button class="preset-slot" data-slot="2" title="Load preset 3">3</button>
+                        <button class="preset-slot" data-slot="3" title="Load preset 4">4</button>
+                        <button class="preset-slot" data-slot="4" title="Load preset 5">5</button>
+                        <button id="preset-save" style="display:none">Save</button>
+                        <button id="preset-delete" style="display:none">Del</button>
+                        <button id="preset-reset" style="display:none">Reset</button>
                     </div>
 
                     <div class="mode-bar">
@@ -416,9 +404,8 @@
                     </div><!-- end #advanced-settings -->
 
                     <div class="sleep-section">
-                        <h3 class="sleep-heading">Geological Time Simulation</h3>
-                        <p class="sleep-description">Simulates 1.25 million years of geological processes: metamorphism, hydrothermal veins, contact aureoles, acid dissolution, and structural collapse.</p>
-                        <p class="sleep-hint">Tip: Switch the Tool to "Place Lava" and click the cave walls to inject magma. Lava creates contact aureoles — heat transforms surrounding limestone into marble and skarn, slate into hornfels, and deposits garnet and diopside. Place water near lava to form hydrothermal pockets that drive vein mineralization.</p>
+                        <h3 class="sleep-heading">Geological Time</h3>
+                        <p class="sleep-hint">Place lava first, then simulate to see metamorphism</p>
                         <div class="gen-row">
                             <button id="sleep-btn" class="action-btn" title="Simulate 1.25 million years of geological processes">Simulate 1.25M Years</button>
                             <button id="toggle-before-after-btn" class="action-btn" style="display:none;" title="Toggle between pre-sleep and post-sleep mesh">Before / After</button>
