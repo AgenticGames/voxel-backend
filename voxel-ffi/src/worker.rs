@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use std::collections::HashSet;
@@ -67,13 +67,14 @@ pub fn worker_loop(
     fluid_event_tx: Sender<FluidEvent>,
     profiler: Arc<StreamingProfiler>,
     worker_id: usize,
+    morph_manifest: Arc<Mutex<Option<voxel_sleep::ChangeManifest>>>,
 ) {
     while !shutdown.load(Ordering::Relaxed) {
         // Priority 1: mine requests (non-blocking)
         if let Ok(req) = mine_rx.try_recv() {
             handle_request(
                 req, &result_tx, &store, &config, &stress_config, &generation_counters,
-                world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx,
+                world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &morph_manifest,
             );
             continue;
         }
@@ -85,7 +86,7 @@ pub fn worker_loop(
                 profiler.record_worker_idle(worker_id, idle_start.elapsed());
                 handle_request(
                     req, &result_tx, &store, &config, &stress_config, &generation_counters,
-                    world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx,
+                    world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &morph_manifest,
                 );
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
@@ -108,6 +109,7 @@ fn handle_request(
     profiler: &Arc<StreamingProfiler>,
     worker_id: usize,
     generate_rx: &Receiver<WorkerRequest>,
+    morph_manifest: &Arc<Mutex<Option<voxel_sleep::ChangeManifest>>>,
 ) {
     match req {
         WorkerRequest::PriorityGenerate { chunk, generation } |
@@ -1315,14 +1317,14 @@ fn handle_request(
                 lava_cells: sleep_result.lava_cells,
             });
         }
-        WorkerRequest::MorphStep { chunks, manifest_json, step, total_steps } => {
+        WorkerRequest::MorphStep { chunks, step, total_steps } => {
             let cfg = config.read().unwrap().clone();
 
-            // Deserialize manifest
-            let manifest = match voxel_sleep::ChangeManifest::from_json(&manifest_json) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("[MORPH] Failed to deserialize manifest: {}", e);
+            // Read cached manifest (set once via set_morph_manifest, reused for all 30 steps)
+            let manifest = match morph_manifest.lock().unwrap().clone() {
+                Some(m) => m,
+                None => {
+                    eprintln!("[MORPH] No cached manifest — call set_morph_manifest first");
                     let _ = result_tx.send(WorkerResult::MorphMeshes {
                         step, total_steps, meshes: Vec::new(),
                     });

@@ -43,7 +43,7 @@ pub struct FfiMeshData {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct FfiMinedMaterials {
-    pub counts: [u32; 29],
+    pub counts: [u32; 42],
 }
 
 #[repr(u8)]
@@ -1043,7 +1043,7 @@ pub struct FfiCollapseEvent {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct FfiStressConfig {
-    pub material_hardness: [f32; 29],
+    pub material_hardness: [f32; 42],
     pub gravity_weight: f32,
     pub lateral_support_factor: f32,
     pub vertical_support_factor: f32,
@@ -1216,7 +1216,6 @@ pub enum WorkerRequest {
     },
     MorphStep {
         chunks: Vec<(i32, i32, i32)>,
-        manifest_json: String,
         step: u32,
         total_steps: u32,
     },

@@ -81,6 +81,7 @@ pub struct VoxelEngine {
 
     // Morph
     morph_results: Arc<Mutex<std::collections::VecDeque<MorphStepResult>>>,
+    morph_manifest: Arc<Mutex<Option<voxel_sleep::ChangeManifest>>>,
 
     // World Scan
     scan_complete: Arc<Mutex<Option<String>>>,
@@ -157,6 +158,7 @@ impl VoxelEngine {
         });
 
         let profiler = Arc::new(StreamingProfiler::new(num_workers));
+        let morph_manifest: Arc<Mutex<Option<voxel_sleep::ChangeManifest>>> = Arc::new(Mutex::new(None));
 
         let mut workers = Vec::with_capacity(num_workers);
         for worker_id in 0..num_workers {
@@ -170,6 +172,7 @@ impl VoxelEngine {
             let gen_counters = Arc::clone(&generation_counters);
             let fluid_tx = fluid_event_tx.clone();
             let prof = Arc::clone(&profiler);
+            let morph_man = Arc::clone(&morph_manifest);
 
             let handle = thread::spawn(move || {
                 worker_loop(
@@ -185,6 +188,7 @@ impl VoxelEngine {
                     fluid_tx,
                     prof,
                     worker_id,
+                    morph_man,
                 );
             });
             workers.push(handle);
@@ -204,6 +208,7 @@ impl VoxelEngine {
             shutdown,
             sleep_complete: Arc::new(Mutex::new(None)),
             morph_results: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            morph_manifest: Arc::new(Mutex::new(None)),
             scan_complete: Arc::new(Mutex::new(None)),
             force_spawn_complete: Arc::new(Mutex::new(None)),
             profiler,
@@ -403,18 +408,35 @@ impl VoxelEngine {
         sc.take()
     }
 
-    /// Request a morph step. Sent through the generate channel (read lock only).
+    /// Cache a morph manifest (deserialized once, reused for all 30 steps).
+    pub fn set_morph_manifest(&self, json: &str) -> bool {
+        match voxel_sleep::ChangeManifest::from_json(json) {
+            Ok(m) => {
+                *self.morph_manifest.lock().unwrap() = Some(m);
+                true
+            }
+            Err(e) => {
+                eprintln!("[MORPH] Failed to cache manifest: {}", e);
+                false
+            }
+        }
+    }
+
+    /// Clear cached morph manifest.
+    pub fn clear_morph_manifest(&self) {
+        *self.morph_manifest.lock().unwrap() = None;
+    }
+
+    /// Request a morph step. Uses the cached manifest (set via set_morph_manifest).
     /// Returns 1 on success, 0 if queue full.
     pub fn request_morph_step(
         &self,
         chunks: Vec<(i32, i32, i32)>,
-        manifest_json: String,
         step: u32,
         total_steps: u32,
     ) -> u32 {
         match self.generate_tx.try_send(WorkerRequest::MorphStep {
             chunks,
-            manifest_json,
             step,
             total_steps,
         }) {

@@ -52,9 +52,34 @@ pub enum Material {
     // Calc-silicate metamorphic (limestone contact aureole)
     Skarn = 26,
 
-    // Zone materials
+    // ── Zone materials ──
+
+    // Frozen Grotto
     Ice = 27,
+    Permafrost = 29,   // frozen dark earth/gravel at zone edges
+    Hoarfrost = 30,    // delicate white crystalline surface frost
+    BlackIce = 31,     // dense, dark, nearly translucent ice
+
+    // Geothermal Terraces
     Travertine = 28,
+    Sinter = 35,       // white-grey siliceous hot spring deposit
+    Sulfur = 36,       // bright yellow sulfur crust near vents
+
+    // Lava Tube Gallery
+    Obsidian = 32,     // glossy black volcanic glass
+    Pumice = 33,       // light grey porous volcanic rock
+    Scoria = 34,       // rough dark reddish-brown volcanic rock
+
+    // Cathedral Cavern
+    Flowstone = 37,    // smooth amber/honey calcite wall drapes
+    Moonmilk = 38,     // soft pure white calcium carbonate
+
+    // Subterranean Lake
+    Tufa = 39,         // porous pale limestone shore deposits
+
+    // Bioluminescent Grotto
+    Mycelium = 40,     // pale fungal growth networks
+    Glowstone = 41,    // luminous blue-green mineral
 }
 
 impl Material {
@@ -88,6 +113,19 @@ impl Material {
             26 => Material::Skarn,
             27 => Material::Ice,
             28 => Material::Travertine,
+            29 => Material::Permafrost,
+            30 => Material::Hoarfrost,
+            31 => Material::BlackIce,
+            32 => Material::Obsidian,
+            33 => Material::Pumice,
+            34 => Material::Scoria,
+            35 => Material::Sinter,
+            36 => Material::Sulfur,
+            37 => Material::Flowstone,
+            38 => Material::Moonmilk,
+            39 => Material::Tufa,
+            40 => Material::Mycelium,
+            41 => Material::Glowstone,
             _ => Material::Air,
         }
     }
@@ -133,12 +171,15 @@ impl Material {
 
     pub fn is_soft_rock(self) -> bool {
         matches!(self, Material::Limestone | Material::Sandstone | Material::Gypsum
-            | Material::Ice | Material::Travertine)
+            | Material::Ice | Material::Travertine | Material::Hoarfrost | Material::BlackIce
+            | Material::Pumice | Material::Sinter | Material::Moonmilk | Material::Tufa
+            | Material::Mycelium)
     }
 
     pub fn is_hard_rock(self) -> bool {
         matches!(self, Material::Granite | Material::Basalt | Material::Slate | Material::Marble
-            | Material::Hornfels | Material::Garnet | Material::Diopside | Material::Skarn)
+            | Material::Hornfels | Material::Garnet | Material::Diopside | Material::Skarn
+            | Material::Obsidian)
     }
 
     pub fn is_geode_shell(self) -> bool {
@@ -147,13 +188,15 @@ impl Material {
 
     /// Permeable materials allow water to flow through.
     pub fn is_permeable(self) -> bool {
-        matches!(self, Material::Sandstone | Material::Limestone | Material::Coal | Material::Travertine)
+        matches!(self, Material::Sandstone | Material::Limestone | Material::Coal
+            | Material::Travertine | Material::Pumice | Material::Sinter | Material::Tufa)
     }
 
     /// Impermeable materials block water flow, creating geological contacts.
     pub fn is_impermeable(self) -> bool {
         matches!(self, Material::Granite | Material::Basalt | Material::Slate | Material::Marble
-            | Material::Hornfels | Material::Garnet | Material::Diopside | Material::Skarn)
+            | Material::Hornfels | Material::Garnet | Material::Diopside | Material::Skarn
+            | Material::Obsidian | Material::Ice | Material::BlackIce | Material::Permafrost)
     }
 
     /// Porosity value (0.0 = impervious, 1.0 = highly porous).
@@ -161,18 +204,26 @@ impl Material {
         match self {
             Material::Limestone => 1.0,
             Material::Sandstone => 0.8,
+            Material::Travertine => 0.9,
+            Material::Tufa => 0.85,
+            Material::Sinter => 0.7,
+            Material::Gypsum => 0.7,
+            Material::Pumice => 0.8,
             Material::Coal => 0.6,
             Material::Slate => 0.5,
             Material::Marble => 0.3,
             Material::Granite => 0.2,
             Material::Basalt => 0.1,
+            Material::Scoria => 0.4,
             Material::Hornfels => 0.05,
             Material::Garnet => 0.05,
             Material::Diopside => 0.1,
-            Material::Gypsum => 0.7,
             Material::Skarn => 0.08,
-            Material::Ice => 0.0,
-            Material::Travertine => 0.9,
+            Material::Obsidian => 0.01,
+            Material::Ice | Material::BlackIce | Material::Permafrost => 0.0,
+            Material::Hoarfrost => 0.1,
+            Material::Moonmilk => 0.6,
+            Material::Mycelium => 0.3,
             _ => 0.0,
         }
     }
@@ -214,6 +265,19 @@ impl Material {
             Material::Skarn => "Skarn",
             Material::Ice => "Ice",
             Material::Travertine => "Travertine",
+            Material::Permafrost => "Permafrost",
+            Material::Hoarfrost => "Hoarfrost",
+            Material::BlackIce => "Black Ice",
+            Material::Obsidian => "Obsidian",
+            Material::Pumice => "Pumice",
+            Material::Scoria => "Scoria",
+            Material::Sinter => "Sinter",
+            Material::Sulfur => "Sulfur",
+            Material::Flowstone => "Flowstone",
+            Material::Moonmilk => "Moonmilk",
+            Material::Tufa => "Tufa",
+            Material::Mycelium => "Mycelium",
+            Material::Glowstone => "Glowstone",
         }
     }
 
@@ -241,13 +305,26 @@ impl Material {
             Material::Coal => 0x2C2C2C,
             Material::Graphite => 0x474747,
             Material::Opal => 0xE0F0FF,
-            Material::Hornfels => 0xFF00FF, // NEON PINK for debug visibility
+            Material::Hornfels => 0xFF00FF,
             Material::Garnet => 0x8B2500,
             Material::Diopside => 0x2E8B57,
             Material::Gypsum => 0xF5F0E8,
-            Material::Skarn => 0x00FF00, // NEON GREEN for debug visibility
+            Material::Skarn => 0x00FF00,
             Material::Ice => 0xB8E4F0,
             Material::Travertine => 0xE8D8B8,
+            Material::Permafrost => 0x5A5046,    // dark grey-brown frozen earth
+            Material::Hoarfrost => 0xF0F5FF,     // near-white crystalline frost
+            Material::BlackIce => 0x2A3040,      // dark blue-grey translucent
+            Material::Obsidian => 0x1A1A2E,      // near-black with purple tinge
+            Material::Pumice => 0xB8B0A0,        // light warm grey
+            Material::Scoria => 0x6B3030,        // dark reddish-brown
+            Material::Sinter => 0xD8D0C0,        // off-white warm grey
+            Material::Sulfur => 0xE8D820,        // vivid yellow
+            Material::Flowstone => 0xC8A060,     // amber/honey calcite
+            Material::Moonmilk => 0xF5F0F0,     // soft pure white
+            Material::Tufa => 0xC8C0A8,          // pale buff limestone
+            Material::Mycelium => 0xC0D0B0,      // pale green-white
+            Material::Glowstone => 0x40E8C0,     // luminous blue-green
         }
     }
 
@@ -282,6 +359,19 @@ impl Material {
             Material::Skarn,
             Material::Ice,
             Material::Travertine,
+            Material::Permafrost,
+            Material::Hoarfrost,
+            Material::BlackIce,
+            Material::Obsidian,
+            Material::Pumice,
+            Material::Scoria,
+            Material::Sinter,
+            Material::Sulfur,
+            Material::Flowstone,
+            Material::Moonmilk,
+            Material::Tufa,
+            Material::Mycelium,
+            Material::Glowstone,
         ]
     }
 }
@@ -318,5 +408,12 @@ mod tests {
         assert_eq!(Material::Basalt.porosity(), 0.1);
         assert_eq!(Material::Air.porosity(), 0.0);
         assert_eq!(Material::Iron.porosity(), 0.0);
+    }
+
+    #[test]
+    fn material_round_trip() {
+        for &mat in Material::all_solid() {
+            assert_eq!(Material::from_u8(mat as u8), mat, "round-trip failed for {:?}", mat);
+        }
     }
 }

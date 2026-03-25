@@ -132,7 +132,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     result_type: FfiResultType::FluidMesh,
                     chunk: FfiChunkCoord { x: ue.0, y: ue.1, z: ue.2 },
                     mesh: empty_mesh_data(),
-                    mined: FfiMinedMaterials { counts: [0; 29] },
+                    mined: FfiMinedMaterials { counts: [0; 42] },
                     generation: 0,
                     fluid_mesh: converted_fluid_mesh_to_ffi(mesh),
                     crystal_data: empty_crystal_data(),
@@ -145,7 +145,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     result_type: FfiResultType::Error,
                     chunk: FfiChunkCoord { x: ue.0, y: ue.1, z: ue.2 },
                     mesh: empty_mesh_data(),
-                    mined: FfiMinedMaterials { counts: [0; 29] },
+                    mined: FfiMinedMaterials { counts: [0; 42] },
                     generation,
                     fluid_mesh: empty_fluid_mesh_data(),
                     crystal_data: empty_crystal_data(),
@@ -179,7 +179,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                         z: ev.center_z as i32,
                     },
                     mesh: empty_mesh_data(),
-                    mined: FfiMinedMaterials { counts: [0; 29] },
+                    mined: FfiMinedMaterials { counts: [0; 42] },
                     generation: ev.volume as u64,
                     fluid_mesh: empty_fluid_mesh_data(),
                     crystal_data: empty_crystal_data(),
@@ -197,7 +197,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     result_type: FfiResultType::MineResult,
                     chunk: FfiChunkCoord { x: 0, y: 0, z: 0 },
                     mesh: empty_mesh_data(),
-                    mined: FfiMinedMaterials { counts: [if success { 1 } else { 0 }; 29] },
+                    mined: FfiMinedMaterials { counts: [if success { 1 } else { 0 }; 42] },
                     generation: 0,
                     fluid_mesh: empty_fluid_mesh_data(),
                     crystal_data: empty_crystal_data(),
@@ -1005,8 +1005,33 @@ pub unsafe extern "C" fn voxel_free_sleep_result(result: *mut FfiSleepResult) {
 /// Request a morph step for progressive showcase morphing.
 /// chunks: pointer to array of FfiChunkCoord (Rust chunk coords)
 /// chunk_count: number of chunks (typically 8)
-/// manifest_json: C string of the compacted manifest JSON
-/// manifest_len: byte length of the manifest string
+/// Cache the morph manifest JSON (deserialized once, reused for all morph steps).
+/// Must be called before voxel_request_morph_step. Returns 1 on success, 0 on parse error.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_set_morph_manifest(
+    engine: *mut c_void,
+    manifest_json: *const std::ffi::c_char,
+    manifest_len: u32,
+) -> u32 {
+    if engine.is_null() || manifest_json.is_null() { return 0; }
+    let engine = &*(engine as *const VoxelEngine);
+    let json_bytes = std::slice::from_raw_parts(manifest_json as *const u8, manifest_len as usize);
+    let json_str = match std::str::from_utf8(json_bytes) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    if engine.set_morph_manifest(json_str) { 1 } else { 0 }
+}
+
+/// Clear cached morph manifest (call after morph sequence completes).
+#[no_mangle]
+pub unsafe extern "C" fn voxel_clear_morph_manifest(engine: *mut c_void) {
+    if engine.is_null() { return; }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.clear_morph_manifest();
+}
+
+/// Request a morph step using the cached manifest.
 /// step: current step (0..total_steps)
 /// total_steps: total number of morph steps
 /// Returns 1 on success, 0 if queue full.
@@ -1015,30 +1040,20 @@ pub unsafe extern "C" fn voxel_request_morph_step(
     engine: *mut c_void,
     chunks: *const FfiChunkCoord,
     chunk_count: u32,
-    manifest_json: *const std::ffi::c_char,
-    manifest_len: u32,
     step: u32,
     total_steps: u32,
 ) -> u32 {
-    if engine.is_null() || chunks.is_null() || manifest_json.is_null() || chunk_count == 0 {
+    if engine.is_null() || chunks.is_null() || chunk_count == 0 {
         return 0;
     }
     let engine = &*(engine as *const VoxelEngine);
 
-    // Convert chunk coords
     let chunk_slice = std::slice::from_raw_parts(chunks, chunk_count as usize);
     let chunk_vec: Vec<(i32, i32, i32)> = chunk_slice.iter()
         .map(|c| (c.x, c.y, c.z))
         .collect();
 
-    // Convert manifest JSON
-    let json_bytes = std::slice::from_raw_parts(manifest_json as *const u8, manifest_len as usize);
-    let json_str = match std::str::from_utf8(json_bytes) {
-        Ok(s) => s.to_string(),
-        Err(_) => return 0,
-    };
-
-    engine.request_morph_step(chunk_vec, json_str, step, total_steps)
+    engine.request_morph_step(chunk_vec, step, total_steps)
 }
 
 /// Poll for a completed morph step result.
@@ -1603,7 +1618,7 @@ fn convert_mesh_to_ffi_result(
             z: ue.2,
         },
         mesh: converted_mesh_to_ffi(mesh),
-        mined: FfiMinedMaterials { counts: [0; 29] },
+        mined: FfiMinedMaterials { counts: [0; 42] },
         generation,
         fluid_mesh: empty_fluid_mesh_data(),
         crystal_data: convert_crystal_vec_to_ffi(crystal_data),

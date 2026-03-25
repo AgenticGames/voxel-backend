@@ -5,6 +5,19 @@ use serde::{Deserialize, Serialize};
 use crate::density::DensityField;
 use crate::material::Material;
 
+/// Serde helper for [f32; 42] (serde doesn't impl Serialize/Deserialize for arrays > 32).
+mod serde_f32_array_42 {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    pub fn serialize<S: Serializer>(arr: &[f32; 42], s: S) -> Result<S::Ok, S::Error> {
+        arr.as_slice().serialize(s)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[f32; 42], D::Error> {
+        let v: Vec<f32> = Vec::deserialize(d)?;
+        v.try_into().map_err(|v: Vec<f32>| serde::de::Error::custom(
+            format!("expected 42 elements, got {}", v.len())))
+    }
+}
+
 /// Per-voxel stress values for a chunk. Same layout as DensityField (17^3 for chunk_size=16).
 #[derive(Debug, Clone)]
 pub struct StressField {
@@ -105,7 +118,7 @@ impl SupportField {
 
 /// Default hardness per Material (index by Material as u8).
 /// Air = 0.0 (no resistance). Higher = harder to collapse.
-pub const DEFAULT_MATERIAL_HARDNESS: [f32; 29] = [
+pub const DEFAULT_MATERIAL_HARDNESS: [f32; 42] = [
     0.0,   // Air
     0.45,  // Sandstone (soft)
     0.55,  // Limestone
@@ -135,6 +148,19 @@ pub const DEFAULT_MATERIAL_HARDNESS: [f32; 29] = [
     0.70,  // Skarn (hard metamorphic)
     0.15,  // Ice (very soft)
     0.35,  // Travertine (soft deposited limestone)
+    0.20,  // Permafrost (frozen earth)
+    0.10,  // Hoarfrost (delicate crystalline)
+    0.25,  // BlackIce (dense ice)
+    0.85,  // Obsidian (hard volcanic glass)
+    0.20,  // Pumice (lightweight porous)
+    0.45,  // Scoria (rough volcanic)
+    0.40,  // Sinter (siliceous deposit)
+    0.15,  // Sulfur (soft crystalline)
+    0.50,  // Flowstone (calcite drape)
+    0.10,  // Moonmilk (very soft calcium carbonate)
+    0.30,  // Tufa (porous limestone)
+    0.05,  // Mycelium (organic, extremely soft)
+    0.35,  // Glowstone (luminous mineral)
 ];
 
 /// Support hardness values (how much stress each support type absorbs).
@@ -155,7 +181,8 @@ pub const SUPPORT_HARDNESS: [f32; 8] = [
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StressConfig {
     /// Per-material hardness thresholds (indexed by Material as u8).
-    pub material_hardness: [f32; 29],
+    #[serde(with = "serde_f32_array_42")]
+    pub material_hardness: [f32; 42],
     /// Weight per solid voxel above (column load factor).
     pub gravity_weight: f32,
     /// Contribution factor for lateral (side) neighbors.
@@ -753,7 +780,7 @@ mod tests {
 
     #[test]
     fn hardness_tables_correct_length() {
-        assert_eq!(DEFAULT_MATERIAL_HARDNESS.len(), 29);
+        assert_eq!(DEFAULT_MATERIAL_HARDNESS.len(), 42);
         assert_eq!(SUPPORT_HARDNESS.len(), 8);
     }
 
