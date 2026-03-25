@@ -183,7 +183,7 @@ fn handle_request(
 
                 let t0 = Instant::now();
                 let coords = region_chunks(rk, cfg.region_size);
-                let (mut densities, _pools, fluid_seeds, worm_paths, rt, river_springs) = generate_region_densities(&coords, &cfg);
+                let (mut densities, _pools, fluid_seeds, worm_paths, rt, river_springs, _zones) = generate_region_densities(&coords, &cfg);
                 pool_fluid_seeds = fluid_seeds;
                 region_river_springs = river_springs;
                 if profiling {
@@ -1177,9 +1177,14 @@ fn handle_request(
             let _ = writeln!(report, "  GRAND TOTAL (worker): {:.2} ms", dur_ms(t_worker_total));
             let _ = writeln!(report, "═══════════════════════════════════════════════════════");
 
-            // Compact & serialize manifest for morph system
+            // Compact & serialize manifest for morph system — filter to aureole block only
+            // (full manifest can be 300+ MB; morph only needs the ~27 showcase chunks)
             let mut compact_manifest = sleep_result.manifest.clone();
             compact_manifest.compact();
+            if let Some(ref block) = sleep_result.aureole_showcase_block {
+                let block_set: std::collections::HashSet<(i32,i32,i32)> = block.iter().copied().collect();
+                compact_manifest.chunk_deltas.retain(|k, _| block_set.contains(k));
+            }
             let manifest_json = compact_manifest.to_json().unwrap_or_default();
 
             // Send sleep completion stats (intercepted by engine.poll_result)
@@ -1327,19 +1332,10 @@ fn handle_request(
 
             let t = if total_steps > 0 { step as f32 / total_steps as f32 } else { 1.0 };
 
-            // Pre-compute which chunks have visually meaningful changes.
-            // Only count aureole/vein changes (spread_distance > 0) — non-aureole
-            // scattered changes aren't worth re-meshing 30 times for.
-            let spread_counts: Vec<usize> = chunks.iter()
-                .map(|key| manifest.chunk_deltas.get(key).map_or(0, |d|
-                    d.voxel_changes.iter().filter(|c| c.spread_distance > 0.0).count()))
-                .collect();
-            let max_spread = spread_counts.iter().copied().max().unwrap_or(0);
-            let threshold = ((max_spread as f32 * 0.05) as usize).max(1);
-            let active: Vec<bool> = spread_counts.iter()
-                .map(|&c| c >= threshold || step == 0)  // always mesh all at step 0
-                .collect();
-            let _active_count = active.iter().filter(|&&a| a).count();
+            // Force ALL chunks active every step to prevent seam cracks between
+            // active (morph-updated) and inactive (stale) neighbors.
+            // Parallelized mesh gen (rayon) keeps this fast.
+            let active: Vec<bool> = vec![true; chunks.len()];
 
             let s = store.read().unwrap();
 
@@ -1432,29 +1428,40 @@ fn handle_request(
                 }
             }
 
-            // Phase 3: Mesh all density fields + build seam data
+            // Phase 3: Mesh all density fields + build seam data (parallelized with rayon)
             let chunk_size = cfg.chunk_size;
+
+            // Parallel mesh generation — each chunk independently computes hermite + DC + mesh + smooth
+            type BEdges = Vec<(voxel_core::hermite::EdgeKey, voxel_core::hermite::EdgeIntersection)>;
+            let mesh_results: Vec<Option<(voxel_core::mesh::Mesh, Vec<glam::Vec3>, BEdges)>> =
+                density_fields.par_iter().map(|df_opt| {
+                    match df_opt {
+                        Some(df) => {
+                            let h = extract_hermite_data(df);
+                            let cell_size = df.size - 1;
+                            let dc_verts = solve_dc_vertices(&h, cell_size);
+                            let mut mesh = generate_mesh(&h, &dc_verts, cell_size);
+                            mesh.smooth(cfg.mesh_smooth_iterations, cfg.mesh_smooth_strength, cfg.mesh_boundary_smooth, Some(cell_size));
+                            let boundary_edges = region_gen::extract_boundary_edges(&h, chunk_size);
+                            Some((mesh, dc_verts, boundary_edges))
+                        }
+                        None => None,
+                    }
+                }).collect();
+
+            // Collect results back into sequential structures (seam_data_map is not thread-safe)
             let mut base_meshes: Vec<Option<voxel_core::mesh::Mesh>> = Vec::with_capacity(chunks.len());
             let mut seam_data_map: std::collections::HashMap<(i32,i32,i32), ChunkSeamData> =
                 std::collections::HashMap::new();
 
-            for (i, df_opt) in density_fields.iter().enumerate() {
-                match df_opt {
-                    Some(df) => {
-                        let h = extract_hermite_data(df);
-                        let cell_size = df.size - 1;
-                        let dc_verts = solve_dc_vertices(&h, cell_size);
-                        let mut mesh = generate_mesh(&h, &dc_verts, cell_size);
-                        mesh.smooth(cfg.mesh_smooth_iterations, cfg.mesh_smooth_strength, cfg.mesh_boundary_smooth, Some(cell_size));
-
-                        // Store seam data for this chunk (using real chunk coords as keys)
-                        let boundary_edges = region_gen::extract_boundary_edges(&h, chunk_size);
+            for (i, result) in mesh_results.into_iter().enumerate() {
+                match result {
+                    Some((mesh, dc_verts, boundary_edges)) => {
                         seam_data_map.insert(chunks[i], ChunkSeamData {
                             dc_vertices: dc_verts,
                             world_origin: glam::Vec3::ZERO,
                             boundary_edges,
                         });
-
                         base_meshes.push(Some(mesh));
                     }
                     None => {

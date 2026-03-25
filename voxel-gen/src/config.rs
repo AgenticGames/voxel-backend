@@ -327,6 +327,7 @@ pub struct GenerationConfig {
     pub artesian: ArtesianConfig,
     pub mine: MineConfig,
     pub crystals: CrystalConfig,
+    pub zones: ZoneConfig,
     pub octree_max_depth: u32,
     /// Region size in chunks per axis for global worm planning (default 3).
     pub region_size: i32,
@@ -405,6 +406,7 @@ impl Default for GenerationConfig {
             artesian: ArtesianConfig::default(),
             mine: MineConfig::default(),
             crystals: CrystalConfig::default(),
+            zones: ZoneConfig::default(),
             octree_max_depth: 4,
             region_size: 3,
             bounds_size: 0.0,
@@ -1170,3 +1172,134 @@ impl Default for OreConfig {
     }
 }
 
+// ── Cavern Zones ──
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum ZoneType {
+    Cathedral = 0,
+    SubterraneanLake = 1,
+    RiverCanyon = 2,
+    LavaTubeGallery = 3,
+    BioluminescentGrotto = 4,
+    GeothermalTerraces = 5,
+    FrozenGrotto = 6,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ZoneConfig {
+    pub enabled: bool,
+
+    // Per-type spawn probabilities (0.0 = never, 1.0 = always when eligible)
+    pub cathedral_chance: f32,
+    pub lake_chance: f32,
+    pub canyon_chance: f32,
+    pub lava_gallery_chance: f32,
+    pub bioluminescent_chance: f32,
+    pub terraces_chance: f32,
+    pub frozen_chance: f32,
+
+    // Per-type minimum air voxel thresholds
+    pub cathedral_min_air: u32,
+    pub lake_min_air: u32,
+    pub canyon_min_air: u32,
+    pub lava_gallery_min_air: u32,
+    pub bioluminescent_min_air: u32,
+    pub terraces_min_air: u32,
+    pub frozen_min_air: u32,
+
+    // Cathedral-specific
+    pub cathedral_dome_scale: f32,
+    pub cathedral_boulder_count_min: u32,
+    pub cathedral_boulder_count_max: u32,
+    pub cathedral_mega_stalagmite_chance: f32,
+    pub cathedral_flowstone_coverage: f32,
+
+    // Lake-specific
+    pub lake_depth: u32,
+    pub lake_beach_width: f32,
+    pub lake_island_min_radius: f32,
+
+    // Canyon-specific
+    pub canyon_width_min: f32,
+    pub canyon_width_max: f32,
+    pub canyon_height_min: f32,
+    pub canyon_height_max: f32,
+    pub canyon_bridge_chance: f32,
+
+    // Lava Gallery-specific
+    pub lava_gallery_bench_spacing: f32,
+    pub lava_gallery_lavacicle_chance: f32,
+
+    // Bioluminescent-specific
+    pub bio_anchor_density: f32,
+    pub bio_max_anchors: u32,
+
+    // Terraces-specific
+    pub terrace_tiers_min: u32,
+    pub terrace_tiers_max: u32,
+    pub terrace_step_height: f32,
+    pub terrace_rim_height: f32,
+    pub terrace_basin_depth: u32,
+
+    // Frozen-specific
+    pub frozen_floor_depth: u32,
+    pub frozen_waterfall_count: u32,
+    pub frozen_ice_stalactite_chance: f32,
+}
+
+impl Default for ZoneConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+
+            cathedral_chance: 0.15,
+            lake_chance: 0.12,
+            canyon_chance: 0.10,
+            lava_gallery_chance: 0.08,
+            bioluminescent_chance: 0.10,
+            terraces_chance: 0.08,
+            frozen_chance: 0.06,
+
+            cathedral_min_air: 2000,
+            lake_min_air: 1500,
+            canyon_min_air: 800,
+            lava_gallery_min_air: 600,
+            bioluminescent_min_air: 400,
+            terraces_min_air: 1000,
+            frozen_min_air: 600,
+
+            cathedral_dome_scale: 0.7,
+            cathedral_boulder_count_min: 3,
+            cathedral_boulder_count_max: 8,
+            cathedral_mega_stalagmite_chance: 0.4,
+            cathedral_flowstone_coverage: 0.3,
+
+            lake_depth: 4,
+            lake_beach_width: 3.0,
+            lake_island_min_radius: 2.0,
+
+            canyon_width_min: 3.0,
+            canyon_width_max: 6.0,
+            canyon_height_min: 12.0,
+            canyon_height_max: 25.0,
+            canyon_bridge_chance: 0.3,
+
+            lava_gallery_bench_spacing: 4.0,
+            lava_gallery_lavacicle_chance: 0.15,
+
+            bio_anchor_density: 0.1,
+            bio_max_anchors: 50,
+
+            terrace_tiers_min: 3,
+            terrace_tiers_max: 7,
+            terrace_step_height: 4.0,
+            terrace_rim_height: 1.5,
+            terrace_basin_depth: 2,
+
+            frozen_floor_depth: 2,
+            frozen_waterfall_count: 2,
+            frozen_ice_stalactite_chance: 0.3,
+        }
+    }
+}

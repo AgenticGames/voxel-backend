@@ -237,7 +237,7 @@ fn make_realistic_world(seed: u64, water_count: usize) -> (
         seed,
         ..Default::default()
     };
-    let (density_fields, _pools, fluid_seeds, _worms, _timings, _springs) =
+    let (density_fields, _pools, fluid_seeds, _worms, _timings, _springs, _zones) =
         voxel_gen::region_gen::generate_region_densities(&coords, &config);
 
     let mut stress_fields = HashMap::new();
@@ -518,6 +518,7 @@ fn make_ue_gen_config(seed: u64) -> voxel_gen::config::GenerationConfig {
 
         mine: MineConfig::default(),
         crystals: CrystalConfig::default(),
+        zones: ZoneConfig::default(),
     }
 }
 
@@ -544,7 +545,7 @@ fn make_realistic_world_at(
         }
     }
 
-    let (density_fields, _pools, fluid_seeds, _worms, _timings, _springs) =
+    let (density_fields, _pools, fluid_seeds, _worms, _timings, _springs, _zones) =
         voxel_gen::region_gen::generate_region_densities(&coords, gen_config);
 
     let mut stress_fields = HashMap::new();

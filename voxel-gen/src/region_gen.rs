@@ -30,6 +30,7 @@ pub struct RegionTimings {
     pub worm_planning: Duration,
     pub worm_carving: Duration,
     pub pools: Duration,
+    pub zones: Duration,
     pub formations: Duration,
     pub boundary_sync: Duration,
     pub metadata: Duration,
@@ -76,7 +77,7 @@ pub fn region_chunks(region: (i32, i32, i32), region_size: i32) -> Vec<(i32, i32
 pub fn generate_region_densities(
     coords: &[(i32, i32, i32)],
     config: &GenerationConfig,
-) -> (HashMap<(i32, i32, i32), DensityField>, Vec<PoolDescriptor>, Vec<FluidSeed>, Vec<Vec<WormSegment>>, RegionTimings, Vec<((i32, i32, i32), SpringDescriptor)>) {
+) -> (HashMap<(i32, i32, i32), DensityField>, Vec<PoolDescriptor>, Vec<FluidSeed>, Vec<Vec<WormSegment>>, RegionTimings, Vec<((i32, i32, i32), SpringDescriptor)>, Vec<crate::zones::ZoneDescriptor>) {
     let eb = config.effective_bounds();
     let chunk_size_f = eb;
     let mut timings = RegionTimings::default();
@@ -230,10 +231,20 @@ pub fn generate_region_densities(
         }
     }
 
-    // Phase 5: Place cave pools per chunk (sort keys for determinism)
+    // Phase 4z: Detect and place cavern zones
+    let t_zones = Instant::now();
+    let (zone_descriptors, zone_bounds, zone_fluid_seeds) = crate::zones::place_zones(
+        &mut density_fields,
+        &config.zones,
+        config.seed,
+        eb,
+    );
+    let mut all_fluid_seeds: Vec<crate::pools::FluidSeed> = zone_fluid_seeds;
+    timings.zones = t_zones.elapsed();
+
+    // Phase 5: Place cave pools per chunk (sort keys for determinism, skip zone areas)
     let t4 = Instant::now();
     let mut all_pool_descriptors = Vec::new();
-    let mut all_fluid_seeds = Vec::new();
     if config.pools.enabled {
         let mut sorted_keys: Vec<_> = density_fields.keys().copied().collect();
         sorted_keys.sort();
@@ -298,7 +309,7 @@ pub fn generate_region_densities(
     }
     timings.metadata = t6.elapsed();
 
-    (density_fields, all_pool_descriptors, all_fluid_seeds, all_worm_paths, timings, all_river_springs)
+    (density_fields, all_pool_descriptors, all_fluid_seeds, all_worm_paths, timings, all_river_springs, zone_descriptors)
 }
 
 /// Compute a deterministic worm seed for a set of coordinates.
@@ -799,7 +810,7 @@ mod tests {
             ..GenerationConfig::default()
         };
         let coords = region_chunks((0, 0, 0), 2);
-        let (densities, _pools, _seeds, _worms, _timings, _river_springs) = generate_region_densities(&coords, &config);
+        let (densities, _pools, _seeds, _worms, _timings, _river_springs, _zones) = generate_region_densities(&coords, &config);
         assert_eq!(densities.len(), 8);
         for &c in &coords {
             assert!(densities.contains_key(&c));

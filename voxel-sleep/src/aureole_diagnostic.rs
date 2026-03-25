@@ -642,7 +642,7 @@ mod tests {
         }
         coords.sort();
 
-        let (mut density_fields, _pools, _fluid_seeds, _worms, _timings, _springs) =
+        let (mut density_fields, _pools, _fluid_seeds, _worms, _timings, _springs, _zones) =
             voxel_gen::region_gen::generate_region_densities(&coords, &gen_config);
 
         eprintln!("  Generated {} chunks", density_fields.len());

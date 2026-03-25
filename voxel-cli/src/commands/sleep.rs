@@ -44,7 +44,7 @@ pub fn run(args: &[String]) {
         .flat_map(|cy| (0..chunks_per_axis as i32).map(move |cx| (cx, cy, 0)))
         .collect();
 
-    let (mut density_fields, _pools, _seeds, _worms, _timings, _river_springs) = region_gen::generate_region_densities(&coords, &config);
+    let (mut density_fields, _pools, _seeds, _worms, _timings, _river_springs, _zones) = region_gen::generate_region_densities(&coords, &config);
     let gen_elapsed = start.elapsed();
     println!("  Region generated in {:.2?} ({} chunks)", gen_elapsed, coords.len());
 

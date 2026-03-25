@@ -18,7 +18,7 @@ pub fn mine_sphere(
     let eb = config.effective_bounds();
     let vs = config.voxel_scale();
     let r2 = radius * radius;
-    let mut mined_counts = [0u32; 27];
+    let mut mined_counts = [0u32; 29];
 
     let min_cx = ((center.x - radius) / eb).floor() as i32;
     let max_cx = ((center.x + radius) / eb).floor() as i32;
@@ -128,7 +128,7 @@ pub fn mine_peel(
     let eb = config.effective_bounds();
     let vs = config.voxel_scale();
     let r2 = radius * radius;
-    let mut mined_counts = [0u32; 27];
+    let mut mined_counts = [0u32; 29];
     let adjusted_center = center - normal * 0.5;
 
     let min_cx = ((adjusted_center.x - radius) / eb).floor() as i32;

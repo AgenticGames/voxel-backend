@@ -56,7 +56,7 @@ impl GeneratedRegion {
             .collect();
 
         // Phases 1-5: Generate density fields with global worm carving + pools (shared pipeline)
-        let (mut density_fields, pool_descriptors, fluid_seeds, _worm_paths, _timings, _river_springs) = region_gen::generate_region_densities(&coords, &config);
+        let (mut density_fields, pool_descriptors, fluid_seeds, _worm_paths, _timings, _river_springs, _zones) = region_gen::generate_region_densities(&coords, &config);
 
         // Phase 5b: Ore detail supersampling — regenerate ore chunks at higher resolution
         let multiplier = config.ore_detail_multiplier.max(1).min(4) as usize;

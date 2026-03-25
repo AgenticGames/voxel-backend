@@ -51,6 +51,10 @@ pub enum Material {
 
     // Calc-silicate metamorphic (limestone contact aureole)
     Skarn = 26,
+
+    // Zone materials
+    Ice = 27,
+    Travertine = 28,
 }
 
 impl Material {
@@ -82,6 +86,8 @@ impl Material {
             24 => Material::Diopside,
             25 => Material::Gypsum,
             26 => Material::Skarn,
+            27 => Material::Ice,
+            28 => Material::Travertine,
             _ => Material::Air,
         }
     }
@@ -121,11 +127,13 @@ impl Material {
                 | Material::Marble
                 | Material::Hornfels
                 | Material::Skarn
+                | Material::Travertine
         )
     }
 
     pub fn is_soft_rock(self) -> bool {
-        matches!(self, Material::Limestone | Material::Sandstone | Material::Gypsum)
+        matches!(self, Material::Limestone | Material::Sandstone | Material::Gypsum
+            | Material::Ice | Material::Travertine)
     }
 
     pub fn is_hard_rock(self) -> bool {
@@ -139,7 +147,7 @@ impl Material {
 
     /// Permeable materials allow water to flow through.
     pub fn is_permeable(self) -> bool {
-        matches!(self, Material::Sandstone | Material::Limestone | Material::Coal)
+        matches!(self, Material::Sandstone | Material::Limestone | Material::Coal | Material::Travertine)
     }
 
     /// Impermeable materials block water flow, creating geological contacts.
@@ -163,6 +171,8 @@ impl Material {
             Material::Diopside => 0.1,
             Material::Gypsum => 0.7,
             Material::Skarn => 0.08,
+            Material::Ice => 0.0,
+            Material::Travertine => 0.9,
             _ => 0.0,
         }
     }
@@ -202,6 +212,8 @@ impl Material {
             Material::Diopside => "Diopside",
             Material::Gypsum => "Gypsum",
             Material::Skarn => "Skarn",
+            Material::Ice => "Ice",
+            Material::Travertine => "Travertine",
         }
     }
 
@@ -234,6 +246,8 @@ impl Material {
             Material::Diopside => 0x2E8B57,
             Material::Gypsum => 0xF5F0E8,
             Material::Skarn => 0x00FF00, // NEON GREEN for debug visibility
+            Material::Ice => 0xB8E4F0,
+            Material::Travertine => 0xE8D8B8,
         }
     }
 
@@ -266,6 +280,8 @@ impl Material {
             Material::Diopside,
             Material::Gypsum,
             Material::Skarn,
+            Material::Ice,
+            Material::Travertine,
         ]
     }
 }

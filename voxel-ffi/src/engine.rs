@@ -1143,6 +1143,7 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
         pools: ffi_to_pool_config(c),
         mine: ffi_to_mine_config(c),
         crystals: ffi_to_crystal_config(c),
+        zones: ffi_to_zone_config(c),
         water_table: ffi_to_water_table_config(c),
         pipe_lava: ffi_to_pipe_lava_config(c),
         lava_tubes: ffi_to_lava_tube_config(c),
@@ -1639,6 +1640,12 @@ fn ffi_to_artesian_config(c: &FfiEngineConfig) -> voxel_gen::config::ArtesianCon
         pressure_noise_freq: if c.artesian_pressure_noise_freq > 0.0 { c.artesian_pressure_noise_freq } else { 0.02 },
         max_per_chunk: if c.artesian_max_per_chunk > 0 { c.artesian_max_per_chunk } else { 3 },
     }
+}
+
+fn ffi_to_zone_config(_c: &FfiEngineConfig) -> voxel_gen::config::ZoneConfig {
+    // Zone FFI fields will be added in Phase 6. For now, use defaults.
+    // When FFI fields are added, this will map them like the other helpers.
+    voxel_gen::config::ZoneConfig::default()
 }
 
 /// Debug: log pool config as received from FFI (temporary diagnostic).
