@@ -312,3 +312,91 @@ pub fn write_cone(
         }
     }
 }
+
+/// Write a mushroom shape: stalk (cylinder) + cap (oblate dome) + gill ring (glowing underside).
+/// `base` is the floor anchor point. Stalk grows upward.
+pub fn write_mushroom(
+    density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
+    base: Vec3,
+    stalk_height: f32,
+    stalk_radius: f32,
+    cap_radius: f32,
+    cap_thickness: f32,
+    stalk_material: Material,
+    cap_material: Material,
+    gill_material: Material,
+    effective_bounds: f32,
+) {
+    let cap_center = base + Vec3::new(0.0, stalk_height, 0.0);
+    let max_r = cap_radius + 1.0;
+    let max_y_top = cap_center.y + cap_thickness + 1.0;
+    let min_y_bot = base.y - 1.0;
+
+    let min_cx = ((base.x - max_r) / effective_bounds).floor() as i32;
+    let max_cx = ((base.x + max_r) / effective_bounds).floor() as i32;
+    let min_cy = ((min_y_bot) / effective_bounds).floor() as i32;
+    let max_cy = ((max_y_top) / effective_bounds).floor() as i32;
+    let min_cz = ((base.z - max_r) / effective_bounds).floor() as i32;
+    let max_cz = ((base.z + max_r) / effective_bounds).floor() as i32;
+
+    for cz in min_cz..=max_cz {
+        for cy in min_cy..=max_cy {
+            for cx in min_cx..=max_cx {
+                if let Some(density) = density_fields.get_mut(&(cx, cy, cz)) {
+                    let origin = Vec3::new(
+                        cx as f32 * effective_bounds,
+                        cy as f32 * effective_bounds,
+                        cz as f32 * effective_bounds,
+                    );
+                    let size = density.size;
+                    let vs = effective_bounds / (size - 1) as f32;
+
+                    for z in 0..size {
+                        for y in 0..size {
+                            for x in 0..size {
+                                let wp = origin + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
+                                let dx = wp.x - base.x;
+                                let dz = wp.z - base.z;
+                                let dist_xz = (dx * dx + dz * dz).sqrt();
+                                let dy = wp.y - base.y;
+                                let idx = z * size * size + y * size + x;
+
+                                // Stalk: cylinder from base up to cap
+                                if dy >= -0.5 && dy <= stalk_height && dist_xz <= stalk_radius + 0.5 {
+                                    let falloff = ((stalk_radius + 0.5 - dist_xz) * 2.0).min(1.0).max(0.0);
+                                    if falloff > 0.0 && falloff > density.samples[idx].density {
+                                        density.samples[idx].density = falloff;
+                                        density.samples[idx].material = stalk_material;
+                                    }
+                                }
+
+                                // Cap: oblate dome on top of stalk
+                                let cap_dy = wp.y - cap_center.y;
+                                if cap_dy >= -0.3 && cap_dy <= cap_thickness && dist_xz <= cap_radius + 0.5 {
+                                    let t = (cap_dy / cap_thickness).max(0.0);
+                                    let dome_r = cap_radius * (1.0 - t * t);
+                                    if dist_xz <= dome_r + 0.5 {
+                                        let falloff = ((dome_r + 0.5 - dist_xz) * 2.0).min(1.0).max(0.0);
+                                        if falloff > 0.0 && falloff > density.samples[idx].density {
+                                            density.samples[idx].density = falloff;
+                                            density.samples[idx].material = cap_material;
+                                        }
+                                    }
+                                }
+
+                                // Gill ring: thin glowing layer on underside of cap
+                                if cap_dy >= -0.8 && cap_dy < 0.0 && dist_xz >= stalk_radius + 0.3 && dist_xz <= cap_radius {
+                                    let falloff = 0.8;
+                                    if falloff > density.samples[idx].density {
+                                        density.samples[idx].density = falloff;
+                                        density.samples[idx].material = gill_material;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

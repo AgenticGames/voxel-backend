@@ -80,6 +80,11 @@ pub enum Material {
     // Bioluminescent Grotto
     Mycelium = 40,     // pale fungal growth networks
     Glowstone = 41,    // luminous blue-green mineral
+    MushroomStalk = 42, // pale cream fibrous stalk
+    MushroomGill = 43,  // glowing blue-green underside
+    PurpleCap = 44,     // deep purple mushroom cap
+    TealCap = 45,       // dark teal mushroom cap
+    AmberCap = 46,      // burnt orange mushroom cap
 }
 
 impl Material {
@@ -126,6 +131,11 @@ impl Material {
             39 => Material::Tufa,
             40 => Material::Mycelium,
             41 => Material::Glowstone,
+            42 => Material::MushroomStalk,
+            43 => Material::MushroomGill,
+            44 => Material::PurpleCap,
+            45 => Material::TealCap,
+            46 => Material::AmberCap,
             _ => Material::Air,
         }
     }
@@ -173,7 +183,8 @@ impl Material {
         matches!(self, Material::Limestone | Material::Sandstone | Material::Gypsum
             | Material::Ice | Material::Travertine | Material::Hoarfrost | Material::BlackIce
             | Material::Pumice | Material::Sinter | Material::Moonmilk | Material::Tufa
-            | Material::Mycelium)
+            | Material::Mycelium | Material::MushroomStalk | Material::MushroomGill
+            | Material::PurpleCap | Material::TealCap | Material::AmberCap)
     }
 
     pub fn is_hard_rock(self) -> bool {
@@ -224,6 +235,8 @@ impl Material {
             Material::Hoarfrost => 0.1,
             Material::Moonmilk => 0.6,
             Material::Mycelium => 0.3,
+            Material::MushroomStalk | Material::MushroomGill
+                | Material::PurpleCap | Material::TealCap | Material::AmberCap => 0.2,
             _ => 0.0,
         }
     }
@@ -278,6 +291,11 @@ impl Material {
             Material::Tufa => "Tufa",
             Material::Mycelium => "Mycelium",
             Material::Glowstone => "Glowstone",
+            Material::MushroomStalk => "Mushroom Stalk",
+            Material::MushroomGill => "Mushroom Gill",
+            Material::PurpleCap => "Purple Cap",
+            Material::TealCap => "Teal Cap",
+            Material::AmberCap => "Amber Cap",
         }
     }
 
@@ -325,6 +343,11 @@ impl Material {
             Material::Tufa => 0xC8C0A8,          // pale buff limestone
             Material::Mycelium => 0xC0D0B0,      // pale green-white
             Material::Glowstone => 0x40E8C0,     // luminous blue-green
+            Material::MushroomStalk => 0xD8D0C0,  // pale cream fibrous
+            Material::MushroomGill => 0x40E8C0,   // blue-green glow (same as glowstone)
+            Material::PurpleCap => 0x6B2D8B,      // deep purple
+            Material::TealCap => 0x1A5050,         // dark teal
+            Material::AmberCap => 0xA04820,        // burnt orange
         }
     }
 
@@ -372,6 +395,11 @@ impl Material {
             Material::Tufa,
             Material::Mycelium,
             Material::Glowstone,
+            Material::MushroomStalk,
+            Material::MushroomGill,
+            Material::PurpleCap,
+            Material::TealCap,
+            Material::AmberCap,
         ]
     }
 }

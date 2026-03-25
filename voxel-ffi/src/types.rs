@@ -43,7 +43,7 @@ pub struct FfiMeshData {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct FfiMinedMaterials {
-    pub counts: [u32; 42],
+    pub counts: [u32; 47],
 }
 
 #[repr(u8)]
@@ -1043,7 +1043,7 @@ pub struct FfiCollapseEvent {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct FfiStressConfig {
-    pub material_hardness: [f32; 42],
+    pub material_hardness: [f32; 47],
     pub gravity_weight: f32,
     pub lateral_support_factor: f32,
     pub vertical_support_factor: f32,
