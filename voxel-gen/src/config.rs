@@ -1251,7 +1251,7 @@ pub struct ZoneConfig {
 impl Default for ZoneConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
 
             cathedral_chance: 0.15,
             lake_chance: 0.12,
