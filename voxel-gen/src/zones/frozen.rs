@@ -50,9 +50,9 @@ pub fn generate(
             let vs = eb / (size - 1) as f32;
             let origin = Vec3::new(key.0 as f32 * eb, key.1 as f32 * eb, key.2 as f32 * eb);
 
-            for z in 1..size - 1 {
-                for y in 1..size - 1 {
-                    for x in 1..size - 1 {
+            for z in 0..size {
+                for y in 0..size {
+                    for x in 0..size {
                         let idx = z * size * size + y * size + x;
                         if density.samples[idx].density <= 0.0 { continue; }
 
@@ -103,9 +103,9 @@ pub fn generate(
             let size = density.size;
             let vs = eb / (size - 1) as f32;
             let origin = Vec3::new(key.0 as f32 * eb, key.1 as f32 * eb, key.2 as f32 * eb);
-            for z in 1..size - 1 {
-                for y in 1..size - 1 {
-                    for x in 1..size - 1 {
+            for z in 0..size {
+                for y in 0..size {
+                    for x in 0..size {
                         let idx = z * size * size + y * size + x;
                         if density.samples[idx].density > 0.0 {
                             let above_idx = z * size * size + (y + 1) * size + x;
@@ -129,9 +129,9 @@ pub fn generate(
             let size = density.size;
             let vs = eb / (size - 1) as f32;
             let origin = Vec3::new(key.0 as f32 * eb, key.1 as f32 * eb, key.2 as f32 * eb);
-            for z in 1..size - 1 {
-                for y in 1..size - 1 {
-                    for x in 1..size - 1 {
+            for z in 0..size {
+                for y in 0..size {
+                    for x in 0..size {
                         let idx = z * size * size + y * size + x;
                         if density.samples[idx].density > 0.0 {
                             let above_idx = z * size * size + (y + 1) * size + x;
@@ -166,9 +166,9 @@ pub fn generate(
                 let vs = eb / (size - 1) as f32;
                 let origin = Vec3::new(key.0 as f32 * eb, key.1 as f32 * eb, key.2 as f32 * eb);
 
-                for z in 1..size - 1 {
-                    for y in 1..size - 1 {
-                        for x in 1..size - 1 {
+                for z in 0..size {
+                    for y in 0..size {
+                        for x in 0..size {
                             let idx = z * size * size + y * size + x;
                             if density.samples[idx].density <= 0.0 { continue; }
 

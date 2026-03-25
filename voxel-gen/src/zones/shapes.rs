@@ -152,9 +152,9 @@ pub fn apply_surface_material(
                     let size = density.size;
                     let vs = effective_bounds / (size - 1) as f32;
 
-                    for z in 1..size - 1 {
-                        for y in 1..size - 1 {
-                            for x in 1..size - 1 {
+                    for z in 0..size {
+                        for y in 0..size {
+                            for x in 0..size {
                                 let world_pos = origin + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
                                 if world_pos.x < world_min.x || world_pos.x > world_max.x
                                     || world_pos.y < world_min.y || world_pos.y > world_max.y
