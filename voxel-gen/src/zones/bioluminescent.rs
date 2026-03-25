@@ -204,28 +204,94 @@ pub fn generate(
         );
     }
 
-    // ── Step 4: Water sources at >50% of seed points ──
+    // ── Step 4: Organic noise-shaped water features ──
+    // Irregular puddles and meandering streams between seed points.
+    // Uses 2D noise to create organic blob boundaries — water placed where
+    // noise exceeds threshold within range of seed points.
     let mut fluid_seeds = Vec::new();
+    let water_noise = Simplex3D::new(zone_seed.wrapping_add(300));
+    let water_freq = 0.25; // organic blob scale
+    let water_threshold = 0.15; // lower = more water coverage
+
+    // For each seed point that gets water (60%), scan the floor area and
+    // place water where noise creates organic shapes
+    let mut water_seeds: Vec<(Vec3, f32)> = Vec::new(); // (center, max_radius)
     for seed_pos in &mycelium_seeds {
         let roll: f32 = rng.gen();
-        if roll < 0.6 { // 60% get a water pool
-            // Small water pool at the seed point
-            let spacing = 1.5;
-            let pool_r = 2.0;
-            let mut fx = seed_pos.x - pool_r;
-            while fx <= seed_pos.x + pool_r {
-                let mut fz = seed_pos.z - pool_r;
-                while fz <= seed_pos.z + pool_r {
-                    let dx = fx - seed_pos.x;
-                    let dz = fz - seed_pos.z;
-                    if dx * dx + dz * dz <= pool_r * pool_r {
-                        fluid_seeds.push(world_to_fluid_seed(
-                            fx, seed_pos.y - 0.5, fz, effective_bounds, chunk_size, false,
-                        ));
+        if roll < 0.6 {
+            // Vary puddle size: 2-10 voxel radius, organic boundary
+            let pool_max_r = rng.gen_range(2.0..10.0);
+            water_seeds.push((*seed_pos, pool_max_r));
+        }
+    }
+
+    // Also add 1-2 connecting streams between adjacent seed pairs
+    if water_seeds.len() >= 2 {
+        let stream_count = rng.gen_range(1u32..=2).min(water_seeds.len() as u32 - 1);
+        for i in 0..stream_count as usize {
+            let a = water_seeds[i].0;
+            let b = water_seeds[(i + 1) % water_seeds.len()].0;
+            // Add intermediate points along the stream path
+            let steps = ((a - b).length() / 3.0).ceil() as u32;
+            for s in 1..steps {
+                let t = s as f32 / steps as f32;
+                let mid = a.lerp(b, t);
+                // Narrow stream: small radius
+                water_seeds.push((mid, rng.gen_range(1.0..3.0)));
+            }
+        }
+    }
+
+    // Scan floor area and place water where noise creates organic blobs near water seeds
+    for &key in &volume.chunk_keys {
+        if let Some(density) = density_fields.get(&key) {
+            let size = density.size;
+            let vs = eb / (size - 1) as f32;
+            let origin = Vec3::new(key.0 as f32 * eb, key.1 as f32 * eb, key.2 as f32 * eb);
+
+            for z in 1..size - 1 {
+                for y in 1..size - 1 {
+                    for x in 1..size - 1 {
+                        let idx = z * size * size + y * size + x;
+                        if density.samples[idx].density <= 0.0 { continue; }
+
+                        // Only floor surfaces
+                        let above_idx = z * size * size + (y + 1) * size + x;
+                        if !(y + 1 < size && density.samples[above_idx].density <= 0.0) { continue; }
+
+                        let wp = origin + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
+
+                        // Check proximity to any water seed
+                        let mut best_influence = 0.0f32;
+                        for &(center, max_r) in &water_seeds {
+                            let dx = wp.x - center.x;
+                            let dz = wp.z - center.z;
+                            let dist = (dx * dx + dz * dz).sqrt();
+                            if dist < max_r {
+                                let proximity = 1.0 - dist / max_r;
+                                best_influence = best_influence.max(proximity);
+                            }
+                        }
+
+                        if best_influence <= 0.0 { continue; }
+
+                        // Sample noise for organic boundary shape
+                        let n = water_noise.sample(
+                            wp.x as f64 * water_freq,
+                            0.0, // flat 2D noise on XZ plane
+                            wp.z as f64 * water_freq,
+                        ) as f32 * 0.5 + 0.5;
+
+                        // Water placed where noise + proximity exceeds threshold
+                        // This creates organic blobs: noise provides the irregular boundary,
+                        // proximity ensures they're near seed points
+                        if n * best_influence > water_threshold {
+                            fluid_seeds.push(world_to_fluid_seed(
+                                wp.x, wp.y - 0.5, wp.z, effective_bounds, chunk_size, false,
+                            ));
+                        }
                     }
-                    fz += spacing;
                 }
-                fx += spacing;
             }
         }
     }
