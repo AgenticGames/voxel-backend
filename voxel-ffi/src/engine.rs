@@ -208,7 +208,7 @@ impl VoxelEngine {
             shutdown,
             sleep_complete: Arc::new(Mutex::new(None)),
             morph_results: Arc::new(Mutex::new(std::collections::VecDeque::new())),
-            morph_manifest: Arc::new(Mutex::new(None)),
+            morph_manifest,
             scan_complete: Arc::new(Mutex::new(None)),
             force_spawn_complete: Arc::new(Mutex::new(None)),
             profiler,

@@ -98,6 +98,8 @@ pub fn generate(
                     for x in 0..size {
                         let idx = z * size * size + y * size + x;
                         if density.samples[idx].density <= 0.0 { continue; }
+                        // Preserve ores — only replace boring host rock
+                        if density.samples[idx].material.is_ore() { continue; }
 
                         let wp = origin + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
 
@@ -211,24 +213,31 @@ pub fn generate(
     let mut fluid_seeds = Vec::new();
     let water_noise = Simplex3D::new(zone_seed.wrapping_add(300));
     let water_freq = 0.25; // organic blob scale
-    let water_threshold = 0.15; // lower = more water coverage
+    let water_threshold = 0.08; // lower = more water coverage
 
-    // For each seed point that gets water (60%), scan the floor area and
-    // place water where noise creates organic shapes
+    // 80% of mycelium seeds get water, plus extra for large zones
     let mut water_seeds: Vec<(Vec3, f32)> = Vec::new(); // (center, max_radius)
     for seed_pos in &mycelium_seeds {
         let roll: f32 = rng.gen();
-        if roll < 0.6 {
-            // Vary puddle size: 2-10 voxel radius, organic boundary
-            let pool_max_r = rng.gen_range(2.0..10.0);
+        if roll < 0.8 {
+            let pool_max_r = rng.gen_range(4.0..10.0);
             water_seeds.push((*seed_pos, pool_max_r));
         }
     }
+    // Add extra water seeds proportional to zone volume
+    let extra_waters = (volume.total_air / 500).min(8);
+    for _ in 0..extra_waters {
+        if !floor_positions.is_empty() {
+            let idx = rng.gen_range(0..floor_positions.len());
+            let pool_max_r = rng.gen_range(3.0..8.0);
+            water_seeds.push((floor_positions[idx], pool_max_r));
+        }
+    }
 
-    // Also add 1-2 connecting streams between adjacent seed pairs
+    // Connect ALL adjacent seed pairs with streams (not just 1-2)
     if water_seeds.len() >= 2 {
-        let stream_count = rng.gen_range(1u32..=2).min(water_seeds.len() as u32 - 1);
-        for i in 0..stream_count as usize {
+        let stream_count = water_seeds.len() - 1;
+        for i in 0..stream_count {
             let a = water_seeds[i].0;
             let b = water_seeds[(i + 1) % water_seeds.len()].0;
             // Add intermediate points along the stream path

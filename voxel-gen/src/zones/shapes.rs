@@ -313,8 +313,9 @@ pub fn write_cone(
     }
 }
 
-/// Write a mushroom shape: stalk (cylinder) + cap (oblate dome) + gill ring (glowing underside).
+/// Write a mushroom shape: clearance carve + stalk (cylinder) + cap (dome) + gill ring (glow underside).
 /// `base` is the floor anchor point. Stalk grows upward.
+/// Carves clearance air around the mushroom first to prevent blending with terrain.
 pub fn write_mushroom(
     density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
     base: Vec3,
@@ -328,17 +329,18 @@ pub fn write_mushroom(
     effective_bounds: f32,
 ) {
     let cap_center = base + Vec3::new(0.0, stalk_height, 0.0);
-    let max_r = cap_radius + 1.0;
-    let max_y_top = cap_center.y + cap_thickness + 1.0;
+    let clearance_r = cap_radius + 1.5;
+    let max_y_top = cap_center.y + cap_thickness + 1.5;
     let min_y_bot = base.y - 1.0;
 
-    let min_cx = ((base.x - max_r) / effective_bounds).floor() as i32;
-    let max_cx = ((base.x + max_r) / effective_bounds).floor() as i32;
+    let min_cx = ((base.x - clearance_r) / effective_bounds).floor() as i32;
+    let max_cx = ((base.x + clearance_r) / effective_bounds).floor() as i32;
     let min_cy = ((min_y_bot) / effective_bounds).floor() as i32;
     let max_cy = ((max_y_top) / effective_bounds).floor() as i32;
-    let min_cz = ((base.z - max_r) / effective_bounds).floor() as i32;
-    let max_cz = ((base.z + max_r) / effective_bounds).floor() as i32;
+    let min_cz = ((base.z - clearance_r) / effective_bounds).floor() as i32;
+    let max_cz = ((base.z + clearance_r) / effective_bounds).floor() as i32;
 
+    // Pass 1: Clearance carve — remove terrain around mushroom so it doesn't blend
     for cz in min_cz..=max_cz {
         for cy in min_cy..=max_cy {
             for cx in min_cx..=max_cx {
@@ -361,6 +363,56 @@ pub fn write_mushroom(
                                 let dy = wp.y - base.y;
                                 let idx = z * size * size + y * size + x;
 
+                                // Only carve in the mushroom's vertical range (above base)
+                                if dy < 0.5 || dy > stalk_height + cap_thickness + 1.0 {
+                                    continue;
+                                }
+
+                                // Carve clearance cylinder around cap area
+                                if dist_xz < clearance_r && density.samples[idx].density > 0.0 {
+                                    // Don't carve where the mushroom itself will be written
+                                    let is_stalk = dist_xz <= stalk_radius + 0.3;
+                                    let cap_dy = wp.y - cap_center.y;
+                                    let is_cap = cap_dy >= 0.0 && cap_dy <= cap_thickness
+                                        && dist_xz <= cap_radius * (1.0 - (cap_dy / cap_thickness).max(0.0).powi(2));
+
+                                    if !is_stalk && !is_cap {
+                                        density.samples[idx].density = -1.0;
+                                        density.samples[idx].material = Material::Air;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Pass 2: Write mushroom geometry (stalk → cap → gill)
+    for cz in min_cz..=max_cz {
+        for cy in min_cy..=max_cy {
+            for cx in min_cx..=max_cx {
+                if let Some(density) = density_fields.get_mut(&(cx, cy, cz)) {
+                    let origin = Vec3::new(
+                        cx as f32 * effective_bounds,
+                        cy as f32 * effective_bounds,
+                        cz as f32 * effective_bounds,
+                    );
+                    let size = density.size;
+                    let vs = effective_bounds / (size - 1) as f32;
+
+                    for z in 0..size {
+                        for y in 0..size {
+                            for x in 0..size {
+                                let wp = origin + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
+                                let dx = wp.x - base.x;
+                                let dz = wp.z - base.z;
+                                let dist_xz = (dx * dx + dz * dz).sqrt();
+                                let dy = wp.y - base.y;
+                                let cap_dy = wp.y - cap_center.y;
+                                let idx = z * size * size + y * size + x;
+
                                 // Stalk: cylinder from base up to cap
                                 if dy >= -0.5 && dy <= stalk_height && dist_xz <= stalk_radius + 0.5 {
                                     let falloff = ((stalk_radius + 0.5 - dist_xz) * 2.0).min(1.0).max(0.0);
@@ -370,10 +422,9 @@ pub fn write_mushroom(
                                     }
                                 }
 
-                                // Cap: oblate dome on top of stalk
-                                let cap_dy = wp.y - cap_center.y;
-                                if cap_dy >= -0.3 && cap_dy <= cap_thickness && dist_xz <= cap_radius + 0.5 {
-                                    let t = (cap_dy / cap_thickness).max(0.0);
+                                // Cap: dome AT and ABOVE cap center only (no downward overlap with gill)
+                                if cap_dy >= 0.0 && cap_dy <= cap_thickness && dist_xz <= cap_radius + 0.5 {
+                                    let t = cap_dy / cap_thickness;
                                     let dome_r = cap_radius * (1.0 - t * t);
                                     if dist_xz <= dome_r + 0.5 {
                                         let falloff = ((dome_r + 0.5 - dist_xz) * 2.0).min(1.0).max(0.0);
@@ -384,9 +435,12 @@ pub fn write_mushroom(
                                     }
                                 }
 
-                                // Gill ring: thin glowing layer on underside of cap
-                                if cap_dy >= -0.8 && cap_dy < 0.0 && dist_xz >= stalk_radius + 0.3 && dist_xz <= cap_radius {
-                                    let falloff = 0.8;
+                                // Gill: strict flat underside only — narrow band below cap, not at edges
+                                if cap_dy >= -0.5 && cap_dy < -0.1
+                                    && dist_xz >= stalk_radius + 0.5
+                                    && dist_xz <= cap_radius * 0.85
+                                {
+                                    let falloff = 0.9;
                                     if falloff > density.samples[idx].density {
                                         density.samples[idx].density = falloff;
                                         density.samples[idx].material = gill_material;
