@@ -1642,10 +1642,49 @@ fn ffi_to_artesian_config(c: &FfiEngineConfig) -> voxel_gen::config::ArtesianCon
     }
 }
 
-fn ffi_to_zone_config(_c: &FfiEngineConfig) -> voxel_gen::config::ZoneConfig {
-    // Zone FFI fields will be added in Phase 6. For now, use defaults.
-    // When FFI fields are added, this will map them like the other helpers.
-    voxel_gen::config::ZoneConfig::default()
+fn ffi_to_zone_config(c: &FfiEngineConfig) -> voxel_gen::config::ZoneConfig {
+    voxel_gen::config::ZoneConfig {
+        enabled: c.zone_enabled != 0,
+        cathedral_chance: if c.zone_cathedral_chance > 0.0 { c.zone_cathedral_chance } else { 0.15 },
+        lake_chance: if c.zone_lake_chance > 0.0 { c.zone_lake_chance } else { 0.12 },
+        canyon_chance: if c.zone_canyon_chance > 0.0 { c.zone_canyon_chance } else { 0.10 },
+        lava_gallery_chance: if c.zone_lava_gallery_chance > 0.0 { c.zone_lava_gallery_chance } else { 0.08 },
+        bioluminescent_chance: if c.zone_bioluminescent_chance > 0.0 { c.zone_bioluminescent_chance } else { 0.10 },
+        terraces_chance: if c.zone_terraces_chance > 0.0 { c.zone_terraces_chance } else { 0.08 },
+        frozen_chance: if c.zone_frozen_chance > 0.0 { c.zone_frozen_chance } else { 0.06 },
+        cathedral_min_air: if c.zone_cathedral_min_air > 0 { c.zone_cathedral_min_air } else { 2000 },
+        lake_min_air: if c.zone_lake_min_air > 0 { c.zone_lake_min_air } else { 1500 },
+        canyon_min_air: if c.zone_canyon_min_air > 0 { c.zone_canyon_min_air } else { 800 },
+        lava_gallery_min_air: if c.zone_lava_gallery_min_air > 0 { c.zone_lava_gallery_min_air } else { 600 },
+        bioluminescent_min_air: if c.zone_bioluminescent_min_air > 0 { c.zone_bioluminescent_min_air } else { 400 },
+        terraces_min_air: if c.zone_terraces_min_air > 0 { c.zone_terraces_min_air } else { 1000 },
+        frozen_min_air: if c.zone_frozen_min_air > 0 { c.zone_frozen_min_air } else { 600 },
+        cathedral_dome_scale: if c.zone_cathedral_dome_scale > 0.0 { c.zone_cathedral_dome_scale } else { 0.7 },
+        cathedral_boulder_count_min: if c.zone_cathedral_boulder_count_min > 0 { c.zone_cathedral_boulder_count_min } else { 3 },
+        cathedral_boulder_count_max: if c.zone_cathedral_boulder_count_max > 0 { c.zone_cathedral_boulder_count_max } else { 8 },
+        cathedral_mega_stalagmite_chance: if c.zone_cathedral_mega_stalagmite_chance > 0.0 { c.zone_cathedral_mega_stalagmite_chance } else { 0.4 },
+        cathedral_flowstone_coverage: if c.zone_cathedral_flowstone_coverage > 0.0 { c.zone_cathedral_flowstone_coverage } else { 0.3 },
+        lake_depth: if c.zone_lake_depth > 0 { c.zone_lake_depth } else { 4 },
+        lake_beach_width: if c.zone_lake_beach_width > 0.0 { c.zone_lake_beach_width } else { 3.0 },
+        lake_island_min_radius: if c.zone_lake_island_min_radius > 0.0 { c.zone_lake_island_min_radius } else { 2.0 },
+        canyon_width_min: if c.zone_canyon_width_min > 0.0 { c.zone_canyon_width_min } else { 3.0 },
+        canyon_width_max: if c.zone_canyon_width_max > 0.0 { c.zone_canyon_width_max } else { 6.0 },
+        canyon_height_min: if c.zone_canyon_height_min > 0.0 { c.zone_canyon_height_min } else { 12.0 },
+        canyon_height_max: if c.zone_canyon_height_max > 0.0 { c.zone_canyon_height_max } else { 25.0 },
+        canyon_bridge_chance: if c.zone_canyon_bridge_chance > 0.0 { c.zone_canyon_bridge_chance } else { 0.3 },
+        lava_gallery_bench_spacing: if c.zone_lava_gallery_bench_spacing > 0.0 { c.zone_lava_gallery_bench_spacing } else { 4.0 },
+        lava_gallery_lavacicle_chance: if c.zone_lava_gallery_lavacicle_chance > 0.0 { c.zone_lava_gallery_lavacicle_chance } else { 0.15 },
+        bio_anchor_density: if c.zone_bio_anchor_density > 0.0 { c.zone_bio_anchor_density } else { 0.1 },
+        bio_max_anchors: if c.zone_bio_max_anchors > 0 { c.zone_bio_max_anchors } else { 50 },
+        terrace_tiers_min: if c.zone_terrace_tiers_min > 0 { c.zone_terrace_tiers_min } else { 3 },
+        terrace_tiers_max: if c.zone_terrace_tiers_max > 0 { c.zone_terrace_tiers_max } else { 7 },
+        terrace_step_height: if c.zone_terrace_step_height > 0.0 { c.zone_terrace_step_height } else { 4.0 },
+        terrace_rim_height: if c.zone_terrace_rim_height > 0.0 { c.zone_terrace_rim_height } else { 1.5 },
+        terrace_basin_depth: if c.zone_terrace_basin_depth > 0 { c.zone_terrace_basin_depth } else { 2 },
+        frozen_floor_depth: if c.zone_frozen_floor_depth > 0 { c.zone_frozen_floor_depth } else { 2 },
+        frozen_waterfall_count: if c.zone_frozen_waterfall_count > 0 { c.zone_frozen_waterfall_count } else { 2 },
+        frozen_ice_stalactite_chance: if c.zone_frozen_ice_stalactite_chance > 0.0 { c.zone_frozen_ice_stalactite_chance } else { 0.3 },
+    }
 }
 
 /// Debug: log pool config as received from FFI (temporary diagnostic).

@@ -27,6 +27,8 @@
 
     // Pool rendering group
     var poolGroup = null;
+    // Zone wireframe rendering group
+    var zoneGroup = null;
 
     // DOM refs
     var summaryTotal = document.getElementById("stat-total");
@@ -962,6 +964,61 @@
         }, 3100);
     }
 
+    // ── Zone wireframe rendering ────────────────────────────────────
+    var ZONE_COLORS = {
+        0: 0xFFD700, // Cathedral - gold
+        1: 0x1E78FF, // SubterraneanLake - blue
+        2: 0xFF8C00, // RiverCanyon - orange
+        3: 0xFF2020, // LavaTubeGallery - red
+        4: 0x00FF88, // BioluminescentGrotto - green
+        5: 0x00DDDD, // GeothermalTerraces - cyan
+        6: 0xFFFFFF, // FrozenGrotto - white
+    };
+
+    function clearZoneGroup() {
+        if (zoneGroup) {
+            scene.remove(zoneGroup);
+            zoneGroup.traverse(function (child) {
+                if (child.geometry) child.geometry.dispose();
+                if (child.material) child.material.dispose();
+            });
+            zoneGroup = null;
+        }
+    }
+
+    function renderZoneBoxes(zones) {
+        clearZoneGroup();
+        if (!zones || zones.length === 0 || !meshCenter) return;
+
+        zoneGroup = new THREE.Group();
+
+        for (var i = 0; i < zones.length; i++) {
+            var z = zones[i];
+            var color = ZONE_COLORS[z.zone_type] || 0xFFFFFF;
+            var mn = z.world_min;
+            var mx = z.world_max;
+            var ct = z.center;
+
+            // Box wireframe
+            var sx = (mx[0] - mn[0]) * meshScale;
+            var sy = (mx[1] - mn[1]) * meshScale;
+            var sz = (mx[2] - mn[2]) * meshScale;
+            var geo = new THREE.BoxGeometry(sx, sy, sz);
+            var edges = new THREE.EdgesGeometry(geo);
+            var mat = new THREE.LineBasicMaterial({ color: color, linewidth: 2 });
+            var wireframe = new THREE.LineSegments(edges, mat);
+            wireframe.position.set(
+                ((mn[0] + mx[0]) / 2 - meshCenter.x) * meshScale,
+                ((mn[1] + mx[1]) / 2 - meshCenter.y) * meshScale,
+                ((mn[2] + mx[2]) / 2 - meshCenter.z) * meshScale
+            );
+            zoneGroup.add(wireframe);
+            geo.dispose();
+        }
+
+        scene.add(zoneGroup);
+    }
+
     // ── Pool surface rendering ─────────────────────────────────────
     function clearPoolGroup() {
         if (poolGroup) {
@@ -1034,6 +1091,7 @@
             currentMesh = null;
         }
         clearPoolGroup();
+        clearZoneGroup();
 
         viewerPlaceholder.style.display = "none";
 
@@ -1622,8 +1680,9 @@
             if (result.mesh) {
                 var keepCam = document.getElementById("gen-keep-camera").checked;
                 displayJsonMesh(result.mesh, { resetCamera: !keepCam });
-                // Render pool surfaces
+                // Render pool surfaces and zone wireframes
                 renderPoolSurfaces(result.pools);
+                renderZoneBoxes(result.zones);
                 // Snapshot for deep sleep before/after comparison
                 preSleepMeshData = result.mesh;
                 postSleepMeshData = null;
@@ -1837,6 +1896,7 @@
                 viewerPlaceholder.style.display = "none";
                 displayJsonMesh(result.mesh, { resetCamera: true });
                 renderPoolSurfaces(result.pools);
+                renderZoneBoxes(result.zones);
                 preSleepMeshData = result.mesh;
                 genStatus.textContent = "";
 

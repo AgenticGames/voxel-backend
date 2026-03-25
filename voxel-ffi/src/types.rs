@@ -919,6 +919,86 @@ pub struct FfiEngineConfig {
     pub sleep_aureole_garnet_per_n_cells: f32,
     pub sleep_aureole_diopside_per_n_cells: f32,
     pub sleep_aureole_cells_per_extra: u32,
+
+    // ── Cavern Zone Config (45 fields) ──
+    pub zone_enabled: u8,
+    // Per-type spawn probabilities
+    pub zone_cathedral_chance: f32,
+    pub zone_lake_chance: f32,
+    pub zone_canyon_chance: f32,
+    pub zone_lava_gallery_chance: f32,
+    pub zone_bioluminescent_chance: f32,
+    pub zone_terraces_chance: f32,
+    pub zone_frozen_chance: f32,
+    // Per-type minimum air thresholds
+    pub zone_cathedral_min_air: u32,
+    pub zone_lake_min_air: u32,
+    pub zone_canyon_min_air: u32,
+    pub zone_lava_gallery_min_air: u32,
+    pub zone_bioluminescent_min_air: u32,
+    pub zone_terraces_min_air: u32,
+    pub zone_frozen_min_air: u32,
+    // Cathedral
+    pub zone_cathedral_dome_scale: f32,
+    pub zone_cathedral_boulder_count_min: u32,
+    pub zone_cathedral_boulder_count_max: u32,
+    pub zone_cathedral_mega_stalagmite_chance: f32,
+    pub zone_cathedral_flowstone_coverage: f32,
+    // Lake
+    pub zone_lake_depth: u32,
+    pub zone_lake_beach_width: f32,
+    pub zone_lake_island_min_radius: f32,
+    // Canyon
+    pub zone_canyon_width_min: f32,
+    pub zone_canyon_width_max: f32,
+    pub zone_canyon_height_min: f32,
+    pub zone_canyon_height_max: f32,
+    pub zone_canyon_bridge_chance: f32,
+    // Lava Gallery
+    pub zone_lava_gallery_bench_spacing: f32,
+    pub zone_lava_gallery_lavacicle_chance: f32,
+    // Bioluminescent
+    pub zone_bio_anchor_density: f32,
+    pub zone_bio_max_anchors: u32,
+    // Terraces
+    pub zone_terrace_tiers_min: u32,
+    pub zone_terrace_tiers_max: u32,
+    pub zone_terrace_step_height: f32,
+    pub zone_terrace_rim_height: f32,
+    pub zone_terrace_basin_depth: u32,
+    // Frozen
+    pub zone_frozen_floor_depth: u32,
+    pub zone_frozen_waterfall_count: u32,
+    pub zone_frozen_ice_stalactite_chance: f32,
+}
+
+/// Zone descriptor returned from generation for UE consumption.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiZoneDescriptor {
+    pub zone_type: u8,
+    pub world_min_x: f32,
+    pub world_min_y: f32,
+    pub world_min_z: f32,
+    pub world_max_x: f32,
+    pub world_max_y: f32,
+    pub world_max_z: f32,
+    pub center_x: f32,
+    pub center_y: f32,
+    pub center_z: f32,
+    pub anchor_count: u32,
+}
+
+/// Anchor point for zone rendering (bioluminescent lights, etc.).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiZoneAnchor {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub nx: f32,
+    pub ny: f32,
+    pub nz: f32,
 }
 
 #[repr(C)]

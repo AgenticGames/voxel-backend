@@ -846,21 +846,35 @@ fn serve_generate(
         app.sleep_config = sleep_cfg;
     }
 
-    // Collect pool descriptors from the region
-    let pool_descriptors = {
+    // Collect pool and zone descriptors from the region
+    let (pool_descriptors, zone_descriptors) = {
         let app = state.lock().unwrap();
-        app.region.as_ref().map(|r| r.pool_descriptors.clone()).unwrap_or_default()
+        let pools = app.region.as_ref().map(|r| r.pool_descriptors.clone()).unwrap_or_default();
+        let zones = app.region.as_ref().map(|r| {
+            r.zone_descriptors.iter().map(|z| {
+                serde_json::json!({
+                    "zone_type": z.zone_type as u8,
+                    "zone_name": format!("{:?}", z.zone_type),
+                    "world_min": [z.world_min.x, z.world_min.y, z.world_min.z],
+                    "world_max": [z.world_max.x, z.world_max.y, z.world_max.z],
+                    "center": [z.center.x, z.center.y, z.center.z],
+                    "anchor_count": z.anchors.len(),
+                })
+            }).collect::<Vec<_>>()
+        }).unwrap_or_default();
+        (pools, zones)
     };
 
     // Serialize and respond
-    let output_msg = format!("Generated {}x{}x{} in {:.2?}: {} verts, {} tris, {} pools",
-        chunks_x, chunks_y, chunks_z, elapsed, verts, tris, pool_descriptors.len());
+    let output_msg = format!("Generated {}x{}x{} in {:.2?}: {} verts, {} tris, {} pools, {} zones",
+        chunks_x, chunks_y, chunks_z, elapsed, verts, tris, pool_descriptors.len(), zone_descriptors.len());
 
     let response_json = serde_json::json!({
         "ok": true,
         "mesh": mesh_json,
         "output": output_msg,
         "pools": pool_descriptors,
+        "zones": zone_descriptors,
     });
 
     let json_str = serde_json::to_string(&response_json)?;
