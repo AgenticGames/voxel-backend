@@ -98,8 +98,6 @@ pub fn generate(
                     for x in 0..size {
                         let idx = z * size * size + y * size + x;
                         if density.samples[idx].density <= 0.0 { continue; }
-                        // Preserve ores — only replace boring host rock
-                        if density.samples[idx].material.is_ore() { continue; }
 
                         let wp = origin + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
 
@@ -122,28 +120,53 @@ pub fn generate(
                         // Sample noise at world position
                         let noise_val = mycelium_noise.sample(
                             wp.x as f64 * mycelium_freq,
-                            wp.y as f64 * mycelium_freq * 0.5, // compress Y for horizontal spread
+                            wp.y as f64 * mycelium_freq * 0.5,
                             wp.z as f64 * mycelium_freq,
-                        ) as f32 * 0.5 + 0.5; // normalize to 0..1
+                        ) as f32 * 0.5 + 0.5;
 
-                        // Seed proximity boost: closer to a seed → higher probability
                         let seed_boost = mycelium_seeds.iter()
                             .map(|s| {
                                 let d = (wp - *s).length();
-                                (1.0 - (d / seed_radius).min(1.0)).powi(2) // quadratic falloff
+                                (1.0 - (d / seed_radius).min(1.0)).powi(2)
                             })
                             .fold(0.0f32, f32::max);
 
                         let combined = noise_val + seed_boost * 0.5;
 
-                        if is_floor && combined > mycelium_threshold {
-                            density.samples[idx].material = Material::Mycelium;
+                        // Determine target material for this surface
+                        let target_mat = if is_floor && combined > mycelium_threshold {
+                            Some(Material::Mycelium)
                         } else if is_wall && combined > mycelium_threshold + 0.15 {
-                            // Walls need higher threshold — mycelium climbs from floor
-                            density.samples[idx].material = Material::Mycelium;
+                            Some(Material::Mycelium)
                         } else if is_ceiling && combined > mycelium_threshold + 0.35 {
-                            // Ceiling: sparse Glowstone at high-combined areas
-                            density.samples[idx].material = Material::Glowstone;
+                            Some(Material::Glowstone)
+                        } else {
+                            None
+                        };
+
+                        if let Some(mat) = target_mat {
+                            if !density.samples[idx].material.is_ore() {
+                                // Normal case: replace host rock
+                                density.samples[idx].material = mat;
+                            } else {
+                                // Ore: grow mycelium around it — paint non-ore solid neighbors
+                                for &(nx, ny, nz) in &[
+                                    (x + 1, y, z), (x.wrapping_sub(1), y, z),
+                                    (x, y + 1, z), (x, y.wrapping_sub(1), z),
+                                    (x, y, z + 1), (x, y, z.wrapping_sub(1)),
+                                ] {
+                                    if nx < size && ny < size && nz < size {
+                                        let ni = nz * size * size + ny * size + nx;
+                                        if density.samples[ni].density > 0.0
+                                            && !density.samples[ni].material.is_ore()
+                                            && density.samples[ni].material != Material::Mycelium
+                                            && density.samples[ni].material != Material::Glowstone
+                                        {
+                                            density.samples[ni].material = mat;
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
