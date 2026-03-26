@@ -454,3 +454,166 @@ pub fn write_mushroom(
         }
     }
 }
+
+/// Write a frozen wall cascade — a thin ice sheet pressed against a wall face.
+/// `anchor` is the top-center of the cascade. `wall_normal` points away from the wall into air.
+pub fn write_wall_cascade(
+    density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
+    anchor: Vec3,
+    wall_normal: Vec3,
+    height: f32,
+    width: f32,
+    thickness: f32,
+    material: Material,
+    effective_bounds: f32,
+) {
+    let normal = Vec3::new(wall_normal.x, 0.0, wall_normal.z).normalize();
+    let tangent = Vec3::new(-normal.z, 0.0, normal.x);
+
+    let max_extent = width.max(height).max(thickness) + 2.0;
+    let min_cx = ((anchor.x - max_extent) / effective_bounds).floor() as i32;
+    let max_cx = ((anchor.x + max_extent) / effective_bounds).floor() as i32;
+    let min_cy = (((anchor.y - height - 2.0)) / effective_bounds).floor() as i32;
+    let max_cy = ((anchor.y + 2.0) / effective_bounds).floor() as i32;
+    let min_cz = ((anchor.z - max_extent) / effective_bounds).floor() as i32;
+    let max_cz = ((anchor.z + max_extent) / effective_bounds).floor() as i32;
+
+    for cz in min_cz..=max_cz {
+        for cy in min_cy..=max_cy {
+            for cx in min_cx..=max_cx {
+                if let Some(density) = density_fields.get_mut(&(cx, cy, cz)) {
+                    let origin = Vec3::new(
+                        cx as f32 * effective_bounds,
+                        cy as f32 * effective_bounds,
+                        cz as f32 * effective_bounds,
+                    );
+                    let size = density.size;
+                    let vs = effective_bounds / (size - 1) as f32;
+
+                    for z in 0..size {
+                        for y in 0..size {
+                            for x in 0..size {
+                                let wp = origin + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
+                                let diff = wp - anchor;
+                                let along_tangent = diff.x * tangent.x + diff.z * tangent.z;
+                                let along_normal = diff.x * normal.x + diff.z * normal.z;
+                                let dy = diff.y;
+
+                                if dy > 0.5 || dy < -height { continue; }
+                                if along_tangent.abs() > width * 0.5 { continue; }
+
+                                let t_height = (-dy / height).clamp(0.0, 1.0);
+                                // Bottom 20% gets thicker (frozen melt pool)
+                                let thickness_at_y = if t_height > 0.8 {
+                                    thickness * (1.0 + (t_height - 0.8) * 3.0)
+                                } else {
+                                    thickness
+                                };
+                                let bulge = (t_height * std::f32::consts::PI).sin() * thickness * 0.3;
+                                let effective_thickness = thickness_at_y + bulge;
+
+                                if along_normal < -0.5 || along_normal > effective_thickness { continue; }
+
+                                let edge_w = ((width * 0.5 - along_tangent.abs()) * 2.0).min(1.0).max(0.0);
+                                let edge_n = ((effective_thickness - along_normal) * 2.0).min(1.0).max(0.0);
+                                let falloff = (edge_w * edge_n).min(1.0);
+
+                                if falloff > 0.0 {
+                                    let idx = z * size * size + y * size + x;
+                                    if falloff > density.samples[idx].density {
+                                        density.samples[idx].density = falloff;
+                                        density.samples[idx].material = material;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Write a floor-to-ceiling ice column with mid-bulge and clearance carving.
+pub fn write_ice_column(
+    density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
+    base: Vec3,
+    top: Vec3,
+    base_radius: f32,
+    bulge_factor: f32,
+    material: Material,
+    effective_bounds: f32,
+) {
+    let total_height = (top.y - base.y).abs();
+    if total_height < 1.0 { return; }
+
+    let center_x = (base.x + top.x) * 0.5;
+    let center_z = (base.z + top.z) * 0.5;
+    let max_r = base_radius * (1.0 + bulge_factor) + 1.5;
+
+    let min_cx = ((center_x - max_r) / effective_bounds).floor() as i32;
+    let max_cx = ((center_x + max_r) / effective_bounds).floor() as i32;
+    let min_cy = ((base.y - 1.0) / effective_bounds).floor() as i32;
+    let max_cy = ((top.y + 1.0) / effective_bounds).floor() as i32;
+    let min_cz = ((center_z - max_r) / effective_bounds).floor() as i32;
+    let max_cz = ((center_z + max_r) / effective_bounds).floor() as i32;
+
+    // Pass 1: Clearance carve
+    for cz in min_cz..=max_cz {
+        for cy in min_cy..=max_cy {
+            for cx in min_cx..=max_cx {
+                if let Some(density) = density_fields.get_mut(&(cx, cy, cz)) {
+                    let origin = Vec3::new(cx as f32 * effective_bounds, cy as f32 * effective_bounds, cz as f32 * effective_bounds);
+                    let size = density.size;
+                    let vs = effective_bounds / (size - 1) as f32;
+                    for z in 0..size { for y in 0..size { for x in 0..size {
+                        let wp = origin + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
+                        let dy = wp.y - base.y;
+                        if dy < -0.5 || dy > total_height + 0.5 { continue; }
+                        let t = (dy / total_height).clamp(0.0, 1.0);
+                        let r_at_y = base_radius * (1.0 + bulge_factor * (t * std::f32::consts::PI).sin());
+                        let dist_xz = ((wp.x - center_x).powi(2) + (wp.z - center_z).powi(2)).sqrt();
+                        if dist_xz < r_at_y + 1.5 && dist_xz > r_at_y + 0.3 {
+                            let idx = z * size * size + y * size + x;
+                            if density.samples[idx].density > 0.0 {
+                                density.samples[idx].density = -1.0;
+                                density.samples[idx].material = Material::Air;
+                            }
+                        }
+                    }}}
+                }
+            }
+        }
+    }
+
+    // Pass 2: Write column
+    for cz in min_cz..=max_cz {
+        for cy in min_cy..=max_cy {
+            for cx in min_cx..=max_cx {
+                if let Some(density) = density_fields.get_mut(&(cx, cy, cz)) {
+                    let origin = Vec3::new(cx as f32 * effective_bounds, cy as f32 * effective_bounds, cz as f32 * effective_bounds);
+                    let size = density.size;
+                    let vs = effective_bounds / (size - 1) as f32;
+                    for z in 0..size { for y in 0..size { for x in 0..size {
+                        let wp = origin + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
+                        let dy = wp.y - base.y;
+                        if dy < -0.5 || dy > total_height + 0.5 { continue; }
+                        let t = (dy / total_height).clamp(0.0, 1.0);
+                        let r_at_y = base_radius * (1.0 + bulge_factor * (t * std::f32::consts::PI).sin());
+                        let dist_xz = ((wp.x - center_x).powi(2) + (wp.z - center_z).powi(2)).sqrt();
+                        if dist_xz <= r_at_y + 0.5 {
+                            let falloff = ((r_at_y + 0.5 - dist_xz) * 2.0).min(1.0).max(0.0);
+                            if falloff > 0.0 {
+                                let idx = z * size * size + y * size + x;
+                                if falloff > density.samples[idx].density {
+                                    density.samples[idx].density = falloff;
+                                    density.samples[idx].material = material;
+                                }
+                            }
+                        }
+                    }}}
+                }
+            }
+        }
+    }
+}
