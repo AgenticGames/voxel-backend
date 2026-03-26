@@ -85,6 +85,7 @@ pub enum Material {
     PurpleCap = 44,     // deep purple mushroom cap
     TealCap = 45,       // dark teal mushroom cap
     AmberCap = 46,      // burnt orange mushroom cap
+    IceSheet = 47,      // chunky fractured glacial ice — wall interiors, ledge undersides
 }
 
 impl Material {
@@ -136,6 +137,7 @@ impl Material {
             44 => Material::PurpleCap,
             45 => Material::TealCap,
             46 => Material::AmberCap,
+            47 => Material::IceSheet,
             _ => Material::Air,
         }
     }
@@ -184,7 +186,8 @@ impl Material {
             | Material::Ice | Material::Travertine | Material::Hoarfrost | Material::BlackIce
             | Material::Pumice | Material::Sinter | Material::Moonmilk | Material::Tufa
             | Material::Mycelium | Material::MushroomStalk | Material::MushroomGill
-            | Material::PurpleCap | Material::TealCap | Material::AmberCap)
+            | Material::PurpleCap | Material::TealCap | Material::AmberCap
+            | Material::IceSheet)
     }
 
     pub fn is_hard_rock(self) -> bool {
@@ -237,6 +240,7 @@ impl Material {
             Material::Mycelium => 0.3,
             Material::MushroomStalk | Material::MushroomGill
                 | Material::PurpleCap | Material::TealCap | Material::AmberCap => 0.2,
+            Material::IceSheet => 0.45,
             _ => 0.0,
         }
     }
@@ -296,6 +300,7 @@ impl Material {
             Material::PurpleCap => "Purple Cap",
             Material::TealCap => "Teal Cap",
             Material::AmberCap => "Amber Cap",
+            Material::IceSheet => "Ice Sheet",
         }
     }
 
@@ -348,6 +353,7 @@ impl Material {
             Material::PurpleCap => 0x6B2D8B,      // deep purple
             Material::TealCap => 0x1A5050,         // dark teal
             Material::AmberCap => 0xA04820,        // burnt orange
+            Material::IceSheet => 0x8CBFC8,        // pale teal-grey fractured ice
         }
     }
 
@@ -400,6 +406,7 @@ impl Material {
             Material::PurpleCap,
             Material::TealCap,
             Material::AmberCap,
+            Material::IceSheet,
         ]
     }
 }

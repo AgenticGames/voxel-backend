@@ -253,16 +253,24 @@ pub fn generate_region_densities(
             let coord = ChunkCoord::new(cx, cy, cz);
             let c_seed = crate::seed::chunk_seed(config.seed, coord);
             if let Some(density) = density_fields.get_mut(&(cx, cy, cz)) {
-                let (mut pools, mut seeds) = crate::pools::place_pools(
-                    density,
-                    &config.pools,
-                    coord.world_origin_bounds(eb),
-                    config.seed,
-                    c_seed,
-                    (cx, cy, cz),
+                // Skip pools entirely if chunk center is inside a zone exclusion area
+                let chunk_center = glam::Vec3::new(
+                    cx as f32 * eb + eb * 0.5,
+                    cy as f32 * eb + eb * 0.5,
+                    cz as f32 * eb + eb * 0.5,
                 );
-                all_pool_descriptors.append(&mut pools);
-                all_fluid_seeds.append(&mut seeds);
+                if !crate::zones::is_in_exclusion_zone(chunk_center, &zone_bounds) {
+                    let (mut pools, mut seeds) = crate::pools::place_pools(
+                        density,
+                        &config.pools,
+                        coord.world_origin_bounds(eb),
+                        config.seed,
+                        c_seed,
+                        (cx, cy, cz),
+                    );
+                    all_pool_descriptors.append(&mut pools);
+                    all_fluid_seeds.append(&mut seeds);
+                }
             }
         }
     }
@@ -277,15 +285,23 @@ pub fn generate_region_densities(
             let coord = ChunkCoord::new(cx, cy, cz);
             let c_seed = crate::seed::chunk_seed(config.seed, coord);
             if let Some(density) = density_fields.get_mut(&(cx, cy, cz)) {
-                let formation_seeds = crate::formations::place_formations(
-                    density,
-                    &config.formations,
-                    coord.world_origin_bounds(eb),
-                    config.seed,
-                    c_seed,
-                    (cx, cy, cz),
+                // Skip formations if chunk center is inside a zone exclusion area
+                let chunk_center = glam::Vec3::new(
+                    cx as f32 * eb + eb * 0.5,
+                    cy as f32 * eb + eb * 0.5,
+                    cz as f32 * eb + eb * 0.5,
                 );
-                all_fluid_seeds.extend(formation_seeds);
+                if !crate::zones::is_in_exclusion_zone(chunk_center, &zone_bounds) {
+                    let formation_seeds = crate::formations::place_formations(
+                        density,
+                        &config.formations,
+                        coord.world_origin_bounds(eb),
+                        config.seed,
+                        c_seed,
+                        (cx, cy, cz),
+                    );
+                    all_fluid_seeds.extend(formation_seeds);
+                }
             }
         }
     }

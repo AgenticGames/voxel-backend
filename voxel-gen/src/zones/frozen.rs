@@ -590,24 +590,49 @@ pub fn try_place_mega_vault(
     let mut rng = ChaCha8Rng::seed_from_u64(global_seed.wrapping_add(0xAE6A_F001));
     let eb = effective_bounds;
 
+    // Logging helper — writes to a file since eprintln doesn't reach UE
+    fn vault_log(msg: &str) {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+            .open("D:/Unreal Projects/Mithril2026/Saved/mega_vault_log.txt")
+        {
+            let _ = writeln!(f, "{}", msg);
+        }
+    }
+
     // Roll for mega-vault
     let roll: f32 = rng.gen();
     if roll > config.frozen_mega_chance {
+        vault_log(&format!("[MegaVault] Roll {:.3} > chance {:.3}, skipping", roll, config.frozen_mega_chance));
         return None;
     }
 
-    // Vault dimensions in chunks (halved from 12×7×12)
-    let vault_cx = 6i32;
-    let vault_cy = 4i32;
+    // Vault dimensions in chunks
+    let vault_cx = 8i32;  // 30% wider for fat ledges
+    let vault_cy = 9i32;  // 120% deeper (was 4)
     let vault_cz = 6i32;
 
-    // Deterministic vault location: offset from world origin based on seed
-    // This ensures the vault is always in the same place for a given seed
-    let seed_offset_x = ((global_seed >> 8) & 0xFF) as i32 - 128; // -128..127
-    let seed_offset_z = ((global_seed >> 16) & 0xFF) as i32 - 128;
-    let ox = (seed_offset_x / 20) - vault_cx / 2; // small offset from origin
-    let oy = -vault_cy / 2; // centered vertically around Y=0
-    let oz = (seed_offset_z / 20) - vault_cz / 2;
+    // Place vault centered on (0,0,0) — always overlaps initial streaming region
+    let ox = -vault_cx / 2;
+    let oy = -vault_cy / 2;
+    let oz = -vault_cz / 2;
+
+    // Log all incoming chunk keys
+    let all_keys: Vec<(i32,i32,i32)> = density_fields.keys().copied().collect();
+    vault_log(&format!("[MegaVault] Roll {:.3} PASSED. Vault bounds: ({},{},{}) to ({},{},{})",
+        roll, ox, oy, oz, ox+vault_cx, oy+vault_cy, oz+vault_cz));
+    vault_log(&format!("[MegaVault] Region has {} chunks. Sample keys: {:?}",
+        all_keys.len(), &all_keys[..all_keys.len().min(20)]));
+
+    // Log Y range of incoming chunks
+    let min_y = all_keys.iter().map(|k| k.1).min().unwrap_or(0);
+    let max_y = all_keys.iter().map(|k| k.1).max().unwrap_or(0);
+    let min_x = all_keys.iter().map(|k| k.0).min().unwrap_or(0);
+    let max_x = all_keys.iter().map(|k| k.0).max().unwrap_or(0);
+    let min_z = all_keys.iter().map(|k| k.2).min().unwrap_or(0);
+    let max_z = all_keys.iter().map(|k| k.2).max().unwrap_or(0);
+    vault_log(&format!("[MegaVault] Region range: X={}..{} Y={}..{} Z={}..{}",
+        min_x, max_x, min_y, max_y, min_z, max_z));
 
     let world_min = Vec3::new(ox as f32 * eb, oy as f32 * eb, oz as f32 * eb);
     let world_max = Vec3::new(
@@ -617,7 +642,7 @@ pub fn try_place_mega_vault(
     );
     let world_center = (world_min + world_max) * 0.5;
 
-    // Check if any existing chunks overlap the vault — if none do, skip
+    // Check if any existing chunks overlap the vault
     let overlapping: Vec<(i32, i32, i32)> = density_fields.keys()
         .filter(|&&(cx, cy, cz)| {
             cx >= ox && cx < ox + vault_cx
@@ -627,29 +652,39 @@ pub fn try_place_mega_vault(
         .copied()
         .collect();
 
+    vault_log(&format!("[MegaVault] Overlapping chunks: {} of {} needed",
+        overlapping.len(), vault_cx * vault_cy * vault_cz));
+
     if overlapping.is_empty() {
+        vault_log(&format!("[MegaVault] NO OVERLAP — vault at ({},{},{}) doesn't intersect any streamed chunks", ox, oy, oz));
         return None;
     }
+
+    vault_log(&format!("[MegaVault] CARVING {} fissures into {} chunks!", rng.gen_range(2u32..=3), overlapping.len()));
 
     // Noise for organic fissure shapes
     let fissure_noise = Simplex3D::new(global_seed.wrapping_add(0xF155_0001));
     let ledge_noise = Simplex3D::new(global_seed.wrapping_add(0xF155_0002));
     let fissure_freq = 0.08f64;
 
-    // Fissure parameters
+    // Fissure parameters — wide fissures, thick walls for cramped tunnels
     let num_fissures = rng.gen_range(2u32..=3);
-    let fissure_width = rng.gen_range(4.0f32..6.0);
-    let wall_thickness = rng.gen_range(6.0f32..10.0);
+    let fissure_width = eb * 1.5;      // 1.5 chunks wide per fissure
+    let wall_thickness = eb * 1.6;     // 60% thicker walls for tunnel carving
 
     let total_fissure_width = num_fissures as f32 * fissure_width
         + (num_fissures as f32 - 1.0) * wall_thickness;
     let fissure_start_x = world_center.x - total_fissure_width * 0.5;
 
-    let margin_y = 2.0;
+    let margin_y = eb * 0.25;
     let fissure_floor_y = world_min.y + margin_y;
     let fissure_ceil_y = world_max.y - margin_y;
-    let fissure_min_z = world_min.z + 2.0;
-    let fissure_max_z = world_max.z - 2.0;
+    let margin_z = eb * 0.15;
+    let fissure_min_z = world_min.z + margin_z;
+    let fissure_max_z = world_max.z - margin_z;
+
+    vault_log(&format!("[MegaVault] eb={}, fissure_width={:.1}, wall={:.1}, num={}, total_span={:.1}",
+        eb, fissure_width, wall_thickness, num_fissures, total_fissure_width));
 
     let mut fissure_centers_x: Vec<f32> = Vec::new();
 
@@ -671,10 +706,10 @@ pub fn try_place_mega_vault(
 
                     let floor_offset = fissure_noise.sample(
                         wp.z as f64 * fissure_freq, 0.0, fi as f64 * 100.0,
-                    ) as f32 * 3.0;
+                    ) as f32 * eb * 0.2; // undulate ±20% of a chunk
                     let ceil_offset = fissure_noise.sample(
                         wp.z as f64 * fissure_freq, 100.0, fi as f64 * 100.0,
-                    ) as f32 * 3.0;
+                    ) as f32 * eb * 0.2;
                     if wp.y < fissure_floor_y + floor_offset.abs() { continue; }
                     if wp.y > fissure_ceil_y - ceil_offset.abs() { continue; }
 
@@ -682,7 +717,7 @@ pub fn try_place_mega_vault(
                         wp.z as f64 * fissure_freq * 0.5,
                         wp.y as f64 * 0.02,
                         (fi as f64 + 0.5) * 100.0,
-                    ) as f32 * 2.0;
+                    ) as f32 * eb * 0.3; // waver up to ±30% of a chunk
 
                     if (wp.x - center_x - waver).abs() < fissure_width * 0.5 {
                         let idx = z * size * size + y * size + x;
@@ -696,17 +731,18 @@ pub fn try_place_mega_vault(
         }
     }
 
-    // Carve connecting tunnels
-    let tunnel_spacing = rng.gen_range(15.0f32..25.0);
+    // Carve connecting tunnels — scaled to chunk units
+    let tunnel_spacing = eb * rng.gen_range(1.0f32..2.0); // 1-2 chunks between tunnels
     for fi in 0..(num_fissures - 1) as usize {
         let left_x = fissure_centers_x[fi];
         let right_x = fissure_centers_x[fi + 1];
 
-        let mut z_pos = fissure_min_z + rng.gen_range(5.0..12.0);
-        while z_pos < fissure_max_z - 5.0 {
-            let tunnel_y = fissure_floor_y + rng.gen_range(2.0..(fissure_ceil_y - fissure_floor_y - 4.0).max(3.0));
-            let tunnel_h = 3.0f32;
-            let tunnel_w = 3.0f32;
+        let mut z_pos = fissure_min_z + eb * 0.5;
+        while z_pos < fissure_max_z - eb * 0.5 {
+            let vert_range = (fissure_ceil_y - fissure_floor_y - eb * 0.5).max(eb * 0.3);
+            let tunnel_y = fissure_floor_y + rng.gen_range(eb * 0.2..vert_range);
+            let tunnel_h = 3.0f32; // 3 voxels tall (player height)
+            let tunnel_w = 3.0f32; // 3 voxels wide along Z
             let blocked: f32 = rng.gen();
             let is_blocked = blocked < 0.35;
 
@@ -736,64 +772,371 @@ pub fn try_place_mega_vault(
                     }}}
                 }
             }
-            z_pos += tunnel_spacing + rng.gen_range(-5.0..5.0);
+            z_pos += tunnel_spacing + rng.gen_range(-eb * 0.3..eb * 0.3);
         }
     }
 
-    // Carve tiered ledges
-    let ledge_spacing = 5.0f32;
-    for &center_x in &fissure_centers_x {
-        let mut ledge_y = fissure_floor_y + ledge_spacing;
-        while ledge_y < fissure_ceil_y - ledge_spacing {
-            for side in &[-1.0f32, 1.0f32] {
-                let wall_x = center_x + side * fissure_width * 0.5;
-                let ledge_val = ledge_noise.sample(
-                    wall_x as f64 * 0.1, ledge_y as f64 * 0.1, center_x as f64 * 0.05,
+    // Winding paths along fissure walls — organic walkways that snake along Z
+    // with noise-driven Y wander, occasional cross-bridges between walls
+    let path_noise = Simplex3D::new(global_seed.wrapping_add(0xF155_0004));
+    let path_freq = 0.06f64;
+
+    for (fi, &center_x) in fissure_centers_x.iter().enumerate() {
+        // 2-3 path tiers per fissure at different heights
+        let num_tiers = rng.gen_range(6u32..=8);
+        let tier_spacing = (fissure_ceil_y - fissure_floor_y) / (num_tiers as f32 + 1.0);
+
+        for tier in 0..num_tiers {
+            let base_y = fissure_floor_y + tier_spacing * (tier as f32 + 1.0);
+            let side: f32 = if rng.gen_bool(0.5) { -1.0 } else { 1.0 };
+            let wall_x = center_x + side * fissure_width * 0.5;
+            let path_width = rng.gen_range(4.0f32..5.75); // +15% wider
+            let path_thickness = rng.gen_range(2.5f32..3.5); // slightly thicker too
+
+            // Walk along Z, with noise-driven Y wander
+            let z_step = 1.0f32; // sample every voxel along Z
+            let mut z = fissure_min_z + rng.gen_range(1.0..3.0);
+            let fissure_z_len = fissure_max_z - fissure_min_z;
+
+            // Occasionally bridge across to the other wall
+            // 1-2 cross-bridges per tier path
+            let num_bridges = rng.gen_range(1u32..=2);
+            let mut bridge_zs: Vec<f32> = Vec::new();
+            for _ in 0..num_bridges {
+                bridge_zs.push(fissure_min_z + rng.gen_range(fissure_z_len * 0.15..fissure_z_len * 0.85));
+            }
+            let bridge_width = rng.gen_range(2.5f32..4.0);
+
+            while z < fissure_max_z - 1.0 {
+                // Noise-driven Y offset: path wanders up and down ±3 voxels
+                let y_wander = path_noise.sample(
+                    z as f64 * path_freq,
+                    (fi as f64 + tier as f64 * 10.0) * 50.0,
+                    side as f64 * 100.0,
+                ) as f32 * 4.0;
+                let path_y = base_y + y_wander;
+
+                // Noise-driven width variation + periodic thickness wave
+                let width_noise = path_noise.sample(
+                    z as f64 * path_freq * 2.0,
+                    100.0 + fi as f64 * 50.0,
+                    tier as f64 * 30.0,
                 ) as f32;
-                if ledge_val < -0.1 { continue; }
+                // Thickness wave: every ~15 voxels, bulge out 30-40% wider
+                let wave = ((z as f64 * 0.4).sin() * 0.5 + 0.5) as f32;
+                let bulge = path_width * 0.35 * wave;
+                let local_width = path_width + width_noise * 2.0 + bulge;
 
-                let ledge_depth = rng.gen_range(2.0f32..3.0);
-                let ledge_length = rng.gen_range(6.0f32..12.0);
-                let z_range = (fissure_max_z - fissure_min_z - ledge_length - 3.0).max(4.0);
-                let ledge_z_start = fissure_min_z + rng.gen_range(3.0..z_range);
+                // Tunnel mode: occasionally the path dives INTO the wall as a carved tunnel
+                // Uses a slower noise to create ~20% tunnel sections along the path
+                let tunnel_val = path_noise.sample(
+                    z as f64 * 0.03, // slow frequency = long tunnel sections
+                    200.0 + fi as f64 * 70.0,
+                    tier as f64 * 40.0 + side as f64 * 50.0,
+                ) as f32;
+                let is_tunnel = tunnel_val > 0.5; // ~20-25% of path length
+                let tunnel_depth = 5.0f32; // how far into the wall the tunnel goes
+                let tunnel_height = path_thickness + 2.0; // taller than the ledge for headroom
 
+                // Write path segment at this Z position
                 for &key in &overlapping {
                     if let Some(density) = density_fields.get_mut(&key) {
                         let size = density.size;
                         let vs = eb / (size - 1) as f32;
                         let origin = Vec3::new(key.0 as f32 * eb, key.1 as f32 * eb, key.2 as f32 * eb);
 
-                        for z in 0..size { for y in 0..size { for x in 0..size {
-                            let wp = origin + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
-                            if wp.z < ledge_z_start || wp.z > ledge_z_start + ledge_length { continue; }
-                            if wp.y < ledge_y || wp.y > ledge_y + 1.0 { continue; }
+                        for vy in 0..size { for vx in 0..size { for vz in 0..size {
+                            let wp = origin + Vec3::new(vx as f32 * vs, vy as f32 * vs, vz as f32 * vs);
 
-                            let dist_from_wall = if *side < 0.0 { wall_x - wp.x } else { wp.x - wall_x };
-                            if dist_from_wall >= 0.0 && dist_from_wall < ledge_depth {
-                                let idx = z * size * size + y * size + x;
-                                density.samples[idx].density = 0.9;
-                                density.samples[idx].material = Material::Ice;
+                            if (wp.z - z).abs() > z_step * 1.5 { continue; }
+
+                            if is_tunnel {
+                                // TUNNEL MODE: carve into the wall instead of protruding
+                                // Carve a passage going INTO the wall from wall_x
+                                let into_wall = if side < 0.0 { wall_x - wp.x } else { wp.x - wall_x };
+                                if into_wall < -1.0 || into_wall > tunnel_depth { continue; }
+                                if wp.y < path_y - 0.5 || wp.y > path_y + tunnel_height { continue; }
+
+                                let idx = vz * size * size + vy * size + vx;
+                                if density.samples[idx].density > 0.0 {
+                                    density.samples[idx].density = -1.0;
+                                    density.samples[idx].material = Material::Air;
+                                }
+                                continue; // don't write solid in tunnel mode
+                            }
+
+                            // LEDGE MODE: protruding path, thicker at wall for structural support
+                            let protrusion = if side < 0.0 { wp.x - wall_x } else { wall_x - wp.x };
+                            if protrusion < -2.0 || protrusion > local_width { continue; }
+
+                            // Buttress: ledge is thicker near the wall, thins toward the edge
+                            // At wall (protrusion=0): full thickness + 50% extra underside
+                            // At edge (protrusion=local_width): just path_thickness
+                            let t_across = (protrusion / local_width).clamp(0.0, 1.0);
+                            let buttress_extra = path_thickness * 0.5 * (1.0 - t_across); // tapers to 0 at edge
+                            let local_top = path_y + path_thickness;
+                            let local_bottom = path_y - buttress_extra; // extends DOWN near wall
+
+                            if wp.y < local_bottom || wp.y > local_top { continue; }
+
+                            let idx = vz * size * size + vy * size + vx;
+                            let edge_fade = if protrusion > local_width - 1.5 {
+                                (local_width - protrusion) / 1.5
+                            } else { 1.0 };
+                            let d = (0.9 * edge_fade).max(0.1);
+                            if d > density.samples[idx].density {
+                                density.samples[idx].density = d;
+                                // Top surface = Hoarfrost, underside/sides = IceSheet
+                                let is_top = wp.y > path_y + path_thickness - 1.0;
+                                density.samples[idx].material = if is_top {
+                                    Material::Hoarfrost
+                                } else {
+                                    Material::IceSheet
+                                };
                             }
                         }}}
                     }
                 }
+
+                // Organic cross-bridge: winding path across the fissure with Y slope + noise wander
+                let near_bridge = bridge_zs.iter().any(|bz| (z - *bz).abs() < 2.0);
+                if near_bridge {
+                    let start_y = path_y;
+                    let other_wall_x = center_x - side * fissure_width * 0.5;
+                    // Target Y: slight slope up or down (±3 voxels)
+                    let end_y_offset = path_noise.sample(
+                        z as f64 * 0.1, 300.0 + fi as f64 * 40.0, tier as f64 * 20.0,
+                    ) as f32 * 3.0;
+                    let end_y = start_y + end_y_offset;
+
+                    // Step across the fissure in small increments
+                    let cross_steps = 20u32;
+                    let dx_per_step = (other_wall_x - wall_x) / cross_steps as f32;
+
+                    for step in 0..=cross_steps {
+                        let t = step as f32 / cross_steps as f32;
+                        let bridge_x = wall_x + dx_per_step * step as f32;
+                        let bridge_y = start_y + (end_y - start_y) * t;
+                        // Z wander: noise-driven wiggle along Z as it crosses
+                        let z_wander = path_noise.sample(
+                            t as f64 * 3.0, 400.0 + fi as f64 * 60.0, tier as f64 * 25.0,
+                        ) as f32 * 2.5;
+                        let bridge_z_local = z + z_wander;
+                        // Width narrows in the middle for tension
+                        let width_at_t = bridge_width * (0.6 + 0.4 * (1.0 - (2.0 * t - 1.0).abs()));
+
+                        for &key in &overlapping {
+                            if let Some(density) = density_fields.get_mut(&key) {
+                                let size = density.size;
+                                let vs = eb / (size - 1) as f32;
+                                let origin = Vec3::new(key.0 as f32 * eb, key.1 as f32 * eb, key.2 as f32 * eb);
+
+                                for vy in 0..size { for vx in 0..size { for vz in 0..size {
+                                    let wp = origin + Vec3::new(vx as f32 * vs, vy as f32 * vs, vz as f32 * vs);
+                                    if (wp.x - bridge_x).abs() > 1.5 { continue; }
+                                    if (wp.z - bridge_z_local).abs() > width_at_t * 0.5 { continue; }
+                                    if wp.y < bridge_y || wp.y > bridge_y + path_thickness { continue; }
+
+                                    let idx = vz * size * size + vy * size + vx;
+                                    if 0.85 > density.samples[idx].density {
+                                        density.samples[idx].density = 0.85;
+                                        let is_top = wp.y > bridge_y + path_thickness - 1.0;
+                                        density.samples[idx].material = if is_top {
+                                            Material::BlackIce
+                                        } else {
+                                            Material::IceSheet
+                                        };
+                                    }
+                                }}}
+                            }
+                        }
+                    }
+
+                    // Landing on the other side: carve a small shelf/cave into the far wall
+                    let landing_depth = rng.gen_range(4.0f32..7.0);
+                    let landing_width = rng.gen_range(4.0f32..6.0);
+                    let landing_height = rng.gen_range(3.5f32..5.0);
+                    for &key in &overlapping {
+                        if let Some(density) = density_fields.get_mut(&key) {
+                            let size = density.size;
+                            let vs = eb / (size - 1) as f32;
+                            let origin = Vec3::new(key.0 as f32 * eb, key.1 as f32 * eb, key.2 as f32 * eb);
+
+                            for vy in 0..size { for vx in 0..size { for vz in 0..size {
+                                let wp = origin + Vec3::new(vx as f32 * vs, vy as f32 * vs, vz as f32 * vs);
+                                // Carve into the far wall at the bridge endpoint
+                                let into_far_wall = if side < 0.0 { other_wall_x - wp.x } else { wp.x - other_wall_x };
+                                if into_far_wall < -1.0 || into_far_wall > landing_depth { continue; }
+                                if (wp.z - z).abs() > landing_width * 0.5 { continue; }
+                                if wp.y < end_y - 0.5 || wp.y > end_y + landing_height { continue; }
+
+                                let idx = vz * size * size + vy * size + vx;
+                                if density.samples[idx].density > 0.0 {
+                                    density.samples[idx].density = -1.0;
+                                    density.samples[idx].material = Material::Air;
+                                }
+                            }}}
+                        }
+                    }
+                }
+
+                z += z_step;
             }
-            ledge_y += ledge_spacing + rng.gen_range(-1.0..2.0);
         }
     }
 
-    // Paint all remaining solid within vault as Ice (walls between fissures)
-    for &key in &overlapping {
-        if let Some(density) = density_fields.get_mut(&key) {
-            let size = density.size;
-            for idx in 0..size * size * size {
-                if density.samples[idx].density > 0.0
-                    && density.samples[idx].material.is_host_rock()
-                {
-                    density.samples[idx].material = Material::Ice;
+    // Tier-connecting ramps: short sloped segments between adjacent tier heights
+    // These let the player move between tiers without jumping
+    for (fi, &center_x) in fissure_centers_x.iter().enumerate() {
+        let num_tiers_local = rng.gen_range(6u32..=8);
+        let tier_spacing_local = (fissure_ceil_y - fissure_floor_y) / (num_tiers_local as f32 + 1.0);
+
+        // Connect every other pair of adjacent tiers with a ramp
+        for tier in 0..num_tiers_local.saturating_sub(1) {
+            if rng.gen_bool(0.5) { continue; } // 50% of tier pairs get a ramp
+
+            let lower_y = fissure_floor_y + tier_spacing_local * (tier as f32 + 1.0);
+            let upper_y = fissure_floor_y + tier_spacing_local * (tier as f32 + 2.0);
+            let ramp_z = fissure_min_z + rng.gen_range(eb * 0.3..(fissure_max_z - fissure_min_z - eb * 0.5).max(eb * 0.4));
+            let ramp_side: f32 = if rng.gen_bool(0.5) { -1.0 } else { 1.0 };
+            let ramp_wall_x = center_x + ramp_side * fissure_width * 0.5;
+            let ramp_length = rng.gen_range(eb * 0.5..eb * 1.5); // how far along Z the ramp extends
+            let ramp_width = rng.gen_range(3.0f32..4.5);
+
+            for &key in &overlapping {
+                if let Some(density) = density_fields.get_mut(&key) {
+                    let size = density.size;
+                    let vs = eb / (size - 1) as f32;
+                    let origin = Vec3::new(key.0 as f32 * eb, key.1 as f32 * eb, key.2 as f32 * eb);
+
+                    for vz in 0..size { for vy in 0..size { for vx in 0..size {
+                        let wp = origin + Vec3::new(vx as f32 * vs, vy as f32 * vs, vz as f32 * vs);
+                        if wp.z < ramp_z || wp.z > ramp_z + ramp_length { continue; }
+
+                        // Ramp Y: linearly interpolate from lower_y to upper_y along Z
+                        let t = (wp.z - ramp_z) / ramp_length;
+                        let ramp_y = lower_y + (upper_y - lower_y) * t;
+                        if wp.y < ramp_y || wp.y > ramp_y + 2.5 { continue; }
+
+                        let protrusion = if ramp_side < 0.0 { wp.x - ramp_wall_x } else { ramp_wall_x - wp.x };
+                        if protrusion < -1.0 || protrusion > ramp_width { continue; }
+
+                        let idx = vz * size * size + vy * size + vx;
+                        if 0.85 > density.samples[idx].density {
+                            density.samples[idx].density = 0.85;
+                            density.samples[idx].material = Material::IceSheet;
+                        }
+                    }}}
                 }
             }
         }
+    }
+
+    // Paint materials: low-frequency noise for large connected patches
+    let mat_noise = Simplex3D::new(global_seed.wrapping_add(0xF155_0003));
+    let mat_freq = 0.04f64; // very low freq = large blobs, not speckles
+
+    for &key in &overlapping {
+        if let Some(density) = density_fields.get_mut(&key) {
+            let size = density.size;
+            let vs = eb / (size - 1) as f32;
+            let origin = Vec3::new(key.0 as f32 * eb, key.1 as f32 * eb, key.2 as f32 * eb);
+
+            for z in 0..size {
+                for y in 0..size {
+                    for x in 0..size {
+                        let idx = z * size * size + y * size + x;
+                        if density.samples[idx].density <= 0.0 { continue; }
+                        if density.samples[idx].material.is_ore() { continue; }
+
+                        let wp = origin + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
+
+                        // Surface classification
+                        let above = if y + 1 < size { z * size * size + (y + 1) * size + x } else { idx };
+                        let below = if y > 0 { z * size * size + (y - 1) * size + x } else { idx };
+                        let is_floor = y + 1 < size && density.samples[above].density <= 0.0;
+                        let is_ceiling = y > 0 && density.samples[below].density <= 0.0;
+                        let is_wall = !is_floor && !is_ceiling && [
+                            (x + 1, y, z), (x.wrapping_sub(1), y, z),
+                            (x, y, z + 1), (x, y, z.wrapping_sub(1)),
+                        ].iter().any(|&(nx, ny, nz)| {
+                            nx < size && nz < size && {
+                                let ni = nz * size * size + ny * size + nx;
+                                density.samples[ni].density <= 0.0
+                            }
+                        });
+                        let is_interior = !is_floor && !is_ceiling && !is_wall;
+
+                        let noise_val = mat_noise.sample(
+                            wp.x as f64 * mat_freq,
+                            wp.y as f64 * mat_freq * 0.5,
+                            wp.z as f64 * mat_freq,
+                        ) as f32 * 0.5 + 0.5;
+
+                        // Check if this voxel is on a ledge (has air below AND is horizontal-ish)
+                        let below2 = if y > 1 { z * size * size + (y - 2) * size + x } else { idx };
+                        let on_ledge = is_floor && y > 1 && density.samples[below2].density <= 0.0;
+
+                        // Check if underside of a ledge (solid with air below)
+                        let is_ledge_underside = is_ceiling && y + 1 < size && {
+                            let above2 = z * size * size + (y + 1) * size + x;
+                            density.samples[above2].density > 0.0
+                        };
+
+                        let mat = if on_ledge {
+                            // Ledge tops: Hoarfrost accumulation with BlackIce patches
+                            if noise_val > 0.55 { Material::BlackIce }
+                            else { Material::Hoarfrost }
+                        } else if is_ledge_underside {
+                            // Ledge undersides: chunky IceSheet
+                            Material::IceSheet
+                        } else if is_floor {
+                            // Fissure floor: large BlackIce pools
+                            if noise_val > 0.45 { Material::BlackIce }
+                            else { Material::Permafrost }
+                        } else if is_ceiling {
+                            // Ceiling: mostly Ice with Hoarfrost patches
+                            if noise_val > 0.6 { Material::Hoarfrost }
+                            else { Material::Ice }
+                        } else if is_wall {
+                            // Walls: IceSheet deep in walls, Ice on surface, Permafrost at edges
+                            if noise_val > 0.65 { Material::Hoarfrost }
+                            else if noise_val < 0.2 { Material::Permafrost }
+                            else if noise_val < 0.4 { Material::IceSheet }
+                            else { Material::Ice }
+                        } else {
+                            // Deep interior — thick wall cores
+                            Material::IceSheet
+                        };
+
+                        density.samples[idx].material = mat;
+                    }
+                }
+            }
+        }
+    }
+
+    // Spawn ceiling icicles inside fissures
+    let mut icicle_params: Vec<(Vec3, f32, f32)> = Vec::new(); // (pos, length, radius)
+    for &center_x in &fissure_centers_x {
+        let mut z_step = fissure_min_z + rng.gen_range(1.0..3.0);
+        while z_step < fissure_max_z {
+            if rng.gen::<f32>() < 0.4 { // 40% chance per position
+                let icicle_x = center_x + rng.gen_range(-fissure_width * 0.3..fissure_width * 0.3);
+                let icicle_z = z_step;
+                let icicle_y = fissure_ceil_y - rng.gen_range(0.0..eb * 0.15);
+                let length = rng.gen_range(3.0..8.0);
+                let radius = rng.gen_range(0.4..1.5);
+                icicle_params.push((Vec3::new(icicle_x, icicle_y, icicle_z), length, radius));
+            }
+            z_step += rng.gen_range(2.0..5.0);
+        }
+    }
+    for (anchor, length, radius) in &icicle_params {
+        shapes::write_cone(
+            density_fields, *anchor, *length, *radius, -1.0,
+            Material::Ice, 2.0, effective_bounds,
+        );
     }
 
     let descriptor = ZoneDescriptor {
