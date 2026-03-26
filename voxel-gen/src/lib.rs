@@ -151,3 +151,45 @@ pub fn compute_crystals(
         c_seed,
     )
 }
+
+/// Lightweight zone scan: generates density fields (noise only, no worms/ores)
+/// for chunks in a radius, then runs zone detection. Returns zone descriptors.
+pub fn scan_zones_only(
+    center: (i32, i32, i32),
+    chunk_radius: i32,
+    config: &GenerationConfig,
+) -> Vec<zones::ZoneDescriptor> {
+    use std::collections::HashMap;
+
+    let mut density_fields: HashMap<(i32, i32, i32), voxel_core::density::DensityField> = HashMap::new();
+
+    // Generate base density (noise only) for all chunks in radius
+    for cx in (center.0 - chunk_radius)..=(center.0 + chunk_radius) {
+        for cy in (center.1 - chunk_radius)..=(center.1 + chunk_radius) {
+            for cz in (center.2 - chunk_radius)..=(center.2 + chunk_radius) {
+                let key = (cx, cy, cz);
+                let world_origin = glam::Vec3::new(
+                    cx as f32 * config.chunk_size as f32,
+                    cy as f32 * config.chunk_size as f32,
+                    cz as f32 * config.chunk_size as f32,
+                );
+                let df = density::generate_density_field(
+                    config,
+                    world_origin,
+                );
+                density_fields.insert(key, df);
+            }
+        }
+    }
+
+    // Run zone detection on the density fields
+    let eb = config.effective_bounds();
+    let (descriptors, _bounds, _fluids) = zones::place_zones(
+        &mut density_fields,
+        &config.zones,
+        config.seed,
+        eb,
+    );
+
+    descriptors
+}

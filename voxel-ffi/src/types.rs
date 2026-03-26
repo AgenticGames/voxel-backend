@@ -93,6 +93,29 @@ pub struct FfiCrystalData {
     pub count: u32,
 }
 
+/// Zone descriptor for UE consumption — one per detected zone in a region.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiZoneDescriptor {
+    pub zone_type: u8,
+    pub center_x: f32,
+    pub center_y: f32,
+    pub center_z: f32,
+    pub min_x: f32,
+    pub min_y: f32,
+    pub min_z: f32,
+    pub max_x: f32,
+    pub max_y: f32,
+    pub max_z: f32,
+}
+
+/// Zone data container. Pointer owned by Rust, freed via voxel_free_result.
+#[repr(C)]
+pub struct FfiZoneData {
+    pub descriptors: *mut FfiZoneDescriptor,
+    pub count: u32,
+}
+
 #[repr(C)]
 pub struct FfiResult {
     pub result_type: FfiResultType,
@@ -102,6 +125,7 @@ pub struct FfiResult {
     pub generation: u64,
     pub fluid_mesh: FfiFluidMeshData,
     pub crystal_data: FfiCrystalData,
+    pub zone_data: FfiZoneData,
 }
 
 #[repr(C)]
@@ -972,22 +996,7 @@ pub struct FfiEngineConfig {
     pub zone_frozen_ice_stalactite_chance: f32,
 }
 
-/// Zone descriptor returned from generation for UE consumption.
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct FfiZoneDescriptor {
-    pub zone_type: u8,
-    pub world_min_x: f32,
-    pub world_min_y: f32,
-    pub world_min_z: f32,
-    pub world_max_x: f32,
-    pub world_max_y: f32,
-    pub world_max_z: f32,
-    pub center_x: f32,
-    pub center_y: f32,
-    pub center_z: f32,
-    pub anchor_count: u32,
-}
+// FfiZoneDescriptor is defined near the top of this file, alongside FfiZoneData.
 
 /// Anchor point for zone rendering (bioluminescent lights, etc.).
 #[repr(C)]
@@ -1228,6 +1237,7 @@ pub enum WorkerResult {
         mesh: ConvertedMesh,
         generation: u64,
         crystal_data: Vec<FfiCrystalPlacement>,
+        zone_descriptors: Vec<FfiZoneDescriptor>,
     },
     Error {
         chunk: (i32, i32, i32),

@@ -22,7 +22,7 @@ use crate::convert::{convert_mesh_to_ue_scaled, from_ue_normal, from_ue_world_po
 use crate::engine::terrace_size_for_scale;
 use crate::profiler::{ChunkTimings, StreamingProfiler};
 use crate::store::ChunkStore;
-use crate::types::{FfiCollapseEvent, FfiCrystalPlacement, WorkerRequest, WorkerResult};
+use crate::types::{FfiCollapseEvent, FfiCrystalPlacement, FfiZoneDescriptor, WorkerRequest, WorkerResult};
 
 /// Map SpringType → FluidType u8 for debug-colored water rendering.
 fn spring_type_to_fluid_u8(st: &voxel_gen::springs::SpringType) -> u8 {
@@ -176,6 +176,7 @@ fn handle_request(
 
             let mut pool_fluid_seeds: Vec<voxel_gen::pools::FluidSeed> = Vec::new();
             let mut region_river_springs: Vec<((i32, i32, i32), voxel_gen::springs::SpringDescriptor)> = Vec::new();
+            let mut region_zone_descriptors: Vec<FfiZoneDescriptor> = Vec::new();
 
             let (mesh, dc_vertices, boundary_edges) = if let Some(result) = mesh_result {
                 result
@@ -185,9 +186,30 @@ fn handle_request(
 
                 let t0 = Instant::now();
                 let coords = region_chunks(rk, cfg.region_size);
-                let (mut densities, _pools, fluid_seeds, worm_paths, rt, river_springs, _zones) = generate_region_densities(&coords, &cfg);
+                let (mut densities, _pools, fluid_seeds, worm_paths, rt, river_springs, zones) = generate_region_densities(&coords, &cfg);
                 pool_fluid_seeds = fluid_seeds;
                 region_river_springs = river_springs;
+
+                // Convert zone descriptors to FFI format with coordinate transform
+                {
+                    let voxel_scale = cfg.effective_bounds() / cfg.chunk_size as f32;
+                    let scale = voxel_scale * world_scale;
+                    region_zone_descriptors = zones.iter().map(|zd| {
+                        FfiZoneDescriptor {
+                            zone_type: zd.zone_type as u8,
+                            // Rust Y-up → UE Z-up: swap Y↔Z, negate new Y
+                            center_x: zd.center.x * scale,
+                            center_y: -zd.center.z * scale,
+                            center_z: zd.center.y * scale,
+                            min_x: zd.world_min.x * scale,
+                            min_y: -zd.world_max.z * scale,
+                            min_z: zd.world_min.y * scale,
+                            max_x: zd.world_max.x * scale,
+                            max_y: -zd.world_min.z * scale,
+                            max_z: zd.world_max.y * scale,
+                        }
+                    }).collect();
+                }
                 if profiling {
                     t_region_density += t0.elapsed();
                     region_timings = rt;
@@ -362,6 +384,7 @@ fn handle_request(
                                 let crystal_data = retrieve_crystal_data(store, key, cfg.voxel_scale(), world_scale);
                                 let _ = result_tx.send(WorkerResult::ChunkMesh {
                                     chunk: key, mesh: converted, generation: 0, crystal_data,
+                                    zone_descriptors: Vec::new(),
                                 });
                             }
                         }
@@ -430,6 +453,7 @@ fn handle_request(
                                     let crystal_data = retrieve_crystal_data(store, key, cfg.voxel_scale(), world_scale);
                                     let _ = result_tx.send(WorkerResult::ChunkMesh {
                                         chunk: key, mesh: converted, generation: 0, crystal_data,
+                                        zone_descriptors: Vec::new(),
                                     });
                                 }
                             }
@@ -662,6 +686,7 @@ fn handle_request(
                 mesh: converted,
                 generation,
                 crystal_data,
+                zone_descriptors: std::mem::take(&mut region_zone_descriptors),
             });
             let t_send_block = if profiling { t_send_start.elapsed() } else { Duration::ZERO };
 
@@ -1133,6 +1158,7 @@ fn handle_request(
                     mesh,
                     generation: 0, // Sleep remesh
                     crystal_data,
+                    zone_descriptors: Vec::new(),
                 });
             }
             let t_mesh_send_elapsed = t_mesh_send.elapsed();
@@ -1180,13 +1206,11 @@ fn handle_request(
             let _ = writeln!(report, "═══════════════════════════════════════════════════════");
 
             // Compact & serialize manifest for morph system — filter to aureole block only
-            // (full manifest can be 300+ MB; morph only needs the ~27 showcase chunks)
+            // Compact manifest (merge multi-phase changes per voxel) but don't filter by block —
+            // cinematic mode uses a player-aimed block that differs from Rust's showcase block.
+            // Manifest is cached once via set_morph_manifest, so full size (~30MB) is acceptable.
             let mut compact_manifest = sleep_result.manifest.clone();
             compact_manifest.compact();
-            if let Some(ref block) = sleep_result.aureole_showcase_block {
-                let block_set: std::collections::HashSet<(i32,i32,i32)> = block.iter().copied().collect();
-                compact_manifest.chunk_deltas.retain(|k, _| block_set.contains(k));
-            }
             let manifest_json = compact_manifest.to_json().unwrap_or_default();
 
             // Send sleep completion stats (intercepted by engine.poll_result)
@@ -1283,6 +1307,7 @@ fn handle_request(
                     mesh,
                     generation: 0,
                     crystal_data,
+                    zone_descriptors: Vec::new(),
                 });
             }
 
@@ -1320,11 +1345,14 @@ fn handle_request(
         WorkerRequest::MorphStep { chunks, step, total_steps } => {
             let cfg = config.read().unwrap().clone();
 
-            // Read cached manifest (set once via set_morph_manifest, reused for all 30 steps)
-            let manifest = match morph_manifest.lock().unwrap().clone() {
+            // Borrow cached manifest (set once via set_morph_manifest, reused for all 30 steps)
+            // Hold lock for duration of step — acceptable since only one morph runs at a time
+            let manifest_guard = morph_manifest.lock().unwrap();
+            let manifest = match manifest_guard.as_ref() {
                 Some(m) => m,
                 None => {
                     eprintln!("[MORPH] No cached manifest — call set_morph_manifest first");
+                    drop(manifest_guard);
                     let _ = result_tx.send(WorkerResult::MorphMeshes {
                         step, total_steps, meshes: Vec::new(),
                     });
@@ -1653,6 +1681,7 @@ fn handle_request(
                         mesh,
                         generation: 0,
                         crystal_data,
+                        zone_descriptors: Vec::new(),
                     });
                 }
             }
@@ -1780,6 +1809,7 @@ fn incremental_seam_pass(
             mesh: converted,
             generation: 0,
             crystal_data,
+            zone_descriptors: Vec::new(),
         });
         candidates_sent += 1;
     }
@@ -1882,6 +1912,7 @@ fn batched_seam_pass(
             mesh: converted,
             generation: 0,
             crystal_data,
+            zone_descriptors: Vec::new(),
         });
     }
 }

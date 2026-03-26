@@ -110,8 +110,9 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                 mesh,
                 generation,
                 crystal_data,
+                zone_descriptors,
             } => {
-                let result = convert_mesh_to_ffi_result(chunk, mesh, generation, crystal_data);
+                let result = convert_mesh_to_ffi_result(chunk, mesh, generation, crystal_data, zone_descriptors);
                 Box::into_raw(Box::new(result))
             }
             WorkerResult::MinedMaterials { mined } => {
@@ -123,6 +124,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     generation: 0,
                     fluid_mesh: empty_fluid_mesh_data(),
                     crystal_data: empty_crystal_data(),
+                    zone_data: empty_zone_data(),
                 };
                 Box::into_raw(Box::new(result))
             }
@@ -136,6 +138,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     generation: 0,
                     fluid_mesh: converted_fluid_mesh_to_ffi(mesh),
                     crystal_data: empty_crystal_data(),
+                    zone_data: empty_zone_data(),
                 };
                 Box::into_raw(Box::new(result))
             }
@@ -149,6 +152,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     generation,
                     fluid_mesh: empty_fluid_mesh_data(),
                     crystal_data: empty_crystal_data(),
+                    zone_data: empty_zone_data(),
                 };
                 Box::into_raw(Box::new(result))
             }
@@ -159,7 +163,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
             WorkerResult::CollapseResult { events, meshes } => {
                 // Send each collapse-remeshed chunk as a ChunkMesh result first
                 for (chunk, mesh) in meshes {
-                    let r = convert_mesh_to_ffi_result(chunk, mesh, 0, Vec::new());
+                    let r = convert_mesh_to_ffi_result(chunk, mesh, 0, Vec::new(), Vec::new());
                     let _ = Box::into_raw(Box::new(r));
                     // Note: in practice these go through the result channel,
                     // but for the poll API we emit the collapse event.
@@ -183,13 +187,14 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     generation: ev.volume as u64,
                     fluid_mesh: empty_fluid_mesh_data(),
                     crystal_data: empty_crystal_data(),
+                    zone_data: empty_zone_data(),
                 };
                 Box::into_raw(Box::new(result))
             }
             WorkerResult::SupportResult { success, meshes } => {
                 // Send each remeshed chunk as a ChunkMesh
                 for (chunk, mesh) in meshes {
-                    let r = convert_mesh_to_ffi_result(chunk, mesh, 0, Vec::new());
+                    let r = convert_mesh_to_ffi_result(chunk, mesh, 0, Vec::new(), Vec::new());
                     let _ = Box::into_raw(Box::new(r));
                 }
                 // Return as a mine result with success indicator
@@ -201,6 +206,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     generation: 0,
                     fluid_mesh: empty_fluid_mesh_data(),
                     crystal_data: empty_crystal_data(),
+                    zone_data: empty_zone_data(),
                 };
                 Box::into_raw(Box::new(result))
             }
@@ -328,6 +334,16 @@ pub unsafe extern "C" fn voxel_free_result(result: *mut FfiResult) {
             crystals.placements,
             crystals.count as usize,
             crystals.count as usize,
+        ));
+    }
+
+    // Free zone data if present
+    let zones = &result.zone_data;
+    if zones.count > 0 && !zones.descriptors.is_null() {
+        drop(Vec::from_raw_parts(
+            zones.descriptors,
+            zones.count as usize,
+            zones.count as usize,
         ));
     }
 
@@ -1600,6 +1616,55 @@ pub unsafe extern "C" fn voxel_profiler_free_report(report: *mut c_char) {
     drop(CString::from_raw(report));
 }
 
+/// Lightweight zone scan: generates density fields (noise only, no worms/ores)
+/// for chunks in a radius, then runs zone detection. Writes results into caller-provided buffer.
+/// Returns 0 on success, non-zero on error.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_scan_zones(
+    engine: *mut c_void,
+    center_x: i32, center_y: i32, center_z: i32,
+    chunk_radius: i32,
+    out_zones: *mut FfiZoneDescriptor,
+    out_count: *mut u32,
+    max_zones: u32,
+) -> i32 {
+    if engine.is_null() || out_zones.is_null() || out_count.is_null() {
+        return -1;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let cfg = engine.config_snapshot();
+    let ws = engine.get_world_scale();
+
+    // Transform UE chunk coords to Rust coords
+    let rust_center = crate::convert::ue_chunk_to_rust(center_x, center_y, center_z);
+
+    let descriptors = voxel_gen::scan_zones_only(rust_center, chunk_radius, &cfg);
+
+    let voxel_scale = cfg.effective_bounds() / cfg.chunk_size as f32;
+    let scale = voxel_scale * ws;
+
+    let count = descriptors.len().min(max_zones as usize);
+    for (i, zd) in descriptors.iter().take(count).enumerate() {
+        let ffi = FfiZoneDescriptor {
+            zone_type: zd.zone_type as u8,
+            // Rust Y-up → UE Z-up: swap Y↔Z, negate new Y
+            center_x: zd.center.x * scale,
+            center_y: -zd.center.z * scale,
+            center_z: zd.center.y * scale,
+            min_x: zd.world_min.x * scale,
+            min_y: -zd.world_max.z * scale,  // negate + swap min/max
+            min_z: zd.world_min.y * scale,
+            max_x: zd.world_max.x * scale,
+            max_y: -zd.world_min.z * scale,  // negate + swap min/max
+            max_z: zd.world_max.y * scale,
+        };
+        *out_zones.add(i) = ffi;
+    }
+    *out_count = count as u32;
+
+    0 // success
+}
+
 // ── Internal helpers ──
 
 fn convert_mesh_to_ffi_result(
@@ -1607,6 +1672,7 @@ fn convert_mesh_to_ffi_result(
     mesh: ConvertedMesh,
     generation: u64,
     crystal_data: Vec<FfiCrystalPlacement>,
+    zone_descriptors: Vec<FfiZoneDescriptor>,
 ) -> FfiResult {
     // Convert Rust chunk coords back to UE space for the caller
     let ue = rust_chunk_to_ue(chunk.0, chunk.1, chunk.2);
@@ -1622,6 +1688,7 @@ fn convert_mesh_to_ffi_result(
         generation,
         fluid_mesh: empty_fluid_mesh_data(),
         crystal_data: convert_crystal_vec_to_ffi(crystal_data),
+        zone_data: convert_zone_vec_to_ffi(zone_descriptors),
     }
 }
 
@@ -1638,6 +1705,21 @@ fn convert_crystal_vec_to_ffi(data: Vec<FfiCrystalPlacement>) -> FfiCrystalData 
 
 fn empty_crystal_data() -> FfiCrystalData {
     FfiCrystalData { placements: std::ptr::null_mut(), count: 0 }
+}
+
+fn convert_zone_vec_to_ffi(data: Vec<FfiZoneDescriptor>) -> FfiZoneData {
+    if data.is_empty() {
+        return FfiZoneData { descriptors: std::ptr::null_mut(), count: 0 };
+    }
+    let count = data.len() as u32;
+    let mut boxed = data.into_boxed_slice();
+    let ptr = boxed.as_mut_ptr();
+    std::mem::forget(boxed);
+    FfiZoneData { descriptors: ptr, count }
+}
+
+fn empty_zone_data() -> FfiZoneData {
+    FfiZoneData { descriptors: std::ptr::null_mut(), count: 0 }
 }
 
 fn converted_mesh_to_ffi(mesh: ConvertedMesh) -> FfiMeshData {

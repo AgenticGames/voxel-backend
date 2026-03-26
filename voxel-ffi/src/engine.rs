@@ -105,6 +105,11 @@ impl VoxelEngine {
         self.config.read().map(|c| c.chunk_size).unwrap_or(16)
     }
 
+    /// Return a snapshot of the current generation config.
+    pub fn config_snapshot(&self) -> GenerationConfig {
+        self.config.read().unwrap().clone()
+    }
+
     pub fn get_world_scale(&self) -> f32 {
         self.world_scale
     }
