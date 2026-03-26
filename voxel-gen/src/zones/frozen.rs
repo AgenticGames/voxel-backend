@@ -431,5 +431,143 @@ pub fn generate(
         }
     }
 
+    // ── Step 6: Ice Pit Traps ──
+    // 1-2 hidden pits under BlackIce floor: bowl-shaped cavity with ice spike stalagmites,
+    // thin ice cap on top with a small gap crack. BlackIce sliding pulls players toward center.
+    let num_pits = rng.gen_range(1u32..=2);
+    let mut pit_count = 0u32;
+
+    // Find BlackIce floor positions far enough from zone edges
+    let pit_margin = extent.length() * 0.15;
+    let mut pit_candidates: Vec<Vec3> = Vec::new();
+    for &key in &volume.chunk_keys {
+        if let Some(density) = density_fields.get(&key) {
+            let size = density.size;
+            let vs = eb / (size - 1) as f32;
+            let origin = Vec3::new(key.0 as f32 * eb, key.1 as f32 * eb, key.2 as f32 * eb);
+            for z in (2..size - 2).step_by(4) {
+                for x in (2..size - 2).step_by(4) {
+                    for y in 0..size {
+                        let idx = z * size * size + y * size + x;
+                        if density.samples[idx].density <= 0.0 { continue; }
+                        if density.samples[idx].material != Material::BlackIce { continue; }
+                        let above = z * size * size + (y + 1) * size + x;
+                        if y + 1 < size && density.samples[above].density <= 0.0 {
+                            let wp = origin + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
+                            // Must be away from zone edges
+                            let to_center = (wp - volume.world_center).length();
+                            if to_center < extent.length() * 0.35 {
+                                pit_candidates.push(wp);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for _ in 0..num_pits {
+        if pit_candidates.is_empty() { break; }
+        let idx = rng.gen_range(0..pit_candidates.len());
+        let pit_center = pit_candidates.swap_remove(idx);
+        // Remove nearby candidates so pits don't overlap
+        pit_candidates.retain(|p| (p.x - pit_center.x).abs() > 8.0 || (p.z - pit_center.z).abs() > 8.0);
+
+        let pit_radius = rng.gen_range(3.0..5.0);
+        let pit_depth = rng.gen_range(4.0..6.0);
+        let crack_radius = 0.8; // small center gap for player to fall through
+
+        // Carve bowl-shaped pit beneath the floor
+        for &key in &volume.chunk_keys {
+            if let Some(density) = density_fields.get_mut(&key) {
+                let size = density.size;
+                let vs = eb / (size - 1) as f32;
+                let origin = Vec3::new(key.0 as f32 * eb, key.1 as f32 * eb, key.2 as f32 * eb);
+
+                for z in 0..size {
+                    for y in 0..size {
+                        for x in 0..size {
+                            let wp = origin + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
+                            let dx = wp.x - pit_center.x;
+                            let dz = wp.z - pit_center.z;
+                            let dist_xz = (dx * dx + dz * dz).sqrt();
+                            let dy = pit_center.y - wp.y; // positive = below pit surface
+
+                            if dist_xz > pit_radius + 1.0 { continue; }
+                            if dy < 0.5 || dy > pit_depth + 1.0 { continue; }
+
+                            let idx = z * size * size + y * size + x;
+
+                            // Bowl profile: deeper in center, shallow at edges
+                            let t_radius = (dist_xz / pit_radius).min(1.0);
+                            let max_depth_here = pit_depth * (1.0 - t_radius * t_radius); // parabolic bowl
+
+                            if dy <= max_depth_here && density.samples[idx].density > 0.0 {
+                                density.samples[idx].density = -1.0;
+                                density.samples[idx].material = Material::Air;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Punch a small crack hole in the ice cap at center
+        for &key in &volume.chunk_keys {
+            if let Some(density) = density_fields.get_mut(&key) {
+                let size = density.size;
+                let vs = eb / (size - 1) as f32;
+                let origin = Vec3::new(key.0 as f32 * eb, key.1 as f32 * eb, key.2 as f32 * eb);
+
+                for z in 0..size {
+                    for y in 0..size {
+                        for x in 0..size {
+                            let wp = origin + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
+                            let dx = wp.x - pit_center.x;
+                            let dz = wp.z - pit_center.z;
+                            let dist_xz = (dx * dx + dz * dz).sqrt();
+                            let dy = (wp.y - pit_center.y).abs();
+
+                            // Crack hole: remove ice cap within crack_radius of center
+                            if dist_xz < crack_radius && dy < 1.5 {
+                                let idx = z * size * size + y * size + x;
+                                if density.samples[idx].density > 0.0 {
+                                    density.samples[idx].density = -1.0;
+                                    density.samples[idx].material = Material::Air;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Place ice spike stalagmites in the pit floor
+        let num_spikes = rng.gen_range(5u32..=10);
+        for _ in 0..num_spikes {
+            let spike_offset = Vec3::new(
+                rng.gen_range(-pit_radius * 0.7..pit_radius * 0.7),
+                0.0,
+                rng.gen_range(-pit_radius * 0.7..pit_radius * 0.7),
+            );
+            let spike_base = Vec3::new(
+                pit_center.x + spike_offset.x,
+                pit_center.y - pit_depth + 0.5, // pit floor
+                pit_center.z + spike_offset.z,
+            );
+            let spike_len = rng.gen_range(1.5..3.5);
+            let spike_rad = rng.gen_range(0.2..0.6);
+
+            shapes::write_cone(
+                density_fields, spike_base, spike_len, spike_rad, 1.0,
+                Material::Ice, 2.5, effective_bounds,
+            );
+        }
+
+        pit_count += 1;
+    }
+
+    let _ = (cascade_count, column_count, pit_count); // suppress unused warnings
+
     (Vec::new(), Vec::new())
 }
