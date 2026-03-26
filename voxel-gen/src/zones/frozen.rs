@@ -605,14 +605,15 @@ pub fn try_place_mega_vault(
     let all_keys: Vec<(i32, i32, i32)> = density_fields.keys().copied().collect();
     if all_keys.is_empty() { return None; }
 
-    // Center the vault on the existing chunk region's XZ center, at target depth
+    // Center the vault on the existing region's center — same XYZ range the player is in
     let avg_x = all_keys.iter().map(|k| k.0).sum::<i32>() / all_keys.len() as i32;
+    let avg_y = all_keys.iter().map(|k| k.1).sum::<i32>() / all_keys.len() as i32;
     let avg_z = all_keys.iter().map(|k| k.2).sum::<i32>() / all_keys.len() as i32;
-    let target_y = (-120.0 / eb).floor() as i32; // target depth ~120 voxels down
 
-    let ox = avg_x - vault_cx / 2;
-    let oy = target_y - vault_cy / 2;
-    let oz = avg_z - vault_cz / 2;
+    // Offset slightly so it's not directly on top of player spawn, but overlapping the region
+    let ox = avg_x - vault_cx / 2 + rng.gen_range(-2..3);
+    let oy = avg_y - vault_cy / 2; // same Y range as the existing chunks
+    let oz = avg_z - vault_cz / 2 + rng.gen_range(-2..3);
 
     // Create any missing chunks in the vault region — fill with solid rock
     let grid_size = 17usize; // chunk_size(16) + 1
