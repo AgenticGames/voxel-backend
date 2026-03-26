@@ -1304,7 +1304,7 @@ impl Default for ZoneConfig {
             frozen_waterfall_count: 2,
             frozen_ice_stalactite_chance: 0.3,
 
-            frozen_mega_chance: 0.03,
+            frozen_mega_chance: 1.0, // TODO: revert to 0.03 after testing
         }
     }
 }

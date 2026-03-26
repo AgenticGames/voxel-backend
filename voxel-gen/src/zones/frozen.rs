@@ -601,57 +601,32 @@ pub fn try_place_mega_vault(
     let vault_cy = 7i32;
     let vault_cz = 12i32;
 
-    // Find a valid location: scan for a block of mostly-solid chunks at depth 80-160
+    // Pick a location for the vault: centered on the existing region, pushed to depth 80-160
     let all_keys: Vec<(i32, i32, i32)> = density_fields.keys().copied().collect();
     if all_keys.is_empty() { return None; }
 
-    // Find the Y range that corresponds to depth 80-160
-    let target_y_min = (-160.0 / eb).floor() as i32; // deeper = more negative Y
-    let target_y_max = (-80.0 / eb).floor() as i32;
+    // Center the vault on the existing chunk region's XZ center, at target depth
+    let avg_x = all_keys.iter().map(|k| k.0).sum::<i32>() / all_keys.len() as i32;
+    let avg_z = all_keys.iter().map(|k| k.2).sum::<i32>() / all_keys.len() as i32;
+    let target_y = (-120.0 / eb).floor() as i32; // target depth ~120 voxels down
 
-    // Find X/Z bounds of available chunks
-    let min_x = all_keys.iter().map(|k| k.0).min().unwrap();
-    let max_x = all_keys.iter().map(|k| k.0).max().unwrap();
-    let min_z = all_keys.iter().map(|k| k.2).min().unwrap();
-    let max_z = all_keys.iter().map(|k| k.2).max().unwrap();
+    let ox = avg_x - vault_cx / 2;
+    let oy = target_y - vault_cy / 2;
+    let oz = avg_z - vault_cz / 2;
 
-    // Try random positions for the vault
-    let mut vault_origin: Option<(i32, i32, i32)> = None;
-    for _ in 0..20 {
-        let ox = rng.gen_range(min_x..=(max_x - vault_cx + 1).max(min_x));
-        let oy = rng.gen_range(target_y_min..=(target_y_max - vault_cy + 1).max(target_y_min));
-        let oz = rng.gen_range(min_z..=(max_z - vault_cz + 1).max(min_z));
-
-        // Check that most chunks in the vault region exist and are mostly solid
-        let mut total = 0u32;
-        let mut solid = 0u32;
-        for cy in oy..oy + vault_cy {
-            for cz in oz..oz + vault_cz {
-                for cx in ox..ox + vault_cx {
-                    if density_fields.contains_key(&(cx, cy, cz)) {
-                        total += 1;
-                        // Quick check: sample center voxel
-                        if let Some(d) = density_fields.get(&(cx, cy, cz)) {
-                            let mid = d.size / 2;
-                            let mid_idx = mid * d.size * d.size + mid * d.size + mid;
-                            if d.samples[mid_idx].density > 0.0 {
-                                solid += 1;
-                            }
-                        }
-                    }
-                }
+    // Create any missing chunks in the vault region — fill with solid rock
+    let grid_size = 17usize; // chunk_size(16) + 1
+    for cy in oy..oy + vault_cy {
+        for cz in oz..oz + vault_cz {
+            for cx in ox..ox + vault_cx {
+                density_fields.entry((cx, cy, cz)).or_insert_with(|| {
+                    use voxel_core::density::DensityField;
+                    DensityField::new(grid_size)
+                    // Default VoxelSample is density=1.0, material=Limestone (solid rock)
+                });
             }
         }
-
-        // Need >70% of chunks to exist and be solid
-        let needed = (vault_cx * vault_cy * vault_cz) as u32;
-        if total >= needed * 7 / 10 && solid >= total * 7 / 10 {
-            vault_origin = Some((ox, oy, oz));
-            break;
-        }
     }
-
-    let (ox, oy, oz) = vault_origin?;
 
     let world_min = Vec3::new(ox as f32 * eb, oy as f32 * eb, oz as f32 * eb);
     let world_max = Vec3::new(
