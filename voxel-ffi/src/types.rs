@@ -994,6 +994,7 @@ pub struct FfiEngineConfig {
     pub zone_frozen_floor_depth: u32,
     pub zone_frozen_waterfall_count: u32,
     pub zone_frozen_ice_stalactite_chance: f32,
+    pub zone_frozen_mega_chance: f32,
 }
 
 // FfiZoneDescriptor is defined near the top of this file, alongside FfiZoneData.

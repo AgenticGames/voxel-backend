@@ -238,6 +238,7 @@ pub fn generate_region_densities(
         &config.zones,
         config.seed,
         eb,
+        &all_worm_paths,
     );
     let mut all_fluid_seeds: Vec<crate::pools::FluidSeed> = zone_fluid_seeds;
     timings.zones = t_zones.elapsed();

@@ -2653,6 +2653,7 @@ mod tests {
             zone_frozen_floor_depth: 2,
             zone_frozen_waterfall_count: 2,
             zone_frozen_ice_stalactite_chance: 0.3,
+            zone_frozen_mega_chance: 0.03,
         }
     }
 

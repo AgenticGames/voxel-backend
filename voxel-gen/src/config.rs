@@ -1246,6 +1246,9 @@ pub struct ZoneConfig {
     pub frozen_floor_depth: u32,
     pub frozen_waterfall_count: u32,
     pub frozen_ice_stalactite_chance: f32,
+
+    // Frozen Mega-Vault
+    pub frozen_mega_chance: f32,
 }
 
 impl Default for ZoneConfig {
@@ -1300,6 +1303,8 @@ impl Default for ZoneConfig {
             frozen_floor_depth: 2,
             frozen_waterfall_count: 2,
             frozen_ice_stalactite_chance: 0.3,
+
+            frozen_mega_chance: 0.03,
         }
     }
 }

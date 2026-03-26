@@ -189,6 +189,7 @@ pub fn scan_zones_only(
         &config.zones,
         config.seed,
         eb,
+        &[], // no worm paths in single-chunk generation
     );
 
     descriptors

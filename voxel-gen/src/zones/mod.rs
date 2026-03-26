@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::{ZoneConfig, ZoneType};
 use crate::density::DensityField;
 use crate::pools::{FluidSeed, PoolFluid};
+use crate::worm::path::WormSegment;
 
 /// Convert a world-space position to a FluidSeed (chunk-local coordinates).
 pub fn world_to_fluid_seed(wx: f32, wy: f32, wz: f32, effective_bounds: f32, chunk_size: usize, is_lava: bool) -> FluidSeed {
@@ -91,6 +92,7 @@ pub fn place_zones(
     config: &ZoneConfig,
     global_seed: u64,
     effective_bounds: f32,
+    worm_paths: &[Vec<WormSegment>],
 ) -> (Vec<ZoneDescriptor>, Vec<ZoneBounds>, Vec<FluidSeed>) {
     if !config.enabled {
         return (Vec::new(), Vec::new(), Vec::new());
@@ -99,6 +101,15 @@ pub fn place_zones(
     let mut descriptors = Vec::new();
     let mut bounds = Vec::new();
     let mut fluid_seeds = Vec::new();
+
+    // Phase 0: Try to place a Frozen Mega-Vault (carves its own space from solid rock)
+    if let Some((desc, zone_bounds)) = frozen::try_place_mega_vault(
+        density_fields, config, global_seed, effective_bounds, worm_paths,
+    ) {
+        descriptors.push(desc);
+        bounds.push(zone_bounds);
+        // The carved air will be detected as a CavernVolume below and get ice-painted
+    }
 
     // Step 1: Compute per-chunk air statistics
     let air_stats = detect::compute_air_stats(density_fields, effective_bounds);

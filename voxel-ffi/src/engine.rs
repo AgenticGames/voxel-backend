@@ -1711,6 +1711,7 @@ fn ffi_to_zone_config(c: &FfiEngineConfig) -> voxel_gen::config::ZoneConfig {
         frozen_floor_depth: if c.zone_frozen_floor_depth > 0 { c.zone_frozen_floor_depth } else { 2 },
         frozen_waterfall_count: if c.zone_frozen_waterfall_count > 0 { c.zone_frozen_waterfall_count } else { 2 },
         frozen_ice_stalactite_chance: if c.zone_frozen_ice_stalactite_chance > 0.0 { c.zone_frozen_ice_stalactite_chance } else { 0.3 },
+        frozen_mega_chance: if c.zone_frozen_mega_chance > 0.0 { c.zone_frozen_mega_chance } else { 0.03 },
     }
 }
 
