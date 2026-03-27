@@ -255,9 +255,9 @@ impl MegaVaultBlueprint {
         let sample_resolution = 1.0f32; // one sample per world unit along Z
 
         // Vault dimensions in chunks
-        let vault_cx = 8i32;
+        let vault_cx = 10i32;  // wider for thick walls
         let vault_cy = 9i32;
-        let vault_cz = 6i32;
+        let vault_cz = 8i32;  // longer fissures
 
         let ox = -vault_cx / 2;
         let oy = -vault_cy / 2;
@@ -284,7 +284,7 @@ impl MegaVaultBlueprint {
 
         let num_fissures = rng.gen_range(2u32..=3);
         let fissure_width = eb * 1.5;
-        let wall_thickness = eb * 1.6;
+        let wall_thickness = eb * 2.5; // much thicker walls for tunnels through them
 
         let total_fissure_width = num_fissures as f32 * fissure_width
             + (num_fissures as f32 - 1.0) * wall_thickness;
@@ -354,12 +354,35 @@ impl MegaVaultBlueprint {
                     left_x,
                     right_x,
                     fissure_width,
-                    height: 3.0,
-                    width_z: 3.0,
+                    height: 5.0,  // bigger tunnels
+                    width_z: 4.0,
                     is_blocked,
                 });
 
                 z_pos += tunnel_spacing + rng.gen_range(-eb * 0.3..eb * 0.3);
+            }
+        }
+
+        // Per-tier connecting tunnels: 50% chance at each tier height for each fissure pair
+        for fi in 0..(num_fissures.saturating_sub(1)) as usize {
+            let left_x = fissures[fi].center_x;
+            let right_x = fissures[fi + 1].center_x;
+            let num_tiers_here = rng.gen_range(10u32..=12);
+            let tier_spacing_here = (fissure_ceil_y - fissure_floor_y) / (num_tiers_here as f32 + 1.0);
+            for tier in 0..num_tiers_here {
+                if rng.gen_bool(0.5) { continue; } // 50% per tier
+                let tier_y = fissure_floor_y + tier_spacing_here * (tier as f32 + 1.0);
+                let tier_z = fissure_min_z + rng.gen_range(eb..fissure_max_z - fissure_min_z - eb);
+                connecting_tunnels.push(TunnelDesc {
+                    center_z: tier_z,
+                    center_y: tier_y,
+                    left_x,
+                    right_x,
+                    fissure_width,
+                    height: 4.0,
+                    width_z: 3.5,
+                    is_blocked: rng.gen_bool(0.25),
+                });
             }
         }
 
@@ -429,7 +452,7 @@ impl MegaVaultBlueprint {
                         tier as f64 * 40.0 + side as f64 * 50.0,
                     ) as f32;
                     let is_tunnel = tunnel_val > -0.1;
-                    let tunnel_depth = 16.0f32;
+                    let tunnel_depth = 30.0f32; // deep into wall
                     let tunnel_height = (path_thickness + 2.0) * 2.5;
 
                     // Pre-sample floor wobble for inline tunnels
@@ -574,17 +597,64 @@ impl MegaVaultBlueprint {
 
                 let lower_y = fissure_floor_y + tier_spacing_local * (tier as f32 + 1.0);
                 let upper_y = fissure_floor_y + tier_spacing_local * (tier as f32 + 2.0);
-                let z_range = (fissure_max_z - fissure_min_z - eb * 0.8).max(eb * 0.5);
-                let ramp_z = fissure_min_z + rng.gen_range(eb * 0.3..z_range);
                 let ramp_side: f32 = if rng.gen_bool(0.5) { -1.0 } else { 1.0 };
                 let ramp_wall_x = center_x + ramp_side * fissure_width * 0.5;
                 let ramp_length = rng.gen_range(eb * 0.8..eb * 2.0);
-                let tunnel_depth = rng.gen_range(14.0f32..18.0);
+
+                // Snap tunnel Z to a path waypoint so doorways land ON ledges
+                // Find a path for this fissure at the lower tier
+                let mut ramp_z = fissure_min_z + rng.gen_range(eb * 0.3..(fissure_max_z - fissure_min_z - eb * 0.8).max(eb * 0.5));
+                for p in &paths {
+                    if p.fissure_index == fi as u32 && p.tier == tier
+                        && p.side == ramp_side && !p.waypoints.is_empty()
+                    {
+                        // Pick a waypoint near the middle of the path
+                        let mid = p.waypoints.len() / 2;
+                        let search_start = mid.saturating_sub(p.waypoints.len() / 4);
+                        let search_end = (mid + p.waypoints.len() / 4).min(p.waypoints.len());
+                        // Find the waypoint closest to our random Z that isn't a tunnel
+                        let mut best_z = ramp_z;
+                        let mut best_dist = f32::MAX;
+                        for wi in search_start..search_end {
+                            let w = &p.waypoints[wi];
+                            if w.is_tunnel { continue; }
+                            let d = (w.z - ramp_z).abs();
+                            if d < best_dist {
+                                best_dist = d;
+                                best_z = w.z;
+                            }
+                        }
+                        ramp_z = best_z;
+                        break;
+                    }
+                }
+                // Snap tunnel exit Z to a path waypoint on the upper tier
+                let mut ramp_z_end = ramp_z + ramp_length;
+                for p in &paths {
+                    if p.fissure_index == fi as u32 && p.tier == tier + 1
+                        && p.side == ramp_side && !p.waypoints.is_empty()
+                    {
+                        let mut best_z = ramp_z_end;
+                        let mut best_dist = f32::MAX;
+                        for w in &p.waypoints {
+                            if w.is_tunnel { continue; }
+                            let d = (w.z - ramp_z_end).abs();
+                            if d < best_dist {
+                                best_dist = d;
+                                best_z = w.z;
+                            }
+                        }
+                        ramp_z_end = best_z;
+                        break;
+                    }
+                }
+
+                let tunnel_depth = rng.gen_range(25.0f32..35.0);
                 let tunnel_radius = rng.gen_range(5.0f32..7.0);
 
                 tier_tunnels.push(TierTunnelDesc {
                     z_start: ramp_z,
-                    z_end: ramp_z + ramp_length,
+                    z_end: ramp_z_end,
                     y_start: lower_y,
                     y_end: upper_y,
                     side: ramp_side,
@@ -608,9 +678,10 @@ impl MegaVaultBlueprint {
                 for _ in 0..rng.gen_range(1u32..=3) {
                     if rng.gen::<f32>() < 0.8 {
                         let ix = fissure.center_x + rng.gen_range(-fissure_width * 0.45..fissure_width * 0.45);
-                        let iy = fissure_ceil_y - rng.gen_range(0.0..eb * 0.1);
-                        let length = rng.gen_range(3.0..14.0);
-                        let radius = rng.gen_range(0.4..2.0);
+                        // Ceiling icicles: anchor at fissure ceiling, fixed reasonable length
+                        let iy = fissure_ceil_y - rng.gen_range(0.0..2.0);
+                        let length = rng.gen_range(4.0..15.0);
+                        let radius = rng.gen_range(0.5..2.0);
                         icicles.push(IcicleDesc {
                             pos: Vec3::new(ix, iy, z_pos),
                             length,
@@ -620,7 +691,7 @@ impl MegaVaultBlueprint {
                         });
                     }
                 }
-                z_pos += rng.gen_range(0.5..1.2);
+                z_pos += rng.gen_range(0.15..0.4); // 3x denser
             }
         }
 
@@ -630,7 +701,7 @@ impl MegaVaultBlueprint {
             for (wi, wp) in path.waypoints.iter().enumerate() {
                 if wp.is_tunnel { continue; }
                 // Match legacy step_by(3) spacing
-                if wi % 3 != 0 { continue; }
+                if wi % 1 != 0 { continue; } // every waypoint (3x)
                 // 85% chance per position, matching legacy overhang icicle rate
                 if rng.gen::<f32>() < 0.85 {
                     // Position at the ledge edge, hanging down
@@ -640,13 +711,13 @@ impl MegaVaultBlueprint {
                         wp.wall_x - wp.width * rng.gen_range(0.3..0.9)
                     };
                     let icicle_y = wp.y; // bottom of ledge
-                    let length = rng.gen_range(2.0..6.0);
-                    let radius = rng.gen_range(0.3..0.8);
+                    let length = rng.gen_range(4.0..10.0); // min 4
+                    let radius = rng.gen_range(0.3..1.0);
                     icicles.push(IcicleDesc {
                         pos: Vec3::new(icicle_x, icicle_y, wp.z),
                         length,
                         radius,
-                        has_glow_tip: wi % 2 == 0, // match legacy i % 2 == 0 pattern
+                        has_glow_tip: rng.gen_bool(0.5),
                         direction: -1.0,
                     });
                 }
@@ -656,9 +727,9 @@ impl MegaVaultBlueprint {
         // Bridge underside icicles
         for bridge in &bridges {
             for (i, bwp) in bridge.waypoints.iter().enumerate() {
-                if i % 3 == 0 && rng.gen::<f32>() < 0.6 {
-                    let length = rng.gen_range(1.5..4.0);
-                    let radius = rng.gen_range(0.2..0.6);
+                if rng.gen::<f32>() < 0.9 { // 3x denser
+                    let length = rng.gen_range(4.0..8.0); // min 4
+                    let radius = rng.gen_range(0.3..0.8);
                     icicles.push(IcicleDesc {
                         pos: Vec3::new(bwp.x, bwp.y, bwp.z),
                         length,
@@ -795,28 +866,58 @@ impl MegaVaultBlueprint {
             };
 
             let w = &path.waypoints[idx];
-            if (wp.z - w.z).abs() > 1.5 { continue; }
+            // Wider Z tolerance for tunnels (doorway radius ~4) vs ledges (1.5)
+            let z_tolerance = if w.is_tunnel { 5.0 } else { 1.5 };
+            if (wp.z - w.z).abs() > z_tolerance { continue; }
 
             if w.is_tunnel {
-                // TUNNEL MODE: rounded cross-section carved INTO the wall
-                // Matches legacy: elliptical with entrance flare + floor wobble
+                // ORGANIC WORMY TUNNEL — meanders, varies in radius, natural cave feel
                 let into_wall = if w.side < 0.0 { w.wall_x - wp.x } else { wp.x - w.wall_x };
-                if into_wall < -3.0 || into_wall > w.tunnel_depth + 2.0 { continue; }
-
-                // Entrance flare: wider opening near the wall face
-                let entrance_t = (into_wall / (w.tunnel_depth * 0.3)).clamp(0.0, 1.0);
-                let entrance_scale = 1.0 + (1.0 - entrance_t) * 0.5; // 50% wider at mouth
                 let tunnel_center_y = w.y + w.tunnel_height * 0.45 + w.tunnel_floor_wobble;
-                let tunnel_center_x_depth = w.tunnel_depth * 0.5;
+                let corridor_depth = w.tunnel_depth;
+                let shaft_depth = 14.0; // longer entry shaft
+                let base_radius = 4.5;
+                let doorway_radius = 4.0;
 
-                // Elliptical cross-section with entrance flare
-                let rx = w.tunnel_depth * 0.55;
-                let ry = w.tunnel_height * 0.5 * entrance_scale; // taller at entrance
-                let dx_norm = (into_wall - tunnel_center_x_depth) / rx;
-                let dy_norm = (wp.y - tunnel_center_y) / ry;
-                let dist_sq = dx_norm * dx_norm + dy_norm * dy_norm;
-                if dist_sq < 1.0 {
-                    return Some((Material::Air, -1.0));
+                // Wormy variation: radius pulses along Z + Y wander
+                let z_phase = w.z * 0.25;
+                let radius_pulse = base_radius + (z_phase.sin() as f32) * 1.5; // radius varies 3-6
+                let y_wander = (z_phase * 0.7).cos() as f32 * 2.0; // Y center wanders ±2
+                let x_wander = (z_phase * 0.5).sin() as f32 * 3.0; // X depth wanders ±3
+
+                let is_entry = idx > 0 && !path.waypoints[idx.saturating_sub(1)].is_tunnel;
+                let is_exit = idx + 1 < path.waypoints.len() && !path.waypoints[(idx + 1).min(path.waypoints.len() - 1)].is_tunnel;
+
+                if is_entry || is_exit {
+                    // DOORWAY: generous round opening, wider than corridor
+                    let dz = wp.z - w.z;
+                    let dy = wp.y - tunnel_center_y;
+                    let door_dist = (dz * dz + dy * dy).sqrt();
+                    // Entry shaft: round tube going straight in, flares slightly
+                    let shaft_t = (into_wall / shaft_depth).clamp(0.0, 1.0);
+                    let flared_radius = doorway_radius + shaft_t * 1.0; // widens going in
+                    if door_dist < flared_radius && into_wall >= -3.0 && into_wall <= shaft_depth + 2.0 {
+                        return Some((Material::Air, -1.0));
+                    }
+                    // BEND: smooth transition from shaft to corridor
+                    if into_wall >= shaft_depth - 4.0 && into_wall <= corridor_depth + radius_pulse + 2.0 {
+                        let dy2 = wp.y - (tunnel_center_y + y_wander * 0.5);
+                        let dz2 = wp.z - w.z;
+                        let bend_dist = (dy2 * dy2 + dz2 * dz2).sqrt();
+                        if bend_dist < radius_pulse + 1.0 {
+                            return Some((Material::Air, -1.0));
+                        }
+                    }
+                } else {
+                    // INTERIOR: wormy corridor that meanders
+                    let cx = corridor_depth + x_wander + w.tunnel_floor_wobble;
+                    let cy = tunnel_center_y + y_wander;
+                    let dx = into_wall - cx;
+                    let dy = wp.y - cy;
+                    let dist = (dx * dx + dy * dy).sqrt();
+                    if dist < radius_pulse {
+                        return Some((Material::Air, -1.0));
+                    }
                 }
                 continue;
             }
@@ -853,34 +954,55 @@ impl MegaVaultBlueprint {
     /// Uses live noise for per-voxel wobble matching legacy ramp_noise.
     pub fn is_in_tunnel(&self, wp: Vec3, ramp_noise: &Simplex3D) -> bool {
         for tt in &self.tier_tunnels {
-            if wp.z < tt.z_start || wp.z > tt.z_end { continue; }
+            if wp.z < tt.z_start - 2.0 || wp.z > tt.z_end + 2.0 { continue; }
 
-            // Sloping Y along Z: smooth interpolation (legacy smoothstep)
-            let t = (wp.z - tt.z_start) / (tt.z_end - tt.z_start);
-            let t_smooth = t * t * (3.0 - 2.0 * t); // smoothstep for gentle slope
+            let t = ((wp.z - tt.z_start) / (tt.z_end - tt.z_start)).clamp(0.0, 1.0);
+            let t_smooth = t * t * (3.0 - 2.0 * t);
             let tunnel_center_y = tt.y_start + (tt.y_end - tt.y_start) * t_smooth;
 
-            // Tunnel goes INTO the wall
             let into_wall = if tt.side < 0.0 { tt.wall_x - wp.x } else { wp.x - tt.wall_x };
-            if into_wall < -1.5 || into_wall > tt.depth { continue; }
+            let corridor_depth = tt.depth;
+            let shaft_depth = 12.0;
+            let tunnel_radius = 4.5; // round tunnel
+            let doorway_radius = 4.0;
 
-            // Rounded cross-section: elliptical
-            let tunnel_cx = tt.depth * 0.5;
-            let dx_norm = (into_wall - tunnel_cx) / (tt.depth * 0.5);
-            let dy_norm = (wp.y - tunnel_center_y) / tt.radius;
-            // Add noise wobble to the tunnel shape (legacy ramp_noise)
-            let wobble = ramp_noise.sample(
-                wp.z as f64 * 0.12, wp.y as f64 * 0.1,
-                tt.ramp_noise_seed_data.0 as f64 * 40.0 + tt.ramp_noise_seed_data.1 as f64 * 10.0,
-            ) as f32 * 0.3;
-            let dist_sq = dx_norm * dx_norm + dy_norm * dy_norm + wobble;
+            let is_entry = t < 0.1;
+            let is_exit = t > 0.9;
 
-            if dist_sq < 1.0 {
-                return true;
+            if is_entry || is_exit {
+                // ROUND DOORWAY going straight into wall
+                let dz = wp.z - if is_entry { tt.z_start } else { tt.z_end };
+                let dy = wp.y - tunnel_center_y;
+                let door_dist = (dz * dz + dy * dy).sqrt();
+                if door_dist < doorway_radius && into_wall >= -2.0 && into_wall <= shaft_depth {
+                    return true;
+                }
+                // Bend to corridor
+                if into_wall >= shaft_depth - 3.0 && into_wall <= corridor_depth + tunnel_radius {
+                    let dy2 = wp.y - tunnel_center_y;
+                    if dy2.abs() < tunnel_radius { return true; }
+                }
+            } else {
+                // WORMY CORRIDOR: meanders in X and Y as it travels along Z
+                let z_phase = wp.z * 0.2;
+                let wobble_x = ramp_noise.sample(
+                    wp.z as f64 * 0.12, wp.y as f64 * 0.1,
+                    tt.ramp_noise_seed_data.0 as f64 * 40.0 + tt.ramp_noise_seed_data.1 as f64 * 10.0,
+                ) as f32 * 3.0;
+                let wobble_y = (z_phase * 0.7).cos() as f32 * 2.0;
+                let radius_pulse = tunnel_radius + (z_phase.sin() as f32) * 1.5;
+
+                let cx = corridor_depth + wobble_x;
+                let cy = tunnel_center_y + wobble_y;
+                let dx = into_wall - cx;
+                let dy = wp.y - cy;
+                let dist = (dx * dx + dy * dy).sqrt();
+                if dist < radius_pulse {
+                    return true;
+                }
             }
         }
 
-        // Inline tunnels are handled by path_at returning Air
         false
     }
 
@@ -928,17 +1050,44 @@ impl MegaVaultBlueprint {
     /// Returns Air (open) or Ice (blocked).
     pub fn connecting_tunnel_at(&self, wp: Vec3) -> Option<Material> {
         for ct in &self.connecting_tunnels {
-            if (wp.z - ct.center_z).abs() > ct.width_z * 0.5 { continue; }
-            if wp.y < ct.center_y || wp.y > ct.center_y + ct.height { continue; }
-            if wp.x < ct.left_x - ct.fissure_width * 0.3 || wp.x > ct.right_x + ct.fissure_width * 0.3 {
-                continue;
-            }
+            let wall_left = ct.left_x + ct.fissure_width * 0.3;
+            let wall_right = ct.right_x - ct.fissure_width * 0.3;
+            if wp.x < wall_left - 2.0 || wp.x > wall_right + 2.0 { continue; }
 
-            // Only the wall portion between fissures
-            let in_wall = wp.x > ct.left_x + ct.fissure_width * 0.3
-                && wp.x < ct.right_x - ct.fissure_width * 0.3;
-            if in_wall {
-                return Some(if ct.is_blocked { Material::Ice } else { Material::Air });
+            let tunnel_center_y = ct.center_y + ct.height * 0.5;
+
+            // Wormy path: the tunnel center meanders in Y and Z as it crosses X
+            let t_across = ((wp.x - wall_left) / (wall_right - wall_left)).clamp(0.0, 1.0);
+            let x_phase = t_across * 6.28;
+            let y_wander = (x_phase * 1.3).sin() as f32 * 2.5; // Y meander
+            let z_wander = (x_phase * 0.9).cos() as f32 * 2.0; // Z meander
+
+            let local_cy = tunnel_center_y + y_wander;
+            let local_cz = ct.center_z + z_wander;
+
+            let dz = wp.z - local_cz;
+            let dy = wp.y - local_cy;
+
+            // Base radius with pulse variation
+            let radius_pulse = ct.height * 0.5 + (x_phase * 2.0).sin() as f32 * 1.0;
+
+            // 70% of tunnels get a chamber at the midpoint
+            let at_midpoint = t_across > 0.35 && t_across < 0.65;
+            // Use center_z as a pseudo-random seed for chamber presence
+            let has_chamber = (ct.center_z * 7.3 + ct.center_y * 3.1) as i32 % 10 < 7;
+            let chamber_radius = if at_midpoint && has_chamber {
+                radius_pulse * 2.5 // big chamber in the middle
+            } else {
+                radius_pulse
+            };
+
+            let dist = (dz * dz + dy * dy).sqrt();
+            if dist > chamber_radius + 1.0 { continue; }
+
+            if wp.x > wall_left && wp.x < wall_right {
+                if dist < chamber_radius {
+                    return Some(if ct.is_blocked { Material::Ice } else { Material::Air });
+                }
             }
         }
         None
@@ -946,15 +1095,16 @@ impl MegaVaultBlueprint {
 
     /// Get icicles that might affect a given chunk.
     pub fn icicles_in_chunk(&self, chunk_key: (i32, i32, i32), eb: f32) -> Vec<&IcicleDesc> {
+        let margin = eb; // full chunk margin for long icicles
         let chunk_min = Vec3::new(
-            chunk_key.0 as f32 * eb - 2.0,
-            chunk_key.1 as f32 * eb - 16.0, // icicles can be long
-            chunk_key.2 as f32 * eb - 2.0,
+            chunk_key.0 as f32 * eb - margin,
+            chunk_key.1 as f32 * eb - margin * 2.0, // icicles can be very long
+            chunk_key.2 as f32 * eb - margin,
         );
         let chunk_max = Vec3::new(
-            chunk_key.0 as f32 * eb + eb + 2.0,
-            chunk_key.1 as f32 * eb + eb + 16.0,
-            chunk_key.2 as f32 * eb + eb + 2.0,
+            chunk_key.0 as f32 * eb + eb + margin,
+            chunk_key.1 as f32 * eb + eb + margin * 2.0,
+            chunk_key.2 as f32 * eb + eb + margin,
         );
 
         self.icicles.iter().filter(|ic| {
@@ -1011,8 +1161,9 @@ impl MegaVaultBlueprint {
         ) as f32 * 0.5 + 0.5;
 
         if on_ledge {
-            if noise_val > 0.55 { Material::BlackIce }
-            else { Material::Hoarfrost }
+            if noise_val > 0.6 { Material::BlackIce }
+            else if noise_val > 0.3 { Material::IceSheet }
+            else { Material::Ice }
         } else if is_ledge_underside {
             Material::IceSheet
         } else if is_floor {

@@ -5,6 +5,9 @@
 //! a single iteration + a small post-pass for additive cone shapes.
 
 use glam::Vec3;
+use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
+use rand::Rng;
 use voxel_core::material::Material;
 use voxel_noise::NoiseSource;
 use voxel_noise::simplex::Simplex3D;
@@ -85,11 +88,9 @@ pub fn apply_vault_to_chunk(
                             density.samples[idx].material = Material::Air;
                         }
                     } else {
-                        // Ledge writing -- use edge_fade density from blueprint
-                        if path_density > density.samples[idx].density {
-                            density.samples[idx].density = path_density;
-                            density.samples[idx].material = path_mat;
-                        }
+                        // Ledge writing — always force material (prevents Slate bleed-through)
+                        density.samples[idx].density = density.samples[idx].density.max(path_density);
+                        density.samples[idx].material = path_mat;
                     }
                     continue;
                 }
@@ -103,10 +104,9 @@ pub fn apply_vault_to_chunk(
                             density.samples[idx].material = Material::Air;
                         }
                     } else {
-                        if 0.85 > density.samples[idx].density {
-                            density.samples[idx].density = 0.85;
-                            density.samples[idx].material = bridge_mat;
-                        }
+                        // Always force material on bridges
+                        density.samples[idx].density = density.samples[idx].density.max(0.85);
+                        density.samples[idx].material = bridge_mat;
                     }
                     continue;
                 }
@@ -194,16 +194,255 @@ pub fn apply_vault_to_chunk(
         }
     }
 
-    // ── Post-pass: additive cone shapes for icicles + stalagmites ──
-    // Inline cone writing directly into the density field (avoids HashMap overhead).
+    // ── Pass 2: Geometry refinement — reads actual carved result ──
+    // Scans solid/air boundaries to:
+    // 1. Spawn overhang icicles (solid above air = icicle candidate)
+    // 2. Verify tunnel entrances are open (carve blocked doorways)
+    // 3. Smooth jagged edges on ledge surfaces
+    // 4. Add BlackIce patches on ledge edges near drops
+    // 5. Place small ice formations on horizontal surfaces
+
+    // ── Pass 2a: Tunnel doorway connectivity ──
+    // For each tier tunnel, check entry/exit positions in this chunk.
+    // If the doorway has no solid floor beneath it, write a small IceSheet platform.
+    for tt in &blueprint.tier_tunnels {
+        let entry_z = tt.z_start;
+        let exit_z = tt.z_end;
+        let tunnel_center_y_entry = tt.y_start;
+        let tunnel_center_y_exit = tt.y_end;
+
+        for &(door_z, door_y) in &[(entry_z, tunnel_center_y_entry), (exit_z, tunnel_center_y_exit)] {
+            // Check if this doorway is in this chunk
+            let door_world = Vec3::new(tt.wall_x, door_y, door_z);
+            let local = door_world - origin;
+            let gx = (local.x / vs).round() as i32;
+            let gy = (local.y / vs).round() as i32;
+            let gz = (local.z / vs).round() as i32;
+
+            if gx < 0 || gx >= size as i32 || gy < 1 || gy >= size as i32 || gz < 0 || gz >= size as i32 {
+                continue;
+            }
+
+            // Check if there's solid floor below the doorway
+            let floor_y = gy - 1;
+            if floor_y < 0 { continue; }
+
+            let platform_half = 3i32; // platform extends ±3 voxels around doorway
+            let mut has_floor = false;
+
+            for dz in -platform_half..=platform_half {
+                for dx in -platform_half..=platform_half {
+                    let fx = gx + dx;
+                    let fz = gz + dz;
+                    if fx >= 0 && fx < size as i32 && fz >= 0 && fz < size as i32 {
+                        let fi = fz as usize * size * size + floor_y as usize * size + fx as usize;
+                        if density.samples[fi].density > 0.0 {
+                            has_floor = true;
+                            break;
+                        }
+                    }
+                }
+                if has_floor { break; }
+            }
+
+            // No floor found — write a small IceSheet platform
+            if !has_floor {
+                for dz in -platform_half..=platform_half {
+                    for dx in -platform_half..=platform_half {
+                        let fx = gx + dx;
+                        let fz = gz + dz;
+                        let fy = floor_y;
+                        if fx >= 0 && fx < size as i32 && fz >= 0 && fz < size as i32 && fy >= 0 {
+                            let fi = fz as usize * size * size + fy as usize * size + fx as usize;
+                            if density.samples[fi].density <= 0.0 {
+                                density.samples[fi].density = 0.85;
+                                density.samples[fi].material = Material::IceSheet;
+                            }
+                            // Also write 1 voxel below for thickness
+                            if fy > 0 {
+                                let fi2 = fz as usize * size * size + (fy - 1) as usize * size + fx as usize;
+                                if density.samples[fi2].density <= 0.0 {
+                                    density.samples[fi2].density = 0.85;
+                                    density.samples[fi2].material = Material::IceSheet;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Also verify the doorway itself is open (carve if blocked)
+            for dy in 0..4i32 { // 4 voxels of headroom
+                let door_gy = gy + dy;
+                if door_gy >= size as i32 { break; }
+                for dz in -1i32..=1 {
+                    let door_gz = gz + dz;
+                    if door_gz < 0 || door_gz >= size as i32 { continue; }
+                    let di = door_gz as usize * size * size + door_gy as usize * size + gx as usize;
+                    if density.samples[di].density > 0.0 {
+                        density.samples[di].density = -1.0;
+                        density.samples[di].material = Material::Air;
+                    }
+                }
+            }
+        }
+    }
+
+    // Also check inline tunnel entry/exit points from paths
+    for path in &blueprint.paths {
+        for (wi, wp) in path.waypoints.iter().enumerate() {
+            if !wp.is_tunnel { continue; }
+            // Check if this is entry or exit
+            let prev_tunnel = if wi > 0 { path.waypoints[wi - 1].is_tunnel } else { false };
+            let next_tunnel = if wi + 1 < path.waypoints.len() { path.waypoints[wi + 1].is_tunnel } else { false };
+            if prev_tunnel && next_tunnel { continue; } // interior, skip
+
+            let door_world = Vec3::new(wp.wall_x, wp.y, wp.z);
+            let local = door_world - origin;
+            let gx = (local.x / vs).round() as i32;
+            let gy = (local.y / vs).round() as i32;
+            let gz = (local.z / vs).round() as i32;
+            if gx < 0 || gx >= size as i32 || gy < 0 || gy >= size as i32 || gz < 0 || gz >= size as i32 {
+                continue;
+            }
+
+            // Ensure doorway headroom is clear
+            for dy in 0..4i32 {
+                let door_gy = gy + dy;
+                if door_gy >= size as i32 { break; }
+                let di = gz as usize * size * size + door_gy as usize * size + gx as usize;
+                if density.samples[di].density > 0.0 {
+                    density.samples[di].density = -1.0;
+                    density.samples[di].material = Material::Air;
+                }
+            }
+        }
+    }
+
+    // ── Pass 2b: Geometry scan ──
+    let mut overhang_icicles: Vec<(Vec3, f32, f32, bool)> = Vec::new();
+    let mut rng_pass2 = ChaCha8Rng::seed_from_u64(
+        blueprint.mat_noise_seed.wrapping_add(chunk_key.0 as u64 * 7 + chunk_key.1 as u64 * 31 + chunk_key.2 as u64 * 97)
+    );
+
+    for z in 0..size {
+        for y in 1..size.saturating_sub(1) {
+            for x in 0..size {
+                let idx = z * size * size + y * size + x;
+                let below_idx = z * size * size + (y - 1) * size + x;
+                let above_idx = z * size * size + (y + 1) * size + x;
+
+                let is_solid = density.samples[idx].density > 0.0;
+                let air_below = density.samples[below_idx].density <= 0.0;
+                let air_above = density.samples[above_idx].density <= 0.0;
+                let mat = density.samples[idx].material;
+
+                // ── 1. Overhang icicles: solid with air below ──
+                if is_solid && air_below {
+                    if mat == Material::Ice || mat == Material::IceSheet || mat == Material::Hoarfrost {
+                        // 30% chance per overhang voxel (sampled every 2 to avoid clustering)
+                        if x % 2 == 0 && z % 2 == 0 && rng_pass2.gen::<f32>() < 0.30 {
+                            let wp = origin + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
+                            let len = rng_pass2.gen_range(4.0..10.0);
+                            let rad = rng_pass2.gen_range(0.3..1.0);
+                            let glow = rng_pass2.gen_bool(0.5);
+                            overhang_icicles.push((wp, len, rad, glow));
+                        }
+                    }
+                }
+
+                // ── 2. BlackIce on ledge edges near drops ──
+                // Solid floor with air on 2+ sides below = precarious edge
+                if is_solid && air_above {
+                    let mut air_sides = 0u32;
+                    for &(dx, dz) in &[(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+                        let nx = x as i32 + dx;
+                        let nz = z as i32 + dz;
+                        if nx >= 0 && nx < size as i32 && nz >= 0 && nz < size as i32 {
+                            let ny = y as i32 - 1; // check below the neighbor
+                            if ny >= 0 {
+                                let ni = nz as usize * size * size + ny as usize * size + nx as usize;
+                                if density.samples[ni].density <= 0.0 {
+                                    air_sides += 1;
+                                }
+                            }
+                        }
+                    }
+                    // Edge of a ledge: 2+ sides have air below = slippery danger zone
+                    if air_sides >= 2 && !density.samples[idx].material.is_ore() {
+                        density.samples[idx].material = Material::BlackIce;
+                    }
+                }
+
+                // ── 3. Small stalagmites on wide floor surfaces ──
+                // Solid floor with lots of headroom = place small upward spike
+                if is_solid && air_above && x % 4 == 0 && z % 4 == 0 {
+                    // Check 3 voxels of headroom
+                    let has_headroom = y + 3 < size && {
+                        let h1 = z * size * size + (y + 1) * size + x;
+                        let h2 = z * size * size + (y + 2) * size + x;
+                        let h3 = z * size * size + (y + 3) * size + x;
+                        density.samples[h1].density <= 0.0
+                            && density.samples[h2].density <= 0.0
+                            && density.samples[h3].density <= 0.0
+                    };
+                    if has_headroom && rng_pass2.gen::<f32>() < 0.08 {
+                        let wp = origin + Vec3::new(x as f32 * vs, (y + 1) as f32 * vs, z as f32 * vs);
+                        let len = rng_pass2.gen_range(2.0..5.0);
+                        let rad = rng_pass2.gen_range(0.3..0.8);
+                        // Write small stalagmite inline
+                        write_cone_inline(density, origin, vs, size,
+                            wp, len, rad, 1.0, Material::IceSheet, 2.0);
+                    }
+                }
+
+                // ── 4. Hoarfrost accumulation on ceiling surfaces ──
+                // Solid with air below = ceiling/overhang — add hoarfrost for frosty look
+                if is_solid && air_below && !density.samples[idx].material.is_ore() {
+                    if mat == Material::Ice && rng_pass2.gen::<f32>() < 0.3 {
+                        density.samples[idx].material = Material::Hoarfrost;
+                    }
+                }
+
+                // ── 5. Permafrost on deep interior surfaces near vault boundary ──
+                if is_solid && !density.samples[idx].material.is_ore() {
+                    let wp = origin + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
+                    let dist_to_edge_x = (wp.x - blueprint.world_min.x).min(blueprint.world_max.x - wp.x);
+                    let dist_to_edge_z = (wp.z - blueprint.world_min.z).min(blueprint.world_max.z - wp.z);
+                    let dist_to_edge = dist_to_edge_x.min(dist_to_edge_z);
+                    if dist_to_edge < eb * 0.3 && (air_below || air_above) {
+                        density.samples[idx].material = Material::Permafrost;
+                    }
+                }
+            }
+        }
+    }
+
+    // Write overhang icicles discovered in pass 2
+    for (pos, len, rad, glow) in &overhang_icicles {
+        write_cone_inline(density, origin, vs, size,
+            *pos, *len, *rad, -1.0, Material::IceSheet, 2.0);
+        if *glow {
+            let tip_pos = *pos + Vec3::new(0.0, -(*len - 1.5), 0.0);
+            let tip_len = 1.5f32.min(*len * 0.3);
+            write_cone_inline(density, origin, vs, size,
+                tip_pos, tip_len, rad * 0.4, -1.0, Material::FrozenGlow, 2.5);
+        }
+    }
+
+    // ── Post-pass: additive cone shapes from blueprint icicles + stalagmites ──
 
     let relevant_icicles = blueprint.icicles_in_chunk(chunk_key, eb);
     let relevant_stalagmites = blueprint.stalagmites_in_chunk(chunk_key, eb);
 
+    let mut icicle_writes = 0u32;
     for icicle in &relevant_icicles {
+        let before = density.samples.iter().filter(|s| s.material == Material::IceSheet).count();
         write_cone_inline(density, origin, vs, size,
             icicle.pos, icicle.length, icicle.radius, icicle.direction,
             Material::IceSheet, 2.0);
+        let after = density.samples.iter().filter(|s| s.material == Material::IceSheet).count();
+        if after > before { icicle_writes += (after - before) as u32; }
         if icicle.has_glow_tip {
             let tip_offset = icicle.direction * (icicle.length - 1.5);
             let tip_pos = icicle.pos + Vec3::new(0.0, tip_offset, 0.0);
@@ -244,6 +483,26 @@ pub fn apply_vault_to_chunk(
                         density.samples[vidx].material = Material::IceSheet;
                     }
                 }
+            }
+        }
+    }
+
+    // Diagnostic
+    {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+            .open("D:/Unreal Projects/Mithril2026/Saved/icicle_debug.txt")
+        {
+            let _ = writeln!(f, "chunk({},{},{}) icicles={} stalags={} bp_total={} voxels_written={}",
+                chunk_key.0, chunk_key.1, chunk_key.2,
+                relevant_icicles.len(), relevant_stalagmites.len(),
+                blueprint.icicles.len(), icicle_writes);
+            if !relevant_icicles.is_empty() {
+                let ic = &relevant_icicles[0];
+                let _ = writeln!(f, "  first_icicle: pos=({:.1},{:.1},{:.1}) len={:.1} rad={:.1} dir={:.1}",
+                    ic.pos.x, ic.pos.y, ic.pos.z, ic.length, ic.radius, ic.direction);
+                let _ = writeln!(f, "  chunk_origin=({:.1},{:.1},{:.1}) vs={:.3} size={}",
+                    origin.x, origin.y, origin.z, vs, size);
             }
         }
     }
