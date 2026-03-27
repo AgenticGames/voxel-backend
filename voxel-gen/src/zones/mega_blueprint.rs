@@ -64,8 +64,8 @@ pub struct FissureDesc {
     pub center_x: f32,
     pub width: f32,
     pub index: u32,
-    /// Pre-sampled waver noise at `sample_resolution` Z spacing.
-    /// Indexed by Z bucket: `[(z - fissure_min_z) / sample_resolution]`
+    /// Pre-sampled waver noise BASE at `sample_resolution` Z spacing (Y=0 slice).
+    /// The apply phase adds Y-dependent perturbation using the fissure noise seed.
     pub waver_samples: Vec<f32>,
     /// Pre-sampled floor height offsets at each Z bucket.
     pub floor_samples: Vec<f32>,
@@ -85,6 +85,8 @@ pub struct PathWaypoint {
     pub side: f32,
     pub wall_x: f32,
     pub path_thickness: f32,
+    /// Pre-sampled floor wobble for inline tunnel mode (noise at this Z).
+    pub tunnel_floor_wobble: f32,
 }
 
 /// Full descriptor for one ledge/tunnel path along a fissure wall.
@@ -115,6 +117,10 @@ pub struct BridgeWaypoint {
     pub y: f32,
     pub z: f32,
     pub width: f32,
+    /// True if this waypoint is in the jagged collapse zone of a stub bridge.
+    pub is_collapse_edge: bool,
+    /// Noise value at this waypoint for collapse edge erosion (skip if < 0).
+    pub collapse_noise: f32,
 }
 
 /// A cross-bridge between fissure walls.
@@ -163,12 +169,16 @@ pub struct TierTunnelDesc {
     pub radius: f32,
     pub fissure_index: u32,
     pub tier: u32,
+    /// Pre-sampled noise wobble for the ramp noise seed, used at query time.
+    /// The apply phase uses `ramp_noise_seed` to evaluate per-voxel wobble.
+    pub ramp_noise_seed_data: (u32, u32), // (fissure_index, tier) for noise reconstruction
 }
 
 // ─── The Blueprint ──────────────────────────────────────────────────────────
 
 /// Complete pre-computed vault geometry. All noise has been sampled.
-/// The apply phase queries this with world positions -- no noise calls needed.
+/// The apply phase queries this with world positions -- no noise calls needed
+/// except for per-voxel Y-dependent waver and tier tunnel wobble (cheap).
 pub struct MegaVaultBlueprint {
     pub bounds_min: (i32, i32, i32),
     pub bounds_max: (i32, i32, i32),
@@ -179,6 +189,7 @@ pub struct MegaVaultBlueprint {
     pub fissure_ceil_y: f32,
     pub fissure_min_z: f32,
     pub fissure_max_z: f32,
+    pub effective_bounds: f32,
     pub fissures: Vec<FissureDesc>,
     pub paths: Vec<PathDesc>,
     pub connecting_tunnels: Vec<TunnelDesc>,
@@ -187,6 +198,13 @@ pub struct MegaVaultBlueprint {
     pub icicles: Vec<IcicleDesc>,
     pub stalagmites: Vec<StalagmiteDesc>,
     pub mat_noise_seed: u64,
+    /// Seed for fissure noise -- used at apply time for Y-dependent waver.
+    pub fissure_noise_seed: u64,
+    /// Seed for ramp/tier tunnel noise -- used at apply time for wobble.
+    pub ramp_noise_seed: u64,
+    /// Seed for path noise -- used at apply time for inline tunnel floor wobble.
+    pub path_noise_seed: u64,
+    pub fissure_freq: f64,
     pub sample_resolution: f32,
 }
 
@@ -203,6 +221,7 @@ impl MegaVaultBlueprint {
             fissure_ceil_y: 0.0,
             fissure_min_z: 0.0,
             fissure_max_z: 0.0,
+            effective_bounds: 0.0,
             fissures: Vec::new(),
             paths: Vec::new(),
             connecting_tunnels: Vec::new(),
@@ -211,6 +230,10 @@ impl MegaVaultBlueprint {
             icicles: Vec::new(),
             stalagmites: Vec::new(),
             mat_noise_seed: 0,
+            fissure_noise_seed: 0,
+            ramp_noise_seed: 0,
+            path_noise_seed: 0,
+            fissure_freq: 0.08,
             sample_resolution: 1.0,
         }
     }
@@ -409,6 +432,11 @@ impl MegaVaultBlueprint {
                     let tunnel_depth = 16.0f32;
                     let tunnel_height = (path_thickness + 2.0) * 2.5;
 
+                    // Pre-sample floor wobble for inline tunnels
+                    let tunnel_floor_wobble = path_noise.sample(
+                        z as f64 * 0.15, 500.0 + fi as f64 * 30.0, tier as f64 * 20.0,
+                    ) as f32 * 1.5;
+
                     // Stalagmite spawning on bulge peaks
                     let stag_chance = if wave > 0.95 { 0.7 } else if wave > 0.7 { 0.4 } else { 0.0 };
                     if stag_chance > 0.0 && !is_tunnel && rng.gen::<f32>() < stag_chance {
@@ -445,6 +473,7 @@ impl MegaVaultBlueprint {
                         side,
                         wall_x,
                         path_thickness,
+                        tunnel_floor_wobble,
                     });
 
                     // Check for bridge at this Z
@@ -477,11 +506,23 @@ impl MegaVaultBlueprint {
                             let bridge_z = z + z_wander;
                             let width_at_t = bridge_width * (0.6 + 0.4 * (1.0 - (2.0 * t - 1.0).abs()));
 
+                            // Jagged collapse edge for stub bridges (last 15%)
+                            let at_collapse_edge = !full_bridge && t > max_t * 0.85;
+                            let collapse_noise = if at_collapse_edge {
+                                path_noise.sample(
+                                    bridge_x as f64 * 0.3, bridge_y as f64 * 0.3, bridge_z as f64 * 0.3,
+                                ) as f32
+                            } else {
+                                1.0
+                            };
+
                             bridge_waypoints.push(BridgeWaypoint {
                                 x: bridge_x,
                                 y: bridge_y,
                                 z: bridge_z,
                                 width: width_at_t,
+                                is_collapse_edge: at_collapse_edge,
+                                collapse_noise,
                             });
                         }
 
@@ -552,6 +593,7 @@ impl MegaVaultBlueprint {
                     radius: tunnel_radius,
                     fissure_index: fi as u32,
                     tier,
+                    ramp_noise_seed_data: (fi as u32, tier),
                 });
             }
         }
@@ -582,13 +624,15 @@ impl MegaVaultBlueprint {
             }
         }
 
-        // Under-path icicles: place along path waypoints that are ledges (not tunnels)
-        // This replaces the old overhang-scanning pass.
+        // Under-path/overhang icicles: high density matching legacy code (85% chance
+        // at step_by(3) spacing). We approximate by placing every 3 waypoints at 85%.
         for path in &paths {
-            for wp in &path.waypoints {
+            for (wi, wp) in path.waypoints.iter().enumerate() {
                 if wp.is_tunnel { continue; }
-                // Icicles hang from ledge undersides
-                if rng.gen::<f32>() < 0.25 {
+                // Match legacy step_by(3) spacing
+                if wi % 3 != 0 { continue; }
+                // 85% chance per position, matching legacy overhang icicle rate
+                if rng.gen::<f32>() < 0.85 {
                     // Position at the ledge edge, hanging down
                     let icicle_x = if wp.side < 0.0 {
                         wp.wall_x + wp.width * rng.gen_range(0.3..0.9)
@@ -602,7 +646,7 @@ impl MegaVaultBlueprint {
                         pos: Vec3::new(icicle_x, icicle_y, wp.z),
                         length,
                         radius,
-                        has_glow_tip: rng.gen_bool(0.5),
+                        has_glow_tip: wi % 2 == 0, // match legacy i % 2 == 0 pattern
                         direction: -1.0,
                     });
                 }
@@ -636,6 +680,7 @@ impl MegaVaultBlueprint {
             fissure_ceil_y,
             fissure_min_z,
             fissure_max_z,
+            effective_bounds: eb,
             fissures,
             paths,
             connecting_tunnels,
@@ -644,6 +689,10 @@ impl MegaVaultBlueprint {
             icicles,
             stalagmites: stalagmite_descs,
             mat_noise_seed: global_seed.wrapping_add(0xF155_0003),
+            fissure_noise_seed: global_seed.wrapping_add(0xF155_0001),
+            ramp_noise_seed: global_seed.wrapping_add(0xF155_0006),
+            path_noise_seed: global_seed.wrapping_add(0xF155_0004),
+            fissure_freq,
             sample_resolution,
         }
     }
@@ -676,7 +725,8 @@ impl MegaVaultBlueprint {
 
     /// Check if a world point falls inside any fissure's carved air space.
     /// Returns Some(fissure_index) if inside.
-    pub fn fissure_at(&self, wp: Vec3) -> Option<u32> {
+    /// Uses live noise for Y-dependent waver (matching legacy: `wp.y * 0.02`).
+    pub fn fissure_at(&self, wp: Vec3, fissure_noise: &Simplex3D) -> Option<u32> {
         if wp.y < self.fissure_floor_y || wp.y > self.fissure_ceil_y {
             return None;
         }
@@ -694,12 +744,15 @@ impl MegaVaultBlueprint {
             if wp.y < self.fissure_floor_y + floor_offset.abs() { continue; }
             if wp.y > self.fissure_ceil_y - ceil_offset.abs() { continue; }
 
-            let waver = Self::lerp_sample(
-                &f.waver_samples, wp.z, self.fissure_min_z, self.sample_resolution,
-            );
-            // The original code also used wp.y for waver but at very low freq (0.02).
-            // We approximate by just using the Z-sampled waver since the Y contribution
-            // was minor (0.02 freq * Y range ~ small perturbation).
+            // Legacy waver: fissure_noise.sample(z * freq * 0.5, y * 0.02, (fi+0.5)*100)
+            // We use live noise for the full Y-dependent computation instead of
+            // pre-sampled Z-only approximation.
+            let waver = fissure_noise.sample(
+                wp.z as f64 * self.fissure_freq * 0.5,
+                wp.y as f64 * 0.02,
+                (f.index as f64 + 0.5) * 100.0,
+            ) as f32 * self.effective_bounds * 0.3;
+
             if (wp.x - f.center_x - waver).abs() < f.width * 0.5 {
                 return Some(f.index);
             }
@@ -708,14 +761,14 @@ impl MegaVaultBlueprint {
     }
 
     /// Check if a world point is inside any fissure.
-    pub fn is_in_fissure(&self, wp: Vec3) -> bool {
-        self.fissure_at(wp).is_some()
+    pub fn is_in_fissure(&self, wp: Vec3, fissure_noise: &Simplex3D) -> bool {
+        self.fissure_at(wp, fissure_noise).is_some()
     }
 
-    /// Find the nearest path waypoint to a world Z, returning material if the point
-    /// is within the path's XY bounds.
-    /// Returns material: Hoarfrost (top), IceSheet (underside/buttress).
-    pub fn path_at(&self, wp: Vec3) -> Option<Material> {
+    /// Find the nearest path waypoint to a world Z, returning (material, density) if
+    /// the point is within the path's XY bounds.
+    /// Returns Air for inline tunnels (carved), or (Hoarfrost/IceSheet, density) for ledges.
+    pub fn path_at(&self, wp: Vec3) -> Option<(Material, f32)> {
         for path in &self.paths {
             // Binary search or linear scan for nearest Z waypoint
             // Waypoints are sorted by Z (ascending)
@@ -745,33 +798,38 @@ impl MegaVaultBlueprint {
             if (wp.z - w.z).abs() > 1.5 { continue; }
 
             if w.is_tunnel {
-                // Tunnel mode: elliptical cross-section carved into wall
+                // TUNNEL MODE: rounded cross-section carved INTO the wall
+                // Matches legacy: elliptical with entrance flare + floor wobble
                 let into_wall = if w.side < 0.0 { w.wall_x - wp.x } else { wp.x - w.wall_x };
                 if into_wall < -3.0 || into_wall > w.tunnel_depth + 2.0 { continue; }
 
+                // Entrance flare: wider opening near the wall face
                 let entrance_t = (into_wall / (w.tunnel_depth * 0.3)).clamp(0.0, 1.0);
-                let entrance_scale = 1.0 + (1.0 - entrance_t) * 0.5;
-                let tunnel_center_y = w.y + w.tunnel_height * 0.45;
+                let entrance_scale = 1.0 + (1.0 - entrance_t) * 0.5; // 50% wider at mouth
+                let tunnel_center_y = w.y + w.tunnel_height * 0.45 + w.tunnel_floor_wobble;
                 let tunnel_center_x_depth = w.tunnel_depth * 0.5;
+
+                // Elliptical cross-section with entrance flare
                 let rx = w.tunnel_depth * 0.55;
-                let ry = w.tunnel_height * 0.5 * entrance_scale;
+                let ry = w.tunnel_height * 0.5 * entrance_scale; // taller at entrance
                 let dx_norm = (into_wall - tunnel_center_x_depth) / rx;
                 let dy_norm = (wp.y - tunnel_center_y) / ry;
                 let dist_sq = dx_norm * dx_norm + dy_norm * dy_norm;
                 if dist_sq < 1.0 {
-                    return Some(Material::Air);
+                    return Some((Material::Air, -1.0));
                 }
                 continue;
             }
 
-            // Ledge mode: protruding path
+            // LEDGE MODE: protruding path, thicker at wall for structural support
             let protrusion = if w.side < 0.0 { wp.x - w.wall_x } else { w.wall_x - wp.x };
             if protrusion < -2.0 || protrusion > w.width { continue; }
 
+            // Buttress: ledge is thicker near the wall, thins toward the edge
             let t_across = (protrusion / w.width).clamp(0.0, 1.0);
             let buttress_extra = w.path_thickness * 0.5 * (1.0 - t_across);
             let local_top = w.y + w.path_thickness;
-            let local_bottom = w.y - buttress_extra;
+            let local_bottom = w.y - buttress_extra; // extends DOWN near wall
 
             if wp.y < local_bottom || wp.y > local_top { continue; }
 
@@ -782,32 +840,41 @@ impl MegaVaultBlueprint {
             };
             if edge_fade <= 0.0 { continue; }
 
-            // Top surface = Hoarfrost, underside = IceSheet
+            let d = (0.9 * edge_fade).max(0.1);
+            // Top surface = Hoarfrost, underside/sides = IceSheet
             let is_top = wp.y > w.y + w.path_thickness - 1.0;
             let mat = if is_top { Material::Hoarfrost } else { Material::IceSheet };
-            return Some(mat);
+            return Some((mat, d));
         }
         None
     }
 
-    /// Check if a world point is inside any inline tunnel (from path waypoints)
-    /// or any tier-connecting tunnel.
-    pub fn is_in_tunnel(&self, wp: Vec3) -> bool {
-        // Check tier-connecting tunnels first (fewer of them)
+    /// Check if a world point is inside any tier-connecting tunnel.
+    /// Uses live noise for per-voxel wobble matching legacy ramp_noise.
+    pub fn is_in_tunnel(&self, wp: Vec3, ramp_noise: &Simplex3D) -> bool {
         for tt in &self.tier_tunnels {
             if wp.z < tt.z_start || wp.z > tt.z_end { continue; }
 
+            // Sloping Y along Z: smooth interpolation (legacy smoothstep)
             let t = (wp.z - tt.z_start) / (tt.z_end - tt.z_start);
-            let t_smooth = t * t * (3.0 - 2.0 * t); // smoothstep
+            let t_smooth = t * t * (3.0 - 2.0 * t); // smoothstep for gentle slope
             let tunnel_center_y = tt.y_start + (tt.y_end - tt.y_start) * t_smooth;
 
+            // Tunnel goes INTO the wall
             let into_wall = if tt.side < 0.0 { tt.wall_x - wp.x } else { wp.x - tt.wall_x };
             if into_wall < -1.5 || into_wall > tt.depth { continue; }
 
+            // Rounded cross-section: elliptical
             let tunnel_cx = tt.depth * 0.5;
             let dx_norm = (into_wall - tunnel_cx) / (tt.depth * 0.5);
             let dy_norm = (wp.y - tunnel_center_y) / tt.radius;
-            let dist_sq = dx_norm * dx_norm + dy_norm * dy_norm;
+            // Add noise wobble to the tunnel shape (legacy ramp_noise)
+            let wobble = ramp_noise.sample(
+                wp.z as f64 * 0.12, wp.y as f64 * 0.1,
+                tt.ramp_noise_seed_data.0 as f64 * 40.0 + tt.ramp_noise_seed_data.1 as f64 * 10.0,
+            ) as f32 * 0.3;
+            let dist_sq = dx_norm * dx_norm + dy_norm * dy_norm + wobble;
+
             if dist_sq < 1.0 {
                 return true;
             }
@@ -818,6 +885,7 @@ impl MegaVaultBlueprint {
     }
 
     /// Check if a world point is on a bridge, returning the bridge material if so.
+    /// Handles collapse edge jagged erosion matching legacy code.
     pub fn bridge_at(&self, wp: Vec3) -> Option<Material> {
         for bridge in &self.bridges {
             if bridge.waypoints.is_empty() { continue; }
@@ -843,6 +911,11 @@ impl MegaVaultBlueprint {
                 if (wp.x - bwp.x).abs() > 1.5 { continue; }
                 if (wp.z - bwp.z).abs() > bwp.width * 0.5 { continue; }
                 if wp.y < bwp.y || wp.y > bwp.y + bridge.path_thickness { continue; }
+
+                // Skip jagged collapse edge holes (legacy: at_collapse_edge && noise < 0)
+                if bwp.is_collapse_edge && bwp.collapse_noise < 0.0 {
+                    continue;
+                }
 
                 let is_top = wp.y > bwp.y + bridge.path_thickness - 1.0;
                 return Some(if is_top { Material::BlackIce } else { Material::IceSheet });
@@ -1013,6 +1086,7 @@ mod tests {
     #[test]
     fn fissure_membership_works() {
         let bp = MegaVaultBlueprint::generate(42, 16.0);
+        let fissure_noise = Simplex3D::new(bp.fissure_noise_seed);
 
         // Center of vault should be in a fissure
         let _center = bp.world_center;
@@ -1022,11 +1096,11 @@ mod tests {
             (bp.fissure_floor_y + bp.fissure_ceil_y) * 0.5,
             (bp.fissure_min_z + bp.fissure_max_z) * 0.5,
         );
-        assert!(bp.is_in_fissure(test_point), "center of first fissure should be air");
+        assert!(bp.is_in_fissure(test_point, &fissure_noise), "center of first fissure should be air");
 
         // A point far outside should not be in a fissure
         let outside = Vec3::new(1000.0, 0.0, 0.0);
-        assert!(!bp.is_in_fissure(outside));
+        assert!(!bp.is_in_fissure(outside, &fissure_noise));
     }
 
     #[test]

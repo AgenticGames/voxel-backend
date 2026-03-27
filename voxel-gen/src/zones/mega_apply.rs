@@ -42,8 +42,14 @@ pub fn apply_vault_to_chunk(
     // Material classification noise (cheap at 0.04 freq, sampled lazily per-voxel)
     let mat_noise = Simplex3D::new(blueprint.mat_noise_seed);
 
-    // End-wall noise for organic boundaries
+    // End-wall noise for organic boundaries (legacy seed: global_seed + 0xF155_0005)
     let end_noise = Simplex3D::new(blueprint.mat_noise_seed.wrapping_add(0x0000_0002));
+
+    // Fissure noise for Y-dependent waver (legacy: global_seed + 0xF155_0001)
+    let fissure_noise = Simplex3D::new(blueprint.fissure_noise_seed);
+
+    // Ramp noise for tier tunnel wobble (legacy: global_seed + 0xF155_0006)
+    let ramp_noise = Simplex3D::new(blueprint.ramp_noise_seed);
 
     // ── Main pass: ONE iteration through all voxels ──
     for z in 0..size {
@@ -61,8 +67,8 @@ pub fn apply_vault_to_chunk(
                     continue;
                 }
 
-                // Priority 1: Tier-connecting tunnels
-                if blueprint.is_in_tunnel(wp) {
+                // Priority 1: Tier-connecting tunnels (with noise wobble)
+                if blueprint.is_in_tunnel(wp, &ramp_noise) {
                     if density.samples[idx].density > 0.0 {
                         density.samples[idx].density = -1.0;
                         density.samples[idx].material = Material::Air;
@@ -71,7 +77,7 @@ pub fn apply_vault_to_chunk(
                 }
 
                 // Priority 2+3: Path check (handles both inline tunnels and ledges)
-                if let Some(path_mat) = blueprint.path_at(wp) {
+                if let Some((path_mat, path_density)) = blueprint.path_at(wp) {
                     if path_mat == Material::Air {
                         // Inline tunnel carving
                         if density.samples[idx].density > 0.0 {
@@ -79,11 +85,9 @@ pub fn apply_vault_to_chunk(
                             density.samples[idx].material = Material::Air;
                         }
                     } else {
-                        // Ledge writing -- only write if denser than current
-                        // (preserves existing solid that's already correct)
-                        let edge_d = 0.9; // ledge density (matches old code)
-                        if edge_d > density.samples[idx].density {
-                            density.samples[idx].density = edge_d;
+                        // Ledge writing -- use edge_fade density from blueprint
+                        if path_density > density.samples[idx].density {
+                            density.samples[idx].density = path_density;
                             density.samples[idx].material = path_mat;
                         }
                     }
@@ -121,8 +125,8 @@ pub fn apply_vault_to_chunk(
                     continue;
                 }
 
-                // Priority 6: Fissure carving (main air space)
-                if blueprint.is_in_fissure(wp) {
+                // Priority 6: Fissure carving (main air space, with Y-dependent waver)
+                if blueprint.is_in_fissure(wp, &fissure_noise) {
                     // This is fissure air
                     density.samples[idx].density = -1.0;
                     density.samples[idx].material = Material::Air;
