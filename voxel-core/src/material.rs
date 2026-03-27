@@ -86,6 +86,7 @@ pub enum Material {
     TealCap = 45,       // dark teal mushroom cap
     AmberCap = 46,      // burnt orange mushroom cap
     IceSheet = 47,      // chunky fractured glacial ice — wall interiors, ledge undersides
+    FrozenGlow = 48,    // bioluminescent frozen drip — glowing icicle tips
 }
 
 impl Material {
@@ -138,6 +139,7 @@ impl Material {
             45 => Material::TealCap,
             46 => Material::AmberCap,
             47 => Material::IceSheet,
+            48 => Material::FrozenGlow,
             _ => Material::Air,
         }
     }
@@ -187,7 +189,7 @@ impl Material {
             | Material::Pumice | Material::Sinter | Material::Moonmilk | Material::Tufa
             | Material::Mycelium | Material::MushroomStalk | Material::MushroomGill
             | Material::PurpleCap | Material::TealCap | Material::AmberCap
-            | Material::IceSheet)
+            | Material::IceSheet | Material::FrozenGlow)
     }
 
     pub fn is_hard_rock(self) -> bool {
@@ -241,6 +243,7 @@ impl Material {
             Material::MushroomStalk | Material::MushroomGill
                 | Material::PurpleCap | Material::TealCap | Material::AmberCap => 0.2,
             Material::IceSheet => 0.45,
+            Material::FrozenGlow => 0.3,
             _ => 0.0,
         }
     }
@@ -301,6 +304,7 @@ impl Material {
             Material::TealCap => "Teal Cap",
             Material::AmberCap => "Amber Cap",
             Material::IceSheet => "Ice Sheet",
+            Material::FrozenGlow => "Frozen Glow",
         }
     }
 
@@ -354,6 +358,7 @@ impl Material {
             Material::TealCap => 0x1A5050,         // dark teal
             Material::AmberCap => 0xA04820,        // burnt orange
             Material::IceSheet => 0x8CBFC8,        // pale teal-grey fractured ice
+            Material::FrozenGlow => 0x80D0FF,       // bright blue-white luminous ice
         }
     }
 
@@ -407,6 +412,7 @@ impl Material {
             Material::TealCap,
             Material::AmberCap,
             Material::IceSheet,
+            Material::FrozenGlow,
         ]
     }
 }

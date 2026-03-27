@@ -117,8 +117,12 @@ pub fn place_zones(
     // Step 2: Cluster into CavernVolumes
     let volumes = detect::cluster_cavern_volumes(&air_stats, effective_bounds, 64);
 
-    // Step 3: Select zone types and generate
+    // Step 3: Select zone types and generate — skip volumes inside existing zone bounds
     for volume in &volumes {
+        // Don't place zones that overlap the mega-vault or other existing zones
+        let overlaps_existing = bounds.iter().any(|b| b.contains(volume.world_center));
+        if overlaps_existing { continue; }
+
         let zone_type = detect::select_zone_type(volume, config, global_seed);
         if let Some(zt) = zone_type {
             let (desc, zone_bounds, seeds) = generate_zone(

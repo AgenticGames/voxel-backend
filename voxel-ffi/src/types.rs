@@ -43,7 +43,7 @@ pub struct FfiMeshData {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct FfiMinedMaterials {
-    pub counts: [u32; 47],
+    pub counts: [u32; 64],
 }
 
 #[repr(u8)]

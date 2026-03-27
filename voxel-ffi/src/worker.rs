@@ -794,15 +794,32 @@ fn handle_request(
             batched_seam_pass(&dirty_keys, &cfg, store, result_tx, world_scale);
         }
         WorkerRequest::Mine { request } => {
+            {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+                    .open("D:/Unreal Projects/Mithril2026/Saved/mine_debug.txt")
+                {
+                    let _ = writeln!(f, "[MINE] request: ({},{},{}) r={} mode={}",
+                        request.world_x, request.world_y, request.world_z, request.radius, request.mode);
+                }
+            }
             let cfg = config.read().unwrap().clone();
 
-            // Convert UE world position to Rust coordinates
             let center = from_ue_world_pos(
                 request.world_x, request.world_y, request.world_z, world_scale,
             );
             let radius = request.radius / world_scale;
 
             let mut s = store.write().unwrap();
+            {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+                    .open("D:/Unreal Projects/Mithril2026/Saved/mine_debug.txt")
+                {
+                    let _ = writeln!(f, "[MINE] rust coords: ({:.1},{:.1},{:.1}) r={:.1}, store chunks={}",
+                        center.x, center.y, center.z, radius, s.density_fields.len());
+                }
+            }
             let (meshes, mined) = if request.mode == 0 {
                 crate::mining::mine_sphere(&mut s, center, radius, &cfg, world_scale)
             } else {
@@ -811,6 +828,14 @@ fn handle_request(
                 );
                 crate::mining::mine_peel(&mut s, center, normal, radius, &cfg, world_scale)
             };
+            {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+                    .open("D:/Unreal Projects/Mithril2026/Saved/mine_debug.txt")
+                {
+                    let _ = writeln!(f, "[MINE] complete: {} dirty chunks", meshes.len());
+                }
+            }
             drop(s);
 
             // Collect dirty chunk keys — don't send meshes yet (seam pass will send
