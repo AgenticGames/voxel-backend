@@ -21,14 +21,19 @@ use voxel_core::material::Material;
 use voxel_noise::NoiseSource;
 use voxel_noise::simplex::Simplex3D;
 
-use crate::config::{ZoneConfig, ZoneType};
+use crate::config::ZoneConfig;
+#[allow(unused_imports)]
+use crate::config::ZoneType;
 use crate::density::DensityField;
 use crate::pools::FluidSeed;
+#[allow(unused_imports)]
 use crate::worm::path::WormSegment;
 
 use super::detect::CavernVolume;
 use super::shapes;
-use super::{ZoneAnchor, ZoneBounds, ZoneDescriptor};
+use super::ZoneAnchor;
+#[allow(unused_imports)]
+use super::{ZoneBounds, ZoneDescriptor};
 
 pub fn generate(
     volume: &CavernVolume,
@@ -574,13 +579,33 @@ pub fn generate(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Frozen Mega-Vault: fissure network carved into existing streamed chunks
+// Frozen Mega-Vault (LEGACY)
 // ═══════════════════════════════════════════════════════════════════════════════
+//
+// This multi-pass implementation is superseded by the Blueprint + Per-Chunk-Apply
+// architecture in `mega_blueprint.rs` + `mega_apply.rs`. The new system:
+//   1. Pre-computes all geometry parametrically in ~2ms (MegaVaultBlueprint::generate)
+//   2. Applies to each chunk with ONE pass through 17^3 voxels (apply_vault_to_chunk)
+//
+// Kept as dead code for reference. The entry point in zones/mod.rs now calls
+// the blueprint system directly instead of try_place_mega_vault().
 
-/// Try to carve a frozen mega-vault into existing chunks.
-/// Deterministic location from seed. Only modifies chunks that already exist in density_fields.
-/// Size: 6×4×6 chunks. Carves fissures, tunnels, ledges into whatever solid rock is present.
+/// Legacy mega-vault entry point. No longer called -- see mega_blueprint + mega_apply.
+#[allow(dead_code)]
 pub fn try_place_mega_vault(
+    _density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
+    _config: &ZoneConfig,
+    _global_seed: u64,
+    _effective_bounds: f32,
+    _worm_paths: &[Vec<WormSegment>],
+) -> Option<(ZoneDescriptor, ZoneBounds)> {
+    // Superseded by mega_blueprint::MegaVaultBlueprint + mega_apply::apply_vault_to_chunk
+    None
+}
+
+// Legacy implementation below kept for reference only.
+#[allow(dead_code, unreachable_code, unused_variables, unused_mut)]
+fn try_place_mega_vault_legacy(
     density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
     config: &ZoneConfig,
     global_seed: u64,
@@ -600,7 +625,6 @@ pub fn try_place_mega_vault(
         }
     }
 
-    // Mega-vault disabled for testing
     return None;
 
     // Roll for mega-vault

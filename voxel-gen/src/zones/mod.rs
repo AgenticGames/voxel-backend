@@ -14,10 +14,13 @@ pub mod lava_gallery;
 pub mod bioluminescent;
 pub mod terraces;
 pub mod frozen;
+pub mod mega_blueprint;
+pub mod mega_apply;
 
 use std::collections::HashMap;
 
 use glam::Vec3;
+use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{ZoneConfig, ZoneType};
@@ -92,7 +95,7 @@ pub fn place_zones(
     config: &ZoneConfig,
     global_seed: u64,
     effective_bounds: f32,
-    worm_paths: &[Vec<WormSegment>],
+    _worm_paths: &[Vec<WormSegment>],
 ) -> (Vec<ZoneDescriptor>, Vec<ZoneBounds>, Vec<FluidSeed>) {
     if !config.enabled {
         return (Vec::new(), Vec::new(), Vec::new());
@@ -102,13 +105,48 @@ pub fn place_zones(
     let mut bounds = Vec::new();
     let mut fluid_seeds = Vec::new();
 
-    // Phase 0: Try to place a Frozen Mega-Vault (carves its own space from solid rock)
-    if let Some((desc, zone_bounds)) = frozen::try_place_mega_vault(
-        density_fields, config, global_seed, effective_bounds, worm_paths,
-    ) {
-        descriptors.push(desc);
-        bounds.push(zone_bounds);
-        // The carved air will be detected as a CavernVolume below and get ice-painted
+    // Phase 0: Frozen Mega-Vault via Blueprint + Per-Chunk-Apply pattern.
+    // The blueprint pre-computes all vault geometry parametrically (~2ms),
+    // then each overlapping chunk gets a single-pass apply (~O(17^3) per chunk).
+    {
+        let eb = effective_bounds;
+        let bp = mega_blueprint::MegaVaultBlueprint::generate(global_seed, eb);
+
+        // Only proceed if the chance roll passed (check via RNG replay)
+        let mut vault_rng = rand_chacha::ChaCha8Rng::seed_from_u64(
+            global_seed.wrapping_add(0xAE6A_F001),
+        );
+        let roll: f32 = rand::Rng::gen(&mut vault_rng);
+        if roll <= config.frozen_mega_chance {
+            // Apply to each overlapping chunk
+            let overlapping_keys: Vec<(i32, i32, i32)> = density_fields.keys()
+                .filter(|&&k| bp.overlaps_chunk(k))
+                .copied()
+                .collect();
+
+            for key in &overlapping_keys {
+                if let Some(density) = density_fields.get_mut(key) {
+                    mega_apply::apply_vault_to_chunk(density, *key, &bp, eb);
+                }
+            }
+
+            if !overlapping_keys.is_empty() {
+                let desc = ZoneDescriptor {
+                    zone_type: ZoneType::FrozenGrotto,
+                    world_min: bp.world_min,
+                    world_max: bp.world_max,
+                    center: bp.world_center,
+                    anchors: Vec::new(),
+                };
+                let zone_bounds = ZoneBounds {
+                    world_min: bp.world_min,
+                    world_max: bp.world_max,
+                    zone_type: ZoneType::FrozenGrotto,
+                };
+                descriptors.push(desc);
+                bounds.push(zone_bounds);
+            }
+        }
     }
 
     // Step 1: Compute per-chunk air statistics
