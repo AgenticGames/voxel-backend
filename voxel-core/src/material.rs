@@ -332,7 +332,7 @@ impl Material {
             Material::Coal => 0x2C2C2C,
             Material::Graphite => 0x474747,
             Material::Opal => 0xE0F0FF,
-            Material::Hornfels => 0xFF00FF,
+            Material::Hornfels => 0x5C5452,
             Material::Garnet => 0x8B2500,
             Material::Diopside => 0x2E8B57,
             Material::Gypsum => 0xF5F0E8,
