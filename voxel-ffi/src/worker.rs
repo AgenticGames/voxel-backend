@@ -219,41 +219,44 @@ fn try_process_stress_queue(
 
     let recalc_ms = recalc_start.elapsed().as_secs_f64() * 1000.0;
 
-    // Count support score distribution from the recalc
+    // Count stress + support score distributions
     {
         let s = store.read().unwrap();
-        let mut grounded = 0u32;
-        let mut partial = 0u32;
-        let mut unsupported = 0u32;
-        let mut air_skipped = 0u32;
+        let mut air = 0u32;
+        let mut stress_zero = 0u32;
+        let mut stress_dust = 0u32;   // 0.01 .. 0.4
+        let mut stress_creak = 0u32;  // 0.4 .. 0.6
+        let mut stress_shake = 0u32;  // 0.6 .. 0.8
+        let mut stress_danger = 0u32; // 0.8 .. 1.0
+        let mut stress_over = 0u32;   // >= 1.0
+        let mut sup_zero = 0u32;      // support score 0
+        let mut sup_low = 0u32;       // 0 .. 0.3
+        let mut sup_mid = 0u32;       // 0.3 .. 0.6
+        let mut sup_high = 0u32;      // 0.6 .. 0.8
+        let mut sup_grounded = 0u32;  // >= 0.8
         let grid_size = chunk_size + 1;
         for &key in &dirty_chunks {
-            if let (Some(df), Some(ssf)) = (s.density_fields.get(&key), s.stress_fields.get(&key)) {
+            if let Some(df) = s.density_fields.get(&key) {
+                let ssf = s.stress_fields.get(&key);
                 for z in 0..grid_size {
                     for y in 0..grid_size {
                         for x in 0..grid_size {
-                            if !df.get(x, y, z).material.is_solid() {
-                                air_skipped += 1;
-                                continue;
-                            }
-                            let stress = ssf.get(x, y, z);
-                            if stress <= 0.001 {
-                                grounded += 1;
-                            } else if stress < 1.0 {
-                                partial += 1;
-                            } else {
-                                unsupported += 1;
-                            }
+                            if !df.get(x, y, z).material.is_solid() { air += 1; continue; }
+                            let stress = ssf.map(|f| f.get(x, y, z)).unwrap_or(0.0);
+                            if stress <= 0.001 { stress_zero += 1; }
+                            else if stress < 0.4 { stress_dust += 1; }
+                            else if stress < 0.6 { stress_creak += 1; }
+                            else if stress < 0.8 { stress_shake += 1; }
+                            else if stress < 1.0 { stress_danger += 1; }
+                            else { stress_over += 1; }
                         }
                     }
                 }
             }
         }
-        let total = grounded + partial + unsupported + air_skipped;
-        dbg(format!("  recalc done in {:.1}ms — {} voxels total: {} air, {} grounded(0), {} partial(0-1.0), {} overstressed(1.0+)",
-            recalc_ms, total, air_skipped, grounded, partial, unsupported));
-        dbg(format!("  → {} surface voxels processed, {} interior skipped",
-            partial + unsupported, grounded));
+        let total = air + stress_zero + stress_dust + stress_creak + stress_shake + stress_danger + stress_over;
+        dbg(format!("  recalc {:.1}ms — {} voxels: {} air, {} zero, {} dust(<0.4), {} creak(<0.6), {} shake(<0.8), {} danger(<1.0), {} OVER(1.0+)",
+            recalc_ms, total, air, stress_zero, stress_dust, stress_creak, stress_shake, stress_danger, stress_over));
     }
     dbg(format!("  overstressed={} affected_chunks={}",
         result.overstressed.len(), result.affected_chunks.len()));
