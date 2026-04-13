@@ -272,36 +272,56 @@ fn try_process_stress_queue(
         }
     }
 
-    // Emit stress warnings for UE (dust/creak/shake feedback)
+    // Emit stress warnings for UE — scan ALL voxels with stress above dust threshold.
+    // This is push-based: Rust tells UE where the stress is, UE checks proximity to player.
     {
+        let s = store.read().unwrap();
         let mut warnings = Vec::new();
         let mut dust_count = 0u32;
         let mut creak_count = 0u32;
         let mut shake_count = 0u32;
-        for ov in &result.overstressed {
-            let warning_type = if ov.stress >= stress_cfg.warn_shake_threshold {
-                shake_count += 1; 3
-            } else if ov.stress >= stress_cfg.warn_creak_threshold {
-                creak_count += 1; 2
-            } else if ov.stress >= stress_cfg.warn_dust_threshold {
-                dust_count += 1; 1
-            } else {
-                0
+        let grid_size = chunk_size + 1;
+
+        for &(cx, cy, cz) in &dirty_chunks {
+            let sf = match s.stress_fields.get(&(cx, cy, cz)) {
+                Some(f) => f,
+                None => continue,
             };
-            if warning_type > 0 {
-                let ue_x = ov.world_x as f32 * world_scale;
-                let ue_y = -(ov.world_z as f32) * world_scale;
-                let ue_z = ov.world_y as f32 * world_scale;
-                warnings.push(FfiStressWarning {
-                    world_x: ue_x, world_y: ue_y, world_z: ue_z,
-                    stress: ov.stress, warning_type,
-                });
+            for z in 0..grid_size {
+                for y in 0..grid_size {
+                    for x in 0..grid_size {
+                        let stress = sf.get(x, y, z);
+                        if stress < stress_cfg.warn_dust_threshold {
+                            continue;
+                        }
+                        let warning_type = if stress >= stress_cfg.warn_shake_threshold {
+                            shake_count += 1; 3u8
+                        } else if stress >= stress_cfg.warn_creak_threshold {
+                            creak_count += 1; 2u8
+                        } else {
+                            dust_count += 1; 1u8
+                        };
+                        let wx = cx * chunk_size as i32 + x as i32;
+                        let wy = cy * chunk_size as i32 + y as i32;
+                        let wz = cz * chunk_size as i32 + z as i32;
+                        warnings.push(FfiStressWarning {
+                            world_x: wx as f32 * world_scale,
+                            world_y: -(wz as f32) * world_scale,
+                            world_z: wy as f32 * world_scale,
+                            stress,
+                            warning_type,
+                        });
+                    }
+                }
             }
         }
         if dust_count + creak_count + shake_count > 0 {
-            dbg(format!("  warnings: dust={} creak={} shake={}", dust_count, creak_count, shake_count));
+            dbg(format!("  warnings: dust={} creak={} shake={} (scanned from stress fields)",
+                dust_count, creak_count, shake_count));
         }
-        warnings.truncate(64);
+        // Send the highest-stress warnings (sorted, capped at 128)
+        warnings.sort_by(|a, b| b.stress.partial_cmp(&a.stress).unwrap_or(std::cmp::Ordering::Equal));
+        warnings.truncate(128);
         if !warnings.is_empty() {
             let _ = result_tx.send(WorkerResult::StressWarnings { warnings });
         }

@@ -255,7 +255,7 @@ impl Default for StressConfig {
             lateral_transfer_factor: 0.7,
             vertical_transfer_factor: 0.95,
             support_propagation_iterations: 2, // 2 is enough for chunk_size=30, halves perf cost
-            ground_threshold: 0.8,
+            ground_threshold: 0.95,
             overhang_weight: 0.02,      // Retuned (was 0.06 — dominated the stress calc)
             span_weight: 0.015,         // Retuned (was 0.03)
             min_safe_span: 6,

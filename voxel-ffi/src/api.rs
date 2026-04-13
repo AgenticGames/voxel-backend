@@ -261,9 +261,39 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                 // Intercepted by engine.poll_result(); ignore if it reaches here.
                 ptr::null_mut()
             }
-            WorkerResult::StressWarnings { .. } => {
-                // TODO Phase 2: serialize stress warnings to FfiResult
-                ptr::null_mut()
+            WorkerResult::StressWarnings { warnings } => {
+                if warnings.is_empty() {
+                    return ptr::null_mut();
+                }
+                // Pack summary into FfiResult:
+                // Chunk = position of highest-stress warning (UE coords, as integers)
+                // Generation = (warning_count << 32) | (max_stress * 1000) — packed
+                // Mined.counts[0] = dust_count, [1] = creak_count, [2] = shake_count
+                let top = &warnings[0]; // Already sorted by stress descending
+                let dust_count = warnings.iter().filter(|w| w.warning_type == 1).count() as u32;
+                let creak_count = warnings.iter().filter(|w| w.warning_type == 2).count() as u32;
+                let shake_count = warnings.iter().filter(|w| w.warning_type == 3).count() as u32;
+                let mut mined = FfiMinedMaterials { counts: [0; 64] };
+                mined.counts[0] = dust_count;
+                mined.counts[1] = creak_count;
+                mined.counts[2] = shake_count;
+                mined.counts[3] = warnings.len() as u32;
+
+                let result = FfiResult {
+                    result_type: FfiResultType::StressWarnings,
+                    chunk: FfiChunkCoord {
+                        x: top.world_x as i32,
+                        y: top.world_y as i32,
+                        z: top.world_z as i32,
+                    },
+                    mesh: empty_mesh_data(),
+                    mined,
+                    generation: (top.stress * 1000.0) as u64,
+                    fluid_mesh: empty_fluid_mesh_data(),
+                    crystal_data: empty_crystal_data(),
+                    zone_data: empty_zone_data(),
+                };
+                Box::into_raw(Box::new(result))
             }
             WorkerResult::CollapseSlabResult { .. } => {
                 // TODO Phase 2: serialize slab collapse data to FfiResult
