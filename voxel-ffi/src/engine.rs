@@ -63,6 +63,8 @@ pub struct VoxelEngine {
     generate_tx: Sender<WorkerRequest>,
     mine_tx: Sender<WorkerRequest>,
     result_rx: Receiver<WorkerResult>,
+    /// Priority queue for re-queued results (mine batch expansion)
+    priority_results: std::sync::Mutex<std::collections::VecDeque<WorkerResult>>,
 
     // Fluid
     fluid_event_tx: Sender<FluidEvent>,
@@ -203,6 +205,7 @@ impl VoxelEngine {
             generate_tx,
             mine_tx,
             result_rx,
+            priority_results: std::sync::Mutex::new(std::collections::VecDeque::new()),
             fluid_event_tx,
             fluid_thread: Some(fluid_thread),
             store,
@@ -287,7 +290,15 @@ impl VoxelEngine {
     /// Non-blocking poll for a completed result. Returns None if nothing ready.
     /// SleepComplete results are intercepted and stored internally; they are
     /// retrieved via `poll_sleep_complete()` instead.
+    pub fn requeue_result(&self, result: WorkerResult) {
+        self.priority_results.lock().unwrap().push_back(result);
+    }
+
     pub fn poll_result(&self) -> Option<WorkerResult> {
+        // Priority results first (mine batch expansions)
+        if let Some(r) = self.priority_results.lock().unwrap().pop_front() {
+            return Some(r);
+        }
         match self.result_rx.try_recv() {
             Ok(WorkerResult::SleepComplete {
                 chunks_changed,
@@ -750,6 +761,37 @@ impl VoxelEngine {
         store.stress_fields.get(&chunk).cloned()
     }
 
+    /// Synchronously recalculate stress on nearby chunks for V-key preview.
+    /// Runs the v2 ground connectivity + stress pass on 18 chunks (3x3 at center Y + 3x3 above).
+    pub fn recalc_stress_preview(&self, center: (i32, i32, i32)) {
+        use voxel_core::stress::recalc_stress_region_v2;
+
+        let stress_cfg = self.stress_config.read().unwrap().clone();
+        let cfg = self.config.read().unwrap().clone();
+        let chunk_size = cfg.chunk_size;
+
+        // 3x3 at center Y + 3x3 at Y+1 = 18 chunks
+        let mut chunk_keys = Vec::with_capacity(18);
+        for dy in 0..=1i32 {
+            for dz in -1..=1i32 {
+                for dx in -1..=1i32 {
+                    chunk_keys.push((center.0 + dx, center.1 + dy, center.2 + dz));
+                }
+            }
+        }
+
+        let mut store = self.store.write().unwrap();
+        let loaded_keys: Vec<(i32, i32, i32)> = chunk_keys
+            .into_iter()
+            .filter(|k| store.density_fields.contains_key(k))
+            .collect();
+
+        if !loaded_keys.is_empty() {
+            let (density, stress, support) = store.sleep_fields_mut();
+            recalc_stress_region_v2(density, stress, support, &stress_cfg, &loaded_keys, chunk_size);
+        }
+    }
+
     /// Query stress at a single world voxel position.
     pub fn query_stress_at(&self, wx: i32, wy: i32, wz: i32, chunk_size: usize) -> f32 {
         let cs = chunk_size as i32;
@@ -1011,6 +1053,49 @@ impl VoxelEngine {
             Ok(()) => 1,
             Err(e) => {
                 eprintln!("[voxel] request_building_flatten: send failed: {}", e);
+                0
+            }
+        }
+    }
+
+    /// Batch building flatten: multiple buildings in one worker job, one seam pass.
+    pub fn request_building_flatten_batch(
+        &self,
+        ue_positions: &[(f32, f32, f32)],
+        scale: f32,
+        footprint_voxels: i32,
+        clearance_voxels: i32,
+    ) -> u32 {
+        if ue_positions.is_empty() {
+            return 0;
+        }
+        let bts = footprint_voxels.max(1);
+        let clr = clearance_voxels.max(2);
+        let cfg = self.config.read().unwrap();
+        let buildings: Vec<(i32, i32, i32, u8, i32, i32)> = ue_positions
+            .iter()
+            .map(|&(ue_x, ue_y, ue_z)| {
+                let rust_x = ue_x / scale;
+                let rust_y = ue_z / scale;
+                let rust_z = -ue_y / scale;
+                let base_x = rust_x.round() as i32 - bts / 2;
+                let base_y = rust_y.round() as i32;
+                let base_z = rust_z.round() as i32 - bts / 2;
+                let host_material =
+                    voxel_gen::density::host_rock_for_depth(rust_y as f64, &cfg.ore.host_rock)
+                        as u8;
+                (base_x, base_y, base_z, host_material, bts, clr)
+            })
+            .collect();
+        drop(cfg);
+
+        match self.mine_tx.send_timeout(
+            WorkerRequest::BuildingFlattenBatch { buildings },
+            std::time::Duration::from_millis(500),
+        ) {
+            Ok(()) => 1,
+            Err(e) => {
+                eprintln!("[voxel] request_building_flatten_batch: send failed: {}", e);
                 0
             }
         }
@@ -1711,7 +1796,7 @@ fn ffi_to_zone_config(c: &FfiEngineConfig) -> voxel_gen::config::ZoneConfig {
         frozen_floor_depth: if c.zone_frozen_floor_depth > 0 { c.zone_frozen_floor_depth } else { 2 },
         frozen_waterfall_count: if c.zone_frozen_waterfall_count > 0 { c.zone_frozen_waterfall_count } else { 2 },
         frozen_ice_stalactite_chance: if c.zone_frozen_ice_stalactite_chance > 0.0 { c.zone_frozen_ice_stalactite_chance } else { 0.3 },
-        frozen_mega_chance: if c.zone_frozen_mega_chance > 0.0 { c.zone_frozen_mega_chance } else { 1.0 }, // TODO: revert to 0.03 after testing
+        frozen_mega_chance: if c.zone_frozen_mega_chance > 0.0 { c.zone_frozen_mega_chance } else { 0.03 },
     }
 }
 

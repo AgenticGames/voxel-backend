@@ -573,6 +573,26 @@ pub unsafe extern "C" fn voxel_free_stress_data(data: FfiStressData) {
     }
 }
 
+/// Synchronously recalculate stress on nearby chunks for V-key overlay preview.
+/// Takes a UE chunk coordinate as center, recalcs the 3x3 at that Y + 3x3 at Y+1 (18 chunks).
+/// Call before querying stress to ensure overlay has data.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_recalc_stress_preview(
+    engine: *mut c_void,
+    center_chunk_x: i32,
+    center_chunk_y: i32,
+    center_chunk_z: i32,
+) {
+    use crate::convert::ue_chunk_to_rust;
+
+    if engine.is_null() {
+        return;
+    }
+    let engine_ref = &*(engine as *const VoxelEngine);
+    let center = ue_chunk_to_rust(center_chunk_x, center_chunk_y, center_chunk_z);
+    engine_ref.recalc_stress_preview(center);
+}
+
 /// Query stress at a single world position (UE coords).
 /// Returns normalized stress value (>= 1.0 means overstressed).
 #[no_mangle]
