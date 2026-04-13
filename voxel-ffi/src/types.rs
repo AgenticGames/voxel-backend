@@ -56,6 +56,8 @@ pub enum FfiResultType {
     FluidMesh = 4,
     SolidifyRequest = 5,
     CollapseResult = 6,
+    StressWarnings = 7,
+    CollapseSlabResult = 8,
 }
 
 /// SoA layout for fluid mesh data. Pointers owned by Rust, freed via `voxel_free_result`.
@@ -1050,6 +1052,66 @@ pub struct FfiCollapseEvent {
     pub volume: u32,
 }
 
+/// Per-voxel stress warning sent to UE for visual/audio feedback.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiStressWarning {
+    pub world_x: f32,
+    pub world_y: f32,
+    pub world_z: f32,
+    pub stress: f32,
+    pub warning_type: u8, // 0=none, 1=dust, 2=creak, 3=shake
+}
+
+/// A coherent collapse slab with mesh data for animated falling.
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct FfiCollapseSlab {
+    /// Slab mesh data (ProceduralMesh on UE side)
+    pub positions: *mut FfiVec3,
+    pub normals: *mut FfiVec3,
+    pub material_ids: *mut u8,
+    pub vertex_count: u32,
+    pub indices: *mut u32,
+    pub index_count: u32,
+    pub submeshes: *mut FfiSubmesh,
+    pub submesh_count: u32,
+    /// Spawn position in UE world space (where slab appears initially)
+    pub spawn_x: f32,
+    pub spawn_y: f32,
+    pub spawn_z: f32,
+    /// Landing position in UE world space (where slab comes to rest)
+    pub land_x: f32,
+    pub land_y: f32,
+    pub land_z: f32,
+    /// Fall distance in UE world units
+    pub fall_distance: f32,
+    /// Slab volume (number of voxels)
+    pub volume: u32,
+    /// Dominant material index
+    pub dominant_material: u8,
+}
+
+// SAFETY: FfiCollapseSlab's raw pointers are exclusively owned by the result
+// and only dereferenced on the FFI boundary. Not shared across threads.
+unsafe impl Send for FfiCollapseSlab {}
+unsafe impl Sync for FfiCollapseSlab {}
+
+/// V2 collapse event with coherent slab data for animated falling.
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct FfiCollapseEventV2 {
+    pub center_x: f32,
+    pub center_y: f32,
+    pub center_z: f32,
+    pub total_volume: u32,
+    pub slabs: *mut FfiCollapseSlab,
+    pub slab_count: u32,
+}
+
+unsafe impl Send for FfiCollapseEventV2 {}
+unsafe impl Sync for FfiCollapseEventV2 {}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct FfiStressConfig {
@@ -1066,6 +1128,16 @@ pub struct FfiStressConfig {
     pub warn_creak_threshold: f32,
     pub warn_shake_threshold: f32,
     pub support_hardness: [f32; 8],
+    // V2 fields
+    pub lateral_transfer_factor: f32,
+    pub vertical_transfer_factor: f32,
+    pub support_propagation_iterations: u32,
+    pub ground_threshold: f32,
+    pub overhang_weight: f32,
+    pub span_weight: f32,
+    pub min_safe_span: u32,
+    pub min_collapse_region: u32,
+    pub slab_cohesion_threshold: f32,
 }
 
 #[repr(C)]
@@ -1183,6 +1255,9 @@ pub enum WorkerRequest {
         footprint_voxels: i32,
         clearance_voxels: i32,
     },
+    BuildingFlattenBatch {
+        buildings: Vec<(i32, i32, i32, u8, i32, i32)>, // (base_x, base_y, base_z, host_material, footprint, clearance)
+    },
     Unload {
         chunk: (i32, i32, i32),
     },
@@ -1247,6 +1322,10 @@ pub enum WorkerResult {
     MinedMaterials {
         mined: FfiMinedMaterials,
     },
+    /// All mine mesh updates in one atomic result — prevents pop-in
+    MineBatchMesh {
+        meshes: Vec<((i32, i32, i32), ConvertedMesh, Vec<FfiCrystalPlacement>)>,
+    },
     FluidMesh {
         chunk: (i32, i32, i32),
         mesh: ConvertedFluidMesh,
@@ -1296,6 +1375,15 @@ pub enum WorkerResult {
     },
     ForceSpawnPoolComplete {
         json_report: String,
+    },
+    /// V2 stress warnings for live feedback (dust/creak/shake positions).
+    StressWarnings {
+        warnings: Vec<FfiStressWarning>,
+    },
+    /// V2 collapse result with coherent slab data for animated falling.
+    CollapseSlabResult {
+        events: Vec<FfiCollapseEventV2>,
+        meshes: Vec<((i32, i32, i32), ConvertedMesh)>,
     },
 }
 

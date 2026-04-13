@@ -115,6 +115,28 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                 let result = convert_mesh_to_ffi_result(chunk, mesh, generation, crystal_data, zone_descriptors);
                 Box::into_raw(Box::new(result))
             }
+            WorkerResult::MineBatchMesh { meshes } => {
+                // Convert batch to individual results — send first one now, rest get re-queued
+                let mut iter = meshes.into_iter();
+                // Re-queue remaining for next polls
+                for (chunk, mesh, crystal_data) in iter {
+                    engine.requeue_result(WorkerResult::ChunkMesh {
+                        chunk, mesh, generation: 0, crystal_data, zone_descriptors: Vec::new(),
+                    });
+                }
+                // Signal UE to drain all results this frame
+                let result = FfiResult {
+                    result_type: FfiResultType::MineResult,
+                    chunk: FfiChunkCoord { x: 0, y: 0, z: 0 },
+                    mesh: empty_mesh_data(),
+                    mined: FfiMinedMaterials { counts: [0; 64] },
+                    generation: 0,
+                    fluid_mesh: empty_fluid_mesh_data(),
+                    crystal_data: empty_crystal_data(),
+                    zone_data: empty_zone_data(),
+                };
+                Box::into_raw(Box::new(result))
+            }
             WorkerResult::MinedMaterials { mined } => {
                 let result = FfiResult {
                     result_type: FfiResultType::MineResult,
@@ -226,6 +248,14 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
             }
             WorkerResult::MorphMeshes { .. } => {
                 // Intercepted by engine.poll_result(); ignore if it reaches here.
+                ptr::null_mut()
+            }
+            WorkerResult::StressWarnings { .. } => {
+                // TODO Phase 2: serialize stress warnings to FfiResult
+                ptr::null_mut()
+            }
+            WorkerResult::CollapseSlabResult { .. } => {
+                // TODO Phase 2: serialize slab collapse data to FfiResult
                 ptr::null_mut()
             }
         },
@@ -640,6 +670,16 @@ pub unsafe extern "C" fn voxel_set_stress_config(
         warn_creak_threshold: ffi_cfg.warn_creak_threshold,
         warn_shake_threshold: ffi_cfg.warn_shake_threshold,
         support_hardness: ffi_cfg.support_hardness,
+        // V2 fields
+        lateral_transfer_factor: ffi_cfg.lateral_transfer_factor,
+        vertical_transfer_factor: ffi_cfg.vertical_transfer_factor,
+        support_propagation_iterations: ffi_cfg.support_propagation_iterations,
+        ground_threshold: ffi_cfg.ground_threshold,
+        overhang_weight: ffi_cfg.overhang_weight,
+        span_weight: ffi_cfg.span_weight,
+        min_safe_span: ffi_cfg.min_safe_span,
+        min_collapse_region: ffi_cfg.min_collapse_region,
+        slab_cohesion_threshold: ffi_cfg.slab_cohesion_threshold,
     };
 
     engine.update_stress_config(stress_config);
@@ -1357,6 +1397,31 @@ pub unsafe extern "C" fn voxel_request_building_flatten(
     }
     let engine = &*(engine as *const VoxelEngine);
     engine.request_building_flatten(x, y, z, scale, footprint_voxels, clearance_voxels)
+}
+
+/// Batch building flatten: flatten terrain under multiple buildings in one worker job.
+/// All buildings share the same footprint and clearance. One seam pass for the lot.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_request_building_flatten_batch(
+    engine: *mut c_void,
+    xs: *const f32,
+    ys: *const f32,
+    zs: *const f32,
+    count: u32,
+    scale: f32,
+    footprint_voxels: i32,
+    clearance_voxels: i32,
+) -> u32 {
+    if engine.is_null() || xs.is_null() || ys.is_null() || zs.is_null() || count == 0 {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let n = count as usize;
+    let xs = std::slice::from_raw_parts(xs, n);
+    let ys = std::slice::from_raw_parts(ys, n);
+    let zs = std::slice::from_raw_parts(zs, n);
+    let positions: Vec<(f32, f32, f32)> = (0..n).map(|i| (xs[i], ys[i], zs[i])).collect();
+    engine.request_building_flatten_batch(&positions, scale, footprint_voxels, clearance_voxels)
 }
 
 /// Query floor support for a flatten ghost preview.

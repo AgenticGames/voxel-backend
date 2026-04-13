@@ -50,6 +50,10 @@ pub struct ChunkStore {
     pub crystal_placements: HashMap<(i32, i32, i32), Vec<voxel_gen::CrystalPlacement>>,
     /// Region size for computing region keys (needed by unload).
     region_size: i32,
+    /// Chunk keys with pending stress recalculation (queued by mining).
+    pub stress_dirty_chunks: Vec<(i32, i32, i32)>,
+    /// Timestamp of the last mine action that dirtied stress.
+    pub stress_dirty_time: Option<std::time::Instant>,
 }
 
 impl ChunkStore {
@@ -67,6 +71,8 @@ impl ChunkStore {
             region_worm_paths: HashMap::new(),
             crystal_placements: HashMap::new(),
             region_size,
+            stress_dirty_chunks: Vec::new(),
+            stress_dirty_time: None,
         }
     }
 
@@ -124,6 +130,7 @@ impl ChunkStore {
         self.stress_fields.remove(&key);
         self.support_fields.remove(&key);
         self.crystal_placements.remove(&key);
+        self.stress_dirty_chunks.retain(|k| k != &key);
 
         // Clear region flag immediately — region is no longer intact.
         // Next generate will re-run region gen; has_density() guard
@@ -149,6 +156,31 @@ impl ChunkStore {
         if !any_remaining {
             self.region_worm_paths.remove(&rk);
         }
+    }
+
+    /// Queue chunk keys for deferred stress recalculation (called after mining).
+    pub fn queue_stress_dirty(&mut self, chunk_keys: &[(i32, i32, i32)]) {
+        for &key in chunk_keys {
+            if !self.stress_dirty_chunks.contains(&key) {
+                self.stress_dirty_chunks.push(key);
+            }
+        }
+        self.stress_dirty_time = Some(std::time::Instant::now());
+    }
+
+    /// Drain the stress dirty queue if the deferred timer has elapsed.
+    /// Returns None if timer hasn't elapsed or queue is empty.
+    pub fn drain_stress_dirty(&mut self, defer_secs: f32) -> Option<Vec<(i32, i32, i32)>> {
+        if let Some(t) = self.stress_dirty_time {
+            if t.elapsed().as_secs_f32() >= defer_secs {
+                self.stress_dirty_time = None;
+                let q = std::mem::take(&mut self.stress_dirty_chunks);
+                if !q.is_empty() {
+                    return Some(q);
+                }
+            }
+        }
+        None
     }
 
     /// Return mutable references to density, stress, and support fields simultaneously.
