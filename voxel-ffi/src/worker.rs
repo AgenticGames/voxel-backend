@@ -165,6 +165,15 @@ fn try_process_stress_queue(
         recalc_stress_region_v2, detect_and_execute_collapses_v2,
     };
     use crate::types::FfiStressWarning;
+    use std::io::Write;
+
+    let debug_path = "D:/Unreal Projects/Mithril2026/Saved/stress_debug.txt";
+    let mut dbg = |msg: String| {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(debug_path) {
+            let _ = writeln!(f, "[{:.2}] {}", std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64() % 10000.0, msg);
+        }
+    };
 
     // Check if stress dirty queue is ready (timer elapsed)
     let dirty_chunks = {
@@ -181,8 +190,20 @@ fn try_process_stress_queue(
     let stress_cfg = stress_config.read().unwrap().clone();
     let chunk_size = cfg.chunk_size;
 
+    dbg(format!("=== STRESS RECALC START === dirty_chunks={} chunk_size={}", dirty_chunks.len(), chunk_size));
+    dbg(format!("  config: gravity={:.3} lat_transfer={:.2} vert_transfer={:.2} iters={} ground_thresh={:.2}",
+        stress_cfg.gravity_weight, stress_cfg.lateral_transfer_factor, stress_cfg.vertical_transfer_factor,
+        stress_cfg.support_propagation_iterations, stress_cfg.ground_threshold));
+    dbg(format!("  config: overhang_w={:.3} span_w={:.3} min_safe_span={} min_collapse={} slab_cohesion={:.2} max_vol={}",
+        stress_cfg.overhang_weight, stress_cfg.span_weight, stress_cfg.min_safe_span,
+        stress_cfg.min_collapse_region, stress_cfg.slab_cohesion_threshold, stress_cfg.max_collapse_volume));
+    for (i, &k) in dirty_chunks.iter().enumerate().take(10) {
+        dbg(format!("  dirty[{}]: chunk ({},{},{})", i, k.0, k.1, k.2));
+    }
+
+    let recalc_start = std::time::Instant::now();
+
     // Run v2 stress recalculation on dirty chunks
-    // Use sleep_fields_mut() to split borrows (same pattern as sleep system)
     let result = {
         let mut s = store.write().unwrap();
         let (density, stress, support) = s.sleep_fields_mut();
@@ -196,34 +217,53 @@ fn try_process_stress_queue(
         )
     };
 
+    let recalc_ms = recalc_start.elapsed().as_secs_f64() * 1000.0;
+    dbg(format!("  recalc done in {:.1}ms — overstressed={} affected_chunks={}",
+        recalc_ms, result.overstressed.len(), result.affected_chunks.len()));
+
+    // Log stress distribution
+    if !result.overstressed.is_empty() {
+        let max_stress = result.overstressed.iter().map(|v| v.stress).fold(0.0f32, f32::max);
+        let min_stress = result.overstressed.iter().map(|v| v.stress).fold(f32::MAX, f32::min);
+        let avg_stress: f32 = result.overstressed.iter().map(|v| v.stress).sum::<f32>() / result.overstressed.len() as f32;
+        dbg(format!("  overstressed: min={:.2} avg={:.2} max={:.2}", min_stress, avg_stress, max_stress));
+        // Log top 5 by stress
+        let mut sorted: Vec<_> = result.overstressed.iter().collect();
+        sorted.sort_by(|a, b| b.stress.partial_cmp(&a.stress).unwrap_or(std::cmp::Ordering::Equal));
+        for (i, ov) in sorted.iter().take(5).enumerate() {
+            dbg(format!("  top[{}]: ({},{},{}) stress={:.3}", i, ov.world_x, ov.world_y, ov.world_z, ov.stress));
+        }
+    }
+
     // Emit stress warnings for UE (dust/creak/shake feedback)
     {
         let mut warnings = Vec::new();
+        let mut dust_count = 0u32;
+        let mut creak_count = 0u32;
+        let mut shake_count = 0u32;
         for ov in &result.overstressed {
             let warning_type = if ov.stress >= stress_cfg.warn_shake_threshold {
-                3 // shake
+                shake_count += 1; 3
             } else if ov.stress >= stress_cfg.warn_creak_threshold {
-                2 // creak
+                creak_count += 1; 2
             } else if ov.stress >= stress_cfg.warn_dust_threshold {
-                1 // dust
+                dust_count += 1; 1
             } else {
                 0
             };
             if warning_type > 0 {
-                // Convert to UE coords
                 let ue_x = ov.world_x as f32 * world_scale;
                 let ue_y = -(ov.world_z as f32) * world_scale;
                 let ue_z = ov.world_y as f32 * world_scale;
                 warnings.push(FfiStressWarning {
-                    world_x: ue_x,
-                    world_y: ue_y,
-                    world_z: ue_z,
-                    stress: ov.stress,
-                    warning_type,
+                    world_x: ue_x, world_y: ue_y, world_z: ue_z,
+                    stress: ov.stress, warning_type,
                 });
             }
         }
-        // Cap at 64 warnings to avoid flooding UE
+        if dust_count + creak_count + shake_count > 0 {
+            dbg(format!("  warnings: dust={} creak={} shake={}", dust_count, creak_count, shake_count));
+        }
         warnings.truncate(64);
         if !warnings.is_empty() {
             let _ = result_tx.send(WorkerResult::StressWarnings { warnings });
@@ -234,7 +274,7 @@ fn try_process_stress_queue(
     if !result.overstressed.is_empty() {
         let mut s = store.write().unwrap();
 
-        // Run collapse detection — use sleep_fields_mut() to split borrows
+        let collapse_start = std::time::Instant::now();
         let events = {
             let (density, stress, support) = s.sleep_fields_mut();
             detect_and_execute_collapses_v2(
@@ -246,8 +286,28 @@ fn try_process_stress_queue(
                 chunk_size,
             )
         };
+        let collapse_ms = collapse_start.elapsed().as_secs_f64() * 1000.0;
 
         if !events.is_empty() {
+            let total_voxels: u32 = events.iter().map(|e| e.total_volume).sum();
+            let total_slabs: usize = events.iter().map(|e| e.slabs.len()).sum();
+            dbg(format!("  === COLLAPSE === events={} total_slabs={} total_voxels={} in {:.1}ms",
+                events.len(), total_slabs, total_voxels, collapse_ms));
+
+            for (ei, event) in events.iter().enumerate() {
+                dbg(format!("  event[{}]: vol={} slabs={} center=({:.1},{:.1},{:.1}) affected_chunks={}",
+                    ei, event.total_volume, event.slabs.len(),
+                    event.center.0, event.center.1, event.center.2,
+                    event.affected_chunks.len()));
+                for (si, slab) in event.slabs.iter().enumerate() {
+                    dbg(format!("    slab[{}]: voxels={} fall={} bb=({},{},{})→({},{},{}) mat={:?}",
+                        si, slab.voxels.len(), slab.fall_distance,
+                        slab.bb_min.0, slab.bb_min.1, slab.bb_min.2,
+                        slab.bb_max.0, slab.bb_max.1, slab.bb_max.2,
+                        slab.dominant_material));
+                }
+            }
+
             // Collect all affected chunks for remeshing
             let mut all_dirty: Vec<((i32,i32,i32), usize, usize, usize, usize, usize, usize)> = Vec::new();
             for event in &events {
@@ -255,15 +315,13 @@ fn try_process_stress_queue(
                     all_dirty.push((key, 0, 0, 0, chunk_size, chunk_size, chunk_size));
                 }
             }
-            // Dedup
             all_dirty.sort_by_key(|&(k, ..)| k);
             all_dirty.dedup_by_key(|k| k.0);
+            dbg(format!("  remeshing {} chunks", all_dirty.len()));
 
-            // Remesh affected chunks (updates base meshes + seam data in store)
             let _base_meshes = s.remesh_dirty(&all_dirty, &cfg, world_scale);
             drop(s);
 
-            // Send collapse events to UE (sorted largest first)
             let mut ffi_events: Vec<FfiCollapseEvent> = events.iter().map(|e| {
                 FfiCollapseEvent {
                     center_x: e.center.0 * world_scale,
@@ -274,18 +332,26 @@ fn try_process_stress_queue(
             }).collect();
             ffi_events.sort_by(|a, b| b.volume.cmp(&a.volume));
 
+            dbg(format!("  sending {} collapse events to UE (largest vol={})",
+                ffi_events.len(), ffi_events.first().map(|e| e.volume).unwrap_or(0)));
+
             let _ = result_tx.send(WorkerResult::CollapseResult {
                 events: ffi_events,
                 meshes: Vec::new(),
             });
 
-            // Run seam pass on affected chunks — same path as mining.
-            // This stitches chunk boundaries and sends as atomic MineBatchMesh.
             let dirty_keys: Vec<(i32, i32, i32)> = all_dirty.iter().map(|&(k, ..)| k).collect();
             batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+            dbg("  seam pass complete".to_string());
+        } else {
+            dbg(format!("  no collapses triggered (overstressed={} but regions too small or grounded) in {:.1}ms",
+                result.overstressed.len(), collapse_ms));
         }
+    } else {
+        dbg(format!("  no overstressed voxels — stress is stable"));
     }
 
+    dbg("=== STRESS RECALC END ===".to_string());
     true
 }
 
