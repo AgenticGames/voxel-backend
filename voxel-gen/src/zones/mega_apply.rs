@@ -34,6 +34,16 @@ pub fn apply_vault_to_chunk(
     blueprint: &MegaVaultBlueprint,
     eb: f32,
 ) {
+    use std::time::Instant;
+    let chunk_start = Instant::now();
+    let mut t_pass1 = std::time::Duration::ZERO;
+    let mut t_2pre = std::time::Duration::ZERO;
+    let mut t_2a = std::time::Duration::ZERO;
+    let mut t_2b = std::time::Duration::ZERO;
+    let mut t_2c = std::time::Duration::ZERO;
+    let mut t_2d = std::time::Duration::ZERO;
+    let mut t_2e = std::time::Duration::ZERO;
+    let mut t_cones = std::time::Duration::ZERO;
     let size = density.size;
     let vs = eb / (size - 1) as f32;
     let origin = Vec3::new(
@@ -53,6 +63,116 @@ pub fn apply_vault_to_chunk(
 
     // Ramp noise for tier tunnel wobble (legacy: global_seed + 0xF155_0006)
     let ramp_noise = Simplex3D::new(blueprint.ramp_noise_seed);
+
+    // ── Pre-filter: find which blueprint features overlap this chunk ──
+    let chunk_world_min = origin - Vec3::splat(2.0);
+    let chunk_world_max = origin + Vec3::splat(eb + 2.0);
+
+    // Pre-filter fissures: which fissures could possibly affect this chunk?
+    let relevant_fissure_indices: Vec<u32> = blueprint.fissures.iter()
+        .filter(|f| {
+            // Fissure runs along Z at center_x ± width/2 + waver margin
+            let x_margin = f.width * 0.5 + eb * 0.4; // width + waver
+            (f.center_x - x_margin) < chunk_world_max.x && (f.center_x + x_margin) > chunk_world_min.x
+        })
+        .map(|f| f.index)
+        .collect();
+
+    // Pre-filter paths: which paths have waypoints in this chunk's Z range?
+    let relevant_paths: Vec<usize> = blueprint.paths.iter().enumerate()
+        .filter(|(_, p)| {
+            if p.waypoints.is_empty() { return false; }
+            let first_z = p.waypoints[0].z;
+            let last_z = p.waypoints[p.waypoints.len() - 1].z;
+            // Check Z overlap
+            if last_z < chunk_world_min.z - 5.0 || first_z > chunk_world_max.z + 5.0 { return false; }
+            // Check X overlap (wall_x ± width)
+            let x_min = p.wall_x - 15.0; // generous margin
+            let x_max = p.wall_x + 15.0;
+            x_max > chunk_world_min.x && x_min < chunk_world_max.x
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    // Pre-filter bridges: which bridges have waypoints near this chunk?
+    let relevant_bridges: Vec<usize> = blueprint.bridges.iter().enumerate()
+        .filter(|(_, b)| {
+            b.waypoints.iter().any(|bwp| {
+                bwp.x >= chunk_world_min.x - 5.0 && bwp.x <= chunk_world_max.x + 5.0
+                && bwp.y >= chunk_world_min.y - 5.0 && bwp.y <= chunk_world_max.y + 5.0
+                && bwp.z >= chunk_world_min.z - 5.0 && bwp.z <= chunk_world_max.z + 5.0
+            })
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    // Pre-filter connecting tunnels
+    let relevant_conn_tunnels: Vec<usize> = blueprint.connecting_tunnels.iter().enumerate()
+        .filter(|(_, ct)| {
+            ct.center_z >= chunk_world_min.z - ct.width_z && ct.center_z <= chunk_world_max.z + ct.width_z
+            && ct.center_y >= chunk_world_min.y - ct.height && ct.center_y <= chunk_world_max.y + ct.height
+            && ct.left_x <= chunk_world_max.x && ct.right_x >= chunk_world_min.x
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    // Check if this chunk is even inside the vault at all
+    let in_vault = chunk_world_max.x > blueprint.world_min.x - eb
+        && chunk_world_min.x < blueprint.world_max.x + eb
+        && chunk_world_max.y > blueprint.world_min.y - eb
+        && chunk_world_min.y < blueprint.world_max.y + eb
+        && chunk_world_max.z > blueprint.world_min.z - eb
+        && chunk_world_min.z < blueprint.world_max.z + eb;
+
+    if !in_vault {
+        // Quick timing and exit
+        t_pass1 = chunk_start.elapsed();
+        // Write timing report
+        {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+                .open("D:/Unreal Projects/Mithril2026/Saved/vault_perf.txt")
+            {
+                let _ = writeln!(f, "chunk({},{},{}) SKIPPED (not in vault)",
+                    chunk_key.0, chunk_key.1, chunk_key.2);
+            }
+        }
+        return;
+    }
+
+    // Pre-compute nearest path waypoint index for each Z grid position
+    // This replaces the per-voxel binary search with a O(1) table lookup
+    let path_z_lookup: Vec<Vec<(usize, usize)>> = {
+        let mut lookup: Vec<Vec<(usize, usize)>> = vec![Vec::new(); size]; // per grid-Z: (path_idx, waypoint_idx)
+        for &pi in &relevant_paths {
+            let path = &blueprint.paths[pi];
+            for gz in 0..size {
+                let world_z = origin.z + gz as f32 * vs;
+                // Binary search once per grid Z, store result
+                if let Ok(wi) = path.waypoints.binary_search_by(|w| {
+                    w.z.partial_cmp(&world_z).unwrap_or(std::cmp::Ordering::Equal)
+                }) {
+                    lookup[gz].push((pi, wi));
+                } else if let Err(wi) = path.waypoints.binary_search_by(|w| {
+                    w.z.partial_cmp(&world_z).unwrap_or(std::cmp::Ordering::Equal)
+                }) {
+                    let actual_wi = if wi == 0 { 0 }
+                        else if wi >= path.waypoints.len() { path.waypoints.len() - 1 }
+                        else {
+                            let d_prev = (path.waypoints[wi - 1].z - world_z).abs();
+                            let d_next = (path.waypoints[wi].z - world_z).abs();
+                            if d_prev < d_next { wi - 1 } else { wi }
+                        };
+                    let w = &path.waypoints[actual_wi];
+                    let z_tolerance = if w.is_tunnel { 5.0 } else { 1.5 };
+                    if (w.z - world_z).abs() <= z_tolerance {
+                        lookup[gz].push((pi, actual_wi));
+                    }
+                }
+            }
+        }
+        lookup
+    };
 
     // ── Main pass: ONE iteration through all voxels ──
     for z in 0..size {
@@ -79,8 +199,21 @@ pub fn apply_vault_to_chunk(
                     continue;
                 }
 
-                // Priority 2+3: Path check (handles both inline tunnels and ledges)
-                if let Some((path_mat, path_density)) = blueprint.path_at(wp) {
+                // Priority 2+3: Path check using pre-computed Z lookup (no binary search)
+                let path_result = {
+                    let mut result: Option<(Material, f32)> = None;
+                    for &(pi, wi) in &path_z_lookup[z] {
+                        let path = &blueprint.paths[pi];
+                        let w = &path.waypoints[wi];
+                        // Inline path_at logic but skipping the search
+                        if let Some(r) = blueprint.path_at_waypoint(wp, path, w, wi) {
+                            result = Some(r);
+                            break;
+                        }
+                    }
+                    result
+                };
+                if let Some((path_mat, path_density)) = path_result {
                     if path_mat == Material::Air {
                         // Inline tunnel carving
                         if density.samples[idx].density > 0.0 {
@@ -95,7 +228,8 @@ pub fn apply_vault_to_chunk(
                     continue;
                 }
 
-                // Priority 4: Bridge geometry
+                // Priority 4: Bridge geometry (skip if no bridges near this chunk)
+                if !relevant_bridges.is_empty() {
                 if let Some(bridge_mat) = blueprint.bridge_at(wp) {
                     if bridge_mat == Material::Air {
                         // Landing cave carving
@@ -110,8 +244,10 @@ pub fn apply_vault_to_chunk(
                     }
                     continue;
                 }
+                } // end if !relevant_bridges.is_empty()
 
-                // Priority 5: Connecting tunnels between fissures
+                // Priority 5: Connecting tunnels between fissures (skip if none near)
+                if !relevant_conn_tunnels.is_empty() {
                 if let Some(tunnel_mat) = blueprint.connecting_tunnel_at(wp) {
                     if tunnel_mat == Material::Air {
                         if density.samples[idx].density > 0.0 {
@@ -124,9 +260,10 @@ pub fn apply_vault_to_chunk(
                     }
                     continue;
                 }
+                } // end if !relevant_conn_tunnels.is_empty()
 
-                // Priority 6: Fissure carving (main air space, with Y-dependent waver)
-                if blueprint.is_in_fissure(wp, &fissure_noise) {
+                // Priority 6: Fissure carving (skip if no fissures overlap this chunk X)
+                if !relevant_fissure_indices.is_empty() && blueprint.is_in_fissure(wp, &fissure_noise) {
                     // This is fissure air
                     density.samples[idx].density = -1.0;
                     density.samples[idx].material = Material::Air;
@@ -150,10 +287,25 @@ pub fn apply_vault_to_chunk(
                 }
 
                 // Priority 8: Seal worm holes -- any existing air inside vault becomes solid ice
+                // BUT preserve air adjacent to ore voxels so ores stay exposed
                 if density.samples[idx].density <= 0.0 {
-                    density.samples[idx].density = 1.0;
-                    density.samples[idx].material = Material::Ice;
-                    // Falls through to material classification below
+                    let mut near_ore = false;
+                    for &(dx, dy, dz) in &[(1i32,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)] {
+                        let nx = x as i32 + dx;
+                        let ny = y as i32 + dy;
+                        let nz = z as i32 + dz;
+                        if nx >= 0 && nx < size as i32 && ny >= 0 && ny < size as i32 && nz >= 0 && nz < size as i32 {
+                            let ni = nz as usize * size * size + ny as usize * size + nx as usize;
+                            if density.samples[ni].density > 0.0 && density.samples[ni].material.is_ore() {
+                                near_ore = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !near_ore {
+                        density.samples[idx].density = 1.0;
+                        density.samples[idx].material = Material::Ice;
+                    }
                 }
 
                 // Priority 9: Material classification for solid voxels
@@ -194,137 +346,377 @@ pub fn apply_vault_to_chunk(
         }
     }
 
-    // ── Pass 2: Geometry refinement — reads actual carved result ──
-    // Scans solid/air boundaries to:
-    // 1. Spawn overhang icicles (solid above air = icicle candidate)
-    // 2. Verify tunnel entrances are open (carve blocked doorways)
-    // 3. Smooth jagged edges on ledge surfaces
-    // 4. Add BlackIce patches on ledge edges near drops
-    // 5. Place small ice formations on horizontal surfaces
+    // ═══════════════════════════════════════════════════════════════════
+    // PASS 2: Comprehensive geometry refinement
+    // Sees actual carved result, fixes connectivity, adds details
+    // ═══════════════════════════════════════════════════════════════════
 
-    // ── Pass 2a: Tunnel doorway connectivity ──
-    // For each tier tunnel, check entry/exit positions in this chunk.
-    // If the doorway has no solid floor beneath it, write a small IceSheet platform.
-    for tt in &blueprint.tier_tunnels {
-        let entry_z = tt.z_start;
-        let exit_z = tt.z_end;
-        let tunnel_center_y_entry = tt.y_start;
-        let tunnel_center_y_exit = tt.y_end;
+    t_pass1 = chunk_start.elapsed();
+    let t2_start = Instant::now();
 
-        for &(door_z, door_y) in &[(entry_z, tunnel_center_y_entry), (exit_z, tunnel_center_y_exit)] {
-            // Check if this doorway is in this chunk
-            let door_world = Vec3::new(tt.wall_x, door_y, door_z);
-            let local = door_world - origin;
-            let gx = (local.x / vs).round() as i32;
-            let gy = (local.y / vs).round() as i32;
-            let gz = (local.z / vs).round() as i32;
+    // ── 2-PRE: Natural boundaries + organic floor ──
+    // 1. Where caves intersect vault bounds: noise-driven taper instead of flat wall
+    // 2. Flat floor/ceiling/walls at vault bounds: add noise bumps for organic look
+    {
+        let boundary_depth = eb * 0.6;
+        let floor_noise = Simplex3D::new(blueprint.mat_noise_seed.wrapping_add(0x0000_0099));
 
-            if gx < 0 || gx >= size as i32 || gy < 1 || gy >= size as i32 || gz < 0 || gz >= size as i32 {
-                continue;
-            }
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..size {
+                    let wp = origin + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
+                    let idx = z * size * size + y * size + x;
 
-            // Check if there's solid floor below the doorway
-            let floor_y = gy - 1;
-            if floor_y < 0 { continue; }
+                    let near_z_min = wp.z - blueprint.world_min.z;
+                    let near_z_max = blueprint.world_max.z - wp.z;
+                    let near_x_min = wp.x - blueprint.world_min.x;
+                    let near_x_max = blueprint.world_max.x - wp.x;
+                    let near_y_min = wp.y - blueprint.world_min.y;
+                    let near_y_max = blueprint.world_max.y - wp.y;
 
-            let platform_half = 3i32; // platform extends ±3 voxels around doorway
-            let mut has_floor = false;
-
-            for dz in -platform_half..=platform_half {
-                for dx in -platform_half..=platform_half {
-                    let fx = gx + dx;
-                    let fz = gz + dz;
-                    if fx >= 0 && fx < size as i32 && fz >= 0 && fz < size as i32 {
-                        let fi = fz as usize * size * size + floor_y as usize * size + fx as usize;
-                        if density.samples[fi].density > 0.0 {
-                            has_floor = true;
-                            break;
+                    // Floor organic treatment: noise-driven bumps on the bottom
+                    if near_y_min < eb * 0.5 && near_y_min >= 0.0 {
+                        let floor_n = floor_noise.sample(
+                            wp.x as f64 * 0.07, wp.y as f64 * 0.1, wp.z as f64 * 0.07,
+                        ) as f32;
+                        // Add solid bumps rising from the floor
+                        if density.samples[idx].density <= 0.0 && floor_n > 0.1 {
+                            let bump_height = (floor_n - 0.1) * eb * 0.4;
+                            if near_y_min < bump_height {
+                                density.samples[idx].density = 0.6;
+                                density.samples[idx].material = Material::Permafrost;
+                            }
+                        }
+                        // Erode flat floor edges with noise
+                        if density.samples[idx].density > 0.0 && floor_n < -0.2 && near_y_min < eb * 0.15 {
+                            density.samples[idx].density = -1.0;
+                            density.samples[idx].material = Material::Air;
                         }
                     }
-                }
-                if has_floor { break; }
-            }
 
-            // No floor found — write a small IceSheet platform
-            if !has_floor {
-                for dz in -platform_half..=platform_half {
-                    for dx in -platform_half..=platform_half {
-                        let fx = gx + dx;
-                        let fz = gz + dz;
-                        let fy = floor_y;
-                        if fx >= 0 && fx < size as i32 && fz >= 0 && fz < size as i32 && fy >= 0 {
-                            let fi = fz as usize * size * size + fy as usize * size + fx as usize;
-                            if density.samples[fi].density <= 0.0 {
-                                density.samples[fi].density = 0.85;
-                                density.samples[fi].material = Material::IceSheet;
+                    // Ceiling organic treatment
+                    if near_y_max < eb * 0.5 && near_y_max >= 0.0 {
+                        let ceil_n = floor_noise.sample(
+                            wp.x as f64 * 0.06, 100.0 + wp.y as f64 * 0.1, wp.z as f64 * 0.06,
+                        ) as f32;
+                        if density.samples[idx].density <= 0.0 && ceil_n > 0.15 {
+                            let bump_depth = (ceil_n - 0.15) * eb * 0.35;
+                            if near_y_max < bump_depth {
+                                density.samples[idx].density = 0.5;
+                                density.samples[idx].material = Material::Ice;
                             }
-                            // Also write 1 voxel below for thickness
-                            if fy > 0 {
-                                let fi2 = fz as usize * size * size + (fy - 1) as usize * size + fx as usize;
-                                if density.samples[fi2].density <= 0.0 {
-                                    density.samples[fi2].density = 0.85;
-                                    density.samples[fi2].material = Material::IceSheet;
+                        }
+                    }
+
+                    // Side/end wall transitions: noise taper where caves meet vault
+                    let near_boundary = near_z_min.min(near_z_max).min(near_x_min).min(near_x_max);
+                    if near_boundary < boundary_depth && near_boundary >= 0.0 {
+                        if density.samples[idx].density > 0.0 {
+                            // Check if any neighbor is external air
+                            for &(dx, dy, dz) in &[(1i32,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)] {
+                                let nx = x as i32 + dx;
+                                let ny = y as i32 + dy;
+                                let nz = z as i32 + dz;
+                                if nx < 0 || nx >= size as i32 || ny < 0 || ny >= size as i32 || nz < 0 || nz >= size as i32 { continue; }
+                                let ni = nz as usize * size * size + ny as usize * size + nx as usize;
+                                if density.samples[ni].density <= 0.0 {
+                                    let neighbor_wp = origin + Vec3::new(nx as f32 * vs, ny as f32 * vs, nz as f32 * vs);
+                                    let in_vault_interior = neighbor_wp.x > blueprint.world_min.x + eb
+                                        && neighbor_wp.x < blueprint.world_max.x - eb
+                                        && neighbor_wp.z > blueprint.world_min.z + eb
+                                        && neighbor_wp.z < blueprint.world_max.z - eb;
+                                    if !in_vault_interior {
+                                        // Noise-driven taper (not flat gradient)
+                                        let taper_noise = floor_noise.sample(
+                                            wp.x as f64 * 0.08, wp.y as f64 * 0.08, wp.z as f64 * 0.08,
+                                        ) as f32;
+                                        let taper_t = (near_boundary / boundary_depth).clamp(0.0, 1.0);
+                                        let threshold = taper_t * 0.6 + taper_noise * 0.3;
+                                        if threshold < 0.35 {
+                                            // Carve — creates organic holes in the wall
+                                            density.samples[idx].density = -1.0;
+                                            density.samples[idx].material = Material::Air;
+                                        } else if threshold < 0.5 {
+                                            // Permafrost transition zone
+                                            density.samples[idx].material = Material::Permafrost;
+                                        }
+                                        break;
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
+        }
+    }
 
-            // Also verify the doorway itself is open (carve if blocked)
-            for dy in 0..4i32 { // 4 voxels of headroom
-                let door_gy = gy + dy;
-                if door_gy >= size as i32 { break; }
-                for dz in -1i32..=1 {
-                    let door_gz = gz + dz;
-                    if door_gz < 0 || door_gz >= size as i32 { continue; }
-                    let di = door_gz as usize * size * size + door_gy as usize * size + gx as usize;
-                    if density.samples[di].density > 0.0 {
-                        density.samples[di].density = -1.0;
-                        density.samples[di].material = Material::Air;
+    let mut rng_pass2 = ChaCha8Rng::seed_from_u64(
+        blueprint.mat_noise_seed.wrapping_add(chunk_key.0 as u64 * 7 + chunk_key.1 as u64 * 31 + chunk_key.2 as u64 * 97)
+    );
+    let mut overhang_icicles: Vec<(Vec3, f32, f32, bool)> = Vec::new();
+
+    t_2pre = t2_start.elapsed();
+    let t2a_start = Instant::now();
+
+    // ── 2A: Tunnel sphere-chain carving ──
+    // ALL tunnels (inline, tier, cross-fissure) are carved here via sphere chains.
+    // Blueprint stores waypoint chains, pass 2 carves overlapping spheres along them.
+    let chunk_min = origin - Vec3::splat(20.0); // margin for sphere overlap
+    let chunk_max = origin + Vec3::splat(eb + 20.0);
+
+    for chain in &blueprint.tunnel_chains {
+        // Quick AABB check: does any waypoint fall near this chunk?
+        let mut any_near = false;
+        for wp in &chain.waypoints {
+            if wp.x >= chunk_min.x && wp.x <= chunk_max.x
+                && wp.y >= chunk_min.y && wp.y <= chunk_max.y
+                && wp.z >= chunk_min.z && wp.z <= chunk_max.z
+            {
+                any_near = true;
+                break;
+            }
+        }
+        if !any_near { continue; }
+
+        // Carve spheres at each waypoint — bounded iteration (only voxels near sphere)
+        for (wi, wp) in chain.waypoints.iter().enumerate() {
+            let wobble = ((wi as f32 * 0.7).sin() * 0.3 + 1.0) * chain.radius;
+
+            // Compute grid-space bounding box of this sphere
+            let local = *wp - origin;
+            let gc = Vec3::new(local.x / vs, local.y / vs, local.z / vs);
+            let gr = (wobble / vs).ceil() as i32 + 1;
+            let lo_x = (gc.x as i32 - gr).max(0) as usize;
+            let hi_x = ((gc.x as i32 + gr) as usize).min(size - 1);
+            let lo_y = (gc.y as i32 - gr).max(0) as usize;
+            let hi_y = ((gc.y as i32 + gr) as usize).min(size - 1);
+            let lo_z = (gc.z as i32 - gr).max(0) as usize;
+            let hi_z = ((gc.z as i32 + gr) as usize).min(size - 1);
+
+            for z in lo_z..=hi_z { for y in lo_y..=hi_y { for x in lo_x..=hi_x {
+                let vwp = origin + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
+                let dist = (vwp - *wp).length();
+                if dist < wobble {
+                    let idx = z * size * size + y * size + x;
+                    if chain.is_blocked {
+                        density.samples[idx].density = 1.0;
+                        density.samples[idx].material = Material::Ice;
+                    } else if density.samples[idx].density > 0.0 {
+                        density.samples[idx].density = -1.0;
+                        density.samples[idx].material = Material::Air;
+                    }
+                }
+            }}}
+        }
+    }
+
+    t_2a = t2a_start.elapsed();
+    let t2b_start = Instant::now();
+
+    // ── 2A-CHAMBERS: Carve ore rooms — distinct from tunnels ──
+    for chain in &blueprint.tunnel_chains {
+        for chamber in &chain.chambers {
+            let local = chamber.center - origin;
+            let gc = Vec3::new(local.x / vs, local.y / vs, local.z / vs);
+            let gr = (chamber.radius / vs).ceil() as i32 + 3;
+
+            let lo_x = (gc.x as i32 - gr).max(0) as usize;
+            let hi_x = ((gc.x as i32 + gr) as usize).min(size - 1);
+            let lo_y = (gc.y as i32 - gr).max(0) as usize;
+            let hi_y = ((gc.y as i32 + gr) as usize).min(size - 1);
+            let lo_z = (gc.z as i32 - gr).max(0) as usize;
+            let hi_z = ((gc.z as i32 + gr) as usize).min(size - 1);
+
+            if lo_x >= size || lo_y >= size || lo_z >= size { continue; }
+
+            for z in lo_z..=hi_z { for y in lo_y..=hi_y { for x in lo_x..=hi_x {
+                let vwp = origin + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
+                let dist = (vwp - chamber.center).length();
+                let idx = z * size * size + y * size + x;
+
+                // Slight noise for organic shape (not a perfect sphere)
+                let shape_noise = ((vwp.x * 2.3 + vwp.y * 1.7 + vwp.z * 3.1) as f64).sin() as f32 * chamber.radius * 0.15;
+                let effective_dist = dist + shape_noise;
+
+                if effective_dist < chamber.radius * 0.75 {
+                    // Inner chamber: carve to air
+                    if density.samples[idx].density > 0.0 {
+                        density.samples[idx].density = -1.0;
+                        density.samples[idx].material = Material::Air;
+                    }
+                } else if effective_dist < chamber.radius * 0.85 {
+                    // Transition: BlackIce floor, thin ore veins on walls
+                    if density.samples[idx].density > 0.0 {
+                        let above_idx = if y + 1 < size { z * size * size + (y + 1) * size + x } else { idx };
+                        if y + 1 < size && density.samples[above_idx].density <= 0.0 {
+                            density.samples[idx].material = Material::BlackIce;
+                        } else {
+                            let ore_noise = ((vwp.x * 3.7 + vwp.z * 5.3 + vwp.y * 2.1) as f64).sin() as f32 * 0.5 + 0.5;
+                            if ore_noise > 0.55 { // halved: ~35% coverage (was ~75%)
+                                density.samples[idx].material = chamber.ore_type;
+                            } else {
+                                density.samples[idx].material = Material::BlackIce;
+                            }
+                        }
+                    }
+                } else if effective_dist < chamber.radius {
+                    // Outer shell: mostly BlackIce with sparse ore
+                    if density.samples[idx].density > 0.0 && !density.samples[idx].material.is_ore() {
+                        let ore_noise = ((vwp.x * 3.7 + vwp.z * 5.3 + vwp.y * 2.1) as f64).sin() as f32 * 0.5 + 0.5;
+                        if ore_noise > 0.7 { // sparse: ~20% (was ~75%)
+                            density.samples[idx].material = chamber.ore_type;
+                        } else {
+                            density.samples[idx].material = Material::BlackIce;
+                        }
+                    }
+                }
+            }}}
+        }
+    }
+
+    // ── 2B: Widen cramped tunnel spots + smooth jagged walls ──
+    // First collect changes, then apply (avoid read-during-write)
+    let mut carve_queue: Vec<usize> = Vec::new();
+
+    for z in 1..size.saturating_sub(1) {
+        for y in 1..size.saturating_sub(1) {
+            for x in 1..size.saturating_sub(1) {
+                let idx = z * size * size + y * size + x;
+                if density.samples[idx].density <= 0.0 { continue; } // only check solid
+
+                // Count air neighbors (6-connected)
+                let mut air_count = 0u32;
+                for &(dx, dy, dz) in &[(1i32,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)] {
+                    let nx = (x as i32 + dx) as usize;
+                    let ny = (y as i32 + dy) as usize;
+                    let nz = (z as i32 + dz) as usize;
+                    if nx < size && ny < size && nz < size {
+                        let ni = nz * size * size + ny * size + nx;
+                        if density.samples[ni].density <= 0.0 { air_count += 1; }
+                    }
+                }
+
+                // Sharp protrusion: solid with 4+ air neighbors = jagged, smooth it
+                if air_count >= 4 {
+                    carve_queue.push(idx);
+                }
+
+                // Thin wall detection: solid with air on opposite sides (X or Z axis)
+                let air_left = if x > 0 { density.samples[z * size * size + y * size + (x-1)].density <= 0.0 } else { false };
+                let air_right = if x + 1 < size { density.samples[z * size * size + y * size + (x+1)].density <= 0.0 } else { false };
+                let air_front = if z > 0 { density.samples[(z-1) * size * size + y * size + x].density <= 0.0 } else { false };
+                let air_back = if z + 1 < size { density.samples[(z+1) * size * size + y * size + x].density <= 0.0 } else { false };
+
+                // Paper-thin wall between two air spaces = merge
+                if (air_left && air_right) || (air_front && air_back) {
+                    carve_queue.push(idx);
+                }
+
+                // Right-angle corner detection: solid with 2 perpendicular air faces
+                // These create sharp 90-degree edges that look unnatural
+                let air_above_local = if y + 1 < size { density.samples[z * size * size + (y+1) * size + x].density <= 0.0 } else { false };
+                let air_below_local = if y > 0 { density.samples[z * size * size + (y-1) * size + x].density <= 0.0 } else { false };
+                let perpendicular_pairs = [
+                    (air_left, air_above_local), (air_left, air_below_local),
+                    (air_right, air_above_local), (air_right, air_below_local),
+                    (air_front, air_above_local), (air_front, air_below_local),
+                    (air_back, air_above_local), (air_back, air_below_local),
+                    (air_left, air_front), (air_left, air_back),
+                    (air_right, air_front), (air_right, air_back),
+                ];
+                let corner_count = perpendicular_pairs.iter().filter(|&&(a, b)| a && b).count();
+                // 3+ perpendicular air pairs = very exposed corner, smooth it
+                if corner_count >= 3 && air_count >= 3 {
+                    carve_queue.push(idx);
+                }
+            }
+        }
+    }
+
+    // Apply carve queue
+    for &idx in &carve_queue {
+        density.samples[idx].density = -1.0;
+        density.samples[idx].material = Material::Air;
+    }
+
+    t_2b = t2b_start.elapsed();
+    let t2c_start = Instant::now();
+
+    // ── 2C: Ledge-to-tunnel connectivity ──
+    // For each tunnel doorway, check if there's a ledge nearby. If not, build a platform
+    // connecting the doorway to the nearest ledge path waypoint.
+    for tt in &blueprint.tier_tunnels {
+        for &(door_z, door_y) in &[(tt.z_start, tt.y_start), (tt.z_end, tt.y_end)] {
+            let door_world = Vec3::new(tt.wall_x, door_y, door_z);
+            let local = door_world - origin;
+            let gx = (local.x / vs).round() as i32;
+            let gy = (local.y / vs).round() as i32;
+            let gz = (local.z / vs).round() as i32;
+            if gx < 0 || gx >= size as i32 || gy < 1 || gy >= size as i32 || gz < 0 || gz >= size as i32 { continue; }
+
+            // Check for solid floor below doorway
+            let floor_y = (gy - 1).max(0) as usize;
+            let has_floor = {
+                let fi = gz as usize * size * size + floor_y * size + gx as usize;
+                gz >= 0 && (gz as usize) < size && (gx as usize) < size && density.samples[fi].density > 0.0
+            };
+
+            if !has_floor {
+                // Build bigger platform: ±6 voxels, 40% chance BlackIce on top
+                let plat = 6i32;
+                for dz in -plat..=plat {
+                    for dx in -plat..=plat {
+                        for dy in 0..2i32 {
+                            let px = gx + dx;
+                            let py = floor_y as i32 - dy;
+                            let pz = gz + dz;
+                            if px >= 0 && px < size as i32 && py >= 0 && py < size as i32 && pz >= 0 && pz < size as i32 {
+                                // Round platform shape
+                                let dist = ((dx * dx + dz * dz) as f32).sqrt();
+                                if dist < plat as f32 {
+                                    let pi = pz as usize * size * size + py as usize * size + px as usize;
+                                    if density.samples[pi].density <= 0.0 {
+                                        density.samples[pi].density = 0.85;
+                                        // 40% BlackIce on top layer, IceSheet underneath
+                                        density.samples[pi].material = if dy == 0 && rng_pass2.gen::<f32>() < 0.4 {
+                                            Material::BlackIce
+                                        } else {
+                                            Material::IceSheet
+                                        };
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Also try to bridge toward the fissure (build ledge connector)
+                // Extend the platform toward the fissure opening along X
+                let fissure_dir = if tt.side < 0.0 { 1i32 } else { -1i32 };
+                for step in 0..12i32 { // wider connector
+                    let bx = gx + fissure_dir * step;
+                    if bx < 0 || bx >= size as i32 { break; }
+                    for bz in (gz - 3)..=(gz + 3) { // wider Z spread
+                        if bz < 0 || bz >= size as i32 { continue; }
+                        for by in (floor_y as i32)..=(floor_y as i32 + 1) {
+                            if by < 0 || by >= size as i32 { continue; }
+                            let bi = bz as usize * size * size + by as usize * size + bx as usize;
+                            if density.samples[bi].density <= 0.0 {
+                                density.samples[bi].density = 0.85;
+                                density.samples[bi].material = Material::IceSheet;
+                            }
+                        }
                     }
                 }
             }
         }
     }
 
-    // Also check inline tunnel entry/exit points from paths
-    for path in &blueprint.paths {
-        for (wi, wp) in path.waypoints.iter().enumerate() {
-            if !wp.is_tunnel { continue; }
-            // Check if this is entry or exit
-            let prev_tunnel = if wi > 0 { path.waypoints[wi - 1].is_tunnel } else { false };
-            let next_tunnel = if wi + 1 < path.waypoints.len() { path.waypoints[wi + 1].is_tunnel } else { false };
-            if prev_tunnel && next_tunnel { continue; } // interior, skip
+    t_2c = t2c_start.elapsed();
+    let t2d_start = Instant::now();
 
-            let door_world = Vec3::new(wp.wall_x, wp.y, wp.z);
-            let local = door_world - origin;
-            let gx = (local.x / vs).round() as i32;
-            let gy = (local.y / vs).round() as i32;
-            let gz = (local.z / vs).round() as i32;
-            if gx < 0 || gx >= size as i32 || gy < 0 || gy >= size as i32 || gz < 0 || gz >= size as i32 {
-                continue;
-            }
-
-            // Ensure doorway headroom is clear
-            for dy in 0..4i32 {
-                let door_gy = gy + dy;
-                if door_gy >= size as i32 { break; }
-                let di = gz as usize * size * size + door_gy as usize * size + gx as usize;
-                if density.samples[di].density > 0.0 {
-                    density.samples[di].density = -1.0;
-                    density.samples[di].material = Material::Air;
-                }
-            }
-        }
-    }
-
-    // ── Pass 2b: Geometry scan ──
-    let mut overhang_icicles: Vec<(Vec3, f32, f32, bool)> = Vec::new();
-    let mut rng_pass2 = ChaCha8Rng::seed_from_u64(
-        blueprint.mat_noise_seed.wrapping_add(chunk_key.0 as u64 * 7 + chunk_key.1 as u64 * 31 + chunk_key.2 as u64 * 97)
-    );
-
+    // ── 2D: Full geometry scan — icicles, materials, details ──
     for z in 0..size {
         for y in 1..size.saturating_sub(1) {
             for x in 0..size {
@@ -337,10 +729,9 @@ pub fn apply_vault_to_chunk(
                 let air_above = density.samples[above_idx].density <= 0.0;
                 let mat = density.samples[idx].material;
 
-                // ── 1. Overhang icicles: solid with air below ──
+                // Overhang icicles: solid with air below
                 if is_solid && air_below {
                     if mat == Material::Ice || mat == Material::IceSheet || mat == Material::Hoarfrost {
-                        // 30% chance per overhang voxel (sampled every 2 to avoid clustering)
                         if x % 2 == 0 && z % 2 == 0 && rng_pass2.gen::<f32>() < 0.30 {
                             let wp = origin + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
                             let len = rng_pass2.gen_range(4.0..10.0);
@@ -349,35 +740,51 @@ pub fn apply_vault_to_chunk(
                             overhang_icicles.push((wp, len, rad, glow));
                         }
                     }
+
+                    // Hoarfrost on ceilings
+                    if !density.samples[idx].material.is_ore() && mat == Material::Ice && rng_pass2.gen::<f32>() < 0.3 {
+                        density.samples[idx].material = Material::Hoarfrost;
+                    }
                 }
 
-                // ── 2. BlackIce on ledge edges near drops ──
-                // Solid floor with air on 2+ sides below = precarious edge
-                if is_solid && air_above {
+                // Ledge surface treatment: BlackIce patches + remove Hoarfrost
+                if is_solid && air_above && !density.samples[idx].material.is_ore() {
+                    // Remove Hoarfrost from ledge tops
+                    if mat == Material::Hoarfrost {
+                        density.samples[idx].material = Material::Ice;
+                    }
+
+                    // BlackIce in connected blobs using low-freq noise (not random scatter)
+                    let wp_ledge = origin + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
+                    let ice_noise = mat_noise.sample(
+                        wp_ledge.x as f64 * 0.06,
+                        wp_ledge.y as f64 * 0.03,
+                        wp_ledge.z as f64 * 0.06,
+                    ) as f32 * 0.5 + 0.5;
+                    if ice_noise > 0.55 && density.samples[idx].material != Material::BlackIce {
+                        // ~25% coverage in large connected patches
+                        density.samples[idx].material = Material::BlackIce;
+                    }
+
+                    // Extra BlackIce on edges near drops
                     let mut air_sides = 0u32;
                     for &(dx, dz) in &[(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
                         let nx = x as i32 + dx;
                         let nz = z as i32 + dz;
                         if nx >= 0 && nx < size as i32 && nz >= 0 && nz < size as i32 {
-                            let ny = y as i32 - 1; // check below the neighbor
-                            if ny >= 0 {
-                                let ni = nz as usize * size * size + ny as usize * size + nx as usize;
-                                if density.samples[ni].density <= 0.0 {
-                                    air_sides += 1;
-                                }
+                            if y > 0 {
+                                let ni = nz as usize * size * size + (y - 1) * size + nx as usize;
+                                if density.samples[ni].density <= 0.0 { air_sides += 1; }
                             }
                         }
                     }
-                    // Edge of a ledge: 2+ sides have air below = slippery danger zone
-                    if air_sides >= 2 && !density.samples[idx].material.is_ore() {
+                    if air_sides >= 2 {
                         density.samples[idx].material = Material::BlackIce;
                     }
                 }
 
-                // ── 3. Small stalagmites on wide floor surfaces ──
-                // Solid floor with lots of headroom = place small upward spike
+                // Small floor stalagmites
                 if is_solid && air_above && x % 4 == 0 && z % 4 == 0 {
-                    // Check 3 voxels of headroom
                     let has_headroom = y + 3 < size && {
                         let h1 = z * size * size + (y + 1) * size + x;
                         let h2 = z * size * size + (y + 2) * size + x;
@@ -388,23 +795,151 @@ pub fn apply_vault_to_chunk(
                     };
                     if has_headroom && rng_pass2.gen::<f32>() < 0.08 {
                         let wp = origin + Vec3::new(x as f32 * vs, (y + 1) as f32 * vs, z as f32 * vs);
-                        let len = rng_pass2.gen_range(2.0..5.0);
-                        let rad = rng_pass2.gen_range(0.3..0.8);
-                        // Write small stalagmite inline
-                        write_cone_inline(density, origin, vs, size,
-                            wp, len, rad, 1.0, Material::IceSheet, 2.0);
+                        write_cone_inline(density, origin, vs, size, wp,
+                            rng_pass2.gen_range(2.0..5.0), rng_pass2.gen_range(0.3..0.8),
+                            1.0, Material::IceSheet, 2.0);
                     }
                 }
 
-                // ── 4. Hoarfrost accumulation on ceiling surfaces ──
-                // Solid with air below = ceiling/overhang — add hoarfrost for frosty look
-                if is_solid && air_below && !density.samples[idx].material.is_ore() {
-                    if mat == Material::Ice && rng_pass2.gen::<f32>() < 0.3 {
-                        density.samples[idx].material = Material::Hoarfrost;
+                // Tunnel wall material refinement: solid adjacent to tunnel air
+                if is_solid && !density.samples[idx].material.is_ore() && (air_below || air_above) {
+                    // Check if this is a tunnel wall (multiple air neighbors in non-vertical directions)
+                    let mut h_air = 0u32;
+                    for &(dx, dz) in &[(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+                        let nx = x as i32 + dx;
+                        let nz = z as i32 + dz;
+                        if nx >= 0 && nx < size as i32 && nz >= 0 && nz < size as i32 {
+                            let ni = nz as usize * size * size + y * size + nx as usize;
+                            if density.samples[ni].density <= 0.0 { h_air += 1; }
+                        }
+                    }
+                    // Tunnel wall (enclosed, not fissure surface): use IceSheet
+                    if h_air >= 2 && air_below {
+                        density.samples[idx].material = Material::Hoarfrost; // tunnel ceiling
+                    } else if h_air >= 2 && air_above {
+                        density.samples[idx].material = Material::Permafrost; // tunnel floor
+                    } else if h_air >= 1 {
+                        density.samples[idx].material = Material::IceSheet; // tunnel wall
                     }
                 }
 
-                // ── 5. Permafrost on deep interior surfaces near vault boundary ──
+                // Ore expansion: fatten deposits, connect isolates, spread along surfaces
+                // Skip outer 5% of vault on all faces to avoid flat-zone blanket spread
+                if is_solid && density.samples[idx].material.is_ore() {
+                    let wp_ore = origin + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
+                    let vault_sx = blueprint.world_max.x - blueprint.world_min.x;
+                    let vault_sy = blueprint.world_max.y - blueprint.world_min.y;
+                    let vault_sz = blueprint.world_max.z - blueprint.world_min.z;
+                    let margin_x = vault_sx * 0.05;
+                    let margin_y = vault_sy * 0.05;
+                    let margin_z = vault_sz * 0.05;
+                    let in_ore_zone = wp_ore.x > blueprint.world_min.x + margin_x
+                        && wp_ore.x < blueprint.world_max.x - margin_x
+                        && wp_ore.y > blueprint.world_min.y + margin_y
+                        && wp_ore.y < blueprint.world_max.y - margin_y
+                        && wp_ore.z > blueprint.world_min.z + margin_z
+                        && wp_ore.z < blueprint.world_max.z - margin_z;
+                    if !in_ore_zone { /* skip expansion near vault edges */ }
+                    else if is_solid && density.samples[idx].material.is_ore() {
+                    let ore_mat = density.samples[idx].material;
+
+                    // Check if this ore is on a surface (has air neighbor)
+                    let is_surface_ore = air_below || air_above || {
+                        let mut has_h_air = false;
+                        for &(dx, dz) in &[(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+                            let nx = x as i32 + dx;
+                            let nz = z as i32 + dz;
+                            if nx >= 0 && nx < size as i32 && nz >= 0 && nz < size as i32 {
+                                let ni = nz as usize * size * size + y * size + nx as usize;
+                                if density.samples[ni].density <= 0.0 { has_h_air = true; break; }
+                            }
+                        }
+                        has_h_air
+                    };
+
+                    {
+
+                    let expand_chance = match ore_mat {
+                        Material::Copper => 0.49,
+                        Material::Gold => 0.56,
+                        Material::Quartz => 0.56,
+                        Material::Coal => 0.28,  // same as iron/rest
+                        _ => 0.28,
+                    };
+
+                    let dirs: [(i32,i32,i32); 6] = [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)];
+
+                    if is_surface_ore {
+                        // Surface ores: 100% spread to ALL ice neighbors (make veins visible and fat)
+                        for &(dx, dy, dz) in &dirs {
+                            let nx = x as i32 + dx;
+                            let ny = y as i32 + dy;
+                            let nz = z as i32 + dz;
+                            if nx >= 0 && nx < size as i32 && ny >= 0 && ny < size as i32 && nz >= 0 && nz < size as i32 {
+                                let ni = nz as usize * size * size + ny as usize * size + nx as usize;
+                                if density.samples[ni].density > 0.0 && !density.samples[ni].material.is_ore() {
+                                    density.samples[ni].material = ore_mat;
+                                }
+                            }
+                        }
+                        // Also spread 1 voxel further along surface (extend reach)
+                        for &(dx, dy, dz) in &dirs {
+                            let nx = x as i32 + dx * 2;
+                            let ny = y as i32 + dy * 2;
+                            let nz = z as i32 + dz * 2;
+                            if nx >= 0 && nx < size as i32 && ny >= 0 && ny < size as i32 && nz >= 0 && nz < size as i32 {
+                                let ni = nz as usize * size * size + ny as usize * size + nx as usize;
+                                if density.samples[ni].density > 0.0 && !density.samples[ni].material.is_ore() {
+                                    if rng_pass2.gen::<f32>() < 0.5 { // 50% for 2nd ring
+                                        density.samples[ni].material = ore_mat;
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Interior ores: normal chance to spread to one random neighbor
+                        if rng_pass2.gen::<f32>() < expand_chance {
+                            let dir_idx = rng_pass2.gen_range(0..6usize);
+                            let (dx, dy, dz) = dirs[dir_idx];
+                            let nx = x as i32 + dx;
+                            let ny = y as i32 + dy;
+                            let nz = z as i32 + dz;
+                            if nx >= 0 && nx < size as i32 && ny >= 0 && ny < size as i32 && nz >= 0 && nz < size as i32 {
+                                let ni = nz as usize * size * size + ny as usize * size + nx as usize;
+                                if density.samples[ni].density > 0.0 && !density.samples[ni].material.is_ore() {
+                                    density.samples[ni].material = ore_mat;
+                                }
+                            }
+                        }
+                    }
+
+                    // Connect isolated ores: if this ore has same-type neighbor, try to bridge gaps
+                    for &(dx, dy, dz) in &dirs {
+                        let nx = x as i32 + dx * 2; // check 2 voxels away
+                        let ny = y as i32 + dy * 2;
+                        let nz = z as i32 + dz * 2;
+                        let mx = x as i32 + dx; // the gap voxel between
+                        let my = y as i32 + dy;
+                        let mz = z as i32 + dz;
+                        if nx >= 0 && nx < size as i32 && ny >= 0 && ny < size as i32 && nz >= 0 && nz < size as i32
+                            && mx >= 0 && mx < size as i32 && my >= 0 && my < size as i32 && mz >= 0 && mz < size as i32
+                        {
+                            let ni = nz as usize * size * size + ny as usize * size + nx as usize;
+                            let mi = mz as usize * size * size + my as usize * size + mx as usize;
+                            // If there's same ore 2 away and the gap is ice, fill the gap
+                            if density.samples[ni].material == ore_mat
+                                && density.samples[mi].density > 0.0
+                                && !density.samples[mi].material.is_ore()
+                            {
+                                density.samples[mi].material = ore_mat;
+                            }
+                        }
+                    }
+                    } // end else (coal skip)
+                    } // end else (in_ore_zone)
+                }
+
+                // Permafrost at vault edges
                 if is_solid && !density.samples[idx].material.is_ore() {
                     let wp = origin + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
                     let dist_to_edge_x = (wp.x - blueprint.world_min.x).min(blueprint.world_max.x - wp.x);
@@ -417,6 +952,127 @@ pub fn apply_vault_to_chunk(
             }
         }
     }
+
+    t_2d = t2d_start.elapsed();
+    let t2e_start = Instant::now();
+
+    // ── 2E: Ledge smoothing, buttress reinforcement, platform blending ──
+    // Scan for ledge surfaces and fix jagged edges, strengthen wall connections,
+    // and blend stalagmite platforms into the main ledge path.
+    let mut ledge_fills: Vec<(usize, Material)> = Vec::new();
+
+    for z in 1..size.saturating_sub(1) {
+        for y in 1..size.saturating_sub(1) {
+            for x in 1..size.saturating_sub(1) {
+                let idx = z * size * size + y * size + x;
+                let is_solid = density.samples[idx].density > 0.0;
+                let above = z * size * size + (y + 1) * size + x;
+                let below = z * size * size + (y - 1) * size + x;
+                let air_above = y + 1 < size && density.samples[above].density <= 0.0;
+                let air_below = y > 0 && density.samples[below].density <= 0.0;
+
+                // 1. Ledge surface smoothing: if a ledge voxel has 2+ air side-neighbors
+                //    at the same Y, fill the air gaps with solid to smooth the edge
+                if is_solid && air_above {
+                    let mut missing_neighbors = Vec::new();
+                    for &(dx, dz) in &[(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+                        let nx = x as i32 + dx;
+                        let nz = z as i32 + dz;
+                        if nx >= 0 && nx < size as i32 && nz >= 0 && nz < size as i32 {
+                            let ni = nz as usize * size * size + y * size + nx as usize;
+                            if density.samples[ni].density <= 0.0 {
+                                // Check if the voxel BEYOND this gap is solid (gap is 1 wide = jagged edge)
+                                let nx2 = nx + dx;
+                                let nz2 = nz + dz;
+                                if nx2 >= 0 && nx2 < size as i32 && nz2 >= 0 && nz2 < size as i32 {
+                                    let ni2 = nz2 as usize * size * size + y * size + nx2 as usize;
+                                    if density.samples[ni2].density > 0.0 {
+                                        // 1-voxel gap between two solid ledge sections — fill it
+                                        missing_neighbors.push(ni);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    for ni in missing_neighbors {
+                        ledge_fills.push((ni, density.samples[idx].material));
+                    }
+                }
+
+                // 2. Buttress reinforcement: if solid ledge has air below AND air on the
+                //    wall-side (gap between ledge and cliff), fill with IceSheet to connect
+                if is_solid && air_above && air_below {
+                    // Check all 4 horizontal directions for the cliff wall
+                    for &(dx, dz) in &[(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+                        let nx = x as i32 + dx;
+                        let nz = z as i32 + dz;
+                        if nx < 0 || nx >= size as i32 || nz < 0 || nz >= size as i32 { continue; }
+                        let ni = nz as usize * size * size + y * size + nx as usize;
+                        if density.samples[ni].density <= 0.0 {
+                            // Is there solid wall within 3 voxels in this direction?
+                            let mut found_wall = false;
+                            for step in 2..=3i32 {
+                                let wx = x as i32 + dx * step;
+                                let wz = z as i32 + dz * step;
+                                if wx >= 0 && wx < size as i32 && wz >= 0 && wz < size as i32 {
+                                    let wi = wz as usize * size * size + y * size + wx as usize;
+                                    // Check if this is a tall wall (solid for 3+ voxels vertically)
+                                    let wall_above = if y + 2 < size { density.samples[wz as usize * size * size + (y+2) * size + wx as usize].density > 0.0 } else { false };
+                                    if density.samples[wi].density > 0.0 && wall_above {
+                                        found_wall = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if found_wall {
+                                // Fill the gap between ledge and wall with IceSheet buttress
+                                ledge_fills.push((ni, Material::IceSheet));
+                                // Also fill below for thickness
+                                if y > 0 {
+                                    let below_ni = nz as usize * size * size + (y - 1) * size + nx as usize;
+                                    ledge_fills.push((below_ni, Material::IceSheet));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 3. Stalagmite platform blending: if a solid voxel at ledge height
+                //    is IceSheet (platform) and has a neighbor that's Hoarfrost/Ice (ledge),
+                //    smooth the material transition
+                if is_solid && air_above && density.samples[idx].material == Material::IceSheet {
+                    for &(dx, dz) in &[(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+                        let nx = x as i32 + dx;
+                        let nz = z as i32 + dz;
+                        if nx >= 0 && nx < size as i32 && nz >= 0 && nz < size as i32 {
+                            let ni = nz as usize * size * size + y * size + nx as usize;
+                            let neighbor_mat = density.samples[ni].material;
+                            if density.samples[ni].density > 0.0
+                                && (neighbor_mat == Material::Ice || neighbor_mat == Material::BlackIce)
+                            {
+                                // Blend: make the platform edge match the ledge material
+                                ledge_fills.push((idx, neighbor_mat));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Apply ledge fixes
+    for (idx, mat) in &ledge_fills {
+        if density.samples[*idx].density <= 0.0 {
+            density.samples[*idx].density = 0.85;
+        }
+        if !density.samples[*idx].material.is_ore() {
+            density.samples[*idx].material = *mat;
+        }
+    }
+
+    t_2e = t2e_start.elapsed();
+    let tcones_start = Instant::now();
 
     // Write overhang icicles discovered in pass 2
     for (pos, len, rad, glow) in &overhang_icicles {
@@ -435,14 +1091,10 @@ pub fn apply_vault_to_chunk(
     let relevant_icicles = blueprint.icicles_in_chunk(chunk_key, eb);
     let relevant_stalagmites = blueprint.stalagmites_in_chunk(chunk_key, eb);
 
-    let mut icicle_writes = 0u32;
     for icicle in &relevant_icicles {
-        let before = density.samples.iter().filter(|s| s.material == Material::IceSheet).count();
         write_cone_inline(density, origin, vs, size,
             icicle.pos, icicle.length, icicle.radius, icicle.direction,
             Material::IceSheet, 2.0);
-        let after = density.samples.iter().filter(|s| s.material == Material::IceSheet).count();
-        if after > before { icicle_writes += (after - before) as u32; }
         if icicle.has_glow_tip {
             let tip_offset = icicle.direction * (icicle.length - 1.5);
             let tip_pos = icicle.pos + Vec3::new(0.0, tip_offset, 0.0);
@@ -465,45 +1117,76 @@ pub fn apply_vault_to_chunk(
                 Material::FrozenGlow, 2.5);
         }
 
-        // Platform disc under stalagmite
-        for vz in 0..size {
-            for vy in 0..size {
-                for vx in 0..size {
-                    let vwp = origin + Vec3::new(vx as f32 * vs, vy as f32 * vs, vz as f32 * vs);
-                    let dx = vwp.x - stag.pos.x;
-                    let dz = vwp.z - stag.pos.z;
-                    let dist_h = (dx * dx + dz * dz).sqrt();
-                    if dist_h > stag.platform_radius { continue; }
-                    if vwp.y < stag.platform_y || vwp.y > stag.platform_y + stag.platform_thickness {
-                        continue;
+        // Platform disc — bounded, clones ledge material, only extends toward wall
+        {
+            let local = stag.pos - origin;
+            let gc = Vec3::new(local.x / vs, stag.platform_y / vs - origin.y / vs, local.z / vs);
+            let gr = (stag.platform_radius / vs).ceil() as i32 + 1;
+            let lo_x = (gc.x as i32 - gr).max(0) as usize;
+            let hi_x = ((gc.x as i32 + gr) as usize).min(size - 1);
+            let lo_y = ((stag.platform_y - origin.y) / vs).floor().max(0.0) as usize;
+            let hi_y = (((stag.platform_y + stag.platform_thickness - origin.y) / vs).ceil() as usize).min(size - 1);
+            let lo_z = (gc.z as i32 - gr).max(0) as usize;
+            let hi_z = ((gc.z as i32 + gr) as usize).min(size - 1);
+
+            // Find the dominant ledge material nearby to clone
+            let mut ledge_mat = Material::Ice;
+            'find_mat: for dz in -2i32..=2 {
+                for dx in -2i32..=2 {
+                    let sx = (gc.x as i32 + dx).max(0) as usize;
+                    let sy = lo_y;
+                    let sz = (gc.z as i32 + dz).max(0) as usize;
+                    if sx < size && sy < size && sz < size {
+                        let si = sz * size * size + sy * size + sx;
+                        let m = density.samples[si].material;
+                        if density.samples[si].density > 0.0 && (m == Material::Ice || m == Material::BlackIce || m == Material::IceSheet) {
+                            ledge_mat = m;
+                            break 'find_mat;
+                        }
                     }
-                    let vidx = vz * size * size + vy * size + vx;
-                    if 0.85 > density.samples[vidx].density {
-                        density.samples[vidx].density = 0.85;
-                        density.samples[vidx].material = Material::IceSheet;
+                }
+            }
+
+            for vz in lo_z..=hi_z {
+                for vy in lo_y..=hi_y {
+                    for vx in lo_x..=hi_x {
+                        let vwp = origin + Vec3::new(vx as f32 * vs, vy as f32 * vs, vz as f32 * vs);
+                        let dx = vwp.x - stag.pos.x;
+                        let dz = vwp.z - stag.pos.z;
+                        let dist_h = (dx * dx + dz * dz).sqrt();
+                        if dist_h > stag.platform_radius { continue; }
+                        let vidx = vz * size * size + vy * size + vx;
+                        if 0.85 > density.samples[vidx].density {
+                            density.samples[vidx].density = 0.85;
+                            density.samples[vidx].material = ledge_mat;
+                        }
                     }
                 }
             }
         }
     }
 
-    // Diagnostic
+    t_cones = tcones_start.elapsed();
+    let total = chunk_start.elapsed();
+
+    // Write timing report
     {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-            .open("D:/Unreal Projects/Mithril2026/Saved/icicle_debug.txt")
+            .open("D:/Unreal Projects/Mithril2026/Saved/vault_perf.txt")
         {
-            let _ = writeln!(f, "chunk({},{},{}) icicles={} stalags={} bp_total={} voxels_written={}",
+            let _ = writeln!(f, "chunk({},{},{}) total={:.2}ms | P1={:.2} 2PRE={:.2} 2A={:.2} 2B={:.2} 2C={:.2} 2D={:.2} 2E={:.2} cones={:.2}",
                 chunk_key.0, chunk_key.1, chunk_key.2,
-                relevant_icicles.len(), relevant_stalagmites.len(),
-                blueprint.icicles.len(), icicle_writes);
-            if !relevant_icicles.is_empty() {
-                let ic = &relevant_icicles[0];
-                let _ = writeln!(f, "  first_icicle: pos=({:.1},{:.1},{:.1}) len={:.1} rad={:.1} dir={:.1}",
-                    ic.pos.x, ic.pos.y, ic.pos.z, ic.length, ic.radius, ic.direction);
-                let _ = writeln!(f, "  chunk_origin=({:.1},{:.1},{:.1}) vs={:.3} size={}",
-                    origin.x, origin.y, origin.z, vs, size);
-            }
+                total.as_secs_f64() * 1000.0,
+                t_pass1.as_secs_f64() * 1000.0,
+                t_2pre.as_secs_f64() * 1000.0,
+                t_2a.as_secs_f64() * 1000.0,
+                t_2b.as_secs_f64() * 1000.0,
+                t_2c.as_secs_f64() * 1000.0,
+                t_2d.as_secs_f64() * 1000.0,
+                t_2e.as_secs_f64() * 1000.0,
+                t_cones.as_secs_f64() * 1000.0,
+            );
         }
     }
 }
@@ -522,9 +1205,21 @@ fn write_cone_inline(
     material: Material,
     smoothness: f32,
 ) {
-    for z in 0..size {
-        for y in 0..size {
-            for x in 0..size {
+    // Bounded iteration: only check voxels in the cone's bounding box
+    let tip = anchor + Vec3::new(0.0, direction * length, 0.0);
+    let min_y = anchor.y.min(tip.y) - 1.0;
+    let max_y = anchor.y.max(tip.y) + 1.0;
+    let local_anchor = anchor - origin;
+    let lo_x = ((local_anchor.x - base_radius - 1.0) / vs).floor().max(0.0) as usize;
+    let hi_x = (((local_anchor.x + base_radius + 1.0) / vs).ceil() as usize).min(size - 1);
+    let lo_y = (((min_y - origin.y) / vs).floor().max(0.0)) as usize;
+    let hi_y = ((((max_y - origin.y) / vs).ceil()) as usize).min(size - 1);
+    let lo_z = ((local_anchor.z - base_radius - 1.0) / vs).floor().max(0.0) as usize;
+    let hi_z = (((local_anchor.z + base_radius + 1.0) / vs).ceil() as usize).min(size - 1);
+
+    for z in lo_z..=hi_z {
+        for y in lo_y..=hi_y {
+            for x in lo_x..=hi_x {
                 let world_pos = origin + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
                 // Distance along cone axis (0 at anchor, 1 at tip)
                 let t = (world_pos.y - anchor.y) / (direction * length);

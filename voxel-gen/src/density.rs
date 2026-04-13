@@ -157,6 +157,8 @@ pub fn try_coarse_solid_check(config: &GenerationConfig, world_origin: glam::Vec
 /// Base density is 1.0 (solid). Where combined noise exceeds the threshold,
 /// density goes negative (air). Geodes override density for hollow interiors.
 pub fn generate_density_field(config: &GenerationConfig, world_origin: glam::Vec3) -> DensityField {
+    use std::time::Instant;
+    let _density_start = Instant::now();
     let size = config.chunk_size + 1;
     let mut field = DensityField::new(size);
 
@@ -190,6 +192,12 @@ pub fn generate_density_field(config: &GenerationConfig, world_origin: glam::Vec
     let threshold = config.noise.cavern_threshold;
 
     let vs = config.voxel_scale() as f64;
+
+    let _t_setup = _density_start.elapsed();
+    let _t_loop_start = Instant::now();
+    let mut _t_noise_ns: u64 = 0;
+    let mut _t_material_ns: u64 = 0;
+    let mut _t_geode_ns: u64 = 0;
 
     for z in 0..size {
         for y in 0..size {
@@ -278,6 +286,7 @@ pub fn generate_density_field(config: &GenerationConfig, world_origin: glam::Vec
                 }
 
                 // Assign material
+                let _t_mat_start = Instant::now();
                 let material = if density <= 0.0 {
                     Material::Air
                 } else if geode_shell {
@@ -291,10 +300,33 @@ pub fn generate_density_field(config: &GenerationConfig, world_origin: glam::Vec
                     assign_material(wx, wy, wz, &config.ore, &mat_noise)
                 };
 
+                _t_material_ns += _t_mat_start.elapsed().as_nanos() as u64;
+
                 let sample = field.get_mut(x, y, z);
                 sample.density = density;
                 sample.material = material;
             }
+        }
+    }
+
+    let _t_loop = _t_loop_start.elapsed();
+    let _t_total = _density_start.elapsed();
+
+    // Log every 10th chunk to avoid spam (use world_origin as hash)
+    if (world_origin.x as i32 + world_origin.z as i32) % 10 == 0 {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+            .open("D:/Unreal Projects/Mithril2026/Saved/density_detail.txt")
+        {
+            let _ = writeln!(f, "chunk_at({:.0},{:.0},{:.0}) total={:.2}ms | setup={:.2} loop={:.2} (material={:.2}ms = {:.0}%) voxels={}",
+                world_origin.x, world_origin.y, world_origin.z,
+                _t_total.as_secs_f64() * 1000.0,
+                _t_setup.as_secs_f64() * 1000.0,
+                _t_loop.as_secs_f64() * 1000.0,
+                _t_material_ns as f64 / 1_000_000.0,
+                if _t_loop.as_nanos() > 0 { _t_material_ns as f64 / _t_loop.as_nanos() as f64 * 100.0 } else { 0.0 },
+                size * size * size,
+            );
         }
     }
 

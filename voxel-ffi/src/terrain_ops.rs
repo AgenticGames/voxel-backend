@@ -7,8 +7,9 @@ use crate::store::{sync_boundary_density, ChunkStore};
 use crate::types::ConvertedMesh;
 
 /// Flatten a terrace footprint for building placement.
-/// Sets the floor layer to solid host_material, clears `clearance_voxels` layers above,
-/// and fills down up to 2 voxels below to connect the platform to the cave floor.
+/// The flatten zone is oversized by `MARGIN` voxels beyond the building footprint
+/// so that DC edge artifacts are pushed away from the building mesh and hidden.
+/// Fills down up to 4 voxels below to bridge air gaps over cliffs.
 /// Returns the re-meshed dirty chunks (in UE coords).
 pub fn flatten_terrace(
     store: &mut ChunkStore,
@@ -20,19 +21,39 @@ pub fn flatten_terrace(
     clearance_voxels: i32,
 ) -> Vec<((i32, i32, i32), ConvertedMesh)> {
     let cs = config.chunk_size as i32;
-    let clear = clearance_voxels.max(2); // at least 2 voxels of air
+    let clear = clearance_voxels.max(2);
+    const MARGIN: i32 = 2; // extra voxels beyond footprint in each direction
+    const FILL_DOWN: i32 = 4; // voxels below floor to fill
 
     let mut dirty_set: HashSet<(i32, i32, i32)> = HashSet::new();
     let mut changed_count = 0u32;
 
-    for dx in 0..terrace_size {
-        for dz in 0..terrace_size {
+    // Oversized flatten zone with tapered edges.
+    // Interior cells get full density (1.0) for a flat floor.
+    // Margin cells get decreasing density based on distance from interior,
+    // which makes DC place the surface progressively lower — creating a ramp.
+    for dx in -MARGIN..(terrace_size + MARGIN) {
+        for dz in -MARGIN..(terrace_size + MARGIN) {
             let wx = base.x + dx;
             let wy = base.y;
             let wz = base.z + dz;
 
-            // Process vertical layers: floor (y+0), clearance (y+1 .. y+clear)
-            for dy in 0..=clear {
+            // Chebyshev distance from nearest interior cell
+            let dist_x = 0.max(-dx).max(dx - (terrace_size - 1));
+            let dist_z = 0.max(-dz).max(dz - (terrace_size - 1));
+            let dist = dist_x.max(dist_z); // 0 = interior, 1..MARGIN = margin
+
+            // Tapered floor density: 1.0 at interior, slopes down in margin
+            let floor_density = if dist == 0 {
+                1.0f32
+            } else {
+                (1.0 - dist as f32 / (MARGIN as f32 + 1.0)).max(0.05)
+            };
+
+            // Floor + clearance (clearance only for interior cells — margin cells
+            // only get floor taper, not air carving, to avoid voiding cliff walls)
+            let max_dy = if dist == 0 { clear } else { 0 };
+            for dy in 0..=max_dy {
                 let vy = wy + dy;
                 let cx = wx.div_euclid(cs);
                 let cy = vy.div_euclid(cs);
@@ -45,28 +66,35 @@ pub fn flatten_terrace(
                 if let Some(density) = store.density_fields.get_mut(&key) {
                     let sample = density.get_mut(lx, ly, lz);
                     if dy == 0 {
-                        // Floor: make solid with host material
-                        let (new_d, new_m) = (1.0, host_material);
-                        if (sample.density - new_d).abs() > 0.01 || sample.material != new_m {
+                        // Floor: use tapered density, but only raise — never lower
+                        if floor_density > sample.density {
                             changed_count += 1;
+                            sample.density = floor_density;
+                            sample.material = host_material;
                         }
-                        sample.density = new_d;
-                        sample.material = new_m;
                     } else {
-                        // Clearance: make air
-                        let (new_d, new_m) = (-1.0, Material::Air);
-                        if (sample.density - new_d).abs() > 0.01 || sample.material != new_m {
+                        // Clearance: force to air (interior only)
+                        if sample.density != -1.0 || sample.material != Material::Air {
                             changed_count += 1;
+                            sample.density = -1.0;
+                            sample.material = Material::Air;
                         }
-                        sample.density = new_d;
-                        sample.material = new_m;
                     }
                     dirty_set.insert(key);
                 }
             }
 
-            // Fill-down: scan up to 2 voxels below the floor, filling air with solid
-            for dy in 1..=2i32 {
+            // Fill-down: solid support under the ramp.
+            // Margin cells get tapered fill (less depth, lower density) so cliff
+            // walls slope inward instead of being sheer vertical.
+            let fill_depth = if dist == 0 {
+                FILL_DOWN
+            } else {
+                (FILL_DOWN - dist).max(1)
+            };
+            let fill_density = floor_density; // match the taper
+
+            for dy in 1..=fill_depth {
                 let vy = wy - dy;
                 let cx = wx.div_euclid(cs);
                 let cy = vy.div_euclid(cs);
@@ -78,27 +106,53 @@ pub fn flatten_terrace(
 
                 if let Some(density) = store.density_fields.get_mut(&key) {
                     let sample = density.get_mut(lx, ly, lz);
-                    if sample.density < 0.0 {
-                        // Air gap: fill with host material
+                    if sample.density < fill_density {
                         changed_count += 1;
-                        sample.density = 1.0;
+                        sample.density = fill_density;
                         sample.material = host_material;
                         dirty_set.insert(key);
                     } else {
-                        // Already solid (hit cave floor): stop filling this column
                         break;
                     }
                 }
             }
 
-            // Track this cell as terraced
-            store.terraced_cells.insert((wx, wy, wz));
-            store.terraced_columns.insert((wx, wz), wy);
+            // Track interior cells as terraced (not the margin)
+            if dx >= 0 && dx < terrace_size && dz >= 0 && dz < terrace_size {
+                store.terraced_cells.insert((wx, wy, wz));
+                store.terraced_columns.insert((wx, wz), wy);
+            }
         }
     }
 
-    eprintln!("[voxel] flatten_terrace: base=({},{},{}), size={}, clearance={}, changed={} voxels, dirty={} chunks",
-        base.x, base.y, base.z, terrace_size, clear, changed_count, dirty_set.len());
+    // Collect all floor cells and their intended densities for post-sync restoration.
+    // sync_boundary_density uses min() which can pull down floor densities at chunk seams.
+    let mut floor_cells: Vec<((i32, i32, i32), usize, usize, usize, f32)> = Vec::new();
+    for dx in -MARGIN..(terrace_size + MARGIN) {
+        for dz in -MARGIN..(terrace_size + MARGIN) {
+            let wx = base.x + dx;
+            let wy = base.y;
+            let wz = base.z + dz;
+            let dist_x = 0.max(-dx).max(dx - (terrace_size - 1));
+            let dist_z = 0.max(-dz).max(dz - (terrace_size - 1));
+            let dist = dist_x.max(dist_z);
+            let floor_density = if dist == 0 {
+                1.0f32
+            } else {
+                (1.0 - dist as f32 / (MARGIN as f32 + 1.0)).max(0.05)
+            };
+            let cx = wx.div_euclid(cs);
+            let cy = wy.div_euclid(cs);
+            let cz = wz.div_euclid(cs);
+            let lx = wx.rem_euclid(cs) as usize;
+            let ly = wy.rem_euclid(cs) as usize;
+            let lz = wz.rem_euclid(cs) as usize;
+            floor_cells.push(((cx, cy, cz), lx, ly, lz, floor_density));
+        }
+    }
+
+    eprintln!("[voxel] flatten_terrace: base=({},{},{}), size={} (+{}margin), clearance={}, fill_down={}, changed={} voxels, dirty={} chunks",
+        base.x, base.y, base.z, terrace_size, MARGIN, clear, FILL_DOWN, changed_count, dirty_set.len());
 
     // Build dirty chunks with full-chunk bounds for remeshing
     let chunk_size = config.chunk_size;
@@ -113,12 +167,22 @@ pub fn flatten_terrace(
     );
     dirty_chunks.extend(extra_dirty);
 
+    // Post-sync fixup: restore any floor densities that sync_boundary_density pulled down.
+    // sync uses min() which is correct for mining but wrong for flatten floors.
+    for &(key, lx, ly, lz, intended) in &floor_cells {
+        if let Some(density) = store.density_fields.get_mut(&key) {
+            let sample = density.get_mut(lx, ly, lz);
+            if sample.density < intended {
+                sample.density = intended;
+            }
+        }
+    }
+
     store.remesh_dirty(&dirty_chunks, config, world_scale)
 }
 
 /// Flatten multiple terrace tiles in a single write lock + one remesh pass.
-/// Identical per-cell logic to `flatten_terrace` but all tiles share one dirty_set,
-/// one `sync_boundary_density` call, and one `remesh_dirty` call.
+/// Same oversized-margin approach as `flatten_terrace`.
 pub fn flatten_terrace_batch(
     store: &mut ChunkStore,
     tiles: &[(glam::IVec3, Material)],
@@ -131,17 +195,31 @@ pub fn flatten_terrace_batch(
     }
 
     let cs = config.chunk_size as i32;
+    const MARGIN: i32 = 2;
+    const FILL_DOWN: i32 = 4;
 
     let mut dirty_set: HashSet<(i32, i32, i32)> = HashSet::new();
 
     for (base, host_material) in tiles {
-        for dx in 0..terrace_size {
-            for dz in 0..terrace_size {
+        for dx in -MARGIN..(terrace_size + MARGIN) {
+            for dz in -MARGIN..(terrace_size + MARGIN) {
                 let wx = base.x + dx;
                 let wy = base.y;
                 let wz = base.z + dz;
 
-                for dy in 0..3i32 {
+                // Chebyshev distance from interior
+                let dist_x = 0.max(-dx).max(dx - (terrace_size - 1));
+                let dist_z = 0.max(-dz).max(dz - (terrace_size - 1));
+                let dist = dist_x.max(dist_z);
+                let floor_density = if dist == 0 {
+                    1.0f32
+                } else {
+                    (1.0 - dist as f32 / (MARGIN as f32 + 1.0)).max(0.05)
+                };
+
+                // Clearance only for interior cells — margin only gets floor taper
+                let max_dy = if dist == 0 { 2 } else { 0 };
+                for dy in 0..=max_dy {
                     let vy = wy + dy;
                     let cx = wx.div_euclid(cs);
                     let cy = vy.div_euclid(cs);
@@ -154,8 +232,10 @@ pub fn flatten_terrace_batch(
                     if let Some(density) = store.density_fields.get_mut(&key) {
                         let sample = density.get_mut(lx, ly, lz);
                         if dy == 0 {
-                            sample.density = 1.0;
-                            sample.material = *host_material;
+                            if floor_density > sample.density {
+                                sample.density = floor_density;
+                                sample.material = *host_material;
+                            }
                         } else {
                             sample.density = -1.0;
                             sample.material = Material::Air;
@@ -164,8 +244,10 @@ pub fn flatten_terrace_batch(
                     }
                 }
 
-                // Fill-down: scan up to 2 voxels below the floor, filling air with solid
-                for dy in 1..=2i32 {
+                let fill_depth = if dist == 0 { FILL_DOWN } else { (FILL_DOWN - dist).max(1) };
+                let fill_density = floor_density;
+
+                for dy in 1..=fill_depth {
                     let vy = wy - dy;
                     let cx = wx.div_euclid(cs);
                     let cy = vy.div_euclid(cs);
@@ -177,8 +259,8 @@ pub fn flatten_terrace_batch(
 
                     if let Some(density) = store.density_fields.get_mut(&key) {
                         let sample = density.get_mut(lx, ly, lz);
-                        if sample.density < 0.0 {
-                            sample.density = 1.0;
+                        if sample.density < fill_density {
+                            sample.density = fill_density;
                             sample.material = *host_material;
                             dirty_set.insert(key);
                         } else {
@@ -187,8 +269,37 @@ pub fn flatten_terrace_batch(
                     }
                 }
 
-                store.terraced_cells.insert((wx, wy, wz));
-                store.terraced_columns.insert((wx, wz), wy);
+                if dx >= 0 && dx < terrace_size && dz >= 0 && dz < terrace_size {
+                    store.terraced_cells.insert((wx, wy, wz));
+                    store.terraced_columns.insert((wx, wz), wy);
+                }
+            }
+        }
+    }
+
+    // Collect floor cells for post-sync restoration
+    let mut floor_cells: Vec<((i32, i32, i32), usize, usize, usize, f32)> = Vec::new();
+    for (base, _host_material) in tiles {
+        for dx in -MARGIN..(terrace_size + MARGIN) {
+            for dz in -MARGIN..(terrace_size + MARGIN) {
+                let wx = base.x + dx;
+                let wy = base.y;
+                let wz = base.z + dz;
+                let dist_x = 0.max(-dx).max(dx - (terrace_size - 1));
+                let dist_z = 0.max(-dz).max(dz - (terrace_size - 1));
+                let dist = dist_x.max(dist_z);
+                let floor_density = if dist == 0 {
+                    1.0f32
+                } else {
+                    (1.0 - dist as f32 / (MARGIN as f32 + 1.0)).max(0.05)
+                };
+                let cx = wx.div_euclid(cs);
+                let cy = wy.div_euclid(cs);
+                let cz = wz.div_euclid(cs);
+                let lx = wx.rem_euclid(cs) as usize;
+                let ly = wy.rem_euclid(cs) as usize;
+                let lz = wz.rem_euclid(cs) as usize;
+                floor_cells.push(((cx, cy, cz), lx, ly, lz, floor_density));
             }
         }
     }
@@ -203,6 +314,16 @@ pub fn flatten_terrace_batch(
         &mut store.density_fields, &dirty_chunks, config.chunk_size,
     );
     dirty_chunks.extend(extra_dirty);
+
+    // Post-sync fixup: restore floor densities that sync pulled down
+    for &(key, lx, ly, lz, intended) in &floor_cells {
+        if let Some(density) = store.density_fields.get_mut(&key) {
+            let sample = density.get_mut(lx, ly, lz);
+            if sample.density < intended {
+                sample.density = intended;
+            }
+        }
+    }
 
     store.remesh_dirty(&dirty_chunks, config, world_scale)
 }
@@ -219,9 +340,9 @@ pub fn query_flatten_support(store: &ChunkStore, base: glam::IVec3, chunk_size: 
             let wx = base.x + dx;
             let wz = base.z + dz;
 
-            // Check 2-voxel column below: any solid = supported
+            // Check 4-voxel column below: any solid = supported
             let mut column_supported = false;
-            for dy in 1..=2i32 {
+            for dy in 1..=4i32 {
                 let check_y = base.y - dy;
                 let cx = wx.div_euclid(chunk_size);
                 let cy = check_y.div_euclid(chunk_size);

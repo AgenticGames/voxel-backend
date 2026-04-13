@@ -83,21 +83,43 @@ pub fn generate_region_densities(
     let mut timings = RegionTimings::default();
 
     // Phase 1: Generate base density fields (parallel)
-    // Try coarse solid check first — skip full generation for fully-solid chunks
     let t0 = Instant::now();
+    let coarse_skipped = std::sync::atomic::AtomicU32::new(0);
+    let slowest_chunk_ms = std::sync::atomic::AtomicU64::new(0);
     let mut density_fields: HashMap<(i32, i32, i32), DensityField> = coords
         .par_iter()
         .map(|&(cx, cy, cz)| {
+            let chunk_t0 = Instant::now();
             let coord = ChunkCoord::new(cx, cy, cz);
             let origin = coord.world_origin_bounds(eb);
             let density = match crate::density::try_coarse_solid_check(config, origin) {
-                Some(solid_field) => solid_field,
+                Some(solid_field) => {
+                    coarse_skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    solid_field
+                }
                 None => generate_density_field(config, origin),
             };
+            let ms = (chunk_t0.elapsed().as_secs_f64() * 1000.0) as u64;
+            slowest_chunk_ms.fetch_max(ms, std::sync::atomic::Ordering::Relaxed);
             ((cx, cy, cz), density)
         })
         .collect();
     timings.base_density = t0.elapsed();
+
+    // Log base density breakdown
+    {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+            .open("D:/Unreal Projects/Mithril2026/Saved/density_perf.txt")
+        {
+            let _ = writeln!(f, "base_density: {:.1}ms for {} chunks | coarse_skipped={} slowest_chunk={}ms",
+                timings.base_density.as_secs_f64() * 1000.0,
+                coords.len(),
+                coarse_skipped.load(std::sync::atomic::Ordering::Relaxed),
+                slowest_chunk_ms.load(std::sync::atomic::Ordering::Relaxed),
+            );
+        }
+    }
 
     // Phase 2: Collect cavern centers from ALL chunks
     let t1 = Instant::now();
