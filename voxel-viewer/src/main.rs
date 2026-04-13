@@ -972,8 +972,9 @@ fn serve_mine(
         eprintln!("Lava Carve: placed {} lava seeds in sphere at ({},{},{})", lava_placed, cx, cy, cz);
     }
 
-    // Check pool containment after mining (drainable pools)
-    region.check_pool_containment();
+    // Skip pool containment check — is_pool_contained is too strict for the
+    // natural cave geometry (rim voxels at surface_y are often cave air even
+    // before any mining).  Pool surfaces are cosmetic in the viewer.
     let surviving_pools = region.pool_descriptors.clone();
 
     let mesh_json = region.to_json_mesh();

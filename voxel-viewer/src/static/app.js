@@ -693,11 +693,12 @@
             var mode = mineMode.value;
             var radius = parseInt(mineRadius.value, 10);
 
-            if (mode === "water-place") {
-                // Mine first (carve sphere), then fill with water
+            if (mode === "water-place" || mode === "lava-carve") {
+                var isLava = mode === "lava-carve";
+                // Mine first (carve sphere), then fill with fluid
                 var mineBody = JSON.stringify({
                     x: originalPoint.x, y: originalPoint.y, z: originalPoint.z,
-                    mode: "sphere", radius: radius, nx: nx, ny: ny, nz: nz
+                    mode: isLava ? "lava-carve" : "sphere", radius: radius, nx: nx, ny: ny, nz: nz
                 });
                 showMineOverlay("Placing...");
                 miningInFlight = true;
@@ -709,18 +710,27 @@
                 .then(function (resp) { return resp.json(); })
                 .then(function (mineData) {
                     displayJsonMesh(mineData.mesh, { resetCamera: false, reuseTransform: true });
-                    // Now place water in the carved area
-                    var waterBody = JSON.stringify({
-                        x: originalPoint.x, y: originalPoint.y, z: originalPoint.z, radius: radius
-                    });
-                    return fetch(apiUrl("/api/place-water"), {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: waterBody
-                    });
-                })
-                .then(function (resp) { return resp.json(); })
-                .then(function (data) {
+                    // Add a synthetic pool surface at the placement point
+                    var placedPool = [{
+                        world_x: originalPoint.x,
+                        surface_y: originalPoint.y,
+                        world_z: originalPoint.z,
+                        radius: radius,
+                        fluid_type: isLava ? "Lava" : "Water"
+                    }];
+                    var allPools = (mineData.pools || []).concat(placedPool);
+                    renderPoolSurfaces(allPools);
+                    if (!isLava) {
+                        // Also register water server-side
+                        var waterBody = JSON.stringify({
+                            x: originalPoint.x, y: originalPoint.y, z: originalPoint.z, radius: radius
+                        });
+                        fetch(apiUrl("/api/place-water"), {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: waterBody
+                        });
+                    }
                     hideMineOverlay();
                     miningInFlight = false;
                 })
