@@ -27,6 +27,8 @@
 
     // Pool rendering group
     var poolGroup = null;
+    // Client-side placed fluid pools (accumulates across placements)
+    var placedPools = [];
     // Zone wireframe rendering group
     var zoneGroup = null;
 
@@ -710,15 +712,15 @@
                 .then(function (resp) { return resp.json(); })
                 .then(function (mineData) {
                     displayJsonMesh(mineData.mesh, { resetCamera: false, reuseTransform: true });
-                    // Add a synthetic pool surface at the placement point
-                    var placedPool = [{
+                    // Accumulate placed fluid surface
+                    placedPools.push({
                         world_x: originalPoint.x,
                         surface_y: originalPoint.y,
                         world_z: originalPoint.z,
                         radius: radius,
                         fluid_type: isLava ? "Lava" : "Water"
-                    }];
-                    var allPools = (mineData.pools || []).concat(placedPool);
+                    });
+                    var allPools = (mineData.pools || []).concat(placedPools);
                     renderPoolSurfaces(allPools);
                     if (!isLava) {
                         // Also register water server-side
@@ -762,7 +764,7 @@
             })
             .then(function (data) {
                 displayJsonMesh(data.mesh, { resetCamera: false, reuseTransform: true });
-                renderPoolSurfaces(data.pools);
+                renderPoolSurfaces((data.pools || []).concat(placedPools));
                 showMineToast(data.mined);
                 hideMineOverlay();
                 miningInFlight = false;
@@ -1690,6 +1692,8 @@
             if (result.mesh) {
                 var keepCam = document.getElementById("gen-keep-camera").checked;
                 displayJsonMesh(result.mesh, { resetCamera: !keepCam });
+                // Reset placed fluids on new generation
+                placedPools = [];
                 // Render pool surfaces and zone wireframes
                 renderPoolSurfaces(result.pools);
                 renderZoneBoxes(result.zones);
@@ -1905,6 +1909,7 @@
             if (result.mesh) {
                 viewerPlaceholder.style.display = "none";
                 displayJsonMesh(result.mesh, { resetCamera: true });
+                placedPools = [];
                 renderPoolSurfaces(result.pools);
                 renderZoneBoxes(result.zones);
                 preSleepMeshData = result.mesh;
