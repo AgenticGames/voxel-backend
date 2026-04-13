@@ -1915,6 +1915,7 @@
                         // Display the pre-warmed result (hole is in mesh interior, invisible)
                         if (data && data.mesh) {
                             displayJsonMesh(data.mesh, { resetCamera: false, reuseTransform: true });
+                            renderPoolSurfaces(data.pools);
                             preSleepMeshData = data.mesh;
                         }
                     })
