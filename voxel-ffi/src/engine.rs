@@ -762,17 +762,18 @@ impl VoxelEngine {
     }
 
     /// Synchronously recalculate stress on nearby chunks for V-key preview.
-    /// Runs the v2 ground connectivity + stress pass on 18 chunks (3x3 at center Y + 3x3 above).
-    pub fn recalc_stress_preview(&self, center: (i32, i32, i32)) {
+    /// Returns the UE chunk coords of chunks that were computed (for overlay display).
+    pub fn recalc_stress_preview(&self, center: (i32, i32, i32)) -> Vec<(i32, i32, i32)> {
         use voxel_core::stress::recalc_stress_region_v2;
+        use crate::convert::rust_chunk_to_ue;
 
         let stress_cfg = self.stress_config.read().unwrap().clone();
         let cfg = self.config.read().unwrap().clone();
         let chunk_size = cfg.chunk_size;
 
-        // 3x3 at center Y + 3x3 at Y+1 = 18 chunks
-        let mut chunk_keys = Vec::with_capacity(18);
-        for dy in 0..=1i32 {
+        // 3x3x3 cube around center in Rust coords
+        let mut chunk_keys = Vec::with_capacity(27);
+        for dy in -1..=1i32 {
             for dz in -1..=1i32 {
                 for dx in -1..=1i32 {
                     chunk_keys.push((center.0 + dx, center.1 + dy, center.2 + dz));
@@ -790,6 +791,9 @@ impl VoxelEngine {
             let (density, stress, support) = store.sleep_fields_mut();
             recalc_stress_region_v2(density, stress, support, &stress_cfg, &loaded_keys, chunk_size);
         }
+
+        // Convert computed Rust chunk keys to UE chunk keys for the overlay
+        loaded_keys.iter().map(|&(rx, ry, rz)| rust_chunk_to_ue(rx, ry, rz)).collect()
     }
 
     /// Query stress at a single world voxel position.

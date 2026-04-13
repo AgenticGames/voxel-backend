@@ -197,8 +197,16 @@ fn try_process_stress_queue(
     dbg(format!("  config: overhang_w={:.3} span_w={:.3} min_safe_span={} min_collapse={} slab_cohesion={:.2} max_vol={}",
         stress_cfg.overhang_weight, stress_cfg.span_weight, stress_cfg.min_safe_span,
         stress_cfg.min_collapse_region, stress_cfg.slab_cohesion_threshold, stress_cfg.max_collapse_volume));
-    for (i, &k) in dirty_chunks.iter().enumerate().take(10) {
-        dbg(format!("  dirty[{}]: chunk ({},{},{})", i, k.0, k.1, k.2));
+    {
+        // Log dirty chunks + their Y range for understanding the footprint
+        let min_y = dirty_chunks.iter().map(|k| k.1).min().unwrap_or(0);
+        let max_y = dirty_chunks.iter().map(|k| k.1).max().unwrap_or(0);
+        let min_x = dirty_chunks.iter().map(|k| k.0).min().unwrap_or(0);
+        let max_x = dirty_chunks.iter().map(|k| k.0).max().unwrap_or(0);
+        let min_z = dirty_chunks.iter().map(|k| k.2).min().unwrap_or(0);
+        let max_z = dirty_chunks.iter().map(|k| k.2).max().unwrap_or(0);
+        dbg(format!("  dirty: {} chunks, range ({},{},{})→({},{},{}) [connectivity expands +1 ring]",
+            dirty_chunks.len(), min_x, min_y, min_z, max_x, max_y, max_z));
     }
 
     let recalc_start = std::time::Instant::now();
@@ -219,7 +227,7 @@ fn try_process_stress_queue(
 
     let recalc_ms = recalc_start.elapsed().as_secs_f64() * 1000.0;
 
-    // Count stress + support score distributions
+    // Count stress distribution for DIRTY CHUNKS ONLY (what we just recalculated)
     {
         let s = store.read().unwrap();
         let mut air = 0u32;
@@ -229,20 +237,14 @@ fn try_process_stress_queue(
         let mut stress_shake = 0u32;  // 0.6 .. 0.8
         let mut stress_danger = 0u32; // 0.8 .. 1.0
         let mut stress_over = 0u32;   // >= 1.0
-        let mut sup_zero = 0u32;      // support score 0
-        let mut sup_low = 0u32;       // 0 .. 0.3
-        let mut sup_mid = 0u32;       // 0.3 .. 0.6
-        let mut sup_high = 0u32;      // 0.6 .. 0.8
-        let mut sup_grounded = 0u32;  // >= 0.8
         let grid_size = chunk_size + 1;
         for &key in &dirty_chunks {
-            if let Some(df) = s.density_fields.get(&key) {
-                let ssf = s.stress_fields.get(&key);
+            if let (Some(df), Some(ssf)) = (s.density_fields.get(&key), s.stress_fields.get(&key)) {
                 for z in 0..grid_size {
                     for y in 0..grid_size {
                         for x in 0..grid_size {
                             if !df.get(x, y, z).material.is_solid() { air += 1; continue; }
-                            let stress = ssf.map(|f| f.get(x, y, z)).unwrap_or(0.0);
+                            let stress = ssf.get(x, y, z);
                             if stress <= 0.001 { stress_zero += 1; }
                             else if stress < 0.4 { stress_dust += 1; }
                             else if stress < 0.6 { stress_creak += 1; }
@@ -254,9 +256,9 @@ fn try_process_stress_queue(
                 }
             }
         }
-        let total = air + stress_zero + stress_dust + stress_creak + stress_shake + stress_danger + stress_over;
-        dbg(format!("  recalc {:.1}ms — {} voxels: {} air, {} zero, {} dust(<0.4), {} creak(<0.6), {} shake(<0.8), {} danger(<1.0), {} OVER(1.0+)",
-            recalc_ms, total, air, stress_zero, stress_dust, stress_creak, stress_shake, stress_danger, stress_over));
+        let solid = stress_zero + stress_dust + stress_creak + stress_shake + stress_danger + stress_over;
+        dbg(format!("  recalc {:.1}ms — {} dirty chunks, {} solid: {} zero, {} dust(<0.4), {} creak(<0.6), {} shake(<0.8), {} danger(<1.0), {} OVER(1.0+)",
+            recalc_ms, dirty_chunks.len(), solid, stress_zero, stress_dust, stress_creak, stress_shake, stress_danger, stress_over));
     }
     dbg(format!("  overstressed={} affected_chunks={}",
         result.overstressed.len(), result.affected_chunks.len()));
@@ -270,9 +272,33 @@ fn try_process_stress_queue(
         // Log top 5 by stress
         let mut sorted: Vec<_> = result.overstressed.iter().collect();
         sorted.sort_by(|a, b| b.stress.partial_cmp(&a.stress).unwrap_or(std::cmp::Ordering::Equal));
+        // Detailed stress breakdown for top 5 voxels
+        let s = store.read().unwrap();
         for (i, ov) in sorted.iter().take(5).enumerate() {
-            dbg(format!("  top[{}]: ({},{},{}) stress={:.3}", i, ov.world_x, ov.world_y, ov.world_z, ov.stress));
+            let (wx, wy, wz) = (ov.world_x, ov.world_y, ov.world_z);
+            // Reconstruct components
+            let (key, lx, ly, lz) = voxel_core::stress::world_to_chunk_local(wx, wy, wz, chunk_size);
+            let mat = s.density_fields.get(&key)
+                .map(|df| df.get(lx, ly, lz).material)
+                .unwrap_or(voxel_core::material::Material::Air);
+            let hardness = stress_cfg.material_hardness[mat as u8 as usize];
+            let air_below = voxel_core::stress::count_air_below(&s.density_fields, wx, wy, wz, chunk_size);
+
+            // Count air face-neighbors for cross-section
+            let mut air_faces = 0u32;
+            for &(dx, dy, dz) in &[(1i32,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)] {
+                if let Some((_, m)) = voxel_core::stress::sample_world(&s.density_fields, wx+dx, wy+dy, wz+dz, chunk_size) {
+                    if !m.is_solid() { air_faces += 1; }
+                }
+            }
+
+            dbg(format!("  top[{}]: ({},{},{}) stress={:.3} | mat={:?} hard={:.2} air_below={} air_faces={} | raw≈grav({:.2})+oh({:.2})+xsec({:.2})/h({:.2})",
+                i, wx, wy, wz, ov.stress, mat, hardness, air_below, air_faces,
+                stress_cfg.gravity_weight, air_below as f32 * stress_cfg.overhang_weight,
+                if air_faces >= 2 { (air_faces - 1) as f32 * 0.15 } else { 0.0 },
+                hardness));
         }
+        drop(s);
     }
 
     // Emit stress warnings for UE — scan ALL voxels with stress above dust threshold.

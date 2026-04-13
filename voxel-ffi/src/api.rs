@@ -564,6 +564,7 @@ pub unsafe extern "C" fn voxel_query_stress(
     if engine.is_null() {
         return FfiStressData {
             stress_values: ptr::null_mut(),
+            classification: ptr::null_mut(),
             count: 0,
             valid: 0,
         };
@@ -574,17 +575,24 @@ pub unsafe extern "C" fn voxel_query_stress(
     match engine.query_stress(key) {
         Some(sf) => {
             let count = sf.stress.len() as u32;
-            let mut data = sf.stress.into_boxed_slice();
-            let ptr = data.as_mut_ptr();
-            std::mem::forget(data);
+            let mut stress_data = sf.stress.into_boxed_slice();
+            let stress_ptr = stress_data.as_mut_ptr();
+            std::mem::forget(stress_data);
+
+            let mut class_data = sf.classification.into_boxed_slice();
+            let class_ptr = class_data.as_mut_ptr();
+            std::mem::forget(class_data);
+
             FfiStressData {
-                stress_values: ptr,
+                stress_values: stress_ptr,
+                classification: class_ptr,
                 count,
                 valid: 1,
             }
         }
         None => FfiStressData {
             stress_values: ptr::null_mut(),
+            classification: ptr::null_mut(),
             count: 0,
             valid: 0,
         },
@@ -601,26 +609,58 @@ pub unsafe extern "C" fn voxel_free_stress_data(data: FfiStressData) {
             data.count as usize,
         ));
     }
+    if !data.classification.is_null() && data.count > 0 {
+        drop(Vec::from_raw_parts(
+            data.classification,
+            data.count as usize,
+            data.count as usize,
+        ));
+    }
 }
 
 /// Synchronously recalculate stress on nearby chunks for V-key overlay preview.
 /// Takes a UE chunk coordinate as center, recalcs the 3x3 at that Y + 3x3 at Y+1 (18 chunks).
 /// Call before querying stress to ensure overlay has data.
 #[no_mangle]
+/// out_chunks: caller provides array of 27*3 i32s (27 chunks × xyz).
+/// Returns actual count written.
 pub unsafe extern "C" fn voxel_recalc_stress_preview(
     engine: *mut c_void,
-    center_chunk_x: i32,
-    center_chunk_y: i32,
-    center_chunk_z: i32,
+    world_x: f32,
+    world_y: f32,
+    world_z: f32,
+    out_chunks: *mut i32,
+    out_count: *mut u32,
 ) {
-    use crate::convert::ue_chunk_to_rust;
+    use crate::convert::from_ue_world_pos;
 
     if engine.is_null() {
+        if !out_count.is_null() { *out_count = 0; }
         return;
     }
     let engine_ref = &*(engine as *const VoxelEngine);
-    let center = ue_chunk_to_rust(center_chunk_x, center_chunk_y, center_chunk_z);
-    engine_ref.recalc_stress_preview(center);
+    let world_scale = engine_ref.get_world_scale();
+    let rust_pos = from_ue_world_pos(world_x, world_y, world_z, world_scale);
+
+    let cs = engine_ref.chunk_size() as i32;
+    let center = (
+        (rust_pos.x.floor() as i32).div_euclid(cs),
+        (rust_pos.y.floor() as i32).div_euclid(cs),
+        (rust_pos.z.floor() as i32).div_euclid(cs),
+    );
+    let ue_keys = engine_ref.recalc_stress_preview(center);
+
+    // Write UE chunk coords to output buffer
+    if !out_chunks.is_null() && !out_count.is_null() {
+        let max_out = 27usize;
+        let write_count = ue_keys.len().min(max_out);
+        for i in 0..write_count {
+            *out_chunks.add(i * 3) = ue_keys[i].0;
+            *out_chunks.add(i * 3 + 1) = ue_keys[i].1;
+            *out_chunks.add(i * 3 + 2) = ue_keys[i].2;
+        }
+        *out_count = write_count as u32;
+    }
 }
 
 /// Query stress at a single world position (UE coords).

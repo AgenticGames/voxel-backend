@@ -19,16 +19,46 @@ mod serde_f32_array_47 {
 }
 
 /// Per-voxel stress values for a chunk. Same layout as DensityField (17^3 for chunk_size=16).
+/// Classification byte: top 4 bits = surface type, bottom 4 bits = dominant stress source.
+/// Surface types: 0=interior, 1=floor, 2=ceiling, 3=wall, 4=thin_feature
+/// Stress sources: 0=none, 1=gravity, 2=overhang, 3=span, 4=cross_section
+pub const SURFACE_INTERIOR: u8 = 0;
+pub const SURFACE_FLOOR: u8 = 1;
+pub const SURFACE_CEILING: u8 = 2;
+pub const SURFACE_WALL: u8 = 3;
+pub const SURFACE_THIN: u8 = 4;
+
+pub const SOURCE_NONE: u8 = 0;
+pub const SOURCE_GRAVITY: u8 = 1;
+pub const SOURCE_OVERHANG: u8 = 2;
+pub const SOURCE_SPAN: u8 = 3;
+pub const SOURCE_CROSS_SECTION: u8 = 4;
+
+#[inline]
+pub fn pack_classification(surface: u8, source: u8) -> u8 {
+    (surface << 4) | (source & 0x0F)
+}
+
+#[inline]
+pub fn unpack_surface(c: u8) -> u8 { c >> 4 }
+
+#[inline]
+pub fn unpack_source(c: u8) -> u8 { c & 0x0F }
+
 #[derive(Debug, Clone)]
 pub struct StressField {
     pub stress: Vec<f32>,
+    /// Per-voxel classification: surface type (top 4 bits) + stress source (bottom 4 bits)
+    pub classification: Vec<u8>,
     pub size: usize,
 }
 
 impl StressField {
     pub fn new(size: usize) -> Self {
+        let count = size * size * size;
         Self {
-            stress: vec![0.0; size * size * size],
+            stress: vec![0.0; count],
+            classification: vec![0u8; count],
             size,
         }
     }
@@ -47,6 +77,17 @@ impl StressField {
     pub fn set(&mut self, x: usize, y: usize, z: usize, val: f32) {
         let idx = self.index(x, y, z);
         self.stress[idx] = val;
+    }
+
+    #[inline]
+    pub fn get_class(&self, x: usize, y: usize, z: usize) -> u8 {
+        self.classification[self.index(x, y, z)]
+    }
+
+    #[inline]
+    pub fn set_class(&mut self, x: usize, y: usize, z: usize, val: u8) {
+        let idx = self.index(x, y, z);
+        self.classification[idx] = val;
     }
 }
 
@@ -244,7 +285,7 @@ impl Default for StressConfig {
             vertical_support_factor: 1.0,
             support_radius: 3,
             propagation_radius: 8,
-            max_collapse_volume: 300,
+            max_collapse_volume: 8000,
             rubble_enabled: true,
             rubble_fill_ratio: 0.5,
             warn_dust_threshold: 0.4,
@@ -256,7 +297,7 @@ impl Default for StressConfig {
             vertical_transfer_factor: 0.95,
             support_propagation_iterations: 2,
             ground_threshold: 0.80,     // Reverted from 0.95 — proper init makes 0.80 correct
-            overhang_weight: 0.08,      // Primary ceiling stress driver (raised from 0.02)
+            overhang_weight: 0.05,      // Primary ceiling stress driver. With cap=12: max raw=0.6
             span_weight: 0.04,          // Span penalty per voxel beyond safe (raised from 0.015)
             min_safe_span: 6,
             min_collapse_region: 8,
@@ -387,7 +428,7 @@ pub fn world_to_chunk_local(wx: i32, wy: i32, wz: i32, chunk_size: usize) -> ((i
 
 /// Sample density from world coordinates, looking up the correct chunk.
 /// Returns None if the chunk is not loaded (treated as solid by caller).
-fn sample_world(
+pub fn sample_world(
     density_fields: &HashMap<(i32, i32, i32), DensityField>,
     wx: i32, wy: i32, wz: i32,
     chunk_size: usize,
@@ -522,13 +563,13 @@ pub fn calc_voxel_stress(
 // ── V2 stress algorithm: two-pass ground connectivity + load accumulation ──
 
 /// Count contiguous air voxels below a position (Y−), capped at 32.
-fn count_air_below(
+pub fn count_air_below(
     density_fields: &HashMap<(i32, i32, i32), DensityField>,
     wx: i32, wy: i32, wz: i32,
     chunk_size: usize,
 ) -> u32 {
     let mut count = 0u32;
-    for dy in 1..=32i32 {
+    for dy in 1..=12i32 { // Capped at 12 — prevents deep cave stress explosion
         let sy = wy - dy;
         match sample_world(density_fields, wx, sy, wz, chunk_size) {
             Some((_, mat)) if mat.is_solid() => break,
@@ -615,30 +656,27 @@ pub fn ground_connectivity_pass(
     let cs = chunk_size;
     let grid_size = cs + 1; // DensityField is (chunk_size+1)^3
 
-    // Initialize support scores via top-down column flood.
-    // For each (x,z) column, find the highest solid voxel (surface), then flood
-    // downward through contiguous solid, decaying by vertical_transfer_factor.
-    // Air gaps BREAK the chain — ceiling voxels below air get score 0.
+    // Initialize support scores via GLOBAL top-down column flood.
+    // For each unique (wx, wz) column across dirty chunks, walk from max_wy to min_wy
+    // using sample_world for cross-chunk reads. No per-chunk boundary artifacts.
     let mut scores: HashMap<(i32, i32, i32), SupportScoreField> = HashMap::new();
     for &key in &expanded_keys {
         scores.insert(key, SupportScoreField::new(grid_size));
     }
 
-    // Collect all (world_x, world_z) columns across expanded chunks, with their Y range
-    let mut column_chunks: HashMap<(i32, i32), Vec<(i32, i32, i32)>> = HashMap::new();
-    for &(cx, cy, cz) in &expanded_keys {
+    let vert_decay = config.vertical_transfer_factor;
+
+    // Collect unique (wx, wz) columns from DIRTY chunks only (not all expanded)
+    let mut columns: HashSet<(i32, i32)> = HashSet::new();
+    for &(cx, _, cz) in chunk_keys {
         for z in 0..grid_size {
             for x in 0..grid_size {
-                let wx = cx * cs as i32 + x as i32;
-                let wz = cz * cs as i32 + z as i32;
-                column_chunks.entry((wx, wz)).or_default().push((cx, cy, cz));
+                columns.insert((cx * cs as i32 + x as i32, cz * cs as i32 + z as i32));
             }
         }
     }
 
-    // For each column, flood down from the top
-    let vert_decay = config.vertical_transfer_factor;
-    // Collect world-Y range across all expanded chunks
+    // Y range across all expanded chunks
     let mut min_wy = i32::MAX;
     let mut max_wy = i32::MIN;
     for &(_, cy, _) in &expanded_keys {
@@ -646,26 +684,16 @@ pub fn ground_connectivity_pass(
         max_wy = max_wy.max(cy * cs as i32 + grid_size as i32 - 1);
     }
 
-    // Process each unique (wx, wz) column
-    let unique_columns: HashSet<(i32, i32)> = {
-        let mut cols = HashSet::new();
-        for &(cx, _, cz) in &expanded_keys {
-            for z in 0..grid_size {
-                for x in 0..grid_size {
-                    cols.insert((cx * cs as i32 + x as i32, cz * cs as i32 + z as i32));
-                }
-            }
-        }
-        cols
-    };
-
-    for &(wx, wz) in &unique_columns {
-        // Walk from top to bottom in this column
+    // Global flood: each column walks top-to-bottom across all chunks
+    for &(wx, wz) in &columns {
         let mut current_score = 1.0f32; // Start grounded from surface/unloaded above
         let mut in_air_gap = false;
 
         for wy in (min_wy..=max_wy).rev() {
             let (key, lx, ly, lz) = world_to_chunk_local(wx, wy, wz, cs);
+
+            // Only write to chunks in the expanded set
+            let in_expanded = expanded_keys.contains(&key);
 
             let is_solid = density_fields
                 .get(&key)
@@ -673,7 +701,6 @@ pub fn ground_connectivity_pass(
                 .unwrap_or(false);
 
             if !is_solid {
-                // Air: reset the chain. Next solid below will start at 0.
                 in_air_gap = true;
                 current_score = 0.0;
                 continue;
@@ -681,18 +708,16 @@ pub fn ground_connectivity_pass(
 
             // Solid voxel
             if in_air_gap {
-                // This is a ceiling voxel (solid below an air gap).
-                // Score 0 — no support from above. Only walls can help (iteration phase).
-                current_score = 0.0;
+                current_score = 0.0; // Below air gap = ceiling, score 0
                 in_air_gap = false;
             }
-            // else: contiguous solid from above, score decays
 
-            if let Some(sf) = scores.get_mut(&key) {
-                sf.set(lx, ly, lz, current_score);
+            if in_expanded {
+                if let Some(sf) = scores.get_mut(&key) {
+                    sf.set(lx, ly, lz, current_score);
+                }
             }
 
-            // Decay for next voxel below
             current_score *= vert_decay;
         }
     }
@@ -787,16 +812,16 @@ pub fn calc_voxel_stress_v2(
     config: &StressConfig,
     wx: i32, wy: i32, wz: i32,
     chunk_size: usize,
-) -> f32 {
+) -> (f32, u8) {
     // Only solid voxels have stress
     let mat = match sample_world(density_fields, wx, wy, wz, chunk_size) {
         Some((_, m)) if m.is_solid() => m,
-        _ => return 0.0,
+        _ => return (0.0, pack_classification(SURFACE_INTERIOR, SOURCE_NONE)),
     };
 
     let hardness = config.material_hardness[mat as u8 as usize];
     if hardness <= 0.0 {
-        return 0.0;
+        return (0.0, pack_classification(SURFACE_INTERIOR, SOURCE_NONE));
     }
 
     // Get support score from ground connectivity pass
@@ -809,35 +834,53 @@ pub fn calc_voxel_stress_v2(
     // Unsupported factor: 0.0 for fully grounded, 1.0 for floating.
     let unsupported = (1.0 - support_score).max(0.0);
 
-    // Floor protection: if this voxel has solid below with good support, it's floor-like.
-    // Floors never have structural stress.
+    // Floor protection: solid below AND well-supported by the flood = stable floor.
+    // Thick ceiling rock has solid below but LOW flood score (air gap broke chain) → NOT protected.
+    // Floor rock has solid below AND HIGH flood score (connected to surface) → protected.
     {
-        let (bkey, blx, bly, blz) = world_to_chunk_local(wx, wy - 1, wz, chunk_size);
-        let below_score = support_scores
-            .get(&bkey)
-            .map(|sf| sf.get(blx, bly, blz))
-            .unwrap_or(1.0);
-        if below_score >= config.ground_threshold {
-            return 0.0; // Floor voxel — no stress
+        let below_solid = sample_world(density_fields, wx, wy - 1, wz, chunk_size)
+            .map(|(_, m)| m.is_solid())
+            .unwrap_or(true);
+        if below_solid && support_score >= 0.5 {
+            return (0.0, pack_classification(SURFACE_FLOOR, SOURCE_NONE));
         }
     }
 
-    // Base load: flat stress from gravity, scaled by how unsupported this voxel is.
-    // The unsupported factor IS the load indicator (low support_score = high load).
-    let mut raw_stress = config.gravity_weight * unsupported;
+    // Track individual stress components for classification
+    let gravity_stress = config.gravity_weight * unsupported;
+    let mut raw_stress = gravity_stress;
 
     // Overhang penalty: air below means this is a ceiling surface
     let air_below = count_air_below(density_fields, wx, wy, wz, chunk_size);
-    raw_stress += air_below as f32 * config.overhang_weight * unsupported;
+    let overhang_stress = air_below as f32 * config.overhang_weight * unsupported;
+    raw_stress += overhang_stress;
 
     // Span penalty: distance to nearest grounded voxel (wall/pillar)
     let span_dist = min_lateral_distance_to_grounded(
         density_fields, support_scores, wx, wy, wz, chunk_size,
         config.ground_threshold, 20,
     );
-    if span_dist > config.min_safe_span {
-        raw_stress += (span_dist - config.min_safe_span) as f32 * config.span_weight * unsupported;
+    let span_stress = if span_dist > config.min_safe_span {
+        (span_dist - config.min_safe_span) as f32 * config.span_weight * unsupported
+    } else { 0.0 };
+    raw_stress += span_stress;
+
+    // Cross-section penalty
+    let face_offsets: [(i32, i32, i32); 6] = [
+        (1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1),
+    ];
+    let mut air_neighbors = 0u32;
+    for &(dx, dy, dz) in &face_offsets {
+        match sample_world(density_fields, wx + dx, wy + dy, wz + dz, chunk_size) {
+            Some((_, m)) if !m.is_solid() => air_neighbors += 1,
+            None => {}
+            _ => {}
+        }
     }
+    let xsec_stress = if air_neighbors >= 2 {
+        (air_neighbors - 1) as f32 * 0.15
+    } else { 0.0 };
+    raw_stress += xsec_stress;
 
     // Support structure bonus: nearby struts reduce stress
     let sr = config.support_radius as i32;
@@ -857,8 +900,37 @@ pub fn calc_voxel_stress_v2(
         }
     }
 
-    // Clamp to non-negative, normalize by material hardness
-    raw_stress.max(0.0) / hardness
+    let final_stress = raw_stress.max(0.0) / hardness;
+
+    // Classify surface type
+    let below_solid = sample_world(density_fields, wx, wy - 1, wz, chunk_size)
+        .map(|(_, m)| m.is_solid()).unwrap_or(true);
+    let surface_type = if air_neighbors >= 4 {
+        SURFACE_THIN       // Stalactite/thin column (4+ air faces)
+    } else if !below_solid {
+        SURFACE_CEILING    // Air directly below
+    } else if air_neighbors == 0 {
+        SURFACE_INTERIOR   // Fully enclosed
+    } else if below_solid && support_score >= 0.5 {
+        SURFACE_FLOOR      // Solid below + well-supported
+    } else {
+        SURFACE_WALL       // Solid below but near air (wall surface)
+    };
+
+    // Dominant stress source
+    let dominant_source = if final_stress <= 0.001 {
+        SOURCE_NONE
+    } else if xsec_stress >= overhang_stress && xsec_stress >= span_stress && xsec_stress >= gravity_stress {
+        SOURCE_CROSS_SECTION
+    } else if overhang_stress >= span_stress && overhang_stress >= gravity_stress {
+        SOURCE_OVERHANG
+    } else if span_stress >= gravity_stress {
+        SOURCE_SPAN
+    } else {
+        SOURCE_GRAVITY
+    };
+
+    (final_stress, pack_classification(surface_type, dominant_source))
 }
 
 /// V2 stress recalculation: runs ground connectivity pass then per-voxel stress.
@@ -893,6 +965,7 @@ pub fn recalc_stress_region_v2(
                     if !df.get(x, y, z).material.is_solid() {
                         if let Some(sf) = stress_fields.get_mut(&(cx, cy, cz)) {
                             sf.set(x, y, z, 0.0);
+                            sf.set_class(x, y, z, 0); // Air = no classification
                         }
                         continue;
                     }
@@ -901,26 +974,40 @@ pub fn recalc_stress_region_v2(
                     let wy = cy * cs as i32 + y as i32;
                     let wz = cz * cs as i32 + z as i32;
 
-                    // Interior skip: if this voxel is fully grounded, it has ~0 stress.
-                    // Skip the expensive per-voxel calculation.
+                    // Interior skip: fully grounded voxels get 0 stress but still classified.
                     let my_support = support_scores
                         .get(&(cx, cy, cz))
                         .map(|sf| sf.get(x, y, z))
                         .unwrap_or(1.0);
                     if my_support >= config.ground_threshold {
+                        // Classify: is this a floor or deep interior?
+                        let below_solid = sample_world(density_fields, wx, wy - 1, wz, cs)
+                            .map(|(_, m)| m.is_solid()).unwrap_or(true);
+                        // Count air neighbors for wall detection
+                        let mut air_n = 0u8;
+                        for &(dx, dy, dz) in &[(1i32,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)] {
+                            if let Some((_, m)) = sample_world(density_fields, wx+dx, wy+dy, wz+dz, cs) {
+                                if !m.is_solid() { air_n += 1; }
+                            }
+                        }
+                        let stype = if air_n == 0 { SURFACE_INTERIOR }
+                            else if below_solid { SURFACE_FLOOR }
+                            else { SURFACE_WALL };
                         if let Some(sf) = stress_fields.get_mut(&(cx, cy, cz)) {
                             sf.set(x, y, z, 0.0);
+                            sf.set_class(x, y, z, pack_classification(stype, SOURCE_NONE));
                         }
                         continue;
                     }
 
-                    let stress = calc_voxel_stress_v2(
+                    let (stress, classification) = calc_voxel_stress_v2(
                         density_fields, support_fields, &support_scores,
                         config, wx, wy, wz, cs,
                     );
 
                     if let Some(sf) = stress_fields.get_mut(&(cx, cy, cz)) {
                         sf.set(x, y, z, stress);
+                        sf.set_class(x, y, z, classification);
                         affected_chunks.insert((cx, cy, cz));
                     }
 
@@ -1214,7 +1301,10 @@ pub fn detect_and_execute_collapses_v2(
             continue;
         }
 
-        // BFS flood-fill: find contiguous region of overstressed + nearly-overstressed voxels
+        // Check if the starting voxel can actually fall (has air below within 48 voxels)
+        // BFS flood-fill: find contiguous region of overstressed voxels.
+        // No "can fall" filter — all overstressed voxels join the region.
+        // Fall eligibility is checked per-column in the landing computation.
         let mut queue = VecDeque::new();
         let mut region: Vec<(i32, i32, i32)> = Vec::new();
         queue.push_back(start);
@@ -1227,8 +1317,6 @@ pub fn detect_and_execute_collapses_v2(
             region.push(pos);
 
             // 26-connected BFS: face + edge + corner neighbors.
-            // Thin ceilings (1-voxel shell) need diagonal connectivity to
-            // merge into one big slab instead of dozens of tiny fragments.
             for dz in -1..=1i32 {
                 for dy in -1..=1i32 {
                     for dx in -1..=1i32 {
@@ -1302,40 +1390,52 @@ pub fn detect_and_execute_collapses_v2(
             .map(|(mat, _)| mat)
             .unwrap_or(Material::Granite);
 
-        // Compute landing position: for each (x, z) column in the slab,
-        // trace down from the slab's bottom-most voxel in that column
-        // to find the highest floor surface. The slab landing_y is the
-        // maximum across all columns (so the slab sits on the highest floor).
+        // Compute landing position using only columns with immediate air below
+        // (actual ceiling surfaces). Wall/floor voxels in the region are ignored
+        // for fall distance — they just get removed along with the slab.
         let region_set: HashSet<(i32, i32, i32)> = region.iter().copied().collect();
         let mut column_min_y: HashMap<(i32, i32), i32> = HashMap::new();
         for &(x, y, z) in &region {
+            // Only include this column if the voxel at the bottom has air below
             let entry = column_min_y.entry((x, z)).or_insert(y);
             *entry = (*entry).min(y);
         }
 
-        let mut landing_offset = i32::MAX; // How far the slab drops (min across columns)
-        for (&(x, z), &min_y) in &column_min_y {
-            // Trace down from one below the slab bottom in this column
+        // Filter to only columns with air immediately below the slab
+        let fallable_columns: Vec<((i32, i32), i32)> = column_min_y.iter()
+            .filter(|&(&(x, z), &min_y)| {
+                // Check if the voxel below the slab bottom in this column is air
+                match sample_world(density_fields, x, min_y - 1, z, chunk_size) {
+                    Some((_, mat)) => !mat.is_solid(),
+                    None => false,
+                }
+            })
+            .map(|(&k, &v)| (k, v))
+            .collect();
+
+        if fallable_columns.is_empty() {
+            continue; // No columns can fall — entire region is embedded in solid
+        }
+
+        // Compute fall offset per column, then use MEDIAN (not minimum).
+        // One wall column near the floor shouldn't anchor the whole ceiling slab.
+        let mut column_offsets: Vec<i32> = Vec::with_capacity(fallable_columns.len());
+        for &((x, z), min_y) in &fallable_columns {
             let mut floor_y = min_y - 1;
             let mut found = false;
             for _ in 0..64 {
-                // Don't count other slab voxels as floor
                 if region_set.contains(&(x, floor_y, z)) {
                     floor_y -= 1;
                     continue;
                 }
                 match sample_world(density_fields, x, floor_y, z, chunk_size) {
                     Some((_, mat)) if mat.is_solid() => {
-                        // Floor found: slab bottom rests one above this
-                        let this_offset = min_y - (floor_y + 1);
-                        landing_offset = landing_offset.min(this_offset);
+                        column_offsets.push(min_y - (floor_y + 1));
                         found = true;
                         break;
                     }
                     None => {
-                        // Unloaded = assume floor here
-                        let this_offset = min_y - (floor_y + 1);
-                        landing_offset = landing_offset.min(this_offset);
+                        column_offsets.push(min_y - (floor_y + 1));
                         found = true;
                         break;
                     }
@@ -1343,13 +1443,19 @@ pub fn detect_and_execute_collapses_v2(
                 }
             }
             if !found {
-                // No floor found within 64 voxels, use max trace distance
-                landing_offset = landing_offset.min(min_y - (min_y - 64));
+                column_offsets.push(64);
             }
         }
 
+        column_offsets.sort();
+        let landing_offset = if column_offsets.is_empty() {
+            0
+        } else {
+            column_offsets[column_offsets.len() / 2] // median
+        };
+
         if landing_offset <= 0 {
-            continue; // Slab is already grounded, no fall
+            continue; // Median says slab is grounded
         }
 
         let landing_y = bb_min.1 - landing_offset;
@@ -2131,10 +2237,10 @@ mod tests {
             &density_fields, &[(0, 0, 0)], 16, &config,
         );
 
-        let stress_without = calc_voxel_stress_v2(
+        let (stress_without, _) = calc_voxel_stress_v2(
             &density_fields, &support_fields_empty, &scores, &config, 8, 8, 8, 16,
         );
-        let stress_with = calc_voxel_stress_v2(
+        let (stress_with, _) = calc_voxel_stress_v2(
             &density_fields, &support_fields_with, &scores, &config, 8, 8, 8, 16,
         );
 

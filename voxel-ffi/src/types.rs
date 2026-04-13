@@ -1039,6 +1039,7 @@ pub struct FfiEngineStats {
 #[derive(Debug, Clone)]
 pub struct FfiStressData {
     pub stress_values: *mut f32,
+    pub classification: *mut u8,  // Per-voxel: top 4 = surface type, bottom 4 = stress source
     pub count: u32,
     pub valid: u32,
 }
