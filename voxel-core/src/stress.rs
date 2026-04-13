@@ -1332,29 +1332,70 @@ pub fn detect_and_execute_collapses_v2(
             });
         }
 
-        // Place slab at landing position (translated down by landing_offset)
-        for cv in &collapsed_voxels {
-            if cv.material == Material::Air {
-                continue;
-            }
-            let lx_world = cv.world_x;
-            let ly_world = cv.world_y - landing_offset;
-            let lz_world = cv.world_z;
-            let (rkey, rlx, rly, rlz) = world_to_chunk_local(lx_world, ly_world, lz_world, chunk_size);
+        // Place rubble as a natural mound at landing position.
+        // Instead of 1:1 translation (which creates flat block copies), we build a
+        // mound shape: tallest at center, tapering toward edges, with ~70% fill.
+        {
+            let cx_f = center.0;
+            let cz_f = center.2;
+            // Compute max radius of the collapse footprint
+            let max_radius = {
+                let dx = (bb_max.0 - bb_min.0) as f32 * 0.5;
+                let dz = (bb_max.2 - bb_min.2) as f32 * 0.5;
+                dx.max(dz).max(1.0)
+            };
+            // Slab thickness = how many Y layers the slab spans
+            let slab_thickness = (bb_max.1 - bb_min.1 + 1).max(1) as f32;
 
-            // Only place in air voxels (don't overwrite existing solid)
-            let is_air = density_fields
-                .get(&rkey)
-                .map(|df| !df.get(rlx, rly, rlz).material.is_solid())
-                .unwrap_or(false);
+            // Target rubble fill: 70% of collapsed volume, capped
+            let target_fill = (collapsed_voxels.len() as f32 * config.rubble_fill_ratio).ceil() as usize;
+            let mut placed = 0usize;
 
-            if is_air {
-                if let Some(df) = density_fields.get_mut(&rkey) {
-                    let sample = df.get_mut(rlx, rly, rlz);
-                    sample.density = 1.0;
-                    sample.material = cv.material;
+            // Sort voxels by distance to center (place center first for mound shape)
+            let mut sorted_voxels: Vec<&CollapsedVoxel> = collapsed_voxels.iter()
+                .filter(|cv| cv.material != Material::Air)
+                .collect();
+            sorted_voxels.sort_by(|a, b| {
+                let da = (a.world_x as f32 - cx_f).powi(2) + (a.world_z as f32 - cz_f).powi(2);
+                let db = (b.world_x as f32 - cx_f).powi(2) + (b.world_z as f32 - cz_f).powi(2);
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            for cv in &sorted_voxels {
+                if placed >= target_fill {
+                    break;
                 }
-                affected_chunks_set.insert(rkey);
+
+                // Distance from center as 0..1
+                let dist_xz = ((cv.world_x as f32 - cx_f).powi(2) + (cv.world_z as f32 - cz_f).powi(2)).sqrt();
+                let norm_dist = (dist_xz / max_radius).min(1.0);
+
+                // Mound height: tallest at center, tapers to 0 at edges
+                // Uses a smooth falloff: (1 - dist^1.5) * thickness * 0.6
+                let mound_height = ((1.0 - norm_dist.powf(1.5)) * slab_thickness * 0.6).round() as i32;
+
+                // Place at floor level + mound height offset
+                let base_y = bb_min.1 - landing_offset; // floor level
+                let place_y = base_y + mound_height.max(0);
+
+                let (rkey, rlx, rly, rlz) = world_to_chunk_local(
+                    cv.world_x, place_y, cv.world_z, chunk_size,
+                );
+
+                let is_air = density_fields
+                    .get(&rkey)
+                    .map(|df| !df.get(rlx, rly, rlz).material.is_solid())
+                    .unwrap_or(false);
+
+                if is_air {
+                    if let Some(df) = density_fields.get_mut(&rkey) {
+                        let sample = df.get_mut(rlx, rly, rlz);
+                        sample.density = 1.0;
+                        sample.material = cv.material;
+                    }
+                    affected_chunks_set.insert(rkey);
+                    placed += 1;
+                }
             }
         }
 
@@ -1965,12 +2006,21 @@ mod tests {
         let slab = &events[0].slabs[0];
         assert_eq!(slab.fall_distance, 4, "Should fall 4 voxels (10 → 6)");
 
-        // Verify rubble was placed at landing position
+        // Verify rubble was placed as a mound near the landing area
+        // With mound shape, center voxels are placed higher, edge voxels lower
         let df = density_fields.get(&(0, 0, 0)).unwrap();
-        assert!(df.get(8, 6, 8).material.is_solid(),
-            "Rubble should be solid at landing position (8,6,8)");
-        assert!(df.get(9, 6, 9).material.is_solid(),
-            "Rubble should be solid at landing position (9,6,9)");
+        // At least some rubble should exist in the landing zone (y=6..8)
+        let mut rubble_count = 0;
+        for y in 6..9 {
+            for z in 7..11 {
+                for x in 7..11 {
+                    if df.get(x, y, z).material.is_solid() {
+                        rubble_count += 1;
+                    }
+                }
+            }
+        }
+        assert!(rubble_count > 0, "Should have rubble in the landing zone");
         // Original position should be air
         assert_eq!(df.get(8, 10, 8).material, Material::Air,
             "Original slab position should be air");
