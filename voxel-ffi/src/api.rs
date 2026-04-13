@@ -182,20 +182,31 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                 // SolidifyRequest is handled engine-internally; skip for now
                 ptr::null_mut()
             }
-            WorkerResult::CollapseResult { events, meshes } => {
+            WorkerResult::CollapseResult { mut events, meshes } => {
                 // Send each collapse-remeshed chunk as a ChunkMesh result first
                 for (chunk, mesh) in meshes {
                     let r = convert_mesh_to_ffi_result(chunk, mesh, 0, Vec::new(), Vec::new());
                     let _ = Box::into_raw(Box::new(r));
-                    // Note: in practice these go through the result channel,
-                    // but for the poll API we emit the collapse event.
                 }
 
                 if events.is_empty() {
                     return ptr::null_mut();
                 }
 
-                // Return the first collapse event (UE polls repeatedly)
+                // Sort by volume descending — biggest slab first
+                events.sort_by(|a, b| b.volume.cmp(&a.volume));
+
+                // Requeue additional events so UE receives them on subsequent polls
+                if events.len() > 1 {
+                    for ev in &events[1..] {
+                        engine.requeue_result(WorkerResult::CollapseResult {
+                            events: vec![*ev],
+                            meshes: Vec::new(),
+                        });
+                    }
+                }
+
+                // Return the largest collapse event
                 let ev = events[0];
                 let result = FfiResult {
                     result_type: FfiResultType::CollapseResult,

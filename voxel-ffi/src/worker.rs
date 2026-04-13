@@ -259,15 +259,12 @@ fn try_process_stress_queue(
             all_dirty.sort_by_key(|&(k, ..)| k);
             all_dirty.dedup_by_key(|k| k.0);
 
-            // Remesh affected chunks
-            let meshes = s.remesh_dirty(&all_dirty, &cfg, world_scale);
+            // Remesh affected chunks (updates base meshes + seam data in store)
+            let _base_meshes = s.remesh_dirty(&all_dirty, &cfg, world_scale);
             drop(s);
 
-            // Send collapse result with meshes
-            // For now, send as regular CollapseResult (v1 format) since UE handler exists.
-            // Phase 3 will switch to CollapseSlabResult with slab mesh actors.
-            let ffi_events: Vec<FfiCollapseEvent> = events.iter().map(|e| {
-                // Convert center from Rust Y-up to UE Z-up
+            // Send collapse events to UE (sorted largest first)
+            let mut ffi_events: Vec<FfiCollapseEvent> = events.iter().map(|e| {
                 FfiCollapseEvent {
                     center_x: e.center.0 * world_scale,
                     center_y: -e.center.2 * world_scale,
@@ -275,23 +272,17 @@ fn try_process_stress_queue(
                     volume: e.total_volume,
                 }
             }).collect();
+            ffi_events.sort_by(|a, b| b.volume.cmp(&a.volume));
 
             let _ = result_tx.send(WorkerResult::CollapseResult {
                 events: ffi_events,
-                meshes: Vec::new(), // Meshes sent separately as ChunkMesh
+                meshes: Vec::new(),
             });
 
-            // Send remeshed chunks
-            for (key, mesh) in meshes {
-                let crystal_data = retrieve_crystal_data(store, key, cfg.voxel_scale(), world_scale);
-                let _ = result_tx.send(WorkerResult::ChunkMesh {
-                    chunk: key,
-                    mesh,
-                    generation: 0,
-                    crystal_data,
-                    zone_descriptors: Vec::new(),
-                });
-            }
+            // Run seam pass on affected chunks — same path as mining.
+            // This stitches chunk boundaries and sends as atomic MineBatchMesh.
+            let dirty_keys: Vec<(i32, i32, i32)> = all_dirty.iter().map(|&(k, ..)| k).collect();
+            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
         }
     }
 
