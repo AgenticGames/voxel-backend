@@ -796,6 +796,9 @@ fn serve_generate(
     if let Some(v) = form_cauldron_floor_noise { config.formations.cauldron_floor_noise = v; }
     if let Some(v) = form_cauldron_water_chance { config.formations.cauldron_water_chance = v; }
     if let Some(v) = form_cauldron_lava_chance { config.formations.cauldron_lava_chance = v; }
+    // Disable cavern zones in the web viewer — they dominate small previews
+    // and obscure the ore veins / formations that are the real showcase.
+    config.zones.enabled = false;
 
     // Build sleep config from UI overrides (stress settings embedded in sleep config)
     let mut sleep_cfg = SleepConfig::default();
