@@ -218,8 +218,45 @@ fn try_process_stress_queue(
     };
 
     let recalc_ms = recalc_start.elapsed().as_secs_f64() * 1000.0;
-    dbg(format!("  recalc done in {:.1}ms — overstressed={} affected_chunks={}",
-        recalc_ms, result.overstressed.len(), result.affected_chunks.len()));
+
+    // Count support score distribution from the recalc
+    {
+        let s = store.read().unwrap();
+        let mut grounded = 0u32;
+        let mut partial = 0u32;
+        let mut unsupported = 0u32;
+        let mut air_skipped = 0u32;
+        let grid_size = chunk_size + 1;
+        for &key in &dirty_chunks {
+            if let (Some(df), Some(ssf)) = (s.density_fields.get(&key), s.stress_fields.get(&key)) {
+                for z in 0..grid_size {
+                    for y in 0..grid_size {
+                        for x in 0..grid_size {
+                            if !df.get(x, y, z).material.is_solid() {
+                                air_skipped += 1;
+                                continue;
+                            }
+                            let stress = ssf.get(x, y, z);
+                            if stress <= 0.001 {
+                                grounded += 1;
+                            } else if stress < 1.0 {
+                                partial += 1;
+                            } else {
+                                unsupported += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let total = grounded + partial + unsupported + air_skipped;
+        dbg(format!("  recalc done in {:.1}ms — {} voxels total: {} air, {} grounded(0), {} partial(0-1.0), {} overstressed(1.0+)",
+            recalc_ms, total, air_skipped, grounded, partial, unsupported));
+        dbg(format!("  → {} surface voxels processed, {} interior skipped",
+            partial + unsupported, grounded));
+    }
+    dbg(format!("  overstressed={} affected_chunks={}",
+        result.overstressed.len(), result.affected_chunks.len()));
 
     // Log stress distribution
     if !result.overstressed.is_empty() {
@@ -331,6 +368,19 @@ fn try_process_stress_queue(
                 }
             }).collect();
             ffi_events.sort_by(|a, b| b.volume.cmp(&a.volume));
+
+            // Collapse region size distribution
+            let mut vol_hist = [0u32; 5]; // [1-5, 6-15, 16-50, 51-150, 150+]
+            for e in &events {
+                let bucket = if e.total_volume <= 5 { 0 }
+                    else if e.total_volume <= 15 { 1 }
+                    else if e.total_volume <= 50 { 2 }
+                    else if e.total_volume <= 150 { 3 }
+                    else { 4 };
+                vol_hist[bucket] += 1;
+            }
+            dbg(format!("  size distribution: tiny(1-5)={} small(6-15)={} medium(16-50)={} large(51-150)={} huge(150+)={}",
+                vol_hist[0], vol_hist[1], vol_hist[2], vol_hist[3], vol_hist[4]));
 
             dbg(format!("  sending {} collapse events to UE (largest vol={})",
                 ffi_events.len(), ffi_events.first().map(|e| e.volume).unwrap_or(0)));
