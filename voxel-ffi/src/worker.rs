@@ -74,9 +74,16 @@ pub fn worker_loop(
         if let Ok(req) = mine_rx.try_recv() {
             handle_request(
                 req, &result_tx, &store, &config, &stress_config, &generation_counters,
-                world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &morph_manifest,
+                world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &mine_rx, &morph_manifest,
             );
             continue;
+        }
+
+        // Priority 1.5: deferred stress recalculation (only worker 0 handles this)
+        if worker_id == 0 {
+            if try_process_stress_queue(&store, &stress_config, &config, &result_tx, world_scale) {
+                continue;
+            }
         }
 
         // Priority 2: generate requests (blocking with timeout)
@@ -86,7 +93,7 @@ pub fn worker_loop(
                 profiler.record_worker_idle(worker_id, idle_start.elapsed());
                 handle_request(
                     req, &result_tx, &store, &config, &stress_config, &generation_counters,
-                    world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &morph_manifest,
+                    world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &mine_rx, &morph_manifest,
                 );
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
@@ -95,6 +102,200 @@ pub fn worker_loop(
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         }
     }
+}
+
+/// Check mine queue and handle any pending mine request. Returns true if one was handled.
+fn try_handle_mine(
+    mine_rx: &Receiver<WorkerRequest>,
+    result_tx: &Sender<WorkerResult>,
+    store: &Arc<RwLock<ChunkStore>>,
+    config: &Arc<RwLock<GenerationConfig>>,
+    world_scale: f32,
+    fluid_event_tx: &Sender<FluidEvent>,
+) -> bool {
+    if let Ok(req) = mine_rx.try_recv() {
+        match req {
+            WorkerRequest::Mine { request } => {
+                // Inline mine handling (same as handle_request Mine branch)
+                let cfg = config.read().unwrap().clone();
+                let center = from_ue_world_pos(
+                    request.world_x, request.world_y, request.world_z, world_scale,
+                );
+                let radius = request.radius / world_scale;
+                let mut s = store.write().unwrap();
+                let (meshes, mined) = if request.mode == 0 {
+                    crate::mining::mine_sphere(&mut s, center, radius, &cfg, world_scale)
+                } else {
+                    let normal = from_ue_normal(request.normal_x, request.normal_y, request.normal_z);
+                    crate::mining::mine_peel(&mut s, center, normal, radius, &cfg, world_scale)
+                };
+                let dirty_keys: Vec<(i32, i32, i32)> = meshes.into_iter().map(|(k, _)| k).collect();
+                // Crystal recompute
+                for &key in &dirty_keys {
+                    if let Some(density) = s.density_fields.get(&key) {
+                        let coord = voxel_core::chunk::ChunkCoord::new(key.0, key.1, key.2);
+                        let placements = voxel_gen::compute_crystals(coord, density, &cfg);
+                        s.crystal_placements.insert(key, placements);
+                    }
+                }
+                // Queue dirty chunks for deferred stress recalculation
+                s.queue_stress_dirty(&dirty_keys);
+                drop(s);
+                let _ = result_tx.send(WorkerResult::MinedMaterials { mined });
+                batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+                return true;
+            }
+            _ => {} // non-mine request, ignore
+        }
+    }
+    false
+}
+
+/// Deferred stress recalculation: checks if the stress dirty queue timer has elapsed,
+/// runs the v2 stress algorithm, emits warnings, and triggers collapse if needed.
+/// Returns true if work was done (so worker loop can continue instead of sleeping).
+fn try_process_stress_queue(
+    store: &Arc<RwLock<ChunkStore>>,
+    stress_config: &Arc<RwLock<StressConfig>>,
+    config: &Arc<RwLock<GenerationConfig>>,
+    result_tx: &Sender<WorkerResult>,
+    world_scale: f32,
+) -> bool {
+    use voxel_core::stress::{
+        recalc_stress_region_v2, detect_and_execute_collapses_v2,
+    };
+    use crate::types::FfiStressWarning;
+
+    // Check if stress dirty queue is ready (timer elapsed)
+    let dirty_chunks = {
+        let mut s = store.write().unwrap();
+        s.drain_stress_dirty(0.4) // 400ms deferred timer
+    };
+
+    let dirty_chunks = match dirty_chunks {
+        Some(c) if !c.is_empty() => c,
+        _ => return false,
+    };
+
+    let cfg = config.read().unwrap().clone();
+    let stress_cfg = stress_config.read().unwrap().clone();
+    let chunk_size = cfg.chunk_size;
+
+    // Run v2 stress recalculation on dirty chunks
+    // Use sleep_fields_mut() to split borrows (same pattern as sleep system)
+    let result = {
+        let mut s = store.write().unwrap();
+        let (density, stress, support) = s.sleep_fields_mut();
+        recalc_stress_region_v2(
+            density,
+            stress,
+            support,
+            &stress_cfg,
+            &dirty_chunks,
+            chunk_size,
+        )
+    };
+
+    // Emit stress warnings for UE (dust/creak/shake feedback)
+    {
+        let mut warnings = Vec::new();
+        for ov in &result.overstressed {
+            let warning_type = if ov.stress >= stress_cfg.warn_shake_threshold {
+                3 // shake
+            } else if ov.stress >= stress_cfg.warn_creak_threshold {
+                2 // creak
+            } else if ov.stress >= stress_cfg.warn_dust_threshold {
+                1 // dust
+            } else {
+                0
+            };
+            if warning_type > 0 {
+                // Convert to UE coords
+                let ue_x = ov.world_x as f32 * world_scale;
+                let ue_y = -(ov.world_z as f32) * world_scale;
+                let ue_z = ov.world_y as f32 * world_scale;
+                warnings.push(FfiStressWarning {
+                    world_x: ue_x,
+                    world_y: ue_y,
+                    world_z: ue_z,
+                    stress: ov.stress,
+                    warning_type,
+                });
+            }
+        }
+        // Cap at 64 warnings to avoid flooding UE
+        warnings.truncate(64);
+        if !warnings.is_empty() {
+            let _ = result_tx.send(WorkerResult::StressWarnings { warnings });
+        }
+    }
+
+    // Run collapse detection if there are overstressed voxels
+    if !result.overstressed.is_empty() {
+        let mut s = store.write().unwrap();
+
+        // Run collapse detection — use sleep_fields_mut() to split borrows
+        let events = {
+            let (density, stress, support) = s.sleep_fields_mut();
+            detect_and_execute_collapses_v2(
+                density,
+                stress,
+                support,
+                &result.overstressed,
+                &stress_cfg,
+                chunk_size,
+            )
+        };
+
+        if !events.is_empty() {
+            // Collect all affected chunks for remeshing
+            let mut all_dirty: Vec<((i32,i32,i32), usize, usize, usize, usize, usize, usize)> = Vec::new();
+            for event in &events {
+                for &key in &event.affected_chunks {
+                    all_dirty.push((key, 0, 0, 0, chunk_size, chunk_size, chunk_size));
+                }
+            }
+            // Dedup
+            all_dirty.sort_by_key(|&(k, ..)| k);
+            all_dirty.dedup_by_key(|k| k.0);
+
+            // Remesh affected chunks
+            let meshes = s.remesh_dirty(&all_dirty, &cfg, world_scale);
+            drop(s);
+
+            // Send collapse result with meshes
+            // For now, send as regular CollapseResult (v1 format) since UE handler exists.
+            // Phase 3 will switch to CollapseSlabResult with slab mesh actors.
+            let ffi_events: Vec<FfiCollapseEvent> = events.iter().map(|e| {
+                // Convert center from Rust Y-up to UE Z-up
+                FfiCollapseEvent {
+                    center_x: e.center.0 * world_scale,
+                    center_y: -e.center.2 * world_scale,
+                    center_z: e.center.1 * world_scale,
+                    volume: e.total_volume,
+                }
+            }).collect();
+
+            let _ = result_tx.send(WorkerResult::CollapseResult {
+                events: ffi_events,
+                meshes: Vec::new(), // Meshes sent separately as ChunkMesh
+            });
+
+            // Send remeshed chunks
+            for (key, mesh) in meshes {
+                let crystal_data = retrieve_crystal_data(store, key, cfg.voxel_scale(), world_scale);
+                let _ = result_tx.send(WorkerResult::ChunkMesh {
+                    chunk: key,
+                    mesh,
+                    generation: 0,
+                    crystal_data,
+                    zone_descriptors: Vec::new(),
+                });
+            }
+        }
+    }
+
+    true
 }
 
 fn handle_request(
@@ -109,6 +310,7 @@ fn handle_request(
     profiler: &Arc<StreamingProfiler>,
     worker_id: usize,
     generate_rx: &Receiver<WorkerRequest>,
+    mine_rx: &Receiver<WorkerRequest>,
     morph_manifest: &Arc<Mutex<Option<voxel_sleep::ChangeManifest>>>,
 ) {
     match req {
@@ -156,16 +358,16 @@ fn handle_request(
 
                     let t1 = Instant::now();
                     let dc_verts = solve_dc_vertices(hermite, cell_size);
-                    if profiling { t_dc_solve += t1.elapsed(); }
+                    t_dc_solve += t1.elapsed();
 
                     let t2 = Instant::now();
                     let mut m = generate_mesh(hermite, &dc_verts, cell_size);
-                    if profiling { t_mesh_gen += t2.elapsed(); }
+                    t_mesh_gen += t2.elapsed();
 
                     let t_s = Instant::now();
                     m.smooth(cfg.mesh_smooth_iterations, cfg.mesh_smooth_strength, cfg.mesh_boundary_smooth, Some(cell_size));
                     if cfg.mesh_recalc_normals > 0 { m.recalculate_normals(); }
-                    if profiling { t_mesh_smooth += t_s.elapsed(); }
+                    t_mesh_smooth += t_s.elapsed();
 
                     let b_edges = region_gen::extract_boundary_edges(hermite, cfg.chunk_size);
                     Some((m, dc_verts, b_edges))
@@ -210,9 +412,9 @@ fn handle_request(
                         }
                     }).collect();
                 }
+                t_region_density += t0.elapsed();
+                region_timings = rt;
                 if profiling {
-                    t_region_density += t0.elapsed();
-                    region_timings = rt;
                 }
                 // Forward sharing: apply worm paths from already-generated regions
                 // into our new density fields (before hermite extraction)
@@ -241,6 +443,9 @@ fn handle_request(
                 }
                 if profiling { t_worm_forward_sharing = t_fwd.elapsed(); }
 
+                // Check for pending mine requests between phases
+                try_handle_mine(mine_rx, result_tx, store, config, world_scale, fluid_event_tx);
+
                 // Pre-extract hermite data BEFORE acquiring write lock (expensive part)
                 let t2 = Instant::now();
                 let keyed_data: Vec<_> = densities
@@ -250,7 +455,7 @@ fn handle_request(
                         (key, density, hermite)
                     })
                     .collect();
-                if profiling { t_hermite += t2.elapsed(); }
+                t_hermite += t2.elapsed();
 
                 // Write lock held only for fast inserts + worm path storage
                 {
@@ -347,6 +552,9 @@ fn handle_request(
                     }
                     if profiling { t_worm_backward_carve = t_bwd_carve.elapsed(); }
                     backward_dirty_count = backward_dirty.len() as u32;
+
+                    // Check for pending mine requests between phases
+                    try_handle_mine(mine_rx, result_tx, store, config, world_scale, fluid_event_tx);
 
                     let t_bwd_remesh = Instant::now();
                     for &key in &backward_dirty {
@@ -705,6 +913,42 @@ fn handle_request(
             let seam_timings = incremental_seam_pass(chunk, &cfg, store, result_tx, world_scale);
             let t_seam_pass = if profiling { seam_timings.total } else { Duration::ZERO };
 
+            // Write pipeline timing report
+            {
+                let total = chunk_start.elapsed();
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+                    .open("D:/Unreal Projects/Mithril2026/Saved/gen_perf.txt")
+                {
+                    let rt = &region_timings;
+                    let _ = writeln!(f, "chunk({},{},{}) total={:.1}ms slow={} | region_total={:.1} [base_density={:.1} caverns={:.1} worm_plan={:.1} worm_carve={:.1} zones={:.1} pools={:.1} formations={:.1} boundary={:.1} metadata={:.1} worms={}] hermite={:.1} dc={:.1} mesh={:.1} smooth={:.1} seam={:.1} worm_fwd={:.1} bwd_carve={:.1} bwd_remesh={:.1} bwd_dirty={}",
+                        chunk.0, chunk.1, chunk.2,
+                        total.as_secs_f64() * 1000.0,
+                        was_slow_path,
+                        t_region_density.as_secs_f64() * 1000.0,
+                        rt.base_density.as_secs_f64() * 1000.0,
+                        rt.cavern_centers.as_secs_f64() * 1000.0,
+                        rt.worm_planning.as_secs_f64() * 1000.0,
+                        rt.worm_carving.as_secs_f64() * 1000.0,
+                        rt.zones.as_secs_f64() * 1000.0,
+                        rt.pools.as_secs_f64() * 1000.0,
+                        rt.formations.as_secs_f64() * 1000.0,
+                        rt.boundary_sync.as_secs_f64() * 1000.0,
+                        rt.metadata.as_secs_f64() * 1000.0,
+                        rt.worm_count,
+                        t_hermite.as_secs_f64() * 1000.0,
+                        t_dc_solve.as_secs_f64() * 1000.0,
+                        t_mesh_gen.as_secs_f64() * 1000.0,
+                        t_mesh_smooth.as_secs_f64() * 1000.0,
+                        t_seam_pass.as_secs_f64() * 1000.0,
+                        t_worm_forward_sharing.as_secs_f64() * 1000.0,
+                        t_worm_backward_carve.as_secs_f64() * 1000.0,
+                        t_worm_backward_remesh.as_secs_f64() * 1000.0,
+                        backward_dirty_count,
+                    );
+                }
+            }
+
             // Record profiling data
             if profiling {
                 let gen_queue_len = generate_rx.len() as u32;
@@ -766,7 +1010,7 @@ fn handle_request(
             let dirty_keys: Vec<(i32, i32, i32)> = meshes.into_iter().map(|(k, _)| k).collect();
             drop(s);
 
-            batched_seam_pass(&dirty_keys, &cfg, store, result_tx, world_scale);
+            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
         }
         WorkerRequest::FlattenBatch { tiles } => {
             let cfg = config.read().unwrap().clone();
@@ -775,7 +1019,32 @@ fn handle_request(
             let meshes = crate::terrain_ops::flatten_terrace_batch(&mut s, &tiles, &cfg, world_scale, ts);
             let dirty_keys: Vec<_> = meshes.into_iter().map(|(k, _)| k).collect();
             drop(s);
-            batched_seam_pass(&dirty_keys, &cfg, store, result_tx, world_scale);
+            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+        }
+        WorkerRequest::BuildingFlattenBatch { buildings } => {
+            let cfg = config.read().unwrap().clone();
+            let mut s = store.write().unwrap();
+            let mut all_dirty: Vec<(i32, i32, i32)> = Vec::new();
+            for &(bx, by, bz, host_mat, footprint, clearance) in &buildings {
+                let mat = voxel_core::material::Material::from_u8(host_mat);
+                let bts = footprint.max(1);
+                let meshes = crate::terrain_ops::flatten_terrace(
+                    &mut s,
+                    glam::IVec3::new(bx, by, bz),
+                    mat,
+                    &cfg,
+                    world_scale,
+                    bts,
+                    clearance.max(2),
+                );
+                all_dirty.extend(meshes.into_iter().map(|(k, _)| k));
+            }
+            // Deduplicate dirty keys
+            all_dirty.sort();
+            all_dirty.dedup();
+            drop(s);
+            // Single seam pass for all flattens combined
+            batched_seam_pass_mine(&all_dirty, &cfg, store, result_tx, world_scale);
         }
         WorkerRequest::BuildingFlatten { base_x, base_y, base_z, host_material, footprint_voxels, clearance_voxels } => {
             let cfg = config.read().unwrap().clone();
@@ -791,7 +1060,7 @@ fn handle_request(
             let dirty_keys: Vec<(i32, i32, i32)> = meshes.into_iter().map(|(k, _)| k).collect();
             drop(s);
 
-            batched_seam_pass(&dirty_keys, &cfg, store, result_tx, world_scale);
+            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
         }
         WorkerRequest::Mine { request } => {
             {
@@ -859,7 +1128,11 @@ fn handle_request(
             // Send mined material counts separately
             let _ = result_tx.send(WorkerResult::MinedMaterials { mined });
 
-            // Stress/collapse deferred to sleep-only — no live stress update
+            // Queue dirty chunks for deferred stress recalculation
+            {
+                let mut s = store.write().unwrap();
+                s.queue_stress_dirty(&dirty_keys);
+            }
 
             // Send terrain modifications to fluid thread + detect aquifer breaches
             {
@@ -904,7 +1177,7 @@ fn handle_request(
                 }
             }
 
-            batched_seam_pass(&dirty_keys, &cfg, store, result_tx, world_scale);
+            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
         }
         WorkerRequest::MineAndFillFluid { world_x, world_y, world_z, radius, fluid_type, world_scale: ws } => {
             let cfg = config.read().unwrap().clone();
@@ -1036,7 +1309,7 @@ fn handle_request(
             }
 
             // Step 6: Regenerate seams
-            batched_seam_pass(&dirty_keys, &cfg, store, result_tx, ws);
+            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, ws);
         }
         WorkerRequest::Unload { chunk } => {
             let mut s = store.write().unwrap();
@@ -1862,6 +2135,27 @@ fn batched_seam_pass(
     result_tx: &Sender<WorkerResult>,
     world_scale: f32,
 ) {
+    batched_seam_pass_inner(dirty_keys, cfg, store, result_tx, world_scale, false);
+}
+
+fn batched_seam_pass_mine(
+    dirty_keys: &[(i32, i32, i32)],
+    cfg: &GenerationConfig,
+    store: &Arc<RwLock<ChunkStore>>,
+    result_tx: &Sender<WorkerResult>,
+    world_scale: f32,
+) {
+    batched_seam_pass_inner(dirty_keys, cfg, store, result_tx, world_scale, true);
+}
+
+fn batched_seam_pass_inner(
+    dirty_keys: &[(i32, i32, i32)],
+    cfg: &GenerationConfig,
+    store: &Arc<RwLock<ChunkStore>>,
+    result_tx: &Sender<WorkerResult>,
+    world_scale: f32,
+    batch_as_mine: bool,
+) {
     let dirty_set: HashSet<(i32, i32, i32)> = dirty_keys.iter().copied().collect();
 
     let mut candidates: HashSet<(i32, i32, i32)> = HashSet::new();
@@ -1925,19 +2219,29 @@ fn batched_seam_pass(
         }
     }
 
-    for (target, combined) in to_send {
-        let mut converted = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
-        crate::convert::bucket_mesh_by_material(&mut converted);
-        if converted.indices.is_empty() {
-            continue;
+    if batch_as_mine {
+        // Send all mine mesh updates as one atomic result — no pop-in
+        let mut batch = Vec::new();
+        for (target, combined) in to_send {
+            let mut converted = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
+            crate::convert::bucket_mesh_by_material(&mut converted);
+            if converted.indices.is_empty() { continue; }
+            let crystal_data = retrieve_crystal_data(store, target, cfg.voxel_scale(), world_scale);
+            batch.push((target, converted, crystal_data));
         }
-        let crystal_data = retrieve_crystal_data(store, target, cfg.voxel_scale(), world_scale);
-        let _ = result_tx.send(WorkerResult::ChunkMesh {
-            chunk: target,
-            mesh: converted,
-            generation: 0,
-            crystal_data,
-            zone_descriptors: Vec::new(),
-        });
+        if !batch.is_empty() {
+            let _ = result_tx.send(WorkerResult::MineBatchMesh { meshes: batch });
+        }
+    } else {
+        for (target, combined) in to_send {
+            let mut converted = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
+            crate::convert::bucket_mesh_by_material(&mut converted);
+            if converted.indices.is_empty() { continue; }
+            let crystal_data = retrieve_crystal_data(store, target, cfg.voxel_scale(), world_scale);
+            let _ = result_tx.send(WorkerResult::ChunkMesh {
+                chunk: target, mesh: converted, generation: 0, crystal_data,
+                zone_descriptors: Vec::new(),
+            });
+        }
     }
 }
