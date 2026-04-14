@@ -138,8 +138,10 @@ fn try_handle_mine(
                         s.crystal_placements.insert(key, placements);
                     }
                 }
-                // Queue dirty chunks for deferred stress recalculation
-                s.queue_stress_dirty(&dirty_keys);
+                // Queue position-based stress recalculation at mine point
+                let stress_center = (center.x as i32, center.y as i32, center.z as i32);
+                let stress_radius = radius as i32 + 22; // mine radius + span search(20) + air decay(2)
+                s.queue_stress_dirty(stress_center, stress_radius);
                 drop(s);
                 let _ = result_tx.send(WorkerResult::MinedMaterials { mined });
                 batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
@@ -162,10 +164,11 @@ fn try_process_stress_queue(
     world_scale: f32,
 ) -> bool {
     use voxel_core::stress::{
-        recalc_stress_region_v2, detect_and_execute_collapses_v2,
+        recalc_stress_region_v2_filtered, detect_and_execute_collapses_v2,
     };
     use crate::types::FfiStressWarning;
     use std::io::Write;
+    use std::collections::HashSet;
 
     let debug_path = "D:/Unreal Projects/Mithril2026/Saved/stress_debug.txt";
     let mut dbg = |msg: String| {
@@ -176,13 +179,13 @@ fn try_process_stress_queue(
     };
 
     // Check if stress dirty queue is ready (timer elapsed)
-    let dirty_chunks = {
+    let events = {
         let mut s = store.write().unwrap();
         s.drain_stress_dirty(0.4) // 400ms deferred timer
     };
 
-    let dirty_chunks = match dirty_chunks {
-        Some(c) if !c.is_empty() => c,
+    let events = match events {
+        Some(e) if !e.is_empty() => e,
         _ => return false,
     };
 
@@ -190,37 +193,45 @@ fn try_process_stress_queue(
     let stress_cfg = stress_config.read().unwrap().clone();
     let chunk_size = cfg.chunk_size;
 
-    dbg(format!("=== STRESS RECALC START === dirty_chunks={} chunk_size={}", dirty_chunks.len(), chunk_size));
-    dbg(format!("  config: gravity={:.3} lat_transfer={:.2} vert_transfer={:.2} iters={} ground_thresh={:.2}",
-        stress_cfg.gravity_weight, stress_cfg.lateral_transfer_factor, stress_cfg.vertical_transfer_factor,
-        stress_cfg.support_propagation_iterations, stress_cfg.ground_threshold));
-    dbg(format!("  config: overhang_w={:.3} span_w={:.3} min_safe_span={} min_collapse={} slab_cohesion={:.2} max_vol={}",
-        stress_cfg.overhang_weight, stress_cfg.span_weight, stress_cfg.min_safe_span,
-        stress_cfg.min_collapse_region, stress_cfg.slab_cohesion_threshold, stress_cfg.max_collapse_volume));
-    {
-        // Log dirty chunks + their Y range for understanding the footprint
-        let min_y = dirty_chunks.iter().map(|k| k.1).min().unwrap_or(0);
-        let max_y = dirty_chunks.iter().map(|k| k.1).max().unwrap_or(0);
-        let min_x = dirty_chunks.iter().map(|k| k.0).min().unwrap_or(0);
-        let max_x = dirty_chunks.iter().map(|k| k.0).max().unwrap_or(0);
-        let min_z = dirty_chunks.iter().map(|k| k.2).min().unwrap_or(0);
-        let max_z = dirty_chunks.iter().map(|k| k.2).max().unwrap_or(0);
-        dbg(format!("  dirty: {} chunks, range ({},{},{})→({},{},{}) [connectivity expands +1 ring]",
-            dirty_chunks.len(), min_x, min_y, min_z, max_x, max_y, max_z));
+    // Derive affected chunks from events (union of all event bounding boxes)
+    let dirty_chunks: Vec<(i32, i32, i32)> = {
+        let s = store.read().unwrap();
+        let mut chunk_set: HashSet<(i32, i32, i32)> = HashSet::new();
+        for event in &events {
+            for key in event.affected_chunks(chunk_size) {
+                if s.density_fields.contains_key(&key) {
+                    chunk_set.insert(key);
+                }
+            }
+        }
+        chunk_set.into_iter().collect()
+    };
+
+    if dirty_chunks.is_empty() { return false; }
+
+    dbg(format!("=== STRESS RECALC START === events={} derived_chunks={} chunk_size={}",
+        events.len(), dirty_chunks.len(), chunk_size));
+    for (i, e) in events.iter().enumerate() {
+        dbg(format!("  event[{}]: center=({},{},{}) radius={}", i, e.center.0, e.center.1, e.center.2, e.radius));
     }
+    dbg(format!("  config: span_w={:.3} min_safe_span={} min_collapse={} slab_cohesion={:.2} max_vol={} depth_scale={:.0}",
+        stress_cfg.span_weight, stress_cfg.min_safe_span,
+        stress_cfg.min_collapse_region, stress_cfg.slab_cohesion_threshold, stress_cfg.max_collapse_volume,
+        stress_cfg.depth_pressure_scale));
 
     let recalc_start = std::time::Instant::now();
 
-    // Run v2 stress recalculation on dirty chunks
+    // Run v2 stress recalculation — only voxels within event radii are recalculated
     let result = {
         let mut s = store.write().unwrap();
         let (density, stress, support) = s.sleep_fields_mut();
-        recalc_stress_region_v2(
+        recalc_stress_region_v2_filtered(
             density,
             stress,
             support,
             &stress_cfg,
             &dirty_chunks,
+            &events,
             chunk_size,
         )
     };
@@ -1284,10 +1295,12 @@ fn handle_request(
             // Send mined material counts separately
             let _ = result_tx.send(WorkerResult::MinedMaterials { mined });
 
-            // Queue dirty chunks for deferred stress recalculation
+            // Queue position-based stress recalculation at mine point
             {
                 let mut s = store.write().unwrap();
-                s.queue_stress_dirty(&dirty_keys);
+                let stress_center = (center.x as i32, center.y as i32, center.z as i32);
+                let stress_radius = radius as i32 + 22;
+                s.queue_stress_dirty(stress_center, stress_radius);
             }
 
             // Send terrain modifications to fluid thread + detect aquifer breaches

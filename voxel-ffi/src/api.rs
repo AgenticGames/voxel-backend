@@ -781,6 +781,10 @@ pub unsafe extern "C" fn voxel_set_stress_config(
         min_safe_span: ffi_cfg.min_safe_span,
         min_collapse_region: ffi_cfg.min_collapse_region,
         slab_cohesion_threshold: ffi_cfg.slab_cohesion_threshold,
+        cross_section_weight: ffi_cfg.cross_section_weight,
+        cross_section_min_faces: ffi_cfg.cross_section_min_faces,
+        surface_y: ffi_cfg.surface_y,
+        depth_pressure_scale: ffi_cfg.depth_pressure_scale,
     };
 
     engine.update_stress_config(stress_config);

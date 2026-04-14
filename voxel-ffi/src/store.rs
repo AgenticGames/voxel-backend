@@ -50,8 +50,8 @@ pub struct ChunkStore {
     pub crystal_placements: HashMap<(i32, i32, i32), Vec<voxel_gen::CrystalPlacement>>,
     /// Region size for computing region keys (needed by unload).
     region_size: i32,
-    /// Chunk keys with pending stress recalculation (queued by mining).
-    pub stress_dirty_chunks: Vec<(i32, i32, i32)>,
+    /// Localized stress recalculation events (queued by mining).
+    pub stress_dirty_events: Vec<voxel_core::stress::StressDirtyEvent>,
     /// Timestamp of the last mine action that dirtied stress.
     pub stress_dirty_time: Option<std::time::Instant>,
 }
@@ -71,7 +71,7 @@ impl ChunkStore {
             region_worm_paths: HashMap::new(),
             crystal_placements: HashMap::new(),
             region_size,
-            stress_dirty_chunks: Vec::new(),
+            stress_dirty_events: Vec::new(),
             stress_dirty_time: None,
         }
     }
@@ -130,7 +130,8 @@ impl ChunkStore {
         self.stress_fields.remove(&key);
         self.support_fields.remove(&key);
         self.crystal_placements.remove(&key);
-        self.stress_dirty_chunks.retain(|k| k != &key);
+        // Events referencing this chunk will still fire but the chunk won't be found
+        // in density_fields during recalc — harmless skip.
 
         // Clear region flag immediately — region is no longer intact.
         // Next generate will re-run region gen; has_density() guard
@@ -158,23 +159,32 @@ impl ChunkStore {
         }
     }
 
-    /// Queue chunk keys for deferred stress recalculation (called after mining).
-    pub fn queue_stress_dirty(&mut self, chunk_keys: &[(i32, i32, i32)]) {
-        for &key in chunk_keys {
-            if !self.stress_dirty_chunks.contains(&key) {
-                self.stress_dirty_chunks.push(key);
-            }
+    /// Queue a localized stress recalculation event (called after mining).
+    /// center: mine point in world voxel coords, radius: effective stress radius in voxels.
+    pub fn queue_stress_dirty(&mut self, center: (i32, i32, i32), radius: i32) {
+        self.stress_dirty_events.push(voxel_core::stress::StressDirtyEvent { center, radius });
+        self.stress_dirty_time = Some(std::time::Instant::now());
+    }
+
+    /// Legacy: queue dirty chunks (used by flatten/sleep paths that don't have a mine center).
+    /// Converts each chunk center to a large-radius event covering the full chunk.
+    pub fn queue_stress_dirty_chunks(&mut self, chunk_keys: &[(i32, i32, i32)], chunk_size: usize) {
+        let half = chunk_size as i32 / 2;
+        let radius = chunk_size as i32 + 22; // Full chunk + span search + air decay
+        for &(cx, cy, cz) in chunk_keys {
+            let center = (cx * chunk_size as i32 + half, cy * chunk_size as i32 + half, cz * chunk_size as i32 + half);
+            self.stress_dirty_events.push(voxel_core::stress::StressDirtyEvent { center, radius });
         }
         self.stress_dirty_time = Some(std::time::Instant::now());
     }
 
     /// Drain the stress dirty queue if the deferred timer has elapsed.
     /// Returns None if timer hasn't elapsed or queue is empty.
-    pub fn drain_stress_dirty(&mut self, defer_secs: f32) -> Option<Vec<(i32, i32, i32)>> {
+    pub fn drain_stress_dirty(&mut self, defer_secs: f32) -> Option<Vec<voxel_core::stress::StressDirtyEvent>> {
         if let Some(t) = self.stress_dirty_time {
             if t.elapsed().as_secs_f32() >= defer_secs {
                 self.stress_dirty_time = None;
-                let q = std::mem::take(&mut self.stress_dirty_chunks);
+                let q = std::mem::take(&mut self.stress_dirty_events);
                 if !q.is_empty() {
                     return Some(q);
                 }

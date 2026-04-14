@@ -1139,6 +1139,10 @@ pub struct FfiStressConfig {
     pub min_safe_span: u32,
     pub min_collapse_region: u32,
     pub slab_cohesion_threshold: f32,
+    pub cross_section_weight: f32,
+    pub cross_section_min_faces: u32,
+    pub surface_y: i32,
+    pub depth_pressure_scale: f32,
 }
 
 #[repr(C)]

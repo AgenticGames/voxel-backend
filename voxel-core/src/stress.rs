@@ -34,6 +34,51 @@ pub const SOURCE_OVERHANG: u8 = 2;
 pub const SOURCE_SPAN: u8 = 3;
 pub const SOURCE_CROSS_SECTION: u8 = 4;
 
+/// A localized stress recalculation event centered on a mine point.
+/// Only voxels within `radius` of `center` (world voxel coords) get recalculated.
+#[derive(Debug, Clone)]
+pub struct StressDirtyEvent {
+    pub center: (i32, i32, i32),
+    pub radius: i32,
+}
+
+impl StressDirtyEvent {
+    /// Returns the set of chunk keys whose bounding boxes overlap this event's sphere.
+    pub fn affected_chunks(&self, chunk_size: usize) -> Vec<(i32, i32, i32)> {
+        let cs = chunk_size as i32;
+        let min_cx = (self.center.0 - self.radius).div_euclid(cs);
+        let max_cx = (self.center.0 + self.radius).div_euclid(cs);
+        let min_cy = (self.center.1 - self.radius).div_euclid(cs);
+        let max_cy = (self.center.1 + self.radius).div_euclid(cs);
+        let min_cz = (self.center.2 - self.radius).div_euclid(cs);
+        let max_cz = (self.center.2 + self.radius).div_euclid(cs);
+        let mut keys = Vec::new();
+        for cz in min_cz..=max_cz {
+            for cy in min_cy..=max_cy {
+                for cx in min_cx..=max_cx {
+                    keys.push((cx, cy, cz));
+                }
+            }
+        }
+        keys
+    }
+
+    /// Check if a world voxel position is within this event's radius.
+    #[inline]
+    pub fn contains(&self, wx: i32, wy: i32, wz: i32) -> bool {
+        let dx = wx - self.center.0;
+        let dy = wy - self.center.1;
+        let dz = wz - self.center.2;
+        dx * dx + dy * dy + dz * dz <= self.radius * self.radius
+    }
+}
+
+/// Check if a world position is within ANY event's radius.
+#[inline]
+pub fn in_any_event(events: &[StressDirtyEvent], wx: i32, wy: i32, wz: i32) -> bool {
+    events.iter().any(|e| e.contains(wx, wy, wz))
+}
+
 #[inline]
 pub fn pack_classification(surface: u8, source: u8) -> u8 {
     (surface << 4) | (source & 0x0F)
@@ -274,6 +319,14 @@ pub struct StressConfig {
     pub min_collapse_region: u32,
     /// Voxels with stress >= this threshold are included in slab cohesion expansion.
     pub slab_cohesion_threshold: f32,
+    /// Stress per additional air face-neighbor beyond 1 (thin feature penalty).
+    pub cross_section_weight: f32,
+    /// Minimum air face-neighbors to trigger cross-section penalty (2 = default).
+    pub cross_section_min_faces: u32,
+    /// World Y coordinate of the surface (depth=0 reference point).
+    pub surface_y: i32,
+    /// Depth scale: depth_factor = 1.0 + depth / depth_scale. Lower = more aggressive.
+    pub depth_pressure_scale: f32,
 }
 
 impl Default for StressConfig {
@@ -298,10 +351,14 @@ impl Default for StressConfig {
             support_propagation_iterations: 2,
             ground_threshold: 0.80,     // Reverted from 0.95 — proper init makes 0.80 correct
             overhang_weight: 0.05,      // Primary ceiling stress driver. With cap=12: max raw=0.6
-            span_weight: 0.04,          // Span penalty per voxel beyond safe (raised from 0.015)
-            min_safe_span: 6,
+            span_weight: 0.025,         // Span penalty per voxel beyond safe (tuned down for gradient)
+            min_safe_span: 8,           // Wider safe span — only large ceilings get stressed
             min_collapse_region: 8,
             slab_cohesion_threshold: 0.75,
+            cross_section_weight: 0.15,  // Stress per air face beyond threshold (thin feature penalty)
+            cross_section_min_faces: 2,  // Need 2+ air faces before penalty applies
+            surface_y: 200,             // Approximate world surface level
+            depth_pressure_scale: 99999.0, // Effectively disabled for now — tune after span gradient is dialed in
         }
     }
 }
@@ -562,6 +619,37 @@ pub fn calc_voxel_stress(
 
 // ── V2 stress algorithm: two-pass ground connectivity + load accumulation ──
 
+/// Minimum distance to nearest air voxel in 6 face-connected directions.
+/// Returns 0 if the voxel itself is air, 1 if a face-neighbor is air, etc.
+/// Returns `max_dist + 1` if no air found within range (deep interior).
+fn min_distance_to_air(
+    density_fields: &HashMap<(i32, i32, i32), DensityField>,
+    wx: i32, wy: i32, wz: i32,
+    chunk_size: usize,
+    max_dist: i32,
+) -> i32 {
+    let dirs: [(i32, i32, i32); 6] = [
+        (1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1),
+    ];
+    let mut best = max_dist + 1;
+    for &(dx, dy, dz) in &dirs {
+        for d in 1..=max_dist {
+            let nx = wx + dx * d;
+            let ny = wy + dy * d;
+            let nz = wz + dz * d;
+            match sample_world(density_fields, nx, ny, nz, chunk_size) {
+                Some((_, mat)) if !mat.is_solid() => {
+                    best = best.min(d);
+                    break; // Found air in this direction
+                }
+                Some(_) => {} // Solid, keep searching
+                None => break, // Unloaded, stop this direction
+            }
+        }
+    }
+    best
+}
+
 /// Count contiguous air voxels below a position (Y−), capped at 32.
 pub fn count_air_below(
     density_fields: &HashMap<(i32, i32, i32), DensityField>,
@@ -622,6 +710,62 @@ fn min_lateral_distance_to_grounded(
         }
     }
     min_dist
+}
+
+/// Measure the unsupported span for a solid surface voxel.
+///
+/// For each air face-neighbor, searches laterally from that air position through air
+/// to find the distance to the nearest wall. Returns the MINIMUM distance found —
+/// the nearest wall provides structural support regardless of what's in other directions.
+///
+/// This handles both ceiling voxels (air below → search laterally at cave level)
+/// and wall voxels (air to the side → search laterally through cave).
+fn measure_span_from_air(
+    density_fields: &HashMap<(i32, i32, i32), DensityField>,
+    wx: i32, wy: i32, wz: i32,
+    chunk_size: usize,
+    max_dist: u32,
+) -> u32 {
+    let face_offsets: [(i32, i32, i32); 6] = [
+        (1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1),
+    ];
+    let lat_dirs: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+    let mut best_span = max_dist;
+    let mut found_any = false;
+
+    for &(dx, dy, dz) in &face_offsets {
+        let ax = wx + dx;
+        let ay = wy + dy;
+        let az = wz + dz;
+
+        // Only start from air neighbors
+        match sample_world(density_fields, ax, ay, az, chunk_size) {
+            Some((_, mat)) if !mat.is_solid() => {}
+            _ => continue,
+        }
+
+        // From this air position, search laterally for walls
+        for &(ldx, ldz) in &lat_dirs {
+            for d in 1..=max_dist as i32 {
+                let nx = ax + ldx * d;
+                let nz = az + ldz * d;
+                match sample_world(density_fields, nx, ay, nz, chunk_size) {
+                    Some((_, mat)) if mat.is_solid() => {
+                        best_span = best_span.min(d as u32);
+                        found_any = true;
+                        break;
+                    }
+                    Some(_) => {} // Air — keep going
+                    None => {
+                        best_span = best_span.min(d as u32); // Unloaded = wall
+                        found_any = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if found_any { best_span } else { max_dist }
 }
 
 /// Pass 1: Ground connectivity analysis via iterative relaxation.
@@ -841,27 +985,40 @@ pub fn calc_voxel_stress_v2(
         let below_solid = sample_world(density_fields, wx, wy - 1, wz, chunk_size)
             .map(|(_, m)| m.is_solid())
             .unwrap_or(true);
-        if below_solid && support_score >= 0.5 {
+        if below_solid && support_score >= 0.2 {
             return (0.0, pack_classification(SURFACE_FLOOR, SOURCE_NONE));
         }
     }
 
+    // Distance-to-air decay: stress attenuates as we go deeper into rock.
+    // Surface voxels (1 cell from air) get full stress, deep interior gets none.
+    // This prevents the span search from producing stress on voxels buried in solid rock
+    // where the concept of "unsupported span" doesn't physically apply.
+    let air_dist = min_distance_to_air(density_fields, wx, wy, wz, chunk_size, 2);
+    let air_decay = if air_dist <= 1 {
+        1.0  // At the cave surface: full stress
+    } else if air_dist == 2 {
+        0.5  // One cell deep: half stress
+    } else {
+        0.0  // 3+ cells deep: no surface stress
+    };
+
+    // Deep interior shortcut: no stress, classify as interior
+    if air_decay <= 0.0 {
+        return (0.0, pack_classification(SURFACE_INTERIOR, SOURCE_NONE));
+    }
+
     // Track individual stress components for classification
-    let gravity_stress = config.gravity_weight * unsupported;
-    let mut raw_stress = gravity_stress;
+    let mut raw_stress = 0.0f32;
 
-    // Overhang penalty: air below means this is a ceiling surface
-    let air_below = count_air_below(density_fields, wx, wy, wz, chunk_size);
-    let overhang_stress = air_below as f32 * config.overhang_weight * unsupported;
-    raw_stress += overhang_stress;
-
-    // Span penalty: distance to nearest grounded voxel (wall/pillar)
-    let span_dist = min_lateral_distance_to_grounded(
-        density_fields, support_scores, wx, wy, wz, chunk_size,
-        config.ground_threshold, 20,
+    // Span penalty: measures widest unsupported air gap this voxel is exposed to.
+    // Searches from each air face-neighbor laterally through air to find walls.
+    // Near walls = low span = safe. Center of wide ceiling = high span = danger.
+    let span_dist = measure_span_from_air(
+        density_fields, wx, wy, wz, chunk_size, 20,
     );
     let span_stress = if span_dist > config.min_safe_span {
-        (span_dist - config.min_safe_span) as f32 * config.span_weight * unsupported
+        (span_dist - config.min_safe_span) as f32 * config.span_weight * unsupported * air_decay
     } else { 0.0 };
     raw_stress += span_stress;
 
@@ -877,8 +1034,8 @@ pub fn calc_voxel_stress_v2(
             _ => {}
         }
     }
-    let xsec_stress = if air_neighbors >= 2 {
-        (air_neighbors - 1) as f32 * 0.15
+    let xsec_stress = if air_neighbors >= config.cross_section_min_faces {
+        (air_neighbors - 1) as f32 * config.cross_section_weight
     } else { 0.0 };
     raw_stress += xsec_stress;
 
@@ -900,34 +1057,38 @@ pub fn calc_voxel_stress_v2(
         }
     }
 
-    let final_stress = raw_stress.max(0.0) / hardness;
+    // Depth pressure: deeper rock is under more overburden compression.
+    // At surface: 1.0x. At depth 100: 2.0x. At depth 200: 3.0x.
+    // This makes narrow tunnels dangerous at depth even when span is safe.
+    let depth = (config.surface_y - wy).max(0) as f32;
+    let depth_factor = 1.0 + depth / config.depth_pressure_scale;
 
-    // Classify surface type
+    let final_stress = (raw_stress.max(0.0) * depth_factor) / hardness;
+
+    // Classify surface type using BOTH local air neighbors AND air_dist.
+    // A voxel with air_neighbors==0 but air_dist<=4 is near the surface and may have
+    // stress — classify by geometry (below_solid) rather than defaulting to INTERIOR.
     let below_solid = sample_world(density_fields, wx, wy - 1, wz, chunk_size)
         .map(|(_, m)| m.is_solid()).unwrap_or(true);
     let surface_type = if air_neighbors >= 4 {
         SURFACE_THIN       // Stalactite/thin column (4+ air faces)
     } else if !below_solid {
         SURFACE_CEILING    // Air directly below
-    } else if air_neighbors == 0 {
-        SURFACE_INTERIOR   // Fully enclosed
-    } else if below_solid && support_score >= 0.5 {
-        SURFACE_FLOOR      // Solid below + well-supported
+    } else if air_neighbors == 0 && final_stress <= 0.001 {
+        SURFACE_INTERIOR   // Fully enclosed AND no stress = truly interior
+    } else if below_solid && support_score >= 0.2 {
+        SURFACE_FLOOR      // Solid below + moderately supported
     } else {
-        SURFACE_WALL       // Solid below but near air (wall surface)
+        SURFACE_WALL       // Near surface, solid below = wall/pillar
     };
 
-    // Dominant stress source
+    // Dominant stress source (gravity + overhang removed — span is primary)
     let dominant_source = if final_stress <= 0.001 {
         SOURCE_NONE
-    } else if xsec_stress >= overhang_stress && xsec_stress >= span_stress && xsec_stress >= gravity_stress {
+    } else if xsec_stress >= span_stress {
         SOURCE_CROSS_SECTION
-    } else if overhang_stress >= span_stress && overhang_stress >= gravity_stress {
-        SOURCE_OVERHANG
-    } else if span_stress >= gravity_stress {
-        SOURCE_SPAN
     } else {
-        SOURCE_GRAVITY
+        SOURCE_SPAN
     };
 
     (final_stress, pack_classification(surface_type, dominant_source))
@@ -935,6 +1096,7 @@ pub fn calc_voxel_stress_v2(
 
 /// V2 stress recalculation: runs ground connectivity pass then per-voxel stress.
 /// Operates on a set of dirty chunks (and their neighborhoods).
+/// Used by overlay preview (V/C key) which needs full-chunk recalc.
 pub fn recalc_stress_region_v2(
     density_fields: &HashMap<(i32, i32, i32), DensityField>,
     stress_fields: &mut HashMap<(i32, i32, i32), StressField>,
@@ -943,6 +1105,26 @@ pub fn recalc_stress_region_v2(
     dirty_chunks: &[(i32, i32, i32)],
     chunk_size: usize,
 ) -> StressResult {
+    recalc_stress_region_v2_filtered(
+        density_fields, stress_fields, support_fields, config,
+        dirty_chunks, &[], chunk_size,
+    )
+}
+
+/// V2 stress recalculation with optional position-based filtering.
+/// If `events` is non-empty, only voxels within any event's radius are recalculated.
+/// If `events` is empty, all voxels in `dirty_chunks` are recalculated (full mode).
+pub fn recalc_stress_region_v2_filtered(
+    density_fields: &HashMap<(i32, i32, i32), DensityField>,
+    stress_fields: &mut HashMap<(i32, i32, i32), StressField>,
+    support_fields: &HashMap<(i32, i32, i32), SupportField>,
+    config: &StressConfig,
+    dirty_chunks: &[(i32, i32, i32)],
+    events: &[StressDirtyEvent],
+    chunk_size: usize,
+) -> StressResult {
+    let use_filter = !events.is_empty();
+
     // Pass 1: ground connectivity on dirty chunks + neighbors
     let support_scores = ground_connectivity_pass(density_fields, dirty_chunks, chunk_size, config);
 
@@ -973,6 +1155,12 @@ pub fn recalc_stress_region_v2(
                     let wx = cx * cs as i32 + x as i32;
                     let wy = cy * cs as i32 + y as i32;
                     let wz = cz * cs as i32 + z as i32;
+
+                    // Position filter: skip voxels outside all mine event radii.
+                    // Their existing stress stays untouched — no phantom collapses.
+                    if use_filter && !in_any_event(events, wx, wy, wz) {
+                        continue;
+                    }
 
                     // Interior skip: fully grounded voxels get 0 stress but still classified.
                     let my_support = support_scores
@@ -2067,7 +2255,7 @@ mod tests {
         // A narrow 4-wide tunnel should NOT produce overstressed voxels
         let (density_fields, mut stress_fields, support_fields) = make_solid_world();
         let mut config = default_config();
-        config.min_safe_span = 6;
+        config.min_safe_span = 8;
         // Carve a 4-wide tunnel in center chunk only (narrow)
         let mut df_clone = density_fields.clone();
         if let Some(df) = df_clone.get_mut(&(0, 0, 0)) {
