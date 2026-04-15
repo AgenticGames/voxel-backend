@@ -178,6 +178,10 @@ pub fn flatten_terrace(
         }
     }
 
+    // Mark modified chunks for save persistence
+    let dirty_keys: Vec<_> = dirty_chunks.iter().map(|&(k, ..)| k).collect();
+    store.modification_tracker.mark_dirty_many(&dirty_keys);
+
     store.remesh_dirty(&dirty_chunks, config, world_scale)
 }
 
@@ -324,6 +328,10 @@ pub fn flatten_terrace_batch(
             }
         }
     }
+
+    // Mark modified chunks for save persistence
+    let dirty_keys: Vec<_> = dirty_chunks.iter().map(|&(k, ..)| k).collect();
+    store.modification_tracker.mark_dirty_many(&dirty_keys);
 
     store.remesh_dirty(&dirty_chunks, config, world_scale)
 }

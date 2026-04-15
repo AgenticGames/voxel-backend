@@ -1990,6 +1990,70 @@ fn converted_fluid_mesh_to_ffi(mesh: ConvertedFluidMesh) -> FfiFluidMeshData {
     }
 }
 
+// ── Save/Load FFI ─────────────��────────────────────────────────────────
+
+/// Export world modification data (mined/flattened/sleep-modified chunks) as a binary buffer.
+/// Returns a heap-allocated buffer; caller must free via `voxel_free_save_buffer`.
+/// Writes the buffer length to `out_len`.
+/// Returns null if engine is null or no modifications exist.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_save_world_data(
+    engine: *mut c_void,
+    out_len: *mut u32,
+) -> *mut u8 {
+    if engine.is_null() || out_len.is_null() {
+        return ptr::null_mut();
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let bytes = engine.export_save_data();
+    if bytes.is_empty() {
+        *out_len = 0;
+        return ptr::null_mut();
+    }
+    *out_len = bytes.len() as u32;
+    let mut boxed = bytes.into_boxed_slice();
+    let ptr = boxed.as_mut_ptr();
+    std::mem::forget(boxed);
+    ptr
+}
+
+/// Free a save buffer returned by `voxel_save_world_data`.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_free_save_buffer(buffer: *mut u8, len: u32) {
+    if buffer.is_null() || len == 0 {
+        return;
+    }
+    let _ = Vec::from_raw_parts(buffer, len as usize, len as usize);
+}
+
+/// Load world modification data from a binary buffer.
+/// Must be called BEFORE chunk streaming begins so snapshots are applied during generation.
+/// Returns 1 on success, 0 on failure (corrupt data or null engine).
+#[no_mangle]
+pub unsafe extern "C" fn voxel_load_world_data(
+    engine: *mut c_void,
+    buffer: *const u8,
+    len: u32,
+) -> u32 {
+    if engine.is_null() || buffer.is_null() || len == 0 {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let data = std::slice::from_raw_parts(buffer, len as usize);
+    if engine.import_save_data(data) { 1 } else { 0 }
+}
+
+/// Check if the world has any unsaved modifications (mining, flatten, sleep, collapse).
+/// Returns 1 if modifications exist, 0 otherwise.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_has_world_modifications(engine: *mut c_void) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    if engine.has_world_modifications() { 1 } else { 0 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -9,3 +9,4 @@ pub mod api;
 pub mod stress;
 pub mod slab;
 pub mod profiler;
+pub mod delta;

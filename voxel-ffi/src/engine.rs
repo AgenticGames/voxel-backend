@@ -1231,6 +1231,42 @@ impl VoxelEngine {
     }
 
     /// Gracefully shut down all workers and wait for them to finish.
+    // ── Save/Load ──────────────────────────────────────────────────────
+
+    /// Export world modification data as a binary buffer for saving.
+    /// Returns the serialized bytes (caller manages the memory).
+    pub fn export_save_data(&self) -> Vec<u8> {
+        let store = self.store.read().unwrap();
+        let data = store.collect_save_data();
+        data.serialize()
+    }
+
+    /// Import world modification data from a binary buffer.
+    /// Must be called BEFORE chunk streaming begins so that pending snapshots
+    /// are applied as chunks are generated.
+    /// Returns true on success.
+    pub fn import_save_data(&self, bytes: &[u8]) -> bool {
+        match crate::delta::WorldSaveData::deserialize(bytes) {
+            Ok(data) => {
+                let mut store = self.store.write().unwrap();
+                store.load_save_data(data);
+                true
+            }
+            Err(e) => {
+                eprintln!("[voxel-ffi] Failed to import save data: {e}");
+                false
+            }
+        }
+    }
+
+    /// Check if the world has any unsaved modifications.
+    pub fn has_world_modifications(&self) -> bool {
+        match self.store.try_read() {
+            Ok(s) => s.has_modifications(),
+            Err(_) => false,
+        }
+    }
+
     pub fn shutdown(mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
         // Drop senders to unblock recv_timeout

@@ -112,6 +112,10 @@ pub fn mine_sphere(
     );
     dirty_chunks.extend(extra_dirty);
 
+    // Mark modified chunks for save persistence
+    let dirty_keys: Vec<_> = dirty_chunks.iter().map(|&(k, ..)| k).collect();
+    store.modification_tracker.mark_dirty_many(&dirty_keys);
+
     let meshes = store.remesh_dirty(&dirty_chunks, config, world_scale);
     (meshes, FfiMinedMaterials { counts: mined_counts })
 }
@@ -242,6 +246,10 @@ pub fn mine_peel(
         &mut store.density_fields, &dirty_chunks, config.chunk_size,
     );
     dirty_chunks.extend(extra_dirty);
+
+    // Mark modified chunks for save persistence
+    let dirty_keys: Vec<_> = dirty_chunks.iter().map(|&(k, ..)| k).collect();
+    store.modification_tracker.mark_dirty_many(&dirty_keys);
 
     let meshes = store.remesh_dirty(&dirty_chunks, config, world_scale);
     (meshes, FfiMinedMaterials { counts: mined_counts })

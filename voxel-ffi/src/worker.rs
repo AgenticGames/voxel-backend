@@ -140,7 +140,7 @@ fn try_handle_mine(
                 }
                 // Queue position-based stress recalculation at mine point
                 let stress_center = (center.x as i32, center.y as i32, center.z as i32);
-                let stress_radius = radius as i32 + 22; // mine radius + span search(20) + air decay(2)
+                let stress_radius = radius as i32 + 4; // mine radius + air decay(2) + small margin
                 s.queue_stress_dirty(stress_center, stress_radius);
                 drop(s);
                 let _ = result_tx.send(WorkerResult::MinedMaterials { mined });
@@ -416,6 +416,10 @@ fn try_process_stress_queue(
             all_dirty.dedup_by_key(|k| k.0);
             dbg(format!("  remeshing {} chunks", all_dirty.len()));
 
+            // Mark collapse-modified chunks for save persistence
+            let collapse_keys: Vec<_> = all_dirty.iter().map(|&(k, ..)| k).collect();
+            s.modification_tracker.mark_dirty_many(&collapse_keys);
+
             let _base_meshes = s.remesh_dirty(&all_dirty, &cfg, world_scale);
             drop(s);
 
@@ -634,6 +638,14 @@ fn handle_request(
                         for (key, density, hermite) in keyed_data {
                             if !s.has_density(&key) {
                                 s.insert(key, density, hermite);
+                                // Apply saved snapshot if loading a saved game
+                                if s.apply_pending_snapshot(key) {
+                                    // Density was patched — re-extract hermite from patched data
+                                    if let Some(df) = s.density_fields.get(&key) {
+                                        let new_hermite = extract_hermite_data(df);
+                                        s.hermite_data.insert(key, new_hermite);
+                                    }
+                                }
                             }
                         }
                         s.mark_region_generated(rk);
@@ -1573,6 +1585,12 @@ fn handle_request(
             let mut dirty_bounds: Vec<_> = sleep_result.dirty_chunks.iter().map(|&key| {
                 (key, 0usize, 0usize, 0usize, cfg.chunk_size, cfg.chunk_size, cfg.chunk_size)
             }).collect();
+
+            // Mark sleep-modified chunks for save persistence
+            {
+                let mut s = store.write().unwrap();
+                s.modification_tracker.mark_dirty_many(&sleep_result.dirty_chunks);
+            }
 
             // NOTE: Do NOT call sync_boundaries here. Sleep uses set_voxel_synced()
             // which already keeps boundary overlap voxels consistent. Running

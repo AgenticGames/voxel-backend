@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use glam::Vec3;
 use rayon::prelude::*;
@@ -16,6 +16,7 @@ use voxel_gen::region_gen::{self, region_key, ChunkSeamData};
 use voxel_gen::worm::path::WormSegment;
 
 use crate::convert::convert_mesh_to_ue_scaled;
+use crate::delta::{ChunkSnapshot, ModificationTracker, WorldSaveData};
 use crate::stress::CollapseEvent;
 use crate::types::ConvertedMesh;
 
@@ -54,6 +55,12 @@ pub struct ChunkStore {
     pub stress_dirty_events: Vec<voxel_core::stress::StressDirtyEvent>,
     /// Timestamp of the last mine action that dirtied stress.
     pub stress_dirty_time: Option<std::time::Instant>,
+    /// Tracks which chunks have been modified by mining/flatten/sleep.
+    pub modification_tracker: ModificationTracker,
+    /// Density snapshots preserved from unloaded modified chunks (for save).
+    pub preserved_snapshots: BTreeMap<(i32, i32, i32), ChunkSnapshot>,
+    /// Pending snapshots loaded from a save file — applied as chunks are generated.
+    pub pending_snapshots: Option<WorldSaveData>,
 }
 
 impl ChunkStore {
@@ -73,6 +80,9 @@ impl ChunkStore {
             region_size,
             stress_dirty_events: Vec::new(),
             stress_dirty_time: None,
+            modification_tracker: ModificationTracker::new(),
+            preserved_snapshots: BTreeMap::new(),
+            pending_snapshots: None,
         }
     }
 
@@ -123,6 +133,13 @@ impl ChunkStore {
     }
 
     pub fn unload(&mut self, key: (i32, i32, i32)) {
+        // Preserve density snapshot if this chunk was modified (mining/flatten/sleep)
+        if self.modification_tracker.dirty_chunks.contains(&key) {
+            if let Some(df) = self.density_fields.get(&key) {
+                self.preserved_snapshots.insert(key, ChunkSnapshot::from_density(df));
+            }
+            self.modification_tracker.remove(&key);
+        }
         self.density_fields.remove(&key);
         self.hermite_data.remove(&key);
         self.chunk_seam_data.remove(&key);
@@ -1231,6 +1248,80 @@ impl ChunkStore {
         }
 
         dirty.into_iter().collect()
+    }
+
+    // ── Save/Load ──────────────────────────────────────────────────────
+
+    /// Collect all world modification data needed for saving.
+    ///
+    /// Gathers snapshots from:
+    /// - Currently loaded modified chunks (in density_fields + modification_tracker)
+    /// - Previously unloaded modified chunks (in preserved_snapshots)
+    /// - Terrace data (terraced_cells + terraced_columns)
+    pub fn collect_save_data(&self) -> WorldSaveData {
+        let mut snapshots = self.preserved_snapshots.clone();
+
+        // Add snapshots for currently loaded modified chunks
+        for key in &self.modification_tracker.dirty_chunks {
+            if let Some(df) = self.density_fields.get(key) {
+                snapshots.insert(*key, ChunkSnapshot::from_density(df));
+            }
+        }
+
+        let terraced_cells: Vec<(i32, i32, i32)> = {
+            let mut v: Vec<_> = self.terraced_cells.iter().copied().collect();
+            v.sort();
+            v
+        };
+
+        let terraced_columns: BTreeMap<(i32, i32), i32> =
+            self.terraced_columns.iter().map(|(&k, &v)| (k, v)).collect();
+
+        WorldSaveData {
+            chunk_snapshots: snapshots,
+            terraced_cells,
+            terraced_columns,
+        }
+    }
+
+    /// Load saved world data for application during chunk generation.
+    ///
+    /// Stores the data internally; the worker thread checks `pending_snapshots`
+    /// after generating each chunk and patches the density field if a snapshot exists.
+    /// Also restores terrace data immediately.
+    pub fn load_save_data(&mut self, data: WorldSaveData) {
+        // Restore terrace data
+        self.terraced_cells = data.terraced_cells.iter().copied().collect();
+        self.terraced_columns = data.terraced_columns.iter().map(|(&k, &v)| (k, v)).collect();
+
+        // Store chunk snapshots for on-demand application during generation
+        self.pending_snapshots = Some(data);
+    }
+
+    /// Check if a pending snapshot exists for a chunk and apply it if so.
+    /// Returns true if a snapshot was applied (density field was patched).
+    pub fn apply_pending_snapshot(&mut self, key: (i32, i32, i32)) -> bool {
+        let snap = match &self.pending_snapshots {
+            Some(data) => data.chunk_snapshots.get(&key).cloned(),
+            None => return false,
+        };
+        if let Some(snap) = snap {
+            if let Some(df) = self.density_fields.get_mut(&key) {
+                if snap.apply_to(df) {
+                    // Mark as modified so it persists across future saves
+                    self.modification_tracker.mark_dirty(key);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Returns true if there are any world modifications to save.
+    pub fn has_modifications(&self) -> bool {
+        self.modification_tracker.has_modifications()
+            || !self.preserved_snapshots.is_empty()
+            || !self.terraced_cells.is_empty()
     }
 }
 
