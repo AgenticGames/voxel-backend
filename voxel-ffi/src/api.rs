@@ -2043,6 +2043,40 @@ pub unsafe extern "C" fn voxel_load_world_data(
     if engine.import_save_data(data) { 1 } else { 0 }
 }
 
+/// Apply pending save snapshots to already-loaded chunks (for mid-game load).
+/// Patches density fields, re-extracts hermite data.
+/// Returns chunk keys that were patched via out_keys/out_count.
+/// Caller must request remesh for these chunks (e.g. via RequestPriorityGenerate).
+/// Caller must free the returned buffer via voxel_free_chunk_keys.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_apply_loaded_snapshots(
+    engine: *mut c_void,
+    out_count: *mut u32,
+) -> *mut FfiChunkCoord {
+    if engine.is_null() || out_count.is_null() {
+        if !out_count.is_null() { *out_count = 0; }
+        return ptr::null_mut();
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let patched = engine.apply_loaded_snapshots();
+    *out_count = patched.len() as u32;
+    if patched.is_empty() {
+        return ptr::null_mut();
+    }
+    let coords: Vec<FfiChunkCoord> = patched.iter().map(|&(x, y, z)| FfiChunkCoord { x, y, z }).collect();
+    let mut boxed = coords.into_boxed_slice();
+    let ptr = boxed.as_mut_ptr();
+    std::mem::forget(boxed);
+    ptr
+}
+
+/// Free a chunk keys buffer returned by voxel_apply_loaded_snapshots.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_free_chunk_keys(keys: *mut FfiChunkCoord, count: u32) {
+    if keys.is_null() || count == 0 { return; }
+    let _ = Vec::from_raw_parts(keys, count as usize, count as usize);
+}
+
 /// Check if the world has any unsaved modifications (mining, flatten, sleep, collapse).
 /// Returns 1 if modifications exist, 0 otherwise.
 #[no_mangle]

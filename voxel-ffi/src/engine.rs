@@ -1259,6 +1259,34 @@ impl VoxelEngine {
         }
     }
 
+    /// Apply pending snapshots to already-loaded density fields and re-extract hermite.
+    /// Returns chunk keys that were patched (caller should request remesh for these).
+    pub fn apply_loaded_snapshots(&self) -> Vec<(i32, i32, i32)> {
+        use voxel_gen::hermite_extract::extract_hermite_data;
+        let mut store = self.store.write().unwrap();
+        let keys: Vec<(i32, i32, i32)> = match &store.pending_snapshots {
+            Some(data) => data.chunk_snapshots.keys().copied().collect(),
+            None => return Vec::new(),
+        };
+        let mut patched = Vec::new();
+        for key in keys {
+            if store.density_fields.contains_key(&key) {
+                if store.apply_pending_snapshot(key) {
+                    // Re-extract hermite from patched density
+                    if let Some(df) = store.density_fields.get(&key) {
+                        let new_hermite = extract_hermite_data(df);
+                        store.hermite_data.insert(key, new_hermite);
+                    }
+                    patched.push(key);
+                }
+            }
+        }
+        if !patched.is_empty() {
+            eprintln!("[voxel-ffi] Applied {} loaded snapshots for mid-game reload", patched.len());
+        }
+        patched
+    }
+
     /// Check if the world has any unsaved modifications.
     pub fn has_world_modifications(&self) -> bool {
         match self.store.try_read() {
