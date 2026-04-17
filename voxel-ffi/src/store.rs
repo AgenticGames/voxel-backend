@@ -61,6 +61,14 @@ pub struct ChunkStore {
     pub preserved_snapshots: BTreeMap<(i32, i32, i32), ChunkSnapshot>,
     /// Pending snapshots loaded from a save file — applied as chunks are generated.
     pub pending_snapshots: Option<WorldSaveData>,
+    /// Round 7: content hash of the last ChunkMesh we sent over FFI per chunk.
+    /// Seam passes often regenerate identical mesh content (6.5× avg per chunk
+    /// during mining when the dirty neighborhood doesn't actually touch each
+    /// neighbor's geometry). Hash-compare combined (base + seam) mesh before
+    /// sending; skip the FFI round-trip when content is identical. UE's
+    /// hash-skip catches these on its side, this prevents Rust from even
+    /// doing the convert + bucket_by_material + FFI send.
+    pub last_sent_mesh_hash: HashMap<(i32, i32, i32), u64>,
 }
 
 impl ChunkStore {
@@ -83,6 +91,7 @@ impl ChunkStore {
             modification_tracker: ModificationTracker::new(),
             preserved_snapshots: BTreeMap::new(),
             pending_snapshots: None,
+            last_sent_mesh_hash: HashMap::new(),
         }
     }
 

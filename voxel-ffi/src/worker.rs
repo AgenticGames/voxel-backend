@@ -68,6 +68,7 @@ pub fn worker_loop(
     profiler: Arc<StreamingProfiler>,
     worker_id: usize,
     morph_manifest: Arc<Mutex<Option<voxel_sleep::ChangeManifest>>>,
+    regions_in_flight: Arc<DashMap<(i32, i32, i32), Arc<Mutex<()>>>>,
 ) {
     while !shutdown.load(Ordering::Relaxed) {
         // Priority 1: mine requests (non-blocking)
@@ -75,6 +76,7 @@ pub fn worker_loop(
             handle_request(
                 req, &result_tx, &store, &config, &stress_config, &generation_counters,
                 world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &mine_rx, &morph_manifest,
+                &regions_in_flight,
             );
             continue;
         }
@@ -94,6 +96,7 @@ pub fn worker_loop(
                 handle_request(
                     req, &result_tx, &store, &config, &stress_config, &generation_counters,
                     world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &mine_rx, &morph_manifest,
+                    &regions_in_flight,
                 );
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
@@ -483,16 +486,25 @@ fn handle_request(
     generate_rx: &Receiver<WorkerRequest>,
     mine_rx: &Receiver<WorkerRequest>,
     morph_manifest: &Arc<Mutex<Option<voxel_sleep::ChangeManifest>>>,
+    regions_in_flight: &Arc<DashMap<(i32, i32, i32), Arc<Mutex<()>>>>,
 ) {
     match req {
         WorkerRequest::PriorityGenerate { chunk, generation } |
         WorkerRequest::Generate { chunk, generation } => {
+            let is_priority = matches!(req, WorkerRequest::PriorityGenerate { .. });
+            if is_priority {
+                eprintln!("[LOAD-DIAG] Worker processing PriorityGenerate ({},{},{}) gen={}", chunk.0, chunk.1, chunk.2, generation);
+            }
             let chunk_start = Instant::now();
             let profiling = profiler.is_enabled();
 
             // Check if this generation is still current (stale detection)
             if let Some(counter) = generation_counters.get(&chunk) {
                 if counter.load(Ordering::Relaxed) != generation {
+                    if is_priority {
+                        eprintln!("[LOAD-DIAG] STALE SKIP PriorityGenerate ({},{},{}) gen={} vs counter={}",
+                            chunk.0, chunk.1, chunk.2, generation, counter.load(Ordering::Relaxed));
+                    }
                     profiler.record_stale_skip(worker_id);
                     return; // Stale request, skip
                 }
@@ -523,6 +535,9 @@ fn handle_request(
                 if profiling { t_store_read_wait += t0.elapsed(); }
 
                 if s.is_region_generated(&rk) && s.has_density(&chunk) {
+                    if is_priority {
+                        eprintln!("[LOAD-DIAG] Fast path for ({},{},{}) — density+hermite exist", chunk.0, chunk.1, chunk.2);
+                    }
                     let density = s.density_fields.get(&chunk).unwrap();
                     let hermite = s.hermite_data.get(&chunk).unwrap();
                     let cell_size = density.size - 1;
@@ -554,7 +569,52 @@ fn handle_request(
             let (mesh, dc_vertices, boundary_edges) = if let Some(result) = mesh_result {
                 result
             } else {
-                // Slow path: (re)generate region densities
+                // Fix A: Per-region mutex — blocks if another worker is
+                // generating this region, preventing redundant slow-path work.
+                let region_mutex = regions_in_flight
+                    .entry(rk)
+                    .or_insert_with(|| Arc::new(Mutex::new(())))
+                    .clone();
+                let _region_guard = region_mutex.lock().unwrap();
+
+                // Re-check fast path under the guard — the owner may have
+                // just finished generating this region while we were waiting.
+                let retry_result = {
+                    let t0 = Instant::now();
+                    let s = store.read().unwrap();
+                    if profiling { t_store_read_wait += t0.elapsed(); }
+
+                    if s.is_region_generated(&rk) && s.has_density(&chunk) {
+                        let density = s.density_fields.get(&chunk).unwrap();
+                        let hermite = s.hermite_data.get(&chunk).unwrap();
+                        let cell_size = density.size - 1;
+
+                        let t1 = Instant::now();
+                        let dc_verts = solve_dc_vertices(hermite, cell_size);
+                        t_dc_solve += t1.elapsed();
+
+                        let t2 = Instant::now();
+                        let mut m = generate_mesh(hermite, &dc_verts, cell_size);
+                        t_mesh_gen += t2.elapsed();
+
+                        let t_s = Instant::now();
+                        m.smooth(cfg.mesh_smooth_iterations, cfg.mesh_smooth_strength, cfg.mesh_boundary_smooth, Some(cell_size));
+                        if cfg.mesh_recalc_normals > 0 { m.recalculate_normals(); }
+                        t_mesh_smooth += t_s.elapsed();
+
+                        let b_edges = region_gen::extract_boundary_edges(hermite, cfg.chunk_size);
+                        Some((m, dc_verts, b_edges))
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(result) = retry_result {
+                    result
+                } else {
+                // Slow path: (re)generate region densities.
+                // Region guard is held throughout — other workers for this
+                // region block on the mutex until we finish.
                 was_slow_path = true;
 
                 let t0 = Instant::now();
@@ -617,7 +677,10 @@ fn handle_request(
                 // Check for pending mine requests between phases
                 try_handle_mine(mine_rx, result_tx, store, config, world_scale, fluid_event_tx);
 
-                // Pre-extract hermite data BEFORE acquiring write lock (expensive part)
+                // Pre-extract hermite data BEFORE acquiring write lock (expensive part).
+                // Round 6 Fix B experiment: tried serial here to avoid rayon contention
+                // across 8 workers. Reverted — measured +58% regression on initial_load.
+                // Parallelism wins even with contention.
                 let t2 = Instant::now();
                 let keyed_data: Vec<_> = densities
                     .into_par_iter()
@@ -886,6 +949,7 @@ fn handle_request(
 
                 let b_edges = region_gen::extract_boundary_edges(hermite, cfg.chunk_size);
                 (m, dc_verts, b_edges)
+                }
             };
 
             // Cache seam data and base mesh for this chunk
@@ -2406,10 +2470,62 @@ fn batched_seam_pass_inner(
         }
     }
 
+    // Round 7: hash combined mesh content; skip chunks whose hash matches
+    // the last sent. Saves Rust-side convert + bucket + FFI round-trip for
+    // duplicates. Hash is FNV-1a over each vertex's explicit fields (NOT
+    // raw struct bytes, which have undefined padding). ~150μs for a typical
+    // 2000-vertex chunk vs multi-ms for convert+bucket+send.
+    fn hash_mesh(m: &voxel_core::mesh::Mesh) -> u64 {
+        let mut h = 14695981039346656037u64; // FNV offset basis
+        let prime = 1099511628211u64;
+        let mut mix = |x: u64| { h ^= x; h = h.wrapping_mul(prime); };
+        mix(m.vertices.len() as u64);
+        mix(m.triangles.len() as u64);
+        for v in &m.vertices {
+            mix(v.position.x.to_bits() as u64);
+            mix(v.position.y.to_bits() as u64);
+            mix(v.position.z.to_bits() as u64);
+            mix(v.normal.x.to_bits() as u64);
+            mix(v.normal.y.to_bits() as u64);
+            mix(v.normal.z.to_bits() as u64);
+            mix(v.material as u8 as u64);
+        }
+        for t in &m.triangles {
+            mix(t.indices[0] as u64);
+            mix(t.indices[1] as u64);
+            mix(t.indices[2] as u64);
+        }
+        h
+    }
+
+    // Filter out chunks whose mesh content is identical to last send.
+    let mut kept: Vec<((i32, i32, i32), voxel_core::mesh::Mesh, u64)> = Vec::new();
+    {
+        let s = store.read().unwrap();
+        for (target, mesh) in to_send {
+            let new_hash = hash_mesh(&mesh);
+            if let Some(&prev) = s.last_sent_mesh_hash.get(&target) {
+                if prev == new_hash {
+                    // Identical mesh — skip resend. UE would hash-skip it anyway;
+                    // this prevents the Rust-side convert + bucket + FFI round trip.
+                    continue;
+                }
+            }
+            kept.push((target, mesh, new_hash));
+        }
+    }
+    // Record new hashes (brief write lock)
+    if !kept.is_empty() {
+        let mut s = store.write().unwrap();
+        for (target, _mesh, new_hash) in &kept {
+            s.last_sent_mesh_hash.insert(*target, *new_hash);
+        }
+    }
+
     if batch_as_mine {
         // Send all mine mesh updates as one atomic result — no pop-in
         let mut batch = Vec::new();
-        for (target, combined) in to_send {
+        for (target, combined, _hash) in kept {
             let mut converted = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
             crate::convert::bucket_mesh_by_material(&mut converted);
             if converted.indices.is_empty() { continue; }
@@ -2420,7 +2536,7 @@ fn batched_seam_pass_inner(
             let _ = result_tx.send(WorkerResult::MineBatchMesh { meshes: batch });
         }
     } else {
-        for (target, combined) in to_send {
+        for (target, combined, _hash) in kept {
             let mut converted = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
             crate::convert::bucket_mesh_by_material(&mut converted);
             if converted.indices.is_empty() { continue; }

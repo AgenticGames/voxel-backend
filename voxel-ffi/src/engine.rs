@@ -167,6 +167,14 @@ impl VoxelEngine {
         let profiler = Arc::new(StreamingProfiler::new(num_workers));
         let morph_manifest: Arc<Mutex<Option<voxel_sleep::ChangeManifest>>> = Arc::new(Mutex::new(None));
 
+        // Per-region generation-in-flight mutexes. Prevents 2+ workers from
+        // redundantly generating the same region's base_density (wasted CPU).
+        // A worker claims a region via the per-region Mutex before slow-path;
+        // other workers for the same region block on the mutex, then re-check
+        // the fast path once the owner finishes.
+        let regions_in_flight: Arc<DashMap<(i32, i32, i32), Arc<Mutex<()>>>> =
+            Arc::new(DashMap::new());
+
         let mut workers = Vec::with_capacity(num_workers);
         for worker_id in 0..num_workers {
             let shutdown = Arc::clone(&shutdown);
@@ -180,6 +188,7 @@ impl VoxelEngine {
             let fluid_tx = fluid_event_tx.clone();
             let prof = Arc::clone(&profiler);
             let morph_man = Arc::clone(&morph_manifest);
+            let rif = Arc::clone(&regions_in_flight);
 
             let handle = thread::spawn(move || {
                 worker_loop(
@@ -196,6 +205,7 @@ impl VoxelEngine {
                     prof,
                     worker_id,
                     morph_man,
+                    rif,
                 );
             });
             workers.push(handle);

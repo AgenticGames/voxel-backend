@@ -82,7 +82,11 @@ pub fn generate_region_densities(
     let chunk_size_f = eb;
     let mut timings = RegionTimings::default();
 
-    // Phase 1: Generate base density fields (parallel)
+    // Phase 1: Generate base density fields (parallel via rayon).
+    // Round 6 Fix B experiment: tried going serial here to avoid rayon pool
+    // contention across 8 FFI workers hitting this simultaneously. Reverted —
+    // measured +58% regression on initial_load wall time. par_iter's speedup
+    // (even with contention) outweighs the serial overhead. Kept as-is.
     let t0 = Instant::now();
     let coarse_skipped = std::sync::atomic::AtomicU32::new(0);
     let slowest_chunk_ms = std::sync::atomic::AtomicU64::new(0);
