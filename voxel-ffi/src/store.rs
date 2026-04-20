@@ -156,6 +156,7 @@ impl ChunkStore {
         self.stress_fields.remove(&key);
         self.support_fields.remove(&key);
         self.crystal_placements.remove(&key);
+        self.last_sent_mesh_hash.remove(&key);
         // Events referencing this chunk will still fire but the chunk won't be found
         // in density_fields during recalc — harmless skip.
 

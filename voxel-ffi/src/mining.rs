@@ -8,13 +8,22 @@ use crate::types::{ConvertedMesh, FfiMinedMaterials};
 
 /// Mine a sphere: set solid voxels within radius to Air.
 /// Returns the re-meshed dirty chunks (in UE coords) and mined material counts.
+/// Returned from mine_*: meshes, mined material counts, and the subset of dirty
+/// chunks that actually had an air↔solid flip (crystal recompute only needs these;
+/// the boundary-sync extras have density tweaks but no material change).
+pub struct MineOutcome {
+    pub meshes: Vec<((i32, i32, i32), ConvertedMesh)>,
+    pub mined: FfiMinedMaterials,
+    pub flipped_chunks: Vec<(i32, i32, i32)>,
+}
+
 pub fn mine_sphere(
     store: &mut ChunkStore,
     center: Vec3,
     radius: f32,
     config: &GenerationConfig,
     world_scale: f32,
-) -> (Vec<((i32, i32, i32), ConvertedMesh)>, FfiMinedMaterials) {
+) -> MineOutcome {
     let eb = config.effective_bounds();
     let vs = config.voxel_scale();
     let r2 = radius * radius;
@@ -106,6 +115,9 @@ pub fn mine_sphere(
         }
     }
 
+    // Capture material-flipped chunks BEFORE boundary-sync adds density-only extras.
+    let flipped_chunks: Vec<(i32, i32, i32)> = dirty_chunks.iter().map(|&(k, ..)| k).collect();
+
     // Sync boundary density between dirty chunks and face neighbors
     let extra_dirty = sync_boundary_density(
         &mut store.density_fields, &dirty_chunks, config.chunk_size,
@@ -117,7 +129,7 @@ pub fn mine_sphere(
     store.modification_tracker.mark_dirty_many(&dirty_keys);
 
     let meshes = store.remesh_dirty(&dirty_chunks, config, world_scale);
-    (meshes, FfiMinedMaterials { counts: mined_counts })
+    MineOutcome { meshes, mined: FfiMinedMaterials { counts: mined_counts }, flipped_chunks }
 }
 
 /// Mine by peeling: only remove surface voxels within radius.
@@ -128,7 +140,7 @@ pub fn mine_peel(
     radius: f32,
     config: &GenerationConfig,
     world_scale: f32,
-) -> (Vec<((i32, i32, i32), ConvertedMesh)>, FfiMinedMaterials) {
+) -> MineOutcome {
     let eb = config.effective_bounds();
     let vs = config.voxel_scale();
     let r2 = radius * radius;
@@ -241,6 +253,9 @@ pub fn mine_peel(
         }
     }
 
+    // Capture material-flipped chunks BEFORE boundary-sync adds density-only extras.
+    let flipped_chunks: Vec<(i32, i32, i32)> = dirty_chunks.iter().map(|&(k, ..)| k).collect();
+
     // Sync boundary density between dirty chunks and face neighbors
     let extra_dirty = sync_boundary_density(
         &mut store.density_fields, &dirty_chunks, config.chunk_size,
@@ -252,7 +267,7 @@ pub fn mine_peel(
     store.modification_tracker.mark_dirty_many(&dirty_keys);
 
     let meshes = store.remesh_dirty(&dirty_chunks, config, world_scale);
-    (meshes, FfiMinedMaterials { counts: mined_counts })
+    MineOutcome { meshes, mined: FfiMinedMaterials { counts: mined_counts }, flipped_chunks }
 }
 
 /// Laplacian smoothing of density values near the mine boundary.

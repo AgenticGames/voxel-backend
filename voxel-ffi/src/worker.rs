@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crossbeam_channel::{Receiver, Sender};
 use dashmap::DashMap;
@@ -152,15 +152,18 @@ fn try_handle_mine(
                 );
                 let radius = request.radius / world_scale;
                 let mut s = store.write().unwrap();
-                let (meshes, mined) = if request.mode == 0 {
+                let outcome = if request.mode == 0 {
                     crate::mining::mine_sphere(&mut s, center, radius, &cfg, world_scale)
                 } else {
                     let normal = from_ue_normal(request.normal_x, request.normal_y, request.normal_z);
                     crate::mining::mine_peel(&mut s, center, normal, radius, &cfg, world_scale)
                 };
-                let dirty_keys: Vec<(i32, i32, i32)> = meshes.into_iter().map(|(k, _)| k).collect();
-                // Crystal recompute
-                for &key in &dirty_keys {
+                let dirty_keys: Vec<(i32, i32, i32)> = outcome.meshes.into_iter().map(|(k, _)| k).collect();
+                let mined = outcome.mined;
+                // Fix B: crystal recompute only for chunks where a material flip
+                // actually occurred. Boundary-sync chunks (density tweaks only) keep
+                // their existing crystal placements — no recompute needed.
+                for &key in &outcome.flipped_chunks {
                     if let Some(density) = s.density_fields.get(&key) {
                         let coord = voxel_core::chunk::ChunkCoord::new(key.0, key.1, key.2);
                         let placements = voxel_gen::compute_crystals(coord, density, &cfg);
@@ -831,30 +834,31 @@ fn handle_request(
                                 Some((dc_verts, m, b_edges))
                             } else { None }
                         };
-                        if let Some((dc_verts, mesh, b_edges)) = computed {
-                            // 2. Update seam data + base mesh (write lock)
-                            {
-                                let mut s = store.write().unwrap();
-                                s.add_seam_data(key, ChunkSeamData {
-                                    dc_vertices: dc_verts,
-                                    world_origin: glam::Vec3::ZERO,
-                                    boundary_edges: b_edges,
-                                });
-                                s.base_meshes.insert(key, mesh.clone());
-                            }
-                            // 3. Send updated base mesh to UE
-                            let mut converted = convert_mesh_to_ue_scaled(&mesh, cfg.voxel_scale(), world_scale);
-                            crate::convert::bucket_mesh_by_material(&mut converted);
-                            if !converted.indices.is_empty() {
-                                let crystal_data = retrieve_crystal_data(store, key, cfg.voxel_scale(), world_scale);
-                                let _ = result_tx.send(WorkerResult::ChunkMesh {
-                                    chunk: key, mesh: converted, generation: 0, crystal_data,
-                                    zone_descriptors: Vec::new(),
-                                });
-                            }
+                        if let Some((dc_verts, mesh, _b_edges)) = computed {
+                            // Update seam data + base mesh (write lock).
+                            // No base-only send — batched_seam_pass below is the sole
+                            // sender. A base-only send here races with other workers'
+                            // seam passes: if their combined-mesh send arrives first
+                            // and records the hash, this base-only arrives later and
+                            // wipes seams via ClearAllMeshSections on UE, while
+                            // batched_seam_pass then hash-skips the redo.
+                            let mut s = store.write().unwrap();
+                            s.add_seam_data(key, ChunkSeamData {
+                                dc_vertices: dc_verts,
+                                world_origin: glam::Vec3::ZERO,
+                                boundary_edges: _b_edges,
+                            });
+                            s.base_meshes.insert(key, mesh);
                         }
                     }
                     if profiling { t_worm_backward_remesh = t_bwd_remesh.elapsed(); }
+
+                    // Seam pass for backward-carved chunks: the base-only sends above
+                    // land on UE via ClearAllMeshSections, wiping any seams those chunks
+                    // had before. Re-stitch seams now so the chunks don't show gaps.
+                    if !backward_dirty.is_empty() {
+                        batched_seam_pass(&backward_dirty, &cfg, store, result_tx, world_scale);
+                    }
                 }
 
                 // Cross-region boundary density sync: ensure region edge chunks
@@ -866,6 +870,11 @@ fn handle_request(
                         let mut s = store.write().unwrap();
                         all_dirty_keys = s.sync_cross_region_densities(&coords, cfg.chunk_size);
                     }
+
+                    let non_region_dirty: Vec<(i32, i32, i32)> = {
+                        let region_set: HashSet<_> = coords.iter().copied().collect();
+                        all_dirty_keys.iter().copied().filter(|k| !region_set.contains(k)).collect()
+                    };
 
                     if !all_dirty_keys.is_empty() {
                         // Phase 2: Extract hermite for all dirty chunks (read lock)
@@ -903,26 +912,21 @@ fn handle_request(
                                 } else { None }
                             };
                             if let Some((dc_verts, mesh, b_edges)) = computed {
-                                {
-                                    let mut s = store.write().unwrap();
-                                    s.add_seam_data(key, ChunkSeamData {
-                                        dc_vertices: dc_verts,
-                                        world_origin: glam::Vec3::ZERO,
-                                        boundary_edges: b_edges,
-                                    });
-                                    s.base_meshes.insert(key, mesh.clone());
-                                }
-                                let mut converted = convert_mesh_to_ue_scaled(&mesh, cfg.voxel_scale(), world_scale);
-                                crate::convert::bucket_mesh_by_material(&mut converted);
-                                if !converted.indices.is_empty() {
-                                    let crystal_data = retrieve_crystal_data(store, key, cfg.voxel_scale(), world_scale);
-                                    let _ = result_tx.send(WorkerResult::ChunkMesh {
-                                        chunk: key, mesh: converted, generation: 0, crystal_data,
-                                        zone_descriptors: Vec::new(),
-                                    });
-                                }
+                                // No base-only send — see backward-carve comment above.
+                                let mut s = store.write().unwrap();
+                                s.add_seam_data(key, ChunkSeamData {
+                                    dc_vertices: dc_verts,
+                                    world_origin: glam::Vec3::ZERO,
+                                    boundary_edges: b_edges,
+                                });
+                                s.base_meshes.insert(key, mesh);
                             }
                         }
+                    }
+
+                    // Seam pass for cross-region dirty chunks: sole sender.
+                    if !non_region_dirty.is_empty() {
+                        batched_seam_pass(&non_region_dirty, &cfg, store, result_tx, world_scale);
                     }
                 }
 
@@ -1146,6 +1150,21 @@ fn handle_request(
                 Vec::new()
             };
 
+            // Record the hash of the base-only mesh we're about to send. Without
+            // this, a cross-worker race can cause UE to end up with base-only:
+            //   W2 sends combined_A first (from its own seam pass as neighbor),
+            //   records hash_combined. W1 sends base-only A afterwards (this
+            //   line). W1's incremental_seam_pass computes combined_A (same
+            //   content as W2's) and hash-matches W2's recorded hash → skips.
+            //   UE channel order: combined, base-only, (nothing). UE ends on
+            //   base-only. Recording hash_base here means W1's subsequent
+            //   incremental sees hash_base (different from combined) and sends.
+            {
+                let base_hash = hash_mesh(&mesh);
+                let mut s = store.write().unwrap();
+                s.last_sent_mesh_hash.insert(chunk, base_hash);
+            }
+
             let t_send_start = Instant::now();
             let _ = result_tx.send(WorkerResult::ChunkMesh {
                 chunk,
@@ -1330,7 +1349,7 @@ fn handle_request(
 
             let mut s = store.write().unwrap();
             let store_chunks_count = s.density_fields.len();
-            let (meshes, mined) = if request.mode == 0 {
+            let outcome = if request.mode == 0 {
                 crate::mining::mine_sphere(&mut s, center, radius, &cfg, world_scale)
             } else {
                 let normal = from_ue_normal(
@@ -1338,7 +1357,10 @@ fn handle_request(
                 );
                 crate::mining::mine_peel(&mut s, center, normal, radius, &cfg, world_scale)
             };
-            let dirty_count = meshes.len();
+            let dirty_count = outcome.meshes.len();
+            let mined = outcome.mined;
+            let flipped_chunks = outcome.flipped_chunks;
+            let meshes = outcome.meshes;
             drop(s);
 
             // Perf: all mine_debug.txt I/O is now after drop(s), consolidated into
@@ -1365,9 +1387,12 @@ fn handle_request(
             // Single read lock for all computes, single write lock for all inserts —
             // replaces N× per-key read+write acquisition (~2-5ms saved per mine with
             // many dirty chunks under contended locking).
+            // Fix B: iterate only flipped_chunks (material actually changed).
+            // Boundary-sync extras in dirty_keys have density tweaks only, no new
+            // material placement, so their crystal layout is unchanged.
             let new_placements: Vec<_> = {
                 let s = store.read().unwrap();
-                dirty_keys.iter().filter_map(|&key| {
+                flipped_chunks.iter().filter_map(|&key| {
                     s.density_fields.get(&key).map(|density| {
                         let coord = voxel_core::chunk::ChunkCoord::new(key.0, key.1, key.2);
                         (key, voxel_gen::compute_crystals(coord, density, &cfg))
@@ -1446,8 +1471,10 @@ fn handle_request(
 
             // Step 1: Mine the sphere (same as normal pick)
             let mut s = store.write().unwrap();
-            let (meshes, mined) = crate::mining::mine_sphere(&mut s, center, rust_radius, &cfg, ws);
+            let outcome = crate::mining::mine_sphere(&mut s, center, rust_radius, &cfg, ws);
             drop(s);
+            let meshes = outcome.meshes;
+            let mined = outcome.mined;
 
             let dirty_keys: Vec<(i32, i32, i32)> = meshes.into_iter().map(|(k, _)| k).collect();
 
@@ -2370,6 +2397,24 @@ fn incremental_seam_pass(
         }
     }
 
+    // Pre-fetch all crystal data in ONE read lock to avoid N per-chunk lock acquires
+    // inside the send loop. This was a major contributor to store_read_wait under
+    // concurrent mining (8 workers contending for the store lock per-target).
+    let crystal_map: HashMap<(i32, i32, i32), Vec<FfiCrystalPlacement>> = {
+        let s = store.read().unwrap();
+        kept.iter()
+            .map(|(target, _, _)| {
+                let data = match s.crystal_placements.get(target) {
+                    Some(p) if !p.is_empty() => {
+                        crate::convert::convert_crystals_to_ue(p, cfg.voxel_scale(), world_scale)
+                    }
+                    _ => Vec::new(),
+                };
+                (*target, data)
+            })
+            .collect()
+    };
+
     // Convert and send outside the lock (non-blocking sends)
     let mut to_record: Vec<((i32, i32, i32), u64)> = Vec::with_capacity(kept.len());
     for (target, combined, new_hash) in kept {
@@ -2382,7 +2427,7 @@ fn incremental_seam_pass(
             continue;  // Don't overwrite base mesh with empty seam update
         }
 
-        let crystal_data = retrieve_crystal_data(store, target, cfg.voxel_scale(), world_scale);
+        let crystal_data = crystal_map.get(&target).cloned().unwrap_or_default();
         let _ = result_tx.send(WorkerResult::ChunkMesh {
             chunk: target,
             mesh: converted,
@@ -2535,6 +2580,22 @@ fn batched_seam_pass_inner(
         }
     }
 
+    // Pre-fetch all crystal data in ONE read lock to avoid N per-chunk acquires.
+    let crystal_map: HashMap<(i32, i32, i32), Vec<FfiCrystalPlacement>> = {
+        let s = store.read().unwrap();
+        kept.iter()
+            .map(|(target, _, _)| {
+                let data = match s.crystal_placements.get(target) {
+                    Some(p) if !p.is_empty() => {
+                        crate::convert::convert_crystals_to_ue(p, cfg.voxel_scale(), world_scale)
+                    }
+                    _ => Vec::new(),
+                };
+                (*target, data)
+            })
+            .collect()
+    };
+
     if batch_as_mine {
         // Send all mine mesh updates as one atomic result — no pop-in
         let mut batch = Vec::new();
@@ -2542,7 +2603,7 @@ fn batched_seam_pass_inner(
             let mut converted = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
             crate::convert::bucket_mesh_by_material(&mut converted);
             if converted.indices.is_empty() { continue; }
-            let crystal_data = retrieve_crystal_data(store, target, cfg.voxel_scale(), world_scale);
+            let crystal_data = crystal_map.get(&target).cloned().unwrap_or_default();
             batch.push((target, converted, crystal_data));
         }
         if !batch.is_empty() {
@@ -2553,7 +2614,7 @@ fn batched_seam_pass_inner(
             let mut converted = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
             crate::convert::bucket_mesh_by_material(&mut converted);
             if converted.indices.is_empty() { continue; }
-            let crystal_data = retrieve_crystal_data(store, target, cfg.voxel_scale(), world_scale);
+            let crystal_data = crystal_map.get(&target).cloned().unwrap_or_default();
             let _ = result_tx.send(WorkerResult::ChunkMesh {
                 chunk: target, mesh: converted, generation: 0, crystal_data,
                 zone_descriptors: Vec::new(),
