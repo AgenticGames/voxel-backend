@@ -36,6 +36,32 @@ fn spring_type_to_fluid_u8(st: &voxel_gen::springs::SpringType) -> u8 {
     }
 }
 
+/// FNV-1a hash over mesh's explicit fields (NOT raw struct bytes — those have
+/// undefined padding). Used to hash-compare combined (base + seam) meshes and
+/// skip FFI round-trips when content is unchanged. ~150μs for a 2000-vertex chunk.
+fn hash_mesh(m: &voxel_core::mesh::Mesh) -> u64 {
+    let mut h = 14695981039346656037u64;
+    let prime = 1099511628211u64;
+    let mut mix = |x: u64| { h ^= x; h = h.wrapping_mul(prime); };
+    mix(m.vertices.len() as u64);
+    mix(m.triangles.len() as u64);
+    for v in &m.vertices {
+        mix(v.position.x.to_bits() as u64);
+        mix(v.position.y.to_bits() as u64);
+        mix(v.position.z.to_bits() as u64);
+        mix(v.normal.x.to_bits() as u64);
+        mix(v.normal.y.to_bits() as u64);
+        mix(v.normal.z.to_bits() as u64);
+        mix(v.material as u8 as u64);
+    }
+    for t in &m.triangles {
+        mix(t.indices[0] as u64);
+        mix(t.indices[1] as u64);
+        mix(t.indices[2] as u64);
+    }
+    h
+}
+
 /// Retrieve existing crystal data from ChunkStore for a chunk, converted to UE coords.
 /// Used by remesh/seam/mining paths that don't recompute crystals from density.
 fn retrieve_crystal_data(
@@ -491,20 +517,12 @@ fn handle_request(
     match req {
         WorkerRequest::PriorityGenerate { chunk, generation } |
         WorkerRequest::Generate { chunk, generation } => {
-            let is_priority = matches!(req, WorkerRequest::PriorityGenerate { .. });
-            if is_priority {
-                eprintln!("[LOAD-DIAG] Worker processing PriorityGenerate ({},{},{}) gen={}", chunk.0, chunk.1, chunk.2, generation);
-            }
             let chunk_start = Instant::now();
             let profiling = profiler.is_enabled();
 
             // Check if this generation is still current (stale detection)
             if let Some(counter) = generation_counters.get(&chunk) {
                 if counter.load(Ordering::Relaxed) != generation {
-                    if is_priority {
-                        eprintln!("[LOAD-DIAG] STALE SKIP PriorityGenerate ({},{},{}) gen={} vs counter={}",
-                            chunk.0, chunk.1, chunk.2, generation, counter.load(Ordering::Relaxed));
-                    }
                     profiler.record_stale_skip(worker_id);
                     return; // Stale request, skip
                 }
@@ -535,9 +553,6 @@ fn handle_request(
                 if profiling { t_store_read_wait += t0.elapsed(); }
 
                 if s.is_region_generated(&rk) && s.has_density(&chunk) {
-                    if is_priority {
-                        eprintln!("[LOAD-DIAG] Fast path for ({},{},{}) — density+hermite exist", chunk.0, chunk.1, chunk.2);
-                    }
                     let density = s.density_fields.get(&chunk).unwrap();
                     let hermite = s.hermite_data.get(&chunk).unwrap();
                     let cell_size = density.size - 1;
@@ -1306,15 +1321,6 @@ fn handle_request(
             batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
         }
         WorkerRequest::Mine { request } => {
-            {
-                use std::io::Write;
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-                    .open("D:/Unreal Projects/Mithril2026/Saved/mine_debug.txt")
-                {
-                    let _ = writeln!(f, "[MINE] request: ({},{},{}) r={} mode={}",
-                        request.world_x, request.world_y, request.world_z, request.radius, request.mode);
-                }
-            }
             let cfg = config.read().unwrap().clone();
 
             let center = from_ue_world_pos(
@@ -1323,15 +1329,7 @@ fn handle_request(
             let radius = request.radius / world_scale;
 
             let mut s = store.write().unwrap();
-            {
-                use std::io::Write;
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-                    .open("D:/Unreal Projects/Mithril2026/Saved/mine_debug.txt")
-                {
-                    let _ = writeln!(f, "[MINE] rust coords: ({:.1},{:.1},{:.1}) r={:.1}, store chunks={}",
-                        center.x, center.y, center.z, radius, s.density_fields.len());
-                }
-            }
+            let store_chunks_count = s.density_fields.len();
             let (meshes, mined) = if request.mode == 0 {
                 crate::mining::mine_sphere(&mut s, center, radius, &cfg, world_scale)
             } else {
@@ -1340,31 +1338,46 @@ fn handle_request(
                 );
                 crate::mining::mine_peel(&mut s, center, normal, radius, &cfg, world_scale)
             };
+            let dirty_count = meshes.len();
+            drop(s);
+
+            // Perf: all mine_debug.txt I/O is now after drop(s), consolidated into
+            // ONE file open (was 3 opens, 2 of them under the write lock — blocking
+            // every other worker for ~200-800μs on a contended NTFS handle cache).
             {
                 use std::io::Write;
                 if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
                     .open("D:/Unreal Projects/Mithril2026/Saved/mine_debug.txt")
                 {
-                    let _ = writeln!(f, "[MINE] complete: {} dirty chunks", meshes.len());
+                    let _ = writeln!(f, "[MINE] request: ({},{},{}) r={} mode={} | rust coords: ({:.1},{:.1},{:.1}) r={:.1}, store chunks={} | complete: {} dirty chunks",
+                        request.world_x, request.world_y, request.world_z, request.radius, request.mode,
+                        center.x, center.y, center.z, radius, store_chunks_count,
+                        dirty_count);
                 }
             }
-            drop(s);
 
             // Collect dirty chunk keys — don't send meshes yet (seam pass will send
             // them with seam quads included, avoiding a seamless→seamed flash)
             let dirty_keys: Vec<(i32, i32, i32)> = meshes.into_iter().map(|(k, _)| k).collect();
 
             // Recompute crystal placements for dirty chunks so batched_seam_pass
-            // picks up the updated data via retrieve_crystal_data
-            for &key in &dirty_keys {
+            // picks up the updated data via retrieve_crystal_data.
+            // Single read lock for all computes, single write lock for all inserts —
+            // replaces N× per-key read+write acquisition (~2-5ms saved per mine with
+            // many dirty chunks under contended locking).
+            let new_placements: Vec<_> = {
                 let s = store.read().unwrap();
-                if let Some(density) = s.density_fields.get(&key) {
-                    let coord = voxel_core::chunk::ChunkCoord::new(key.0, key.1, key.2);
-                    let placements = voxel_gen::compute_crystals(coord, density, &cfg);
-                    drop(s);
-                    store.write().unwrap().crystal_placements.insert(key, placements);
-                } else {
-                    drop(s);
+                dirty_keys.iter().filter_map(|&key| {
+                    s.density_fields.get(&key).map(|density| {
+                        let coord = voxel_core::chunk::ChunkCoord::new(key.0, key.1, key.2);
+                        (key, voxel_gen::compute_crystals(coord, density, &cfg))
+                    })
+                }).collect()
+            };
+            if !new_placements.is_empty() {
+                let mut s = store.write().unwrap();
+                for (key, placements) in new_placements {
+                    s.crystal_placements.insert(key, placements);
                 }
             }
 
@@ -2341,8 +2354,25 @@ fn incremental_seam_pass(
         }
     } // read lock released
 
+    // Hash + filter: skip sends whose combined mesh matches last-sent.
+    // Without this, every neighbor seam pass resends unchanged meshes on
+    // every mine — batched_seam_pass had hash-skip; single-chunk path didn't.
+    let hashed: Vec<((i32, i32, i32), voxel_core::mesh::Mesh, u64)> =
+        to_send.into_iter().map(|(k, m)| { let h = hash_mesh(&m); (k, m, h) }).collect();
+    let mut kept: Vec<((i32, i32, i32), voxel_core::mesh::Mesh, u64)> = Vec::with_capacity(hashed.len());
+    {
+        let s = store.read().unwrap();
+        for (target, mesh, new_hash) in hashed {
+            if let Some(&prev) = s.last_sent_mesh_hash.get(&target) {
+                if prev == new_hash { continue; }
+            }
+            kept.push((target, mesh, new_hash));
+        }
+    }
+
     // Convert and send outside the lock (non-blocking sends)
-    for (target, combined) in to_send {
+    let mut to_record: Vec<((i32, i32, i32), u64)> = Vec::with_capacity(kept.len());
+    for (target, combined, new_hash) in kept {
         let t2 = Instant::now();
         let mut converted = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
         crate::convert::bucket_mesh_by_material(&mut converted);
@@ -2360,7 +2390,12 @@ fn incremental_seam_pass(
             crystal_data,
             zone_descriptors: Vec::new(),
         });
+        to_record.push((target, new_hash));
         candidates_sent += 1;
+    }
+    if !to_record.is_empty() {
+        let mut s = store.write().unwrap();
+        for (k, h) in to_record { s.last_sent_mesh_hash.insert(k, h); }
     }
 
     SeamPassTimings {
@@ -2472,42 +2507,20 @@ fn batched_seam_pass_inner(
 
     // Round 7: hash combined mesh content; skip chunks whose hash matches
     // the last sent. Saves Rust-side convert + bucket + FFI round-trip for
-    // duplicates. Hash is FNV-1a over each vertex's explicit fields (NOT
-    // raw struct bytes, which have undefined padding). ~150μs for a typical
-    // 2000-vertex chunk vs multi-ms for convert+bucket+send.
-    fn hash_mesh(m: &voxel_core::mesh::Mesh) -> u64 {
-        let mut h = 14695981039346656037u64; // FNV offset basis
-        let prime = 1099511628211u64;
-        let mut mix = |x: u64| { h ^= x; h = h.wrapping_mul(prime); };
-        mix(m.vertices.len() as u64);
-        mix(m.triangles.len() as u64);
-        for v in &m.vertices {
-            mix(v.position.x.to_bits() as u64);
-            mix(v.position.y.to_bits() as u64);
-            mix(v.position.z.to_bits() as u64);
-            mix(v.normal.x.to_bits() as u64);
-            mix(v.normal.y.to_bits() as u64);
-            mix(v.normal.z.to_bits() as u64);
-            mix(v.material as u8 as u64);
-        }
-        for t in &m.triangles {
-            mix(t.indices[0] as u64);
-            mix(t.indices[1] as u64);
-            mix(t.indices[2] as u64);
-        }
-        h
-    }
+    // duplicates. UE's hash-skip catches these downstream; doing it here
+    // prevents even doing convert + bucket + FFI send on the Rust side.
+
+    // Hash all meshes FIRST (no lock held — hashing uses only owned data).
+    let hashed: Vec<((i32, i32, i32), voxel_core::mesh::Mesh, u64)> =
+        to_send.into_iter().map(|(k, m)| { let h = hash_mesh(&m); (k, m, h) }).collect();
 
     // Filter out chunks whose mesh content is identical to last send.
-    let mut kept: Vec<((i32, i32, i32), voxel_core::mesh::Mesh, u64)> = Vec::new();
+    let mut kept: Vec<((i32, i32, i32), voxel_core::mesh::Mesh, u64)> = Vec::with_capacity(hashed.len());
     {
         let s = store.read().unwrap();
-        for (target, mesh) in to_send {
-            let new_hash = hash_mesh(&mesh);
+        for (target, mesh, new_hash) in hashed {
             if let Some(&prev) = s.last_sent_mesh_hash.get(&target) {
                 if prev == new_hash {
-                    // Identical mesh — skip resend. UE would hash-skip it anyway;
-                    // this prevents the Rust-side convert + bucket + FFI round trip.
                     continue;
                 }
             }
