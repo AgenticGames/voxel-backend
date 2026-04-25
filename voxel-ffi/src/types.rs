@@ -1256,12 +1256,17 @@ pub enum WorkerRequest {
         base_x: i32,
         base_y: i32,
         base_z: i32,
+        // Exact sub-voxel Y from UE (in voxel units). The integer base_y is
+        // floor(base_y_float). Used by the SDF flatten to position the iso
+        // surface within sub-voxel precision so buildings don't float/sink.
+        base_y_float: f32,
         host_material: u8,
         footprint_voxels: i32,
         clearance_voxels: i32,
     },
     BuildingFlattenBatch {
-        buildings: Vec<(i32, i32, i32, u8, i32, i32)>, // (base_x, base_y, base_z, host_material, footprint, clearance)
+        // (base_x, base_y, base_z, base_y_float, host_material, footprint, clearance)
+        buildings: Vec<(i32, i32, i32, f32, u8, i32, i32)>,
     },
     Unload {
         chunk: (i32, i32, i32),

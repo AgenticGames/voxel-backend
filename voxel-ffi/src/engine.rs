@@ -1045,10 +1045,12 @@ impl VoxelEngine {
         let rust_z = -ue_y / scale;
 
         let bts = footprint_voxels.max(1);
-        // Center the footprint on the building position (UE already snapped)
+        // Center the footprint on the building position (UE already snapped).
         let base_x = rust_x.round() as i32 - bts / 2;
-        // Use exact surface Y (no terrace grid snap) — UE already Z-snapped nearby buildings
-        let base_y = rust_y.round() as i32;
+        // KEEP the exact float Y for sub-voxel surface placement; the integer
+        // base_y is just floor() for chunk indexing.
+        let base_y_float = rust_y;
+        let base_y = rust_y.floor() as i32;
         let base_z = rust_z.round() as i32 - bts / 2;
 
         let host_material = {
@@ -1060,6 +1062,7 @@ impl VoxelEngine {
             base_x,
             base_y,
             base_z,
+            base_y_float,
             host_material,
             footprint_voxels: bts,
             clearance_voxels: clearance_voxels.max(2),
@@ -1086,19 +1089,20 @@ impl VoxelEngine {
         let bts = footprint_voxels.max(1);
         let clr = clearance_voxels.max(2);
         let cfg = self.config.read().unwrap();
-        let buildings: Vec<(i32, i32, i32, u8, i32, i32)> = ue_positions
+        let buildings: Vec<(i32, i32, i32, f32, u8, i32, i32)> = ue_positions
             .iter()
             .map(|&(ue_x, ue_y, ue_z)| {
                 let rust_x = ue_x / scale;
                 let rust_y = ue_z / scale;
                 let rust_z = -ue_y / scale;
                 let base_x = rust_x.round() as i32 - bts / 2;
-                let base_y = rust_y.round() as i32;
+                let base_y_float = rust_y;
+                let base_y = rust_y.floor() as i32;
                 let base_z = rust_z.round() as i32 - bts / 2;
                 let host_material =
                     voxel_gen::density::host_rock_for_depth(rust_y as f64, &cfg.ore.host_rock)
                         as u8;
-                (base_x, base_y, base_z, host_material, bts, clr)
+                (base_x, base_y, base_z, base_y_float, host_material, bts, clr)
             })
             .collect();
         drop(cfg);

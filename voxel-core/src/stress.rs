@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
+use voxel_noise::{simplex::Simplex3D, NoiseSource};
 
 use crate::density::DensityField;
 use crate::material::Material;
@@ -1676,71 +1677,238 @@ pub fn detect_and_execute_collapses_v2(
             });
         }
 
-        // Place rubble as a natural mound at landing position.
-        // Instead of 1:1 translation (which creates flat block copies), we build a
-        // mound shape: tallest at center, tapering toward edges, with ~70% fill.
-        {
+        // Place rubble as a sealed elliptical cone, then add roughness on top.
+        //
+        // Three passes, each one ADDITIVE — no pass ever removes solid:
+        //
+        //  1. SEALED CONE BASE. Stack of fully-filled elliptical discs from
+        //     the floor up. At height fraction f the disc radius is
+        //     (1 - f) * full_radius. Every air cell inside the cone gets
+        //     solid — no per-column breaks, no noise gating. Guaranteed sealed.
+        //
+        //  2. NOISE CRUST. Walk each (x, z) inside the cone footprint and
+        //     stamp 0–2 extra voxels above its cone-top where simplex noise
+        //     is positive. Pure additive — breaks the perfect-cone silhouette.
+        //
+        //  3. BOULDERS. A handful of half-buried solid spheres on the surface
+        //     using the dominant slab material for chunky roughness.
+        //
+        // Pile sizing: cone volume = pi*R^2*H/3, solve for H from
+        // collapsed_volume * rubble_fill_ratio. Seeded from collapse center
+        // for determinism (multiplayer-safe).
+        if config.rubble_enabled && !collapsed_voxels.is_empty() {
+            let pile_seed: u64 = (center.0 as i64 as u64)
+                .wrapping_mul(73856093)
+                ^ (center.1 as i64 as u64).wrapping_mul(19349663)
+                ^ (center.2 as i64 as u64).wrapping_mul(83492791);
+
+            let crust_noise = Simplex3D::new(pile_seed);
+            let boulder_noise = Simplex3D::new(pile_seed.wrapping_add(1));
+
             let cx_f = center.0;
             let cz_f = center.2;
-            // Compute max radius of the collapse footprint
-            let max_radius = {
-                let dx = (bb_max.0 - bb_min.0) as f32 * 0.5;
-                let dz = (bb_max.2 - bb_min.2) as f32 * 0.5;
-                dx.max(dz).max(1.0)
-            };
-            // Slab thickness = how many Y layers the slab spans
+            // Footprint radii. Pad by 1 voxel + floor at 1.5 so even tiny
+            // single-voxel slabs still produce a small visible pile.
+            let radius_x = ((bb_max.0 - bb_min.0) as f32 * 0.5 + 1.0).max(1.5);
+            let radius_z = ((bb_max.2 - bb_min.2) as f32 * 0.5 + 1.0).max(1.5);
+            let avg_radius = (radius_x + radius_z) * 0.5;
             let slab_thickness = (bb_max.1 - bb_min.1 + 1).max(1) as f32;
 
-            // Target rubble fill: 70% of collapsed volume, capped
-            let target_fill = (collapsed_voxels.len() as f32 * config.rubble_fill_ratio).ceil() as usize;
+            let target_volume = (collapsed_voxels.len() as f32 * config.rubble_fill_ratio)
+                .max(1.0);
+
+            // Cone volume = (pi * R^2 * H) / 3 → H = 3V / (pi * R^2).
+            let cone_volume_factor = std::f32::consts::PI * radius_x * radius_z / 3.0;
+            let cone_h_raw = target_volume / cone_volume_factor.max(0.5);
+            // Allow slightly taller than slab so wide flat slabs still pile up.
+            let cone_h_cap = (slab_thickness * 1.2).max(2.0);
+            let cone_h_max = cone_h_raw.clamp(1.0, cone_h_cap);
+            let cone_h_int = cone_h_max.ceil() as i32;
+
+            let floor_y = bb_min.1 - landing_offset;
             let mut placed = 0usize;
 
-            // Sort voxels by distance to center (place center first for mound shape)
-            let mut sorted_voxels: Vec<&CollapsedVoxel> = collapsed_voxels.iter()
-                .filter(|cv| cv.material != Material::Air)
-                .collect();
-            sorted_voxels.sort_by(|a, b| {
-                let da = (a.world_x as f32 - cx_f).powi(2) + (a.world_z as f32 - cz_f).powi(2);
-                let db = (b.world_x as f32 - cx_f).powi(2) + (b.world_z as f32 - cz_f).powi(2);
-                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-            });
+            // ── Pass 1: SEALED CONE BASE ──
+            //
+            // For each layer dy: compute disc radius, fill EVERY air cell in
+            // that ellipse. No noise, no per-column logic, no breaks. The
+            // cone is closed by construction.
+            for dy in 0..cone_h_int {
+                let y = floor_y + dy;
+                // f = 0 at base, 1 at top. Floor at 0.05 so the very tip is
+                // still half a voxel wide instead of an infinitesimal point.
+                let f = (dy as f32 / cone_h_max).clamp(0.0, 1.0);
+                let shrink = (1.0 - f).max(0.05);
+                let rx = (radius_x * shrink).max(0.5);
+                let rz = (radius_z * shrink).max(0.5);
 
-            for cv in &sorted_voxels {
-                if placed >= target_fill {
-                    break;
-                }
+                let x0 = (cx_f - rx).floor() as i32 - 1;
+                let x1 = (cx_f + rx).ceil() as i32 + 1;
+                let z0 = (cz_f - rz).floor() as i32 - 1;
+                let z1 = (cz_f + rz).ceil() as i32 + 1;
 
-                // Distance from center as 0..1
-                let dist_xz = ((cv.world_x as f32 - cx_f).powi(2) + (cv.world_z as f32 - cz_f).powi(2)).sqrt();
-                let norm_dist = (dist_xz / max_radius).min(1.0);
+                for x in x0..=x1 {
+                    for z in z0..=z1 {
+                        let nx = (x as f32 - cx_f) / rx;
+                        let nz = (z as f32 - cz_f) / rz;
+                        if nx * nx + nz * nz > 1.0 { continue; }
 
-                // Mound height: tallest at center, tapers to 0 at edges
-                // Uses a smooth falloff: (1 - dist^1.5) * thickness * 0.6
-                let mound_height = ((1.0 - norm_dist.powf(1.5)) * slab_thickness * 0.6).round() as i32;
+                        let (rkey, rlx, rly, rlz) =
+                            world_to_chunk_local(x, y, z, chunk_size);
+                        let is_air = density_fields
+                            .get(&rkey)
+                            .map(|df| !df.get(rlx, rly, rlz).material.is_solid())
+                            .unwrap_or(false);
+                        if !is_air { continue; }
 
-                // Place at floor level + mound height offset
-                let base_y = bb_min.1 - landing_offset; // floor level
-                let place_y = base_y + mound_height.max(0);
-
-                let (rkey, rlx, rly, rlz) = world_to_chunk_local(
-                    cv.world_x, place_y, cv.world_z, chunk_size,
-                );
-
-                let is_air = density_fields
-                    .get(&rkey)
-                    .map(|df| !df.get(rlx, rly, rlz).material.is_solid())
-                    .unwrap_or(false);
-
-                if is_air {
-                    if let Some(df) = density_fields.get_mut(&rkey) {
-                        let sample = df.get_mut(rlx, rly, rlz);
-                        sample.density = 1.0;
-                        sample.material = cv.material;
+                        if let Some(df) = density_fields.get_mut(&rkey) {
+                            let sample = df.get_mut(rlx, rly, rlz);
+                            sample.density = 1.0;
+                            sample.material = dominant_material;
+                        }
+                        affected_chunks_set.insert(rkey);
+                        placed += 1;
                     }
-                    affected_chunks_set.insert(rkey);
-                    placed += 1;
                 }
             }
+
+            // ── Pass 2: NOISE CRUST ──
+            //
+            // For each (x, z) inside the cone footprint, find the cone-top Y
+            // for that column and stamp 0..=2 extra voxels above where simplex
+            // noise is positive. Pure additive; never subtracts from Pass 1.
+            const CRUST_MAX_EXTRA: i32 = 2;
+            let xmin = (cx_f - radius_x).floor() as i32 - 1;
+            let xmax = (cx_f + radius_x).ceil() as i32 + 1;
+            let zmin = (cz_f - radius_z).floor() as i32 - 1;
+            let zmax = (cz_f + radius_z).ceil() as i32 + 1;
+
+            for x in xmin..=xmax {
+                for z in zmin..=zmax {
+                    let nx = (x as f32 - cx_f) / radius_x;
+                    let nz = (z as f32 - cz_f) / radius_z;
+                    let r2 = nx * nx + nz * nz;
+                    if r2 > 1.0 { continue; }
+
+                    // Cone-top Y for this column: r(y)/R = 1 - f, so the
+                    // column top in voxels = (1 - sqrt(r2)) * cone_h_max.
+                    let column_h = ((1.0 - r2.sqrt()) * cone_h_max).max(0.0);
+                    let column_top_dy = column_h.floor() as i32;
+
+                    let n_lo = crust_noise.sample(
+                        x as f64 * 0.22, 0.0, z as f64 * 0.22,
+                    ) as f32;
+                    let n_hi = crust_noise.sample(
+                        x as f64 * 0.55, 7.0, z as f64 * 0.55,
+                    ) as f32;
+                    let n = n_lo * 0.7 + n_hi * 0.4;
+                    if n <= 0.0 { continue; }
+
+                    let extra = ((n * (CRUST_MAX_EXTRA as f32 + 0.5)).round() as i32)
+                        .clamp(0, CRUST_MAX_EXTRA);
+                    if extra <= 0 { continue; }
+
+                    for k in 1..=extra {
+                        let y = floor_y + column_top_dy + k;
+                        let (rkey, rlx, rly, rlz) =
+                            world_to_chunk_local(x, y, z, chunk_size);
+                        let is_air = density_fields
+                            .get(&rkey)
+                            .map(|df| !df.get(rlx, rly, rlz).material.is_solid())
+                            .unwrap_or(false);
+                        if !is_air { continue; }
+
+                        if let Some(df) = density_fields.get_mut(&rkey) {
+                            let sample = df.get_mut(rlx, rly, rlz);
+                            sample.density = 1.0;
+                            sample.material = dominant_material;
+                        }
+                        affected_chunks_set.insert(rkey);
+                        placed += 1;
+                    }
+                }
+            }
+
+            // ── Pass 3: BOULDERS ──
+            //
+            // 2–8 half-buried spheres around the cone, sitting on the cone-top
+            // for their (x, z). Edge noise so they aren't perfect spheres.
+            let boulder_count = ((avg_radius * 0.6) as usize).clamp(2, 8);
+            for i in 0..boulder_count {
+                // Sweep angles around the cone axis; offset radially via noise
+                // so they don't land on a perfect ring.
+                let theta = (i as f32) * std::f32::consts::TAU / (boulder_count as f32);
+                let radial_n = boulder_noise.sample(
+                    (i as f64) * 1.31, 0.0, (i as f64) * 0.93,
+                ) as f32;
+                // Radial fraction in [0.2, 0.7] of the footprint.
+                let radial_frac = 0.2 + (radial_n * 0.5 + 0.5) * 0.5;
+                let bx = (cx_f + theta.cos() * radius_x * radial_frac).round() as i32;
+                let bz = (cz_f + theta.sin() * radius_z * radial_frac).round() as i32;
+
+                // Cone-top Y at this (bx, bz) so boulders sit ON the pile.
+                let nx = (bx as f32 - cx_f) / radius_x;
+                let nz = (bz as f32 - cz_f) / radius_z;
+                let br2 = (nx * nx + nz * nz).min(1.0);
+                let column_h = ((1.0 - br2.sqrt()) * cone_h_max).max(0.0);
+                let by = floor_y + column_h.floor() as i32;
+
+                let size_n = boulder_noise.sample(
+                    bx as f64 * 0.41, by as f64 * 0.41, bz as f64 * 0.41,
+                ) as f32;
+                let radius = 1.5 + (size_n * 0.5 + 0.5) * 1.2; // 1.5..2.7
+
+                // Half-bury so it looks settled.
+                let bury = (radius * 0.4) as i32;
+                let cy = (by - bury) as f32;
+
+                let r_ceil = radius.ceil() as i32;
+                let r_sq = radius * radius;
+                for ox in -r_ceil..=r_ceil {
+                    for oy in -r_ceil..=r_ceil {
+                        for oz in -r_ceil..=r_ceil {
+                            let dx = ox as f32;
+                            let dy_b = oy as f32;
+                            let dz = oz as f32;
+                            let d2 = dx * dx + dy_b * dy_b + dz * dz;
+                            if d2 > r_sq { continue; }
+
+                            // Edge noise so boulders aren't perfect spheres.
+                            let edge = (d2 / r_sq).sqrt();
+                            let edge_n = boulder_noise.sample(
+                                (bx + ox) as f64 * 0.7,
+                                (cy + oy as f32) as f64 * 0.7,
+                                (bz + oz) as f64 * 0.7,
+                            ) as f32;
+                            if edge > 0.85 + edge_n * 0.20 { continue; }
+
+                            let wx_b = bx + ox;
+                            let wy_b = cy as i32 + oy;
+                            let wz_b = bz + oz;
+                            if wy_b < floor_y { continue; }
+
+                            let (rkey, rlx, rly, rlz) = world_to_chunk_local(
+                                wx_b, wy_b, wz_b, chunk_size,
+                            );
+                            let is_air = density_fields
+                                .get(&rkey)
+                                .map(|df| !df.get(rlx, rly, rlz).material.is_solid())
+                                .unwrap_or(false);
+                            if !is_air { continue; }
+
+                            if let Some(df) = density_fields.get_mut(&rkey) {
+                                let sample = df.get_mut(rlx, rly, rlz);
+                                sample.density = 1.0;
+                                sample.material = dominant_material;
+                            }
+                            affected_chunks_set.insert(rkey);
+                            placed += 1;
+                        }
+                    }
+                }
+            }
+
+            let _ = placed;
         }
 
         let slab = CollapseSlab {
@@ -2436,5 +2604,151 @@ mod tests {
             "Wide ceiling should have positive stress without strut, got {}", stress_without);
         assert!(stress_with < stress_without,
             "Strut should reduce v2 stress: with={}, without={}", stress_with, stress_without);
+    }
+
+    /// Sweep tunnel heights (air gap size) and measure ceiling stress.
+    /// This shows the stress curve vs span width — used for tuning overhang_weight,
+    /// span_weight, and min_safe_span.
+    #[test]
+    #[ignore] // Run with: cargo test --release -p voxel-core sweep_ceiling_stress -- --ignored --nocapture
+    fn sweep_ceiling_stress() {
+        let mut config = default_config();
+        // Set surface_y to 32 so it's at the top of our test world (chunk y=2, local y=0)
+        // This ensures the ground connectivity flood can reach our test geometry
+        config.surface_y = 32;
+
+        println!("\n=== Ceiling Stress vs Tunnel Height (Air Gap) ===");
+        println!("{:<12} {:<12} {:<12} {:<12} {:<12}",
+            "air_gap", "v2_stress", "overstressed", "would_collapse", "support_score");
+        println!("{}", "-".repeat(60));
+
+        for air_gap in [2, 4, 6, 8, 10, 12, 14, 16] {
+            // Tunnel from y=0 to y=air_gap-1, ceiling at y=air_gap
+            let tunnel_y_max = (air_gap - 1).min(15);
+            let (density_fields, _, support_fields) = make_tunnel_world(0, tunnel_y_max);
+
+            // Run ground connectivity
+            let all_keys: Vec<(i32,i32,i32)> = density_fields.keys().cloned().collect();
+            let scores = ground_connectivity_pass(&density_fields, &all_keys, 16, &config);
+
+            // Measure stress at ceiling center (just above the tunnel)
+            let ceiling_y = (tunnel_y_max + 1).min(16);
+            let (stress, _) = calc_voxel_stress_v2(
+                &density_fields, &support_fields, &scores, &config,
+                8, ceiling_y as i32, 8, 16,
+            );
+
+            let support_score = scores.get(&(0, 0, 0))
+                .map(|s| s.get(8, ceiling_y, 8))
+                .unwrap_or(-1.0);
+
+            let overstressed = stress >= 1.0;
+            let would_collapse = stress >= config.slab_cohesion_threshold;
+
+            println!("{:<12} {:<12.4} {:<12} {:<12} {:<12.4}",
+                air_gap, stress, overstressed, would_collapse, support_score);
+        }
+        println!();
+
+        // Now sweep overhang_weight to show sensitivity
+        println!("=== Sensitivity: overhang_weight (gap=12, ceiling at y=12) ===");
+        println!("{:<16} {:<12} {:<12}",
+            "overhang_weight", "v2_stress", "would_collapse");
+        println!("{}", "-".repeat(40));
+
+        for &ow in &[0.01, 0.025, 0.05, 0.075, 0.10, 0.15, 0.20] {
+            let mut cfg = default_config();
+            cfg.surface_y = 32;
+            cfg.overhang_weight = ow;
+
+            let (density_fields, _, support_fields) = make_tunnel_world(0, 11);
+            let all_keys: Vec<(i32,i32,i32)> = density_fields.keys().cloned().collect();
+            let scores = ground_connectivity_pass(&density_fields, &all_keys, 16, &cfg);
+            let (stress, _) = calc_voxel_stress_v2(
+                &density_fields, &support_fields, &scores, &cfg,
+                8, 12, 8, 16,
+            );
+
+            println!("{:<16.3} {:<12.4} {:<12}",
+                ow, stress, stress >= cfg.slab_cohesion_threshold);
+        }
+        println!();
+
+        // Multi-chunk span: measure stress at varying positions across a 3-chunk-wide tunnel
+        println!("=== Multi-chunk span: stress across 48-voxel-wide ceiling ===");
+        println!("{:<12} {:<12} {:<12}",
+            "x_position", "v2_stress", "support_score");
+        println!("{}", "-".repeat(36));
+
+        let (density_fields, _, support_fields) = make_tunnel_world(0, 11);
+        let all_keys: Vec<(i32,i32,i32)> = density_fields.keys().cloned().collect();
+        let scores = ground_connectivity_pass(&density_fields, &all_keys, 16, &config);
+
+        // Sample stress across x positions in different chunks (with corrected surface_y)
+        for &(cx, x) in &[(-1,4), (-1,8), (-1,12), (0,4), (0,8), (0,12), (1,4), (1,8), (1,12)] {
+            let (stress, _) = calc_voxel_stress_v2(
+                &density_fields, &support_fields, &scores, &config,
+                cx * 16 + x, 12, 8, 16,
+            );
+            let score = scores.get(&(cx, 0, 0))
+                .map(|s| s.get(x as usize, 12, 8))
+                .unwrap_or(-1.0);
+            println!("{:<12} {:<12.4} {:<12.4}",
+                format!("c{}:x{}", cx, x), stress, score);
+        }
+        println!();
+
+        // Sweep span_weight — the other major knob
+        println!("=== Sensitivity: span_weight (gap=12, ceiling at y=12, min_safe_span=8) ===");
+        println!("{:<16} {:<12} {:<12} {:<20}",
+            "span_weight", "v2_stress", "would_collapse", "collapses_at_span");
+        println!("{}", "-".repeat(60));
+
+        for &sw in &[0.025, 0.05, 0.075, 0.10, 0.15, 0.20, 0.30] {
+            let mut cfg = default_config();
+            cfg.surface_y = 32;
+            cfg.span_weight = sw;
+
+            let (density_fields, _, support_fields) = make_tunnel_world(0, 11);
+            let all_keys: Vec<(i32,i32,i32)> = density_fields.keys().cloned().collect();
+            let scores = ground_connectivity_pass(&density_fields, &all_keys, 16, &cfg);
+            let (stress, _) = calc_voxel_stress_v2(
+                &density_fields, &support_fields, &scores, &cfg,
+                8, 12, 8, 16,
+            );
+
+            // Calculate at what span width this would collapse (stress >= 0.75)
+            // stress = overhang_weight * overhang_factor + span_weight * max(0, span - min_safe_span)
+            // For collapse: 0.75 = 0.05 * oh + sw * (span - 8)
+            // Simplified: span_for_collapse = (0.75 - base_stress) / sw + 8
+            let collapse_span = if sw > 0.0 { ((0.75 - 0.05 * 12.0) / sw + 8.0) as i32 } else { 999 };
+
+            println!("{:<16.3} {:<12.4} {:<12} span >= {:<12}",
+                sw, stress, stress >= cfg.slab_cohesion_threshold, collapse_span);
+        }
+        println!();
+
+        // Sweep min_safe_span
+        println!("=== Sensitivity: min_safe_span (gap=12, ceiling at y=12) ===");
+        println!("{:<16} {:<12} {:<12}",
+            "min_safe_span", "v2_stress", "would_collapse");
+        println!("{}", "-".repeat(40));
+
+        for &mss in &[2, 4, 6, 8, 10, 12, 16] {
+            let mut cfg = default_config();
+            cfg.surface_y = 32;
+            cfg.min_safe_span = mss;
+
+            let (density_fields, _, support_fields) = make_tunnel_world(0, 11);
+            let all_keys: Vec<(i32,i32,i32)> = density_fields.keys().cloned().collect();
+            let scores = ground_connectivity_pass(&density_fields, &all_keys, 16, &cfg);
+            let (stress, _) = calc_voxel_stress_v2(
+                &density_fields, &support_fields, &scores, &cfg,
+                8, 12, 8, 16,
+            );
+
+            println!("{:<16} {:<12.4} {:<12}",
+                mss, stress, stress >= cfg.slab_cohesion_threshold);
+        }
     }
 }

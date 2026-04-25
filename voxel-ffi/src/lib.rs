@@ -3,6 +3,8 @@ pub mod convert;
 pub mod store;
 pub mod mining;
 pub mod terrain_ops;
+pub mod sdf;
+pub mod flatten_sdf;
 pub mod worker;
 pub mod engine;
 pub mod api;

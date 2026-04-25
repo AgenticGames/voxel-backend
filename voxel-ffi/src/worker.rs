@@ -1159,8 +1159,12 @@ fn handle_request(
             //   UE channel order: combined, base-only, (nothing). UE ends on
             //   base-only. Recording hash_base here means W1's subsequent
             //   incremental sees hash_base (different from combined) and sends.
+            //
+            // Hash is computed BEFORE acquiring the write lock — hashing a base
+            // mesh iterates every triangle, and holding the write lock during
+            // that iteration serializes all other workers waiting for store access.
+            let base_hash = hash_mesh(&mesh);
             {
-                let base_hash = hash_mesh(&mesh);
                 let mut s = store.write().unwrap();
                 s.last_sent_mesh_hash.insert(chunk, base_hash);
             }
@@ -1283,7 +1287,8 @@ fn handle_request(
             let mat = voxel_core::material::Material::from_u8(host_material);
             let mut s = store.write().unwrap();
             let ts = terrace_size_for_scale(world_scale);
-            let meshes = crate::terrain_ops::flatten_terrace(&mut s, glam::IVec3::new(base_x, base_y, base_z), mat, &cfg, world_scale, ts, 2);
+            // DK2-style zone flatten: integer Y is fine (no per-tile float).
+            let meshes = crate::terrain_ops::flatten_terrace(&mut s, glam::IVec3::new(base_x, base_y, base_z), base_y as f32, mat, &cfg, world_scale, ts, 2);
             let dirty_keys: Vec<(i32, i32, i32)> = meshes.into_iter().map(|(k, _)| k).collect();
             drop(s);
 
@@ -1299,15 +1304,19 @@ fn handle_request(
             batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
         }
         WorkerRequest::BuildingFlattenBatch { buildings } => {
+            // Cheap path: per-tile call to the legacy ramp flatten. Each tile
+            // carries its own sub-voxel base_y_float so conveyors don't
+            // float/sink (3A density tweak applied inside apply_ramp_column).
             let cfg = config.read().unwrap().clone();
             let mut s = store.write().unwrap();
             let mut all_dirty: Vec<(i32, i32, i32)> = Vec::new();
-            for &(bx, by, bz, host_mat, footprint, clearance) in &buildings {
+            for &(bx, by, bz, by_f, host_mat, footprint, clearance) in &buildings {
                 let mat = voxel_core::material::Material::from_u8(host_mat);
                 let bts = footprint.max(1);
                 let meshes = crate::terrain_ops::flatten_terrace(
                     &mut s,
                     glam::IVec3::new(bx, by, bz),
+                    by_f,
                     mat,
                     &cfg,
                     world_scale,
@@ -1323,17 +1332,26 @@ fn handle_request(
             // Single seam pass for all flattens combined
             batched_seam_pass_mine(&all_dirty, &cfg, store, result_tx, world_scale);
         }
-        WorkerRequest::BuildingFlatten { base_x, base_y, base_z, host_material, footprint_voxels, clearance_voxels } => {
+        WorkerRequest::BuildingFlatten { base_x, base_y, base_z, base_y_float, host_material, footprint_voxels, clearance_voxels } => {
             let cfg = config.read().unwrap().clone();
             let mat = voxel_core::material::Material::from_u8(host_material);
             let mut s = store.write().unwrap();
             let bts = footprint_voxels.max(1);
 
-            // No surface correction — UE-side QueryBuildingSupport already found the
-            // correct surface Y. Double-correcting here causes inconsistent floor heights
-            // when adjacent placements have different terrain at their center columns.
-
-            let meshes = crate::terrain_ops::flatten_terrace(&mut s, glam::IVec3::new(base_x, base_y, base_z), mat, &cfg, world_scale, bts, clearance_voxels);
+            // Single placement: route to the all-in SDF flatten (1C+3C+2C).
+            // base_y_float carries the exact sub-voxel Y so the iso surface
+            // lands exactly where UE wants it (no float/sink). Cantilever
+            // columns get convex-hull buttresses to nearby natural rock.
+            let meshes = crate::flatten_sdf::flatten_terrace_sdf(
+                &mut s,
+                glam::IVec3::new(base_x, base_y, base_z),
+                base_y_float,
+                mat,
+                &cfg,
+                world_scale,
+                bts,
+                clearance_voxels,
+            );
             let dirty_keys: Vec<(i32, i32, i32)> = meshes.into_iter().map(|(k, _)| k).collect();
             drop(s);
 
@@ -1399,23 +1417,23 @@ fn handle_request(
                     })
                 }).collect()
             };
-            if !new_placements.is_empty() {
+            // Merge crystal insert + stress-dirty queue into a single write lock.
+            // Previously these were two separate write lock acquisitions sandwiching
+            // a channel send — every mine paid for two lock round-trips on the
+            // contended store. Channel send moved after the write lock; ordering
+            // is independent (stress + crystal writes don't depend on the send).
+            {
                 let mut s = store.write().unwrap();
                 for (key, placements) in new_placements {
                     s.crystal_placements.insert(key, placements);
                 }
-            }
-
-            // Send mined material counts separately
-            let _ = result_tx.send(WorkerResult::MinedMaterials { mined });
-
-            // Queue position-based stress recalculation at mine point
-            {
-                let mut s = store.write().unwrap();
                 let stress_center = (center.x as i32, center.y as i32, center.z as i32);
                 let stress_radius = radius as i32 + 22;
                 s.queue_stress_dirty(stress_center, stress_radius);
             }
+
+            // Send mined material counts (outside the store lock)
+            let _ = result_tx.send(WorkerResult::MinedMaterials { mined });
 
             // Send terrain modifications to fluid thread + detect aquifer breaches
             {
@@ -2386,38 +2404,31 @@ fn incremental_seam_pass(
     // every mine — batched_seam_pass had hash-skip; single-chunk path didn't.
     let hashed: Vec<((i32, i32, i32), voxel_core::mesh::Mesh, u64)> =
         to_send.into_iter().map(|(k, m)| { let h = hash_mesh(&m); (k, m, h) }).collect();
-    let mut kept: Vec<((i32, i32, i32), voxel_core::mesh::Mesh, u64)> = Vec::with_capacity(hashed.len());
+
+    // Fuse hash-filter + crystal-data fetch into ONE read lock (was 2 acquisitions).
+    // Also takes crystal data by-value into the tuple, avoiding a later .cloned()
+    // per target in the send loop.
+    let mut kept: Vec<((i32, i32, i32), voxel_core::mesh::Mesh, u64, Vec<FfiCrystalPlacement>)> =
+        Vec::with_capacity(hashed.len());
     {
         let s = store.read().unwrap();
         for (target, mesh, new_hash) in hashed {
             if let Some(&prev) = s.last_sent_mesh_hash.get(&target) {
                 if prev == new_hash { continue; }
             }
-            kept.push((target, mesh, new_hash));
+            let crystal_data = match s.crystal_placements.get(&target) {
+                Some(p) if !p.is_empty() => {
+                    crate::convert::convert_crystals_to_ue(p, cfg.voxel_scale(), world_scale)
+                }
+                _ => Vec::new(),
+            };
+            kept.push((target, mesh, new_hash, crystal_data));
         }
     }
 
-    // Pre-fetch all crystal data in ONE read lock to avoid N per-chunk lock acquires
-    // inside the send loop. This was a major contributor to store_read_wait under
-    // concurrent mining (8 workers contending for the store lock per-target).
-    let crystal_map: HashMap<(i32, i32, i32), Vec<FfiCrystalPlacement>> = {
-        let s = store.read().unwrap();
-        kept.iter()
-            .map(|(target, _, _)| {
-                let data = match s.crystal_placements.get(target) {
-                    Some(p) if !p.is_empty() => {
-                        crate::convert::convert_crystals_to_ue(p, cfg.voxel_scale(), world_scale)
-                    }
-                    _ => Vec::new(),
-                };
-                (*target, data)
-            })
-            .collect()
-    };
-
     // Convert and send outside the lock (non-blocking sends)
     let mut to_record: Vec<((i32, i32, i32), u64)> = Vec::with_capacity(kept.len());
-    for (target, combined, new_hash) in kept {
+    for (target, combined, new_hash, crystal_data) in kept {
         let t2 = Instant::now();
         let mut converted = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
         crate::convert::bucket_mesh_by_material(&mut converted);
@@ -2427,7 +2438,6 @@ fn incremental_seam_pass(
             continue;  // Don't overwrite base mesh with empty seam update
         }
 
-        let crystal_data = crystal_map.get(&target).cloned().unwrap_or_default();
         let _ = result_tx.send(WorkerResult::ChunkMesh {
             chunk: target,
             mesh: converted,
@@ -2559,8 +2569,12 @@ fn batched_seam_pass_inner(
     let hashed: Vec<((i32, i32, i32), voxel_core::mesh::Mesh, u64)> =
         to_send.into_iter().map(|(k, m)| { let h = hash_mesh(&m); (k, m, h) }).collect();
 
-    // Filter out chunks whose mesh content is identical to last send.
-    let mut kept: Vec<((i32, i32, i32), voxel_core::mesh::Mesh, u64)> = Vec::with_capacity(hashed.len());
+    // Fuse hash-filter + crystal-data fetch into ONE read lock (was 2 read locks with
+    // a write lock sandwiched between them — 3 acquisitions total). Hashes are now
+    // recorded in a single write lock AFTER the read, and crystal data is carried
+    // by-value so the send loop doesn't .cloned() it per target.
+    let mut kept: Vec<((i32, i32, i32), voxel_core::mesh::Mesh, u64, Vec<FfiCrystalPlacement>)> =
+        Vec::with_capacity(hashed.len());
     {
         let s = store.read().unwrap();
         for (target, mesh, new_hash) in hashed {
@@ -2569,52 +2583,40 @@ fn batched_seam_pass_inner(
                     continue;
                 }
             }
-            kept.push((target, mesh, new_hash));
+            let crystal_data = match s.crystal_placements.get(&target) {
+                Some(p) if !p.is_empty() => {
+                    crate::convert::convert_crystals_to_ue(p, cfg.voxel_scale(), world_scale)
+                }
+                _ => Vec::new(),
+            };
+            kept.push((target, mesh, new_hash, crystal_data));
         }
     }
     // Record new hashes (brief write lock)
     if !kept.is_empty() {
         let mut s = store.write().unwrap();
-        for (target, _mesh, new_hash) in &kept {
+        for (target, _mesh, new_hash, _crystals) in &kept {
             s.last_sent_mesh_hash.insert(*target, *new_hash);
         }
     }
 
-    // Pre-fetch all crystal data in ONE read lock to avoid N per-chunk acquires.
-    let crystal_map: HashMap<(i32, i32, i32), Vec<FfiCrystalPlacement>> = {
-        let s = store.read().unwrap();
-        kept.iter()
-            .map(|(target, _, _)| {
-                let data = match s.crystal_placements.get(target) {
-                    Some(p) if !p.is_empty() => {
-                        crate::convert::convert_crystals_to_ue(p, cfg.voxel_scale(), world_scale)
-                    }
-                    _ => Vec::new(),
-                };
-                (*target, data)
-            })
-            .collect()
-    };
-
     if batch_as_mine {
         // Send all mine mesh updates as one atomic result — no pop-in
         let mut batch = Vec::new();
-        for (target, combined, _hash) in kept {
+        for (target, combined, _hash, crystal_data) in kept {
             let mut converted = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
             crate::convert::bucket_mesh_by_material(&mut converted);
             if converted.indices.is_empty() { continue; }
-            let crystal_data = crystal_map.get(&target).cloned().unwrap_or_default();
             batch.push((target, converted, crystal_data));
         }
         if !batch.is_empty() {
             let _ = result_tx.send(WorkerResult::MineBatchMesh { meshes: batch });
         }
     } else {
-        for (target, combined, _hash) in kept {
+        for (target, combined, _hash, crystal_data) in kept {
             let mut converted = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
             crate::convert::bucket_mesh_by_material(&mut converted);
             if converted.indices.is_empty() { continue; }
-            let crystal_data = crystal_map.get(&target).cloned().unwrap_or_default();
             let _ = result_tx.send(WorkerResult::ChunkMesh {
                 chunk: target, mesh: converted, generation: 0, crystal_data,
                 zone_descriptors: Vec::new(),
