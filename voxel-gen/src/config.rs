@@ -350,6 +350,12 @@ pub struct GenerationConfig {
     /// Master toggle for fluid source generation.
     /// When false, all fluid sources are suppressed except cauldron seeds (is_source == false).
     pub fluid_sources_enabled: bool,
+    /// Creative-authoring blank-slate world. When true, all decoration phases
+    /// (caverns, worms, lava tubes, rivers, pools, formations, zones, ore
+    /// protrusion) are short-circuited and every chunk emits as solid
+    /// depth-stratified host rock. Use this to start a fresh demo level for
+    /// hand-authoring with the creative brushes.
+    pub blank_canvas: bool,
 }
 
 impl GenerationConfig {
@@ -417,6 +423,7 @@ impl Default for GenerationConfig {
             ore_detail_multiplier: 1,
             ore_protrusion: 0.0,
             fluid_sources_enabled: true,
+            blank_canvas: false,
         }
     }
 }

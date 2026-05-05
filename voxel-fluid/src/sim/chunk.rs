@@ -11,6 +11,45 @@ pub(super) struct CrossChunkTransfer {
     pub dest_z: usize,
     pub amount: f32,
     pub fluid_type: FluidType,
+    /// Bounded-flow propagation: hops the dest cell will have after this transfer.
+    /// 0 means "no source recorded / unbounded" (for legacy compatibility).
+    pub dest_hops: u8,
+    /// Bounded-flow propagation: dest cell inherits this max from the source it
+    /// propagated from. 0 = unlimited.
+    pub dest_max_flow: u8,
+}
+
+/// Number of hops at the tail of a bounded source where flow tapers from 1.0 → 0.
+/// Cells closer to the source than `max - TAPER_HOPS` get level=1.0 (full).
+/// Cells in the last `TAPER_HOPS` ramp linearly down toward 0 at the limit.
+pub const TAPER_HOPS: u8 = 4;
+
+/// Per-cell level cap for a child of a bounded source.
+/// `new_hops`: hops the destination cell will have after this transfer (1 = direct neighbor).
+/// `max_flow`: source's max_flow_dist (0 = unlimited → returns 1.0).
+/// Returns 0.0 if the hop would exceed the limit (caller should skip transfer).
+#[inline]
+pub fn bounded_level_cap(new_hops: u8, max_flow: u8) -> f32 {
+    if max_flow == 0 { return 1.0; }
+    if new_hops > max_flow { return 0.0; }
+    let head_zone = max_flow.saturating_sub(TAPER_HOPS);
+    if new_hops <= head_zone {
+        1.0
+    } else {
+        // Linear ramp 1.0 → 0.0 across the last TAPER_HOPS cells.
+        let into_taper = (new_hops - head_zone) as f32;
+        let taper_span = TAPER_HOPS.min(max_flow) as f32;
+        (1.0 - into_taper / taper_span).max(0.0)
+    }
+}
+
+/// Returns true if a transfer from `src` should be skipped because it would
+/// exceed the source's bounded reach. Used to short-circuit before doing the
+/// usual transfer math.
+#[inline]
+pub fn bounded_blocks_transfer(src_hops: u8, src_max_flow: u8) -> bool {
+    if src_max_flow == 0 { return false; }
+    src_hops >= src_max_flow
 }
 
 /// Count how many of the 6 face neighbors are solid (or out of bounds).
@@ -179,17 +218,25 @@ pub(super) fn tick_chunk(
                 // Gravity: try to flow down (8x flow rate for fast pooling)
                 if y > 0 {
                     let below_idx = z * size * size + (y - 1) * size + x;
-                    if cell_cap[below_idx] > MIN_LEVEL {
+                    if cell_cap[below_idx] > MIN_LEVEL
+                        && !bounded_blocks_transfer(cell.hops_from_source, cell.max_flow_dist)
+                    {
                         let below_capacity = cell_cap[below_idx];
                         let below_space = (below_capacity - new_cells[below_idx].level).max(0.0);
                         if below_space > MIN_LEVEL {
-                            let transfer = cell.level.min(below_space).min(flow_rate * 8.0);
+                            // Bounded-flow cap: child receives at most `level_cap`.
+                            let new_hops = cell.hops_from_source.saturating_add(1);
+                            let cap = bounded_level_cap(new_hops, cell.max_flow_dist);
+                            let bounded_space = (cap - new_cells[below_idx].level).max(0.0).min(below_space);
+                            let transfer = cell.level.min(bounded_space).min(flow_rate * 8.0);
                             if transfer > MIN_LEVEL {
                                 if !is_source && !has_grace {
                                     new_cells[idx].level -= transfer;
                                 }
                                 new_cells[below_idx].level += transfer;
                                 new_cells[below_idx].fluid_type = cell.fluid_type;
+                                new_cells[below_idx].hops_from_source = new_hops;
+                                new_cells[below_idx].max_flow_dist = cell.max_flow_dist;
                                 changed = true;
                             }
                         }
@@ -199,26 +246,33 @@ pub(super) fn tick_chunk(
                 else {
                     let below_key = (key.0, key.1 - 1, key.2);
                     if let Some(below_grid) = chunks.get(&below_key) {
-                        let by = size - 1;
-                        let below_idx = z * size * size + by * size + x;
-                        let below_capacity = below_grid.cell_capacity(x, by, z);
-                        if below_capacity > MIN_LEVEL {
-                            let below_space = (below_capacity - below_grid.cells[below_idx].level).max(0.0);
-                            if below_space > MIN_LEVEL {
-                                let transfer = new_cells[idx].level.min(below_space).min(flow_rate * 8.0);
-                                if transfer > MIN_LEVEL {
-                                    if !is_source && !has_grace {
-                                        new_cells[idx].level -= transfer;
+                        if !bounded_blocks_transfer(cell.hops_from_source, cell.max_flow_dist) {
+                            let by = size - 1;
+                            let below_idx = z * size * size + by * size + x;
+                            let below_capacity = below_grid.cell_capacity(x, by, z);
+                            if below_capacity > MIN_LEVEL {
+                                let below_space = (below_capacity - below_grid.cells[below_idx].level).max(0.0);
+                                if below_space > MIN_LEVEL {
+                                    let new_hops = cell.hops_from_source.saturating_add(1);
+                                    let cap = bounded_level_cap(new_hops, cell.max_flow_dist);
+                                    let bounded_space = (cap - below_grid.cells[below_idx].level).max(0.0).min(below_space);
+                                    let transfer = new_cells[idx].level.min(bounded_space).min(flow_rate * 8.0);
+                                    if transfer > MIN_LEVEL {
+                                        if !is_source && !has_grace {
+                                            new_cells[idx].level -= transfer;
+                                        }
+                                        cross_transfers.push(CrossChunkTransfer {
+                                            dest_key: below_key,
+                                            dest_x: x,
+                                            dest_y: by,
+                                            dest_z: z,
+                                            amount: transfer,
+                                            fluid_type: cell.fluid_type,
+                                            dest_hops: new_hops,
+                                            dest_max_flow: cell.max_flow_dist,
+                                        });
+                                        changed = true;
                                     }
-                                    cross_transfers.push(CrossChunkTransfer {
-                                        dest_key: below_key,
-                                        dest_x: x,
-                                        dest_y: by,
-                                        dest_z: z,
-                                        amount: transfer,
-                                        fluid_type: cell.fluid_type,
-                                    });
-                                    changed = true;
                                 }
                             }
                         }
@@ -340,11 +394,19 @@ pub(super) fn tick_chunk(
 
                         // Orphan puddles get boosted slope flow (8x vs 4x)
                         let slope_mult = if cell.level < ORPHAN_THRESHOLD && cell.stagnant_ticks > 0 { 8.0 } else { 4.0 };
+                        // Bounded-flow gate (apply once per source per tick).
+                        let bounded_blocked = bounded_blocks_transfer(cell.hops_from_source, cell.max_flow_dist);
+                        let new_hops = cell.hops_from_source.saturating_add(1);
+                        let level_cap = bounded_level_cap(new_hops, cell.max_flow_dist);
                         for (_score, dst_space, ni, is_cross, dest_key, dest_x, dest_y, dest_z) in candidates {
+                            if bounded_blocked { break; }
                             if new_cells[idx].level < MIN_LEVEL && !is_source && !has_grace {
                                 break;
                             }
-                            let transfer = new_cells[idx].level.min(dst_space).min(flow_rate * slope_mult);
+                            // Cap dst's allowed receive level by bounded-flow rule.
+                            let dst_existing = if is_cross { 0.0 } else { new_cells[ni].level };
+                            let bounded_space = (level_cap - dst_existing).max(0.0).min(dst_space);
+                            let transfer = new_cells[idx].level.min(bounded_space).min(flow_rate * slope_mult);
                             if transfer > MIN_LEVEL {
                                 if !is_source && !has_grace {
                                     new_cells[idx].level -= transfer;
@@ -357,10 +419,14 @@ pub(super) fn tick_chunk(
                                         dest_z,
                                         amount: transfer,
                                         fluid_type: cell.fluid_type,
+                                        dest_hops: new_hops,
+                                        dest_max_flow: cell.max_flow_dist,
                                     });
                                 } else {
                                     new_cells[ni].level += transfer;
                                     new_cells[ni].fluid_type = cell.fluid_type;
+                                    new_cells[ni].hops_from_source = new_hops;
+                                    new_cells[ni].max_flow_dist = cell.max_flow_dist;
                                 }
                                 changed = true;
                             }
@@ -371,13 +437,17 @@ pub(super) fn tick_chunk(
                 // Horizontal spread using fill-fraction equalization
                 // Skip for orphan puddles — force them downhill only
                 let is_orphan = cell.level < ORPHAN_THRESHOLD && cell.stagnant_ticks > 0;
-                if new_cells[idx].level > MIN_LEVEL && !is_orphan {
+                if new_cells[idx].level > MIN_LEVEL && !is_orphan
+                    && !bounded_blocks_transfer(cell.hops_from_source, cell.max_flow_dist)
+                {
                     let neighbors: [(i32, i32, i32); 4] = [
                         (x as i32 + 1, y as i32, z as i32),
                         (x as i32 - 1, y as i32, z as i32),
                         (x as i32, y as i32, z as i32 + 1),
                         (x as i32, y as i32, z as i32 - 1),
                     ];
+                    let new_hops_h = cell.hops_from_source.saturating_add(1);
+                    let level_cap_h = bounded_level_cap(new_hops_h, cell.max_flow_dist);
 
                     for (nx, ny, nz) in neighbors {
                         // Recompute src_fill from current level each iteration
@@ -401,9 +471,13 @@ pub(super) fn tick_chunk(
                                         let dst_fill = nbr_grid.cells[bi].level / cap;
                                         let diff = src_fill - dst_fill;
                                         if diff > MIN_LEVEL {
+                                            // Bounded-flow level cap on cross-chunk dst.
+                                            let dst_existing = nbr_grid.cells[bi].level;
+                                            let bounded_room = (level_cap_h - dst_existing).max(0.0);
                                             let transfer = (diff * horizontal_spread * src_capacity)
                                                 .min(flow_rate)
-                                                .min(new_cells[idx].level); // prevent overdrain
+                                                .min(new_cells[idx].level)
+                                                .min(bounded_room);
                                             if transfer > MIN_LEVEL {
                                                 if !is_source && !has_grace {
                                                     new_cells[idx].level -= transfer;
@@ -415,6 +489,8 @@ pub(super) fn tick_chunk(
                                                     dest_z: tz,
                                                     amount: transfer,
                                                     fluid_type: cell.fluid_type,
+                                                    dest_hops: new_hops_h,
+                                                    dest_max_flow: cell.max_flow_dist,
                                                 });
                                                 changed = true;
                                             }
@@ -436,16 +512,20 @@ pub(super) fn tick_chunk(
                         let diff = src_fill - dst_fill;
                         if diff > MIN_LEVEL {
                             let dst_space = (dst_capacity - new_cells[ni].level).max(0.0);
+                            // Bounded-flow level cap.
+                            let bounded_space = (level_cap_h - new_cells[ni].level).max(0.0).min(dst_space);
                             let transfer = (diff * horizontal_spread * src_capacity)
                                 .min(flow_rate)
                                 .min(new_cells[idx].level) // prevent overdrain
-                                .min(dst_space); // prevent overfill
+                                .min(bounded_space);       // prevent overfill + bounded cap
                             if transfer > MIN_LEVEL {
                                 if !is_source && !has_grace {
                                     new_cells[idx].level -= transfer;
                                 }
                                 new_cells[ni].level += transfer;
                                 new_cells[ni].fluid_type = cell.fluid_type;
+                                new_cells[ni].hops_from_source = new_hops_h;
+                                new_cells[ni].max_flow_dist = cell.max_flow_dist;
                                 changed = true;
                             }
                         }
@@ -483,16 +563,23 @@ pub(super) fn tick_chunk(
                             }
 
                             let weight_diff = max_neighbor_weight - our_weight;
-                            if weight_diff > 0.5 {
+                            if weight_diff > 0.5
+                                && !bounded_blocks_transfer(cell.hops_from_source, cell.max_flow_dist)
+                            {
                                 let above_space = (cell_cap[ai] - new_cells[ai].level).max(0.0);
+                                let new_hops_u = cell.hops_from_source.saturating_add(1);
+                                let cap_u = bounded_level_cap(new_hops_u, cell.max_flow_dist);
+                                let bounded_space = (cap_u - new_cells[ai].level).max(0.0).min(above_space);
                                 let push = (weight_diff * pressure_rate * 0.3)
-                                    .min(above_space)
+                                    .min(bounded_space)
                                     .min(flow_rate)
                                     .min(new_cells[idx].level);
                                 if push > MIN_LEVEL && !is_source && !has_grace {
                                     new_cells[idx].level -= push;
                                     new_cells[ai].level += push;
                                     new_cells[ai].fluid_type = cell.fluid_type;
+                                    new_cells[ai].hops_from_source = new_hops_u;
+                                    new_cells[ai].max_flow_dist = cell.max_flow_dist;
                                     changed = true;
                                 }
                             }

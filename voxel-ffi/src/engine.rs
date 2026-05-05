@@ -1,3 +1,4 @@
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
@@ -117,6 +118,10 @@ impl VoxelEngine {
     }
 
     pub fn new(ffi_config: &FfiEngineConfig) -> Self {
+        // Install panic hook + log file as early as possible. Idempotent
+        // across engine creation; first install wins.
+        crate::panic_log::install("D:/Unreal Projects/Mithril2026/Saved/voxel_panic.log");
+
         debug_log_pool_config(ffi_config);
         let config = ffi_config_to_generation(ffi_config);
         let voxel_scale = config.voxel_scale();
@@ -190,24 +195,78 @@ impl VoxelEngine {
             let morph_man = Arc::clone(&morph_manifest);
             let rif = Arc::clone(&regions_in_flight);
 
-            let handle = thread::spawn(move || {
-                worker_loop(
-                    shutdown,
-                    generate_rx,
-                    mine_rx,
-                    result_tx,
-                    store,
-                    config,
-                    stress_cfg,
-                    gen_counters,
-                    world_scale,
-                    fluid_tx,
-                    prof,
-                    worker_id,
-                    morph_man,
-                    rif,
-                );
-            });
+            let builder = thread::Builder::new().name(format!("voxel-worker-{}", worker_id));
+            let handle = builder
+                .spawn(move || {
+                    // Each worker runs `worker_loop` inside `catch_unwind` so a
+                    // single .unwrap() panic does not silently kill the thread
+                    // (which previously left every queued chunk stuck forever).
+                    // We respawn up to MAX_RESPAWNS times — beyond that the
+                    // panic is almost certainly a poisoned-lock cascade and
+                    // looping faster only spams the log.
+                    const MAX_RESPAWNS: u32 = 16;
+                    let mut respawn = 0u32;
+                    crate::panic_log::worker_started();
+                    loop {
+                        let outcome = {
+                            let shutdown = Arc::clone(&shutdown);
+                            let generate_rx = generate_rx.clone();
+                            let mine_rx = mine_rx.clone();
+                            let result_tx = result_tx.clone();
+                            let store = Arc::clone(&store);
+                            let config = Arc::clone(&config);
+                            let stress_cfg = Arc::clone(&stress_cfg);
+                            let gen_counters = Arc::clone(&gen_counters);
+                            let fluid_tx = fluid_tx.clone();
+                            let prof = Arc::clone(&prof);
+                            let morph_man = Arc::clone(&morph_man);
+                            let rif = Arc::clone(&rif);
+                            std::panic::catch_unwind(AssertUnwindSafe(move || {
+                                worker_loop(
+                                    shutdown,
+                                    generate_rx,
+                                    mine_rx,
+                                    result_tx,
+                                    store,
+                                    config,
+                                    stress_cfg,
+                                    gen_counters,
+                                    world_scale,
+                                    fluid_tx,
+                                    prof,
+                                    worker_id,
+                                    morph_man,
+                                    rif,
+                                );
+                            }))
+                        };
+
+                        if shutdown.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        match outcome {
+                            Ok(()) => break, // normal exit (shutdown / channel closed)
+                            Err(payload) => {
+                                respawn += 1;
+                                let msg = crate::panic_log::payload_string(&*payload);
+                                crate::panic_log::note(&format!(
+                                    "worker {} caught panic (respawn {}/{}): {}",
+                                    worker_id, respawn, MAX_RESPAWNS, msg
+                                ));
+                                if respawn >= MAX_RESPAWNS {
+                                    crate::panic_log::note(&format!(
+                                        "worker {} GIVING UP after {} respawns — pool degraded",
+                                        worker_id, respawn
+                                    ));
+                                    break;
+                                }
+                                std::thread::sleep(std::time::Duration::from_millis(100));
+                            }
+                        }
+                    }
+                    crate::panic_log::worker_exited();
+                })
+                .expect("failed to spawn voxel worker thread");
             workers.push(handle);
         }
 
@@ -239,18 +298,23 @@ impl VoxelEngine {
     /// Returns 1 on success, 0 if queue full.
     pub fn request_generate(&self, cx: i32, cy: i32, cz: i32) -> u32 {
         let key = ue_chunk_to_rust(cx, cy, cz);
-        let counter_ref = self
+        // Bump the counter BEFORE sending. If we sent first and stored the new
+        // value after, a worker could pick the job off the queue between the
+        // send and the store, observe the old counter value, fail the
+        // stale-detection check at worker.rs:528, and silently `return`.
+        // No result reaches UE → PendingRequests leaks the coord forever.
+        let generation = self
             .generation_counters
             .entry(key)
-            .or_insert_with(|| AtomicU64::new(0));
-        let generation = counter_ref.load(Ordering::Relaxed) + 1;
+            .or_insert_with(|| AtomicU64::new(0))
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
 
         match self.generate_tx.try_send(WorkerRequest::Generate {
             chunk: key,
             generation,
         }) {
             Ok(()) => {
-                counter_ref.store(generation, Ordering::Relaxed);
                 self.profiler.record_request(key);
                 1
             }
@@ -545,13 +609,16 @@ impl VoxelEngine {
             pending_requests: self.generate_tx.len() as u32,
             completed_results: self.result_rx.len() as u32,
             worker_threads_active: self.workers.len() as u32,
+            workers_alive: crate::panic_log::workers_alive() as u32,
+            panics_observed: crate::panic_log::panic_count() as u32,
         }
     }
 
     /// Inject fluid at a UE world position. Computes chunk + local cell automatically.
     /// fluid_type: 1=Water, 2=Lava. Returns 1 on success, 0 on failure.
     pub fn add_fluid(&self, world_x: f32, world_y: f32, world_z: f32,
-                     fluid_type: u8, is_source: bool, world_scale: f32) -> u32 {
+                     fluid_type: u8, is_source: bool, world_scale: f32,
+                     max_flow_dist: u8) -> u32 {
         use crate::convert::from_ue_world_pos;
         use voxel_fluid::cell::FluidType;
 
@@ -582,6 +649,7 @@ impl VoxelEngine {
             fluid_type: ft,
             level: voxel_fluid::cell::MAX_LEVEL,
             is_source,
+            max_flow_dist: if is_source { max_flow_dist } else { 0 },
         }) {
             Ok(()) => 1,
             Err(_) => 0,
@@ -1119,6 +1187,248 @@ impl VoxelEngine {
         }
     }
 
+    /// Creative-mode sphere brush (paint/carve/fill).
+    /// Returns 1 on success, 0 if queue full.
+    pub fn request_brush_sphere(&self, request: FfiBrushSphereRequest) -> u32 {
+        match self.mine_tx.try_send(WorkerRequest::BrushSphere { request }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
+    /// Creative-mode tunnel-along-polyline brush.
+    /// `points` are UE world coords; converted to Rust space here.
+    /// `material == 255` means carve; otherwise fill with that material.
+    /// Returns 1 on success, 0 if queue full or invalid input.
+    pub fn request_brush_tunnel(
+        &self,
+        ue_points: &[(f32, f32, f32)],
+        ue_radius: f32,
+        material: u8,
+    ) -> u32 {
+        if ue_points.len() < 2 || ue_radius <= 0.0 {
+            return 0;
+        }
+        let scale = self.world_scale;
+        let points: Vec<glam::Vec3> = ue_points
+            .iter()
+            .map(|&(x, y, z)| crate::convert::from_ue_world_pos(x, y, z, scale))
+            .collect();
+        let radius = ue_radius / scale;
+        let mat = if material == 255 { None } else { Some(material) };
+        match self.mine_tx.try_send(WorkerRequest::BrushTunnel {
+            points,
+            radius,
+            material: mat,
+        }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
+    /// Sphere fluid brush — fill / clear / pool-dig / carve+fill.
+    pub fn request_brush_fluid_sphere(&self, request: FfiBrushFluidSphereRequest) -> u32 {
+        let scale = self.world_scale;
+        let center_rust = crate::convert::from_ue_world_pos(
+            request.world_x, request.world_y, request.world_z, scale,
+        );
+        let radius = request.radius / scale;
+        match self.mine_tx.try_send(WorkerRequest::BrushFluidSphere {
+            center_rust,
+            radius,
+            fluid_type: request.fluid_type,
+            is_source: request.is_source != 0,
+            op: request.op,
+            max_flow_dist: request.max_flow_dist,
+        }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
+    /// Box fluid brush — fill / clear / carve+fill within an axis-aligned box.
+    pub fn request_brush_fluid_box(&self, request: FfiBrushFluidBoxRequest) -> u32 {
+        let scale = self.world_scale;
+        let center_rust = crate::convert::from_ue_world_pos(
+            request.world_x, request.world_y, request.world_z, scale,
+        );
+        let half_ext_rust = glam::Vec3::new(
+            request.half_x / scale,
+            request.half_z / scale,
+            request.half_y / scale,
+        );
+        match self.mine_tx.try_send(WorkerRequest::BrushFluidBox {
+            center_rust,
+            half_ext_rust,
+            fluid_type: request.fluid_type,
+            is_source: request.is_source != 0,
+            op: request.op,
+            max_flow_dist: request.max_flow_dist,
+        }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
+    /// River (capsule chain) fluid brush. Points are UE world coords.
+    pub fn request_brush_fluid_river(
+        &self,
+        ue_points: &[(f32, f32, f32)],
+        ue_radius: f32,
+        fluid_type: u8,
+        is_source: bool,
+        op: u8,
+        max_flow_dist: u8,
+    ) -> u32 {
+        if ue_points.len() < 2 || ue_radius <= 0.0 {
+            return 0;
+        }
+        let scale = self.world_scale;
+        let points: Vec<glam::Vec3> = ue_points
+            .iter()
+            .map(|&(x, y, z)| crate::convert::from_ue_world_pos(x, y, z, scale))
+            .collect();
+        let radius = ue_radius / scale;
+        match self.mine_tx.try_send(WorkerRequest::BrushFluidRiver {
+            points,
+            radius,
+            fluid_type,
+            is_source,
+            op,
+            max_flow_dist,
+        }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
+    /// Pop the most recent brush stroke and restore the captured chunk state.
+    /// Returns 1 on success, 0 if queue full. (Returns 1 even if the undo stack
+    /// is empty — the worker will simply no-op; query depth via `undo_depth`.)
+    pub fn request_brush_undo(&self) -> u32 {
+        match self.mine_tx.try_send(WorkerRequest::BrushUndo) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
+    /// Current undo stack depth (number of strokes available to undo).
+    pub fn undo_depth(&self) -> u32 {
+        self.store.read().unwrap().undo_stack.len() as u32
+    }
+
+    /// Creative-mode axis-aligned-or-yawed box brush (paint/carve/fill).
+    /// `yaw_deg` rotates around UE vertical (Z); since UE Z = Rust Y, the
+    /// rotation is around Rust Y axis. UE positive yaw maps to Rust positive
+    /// rotation (left-hand vs right-hand chirality cancels because both axes
+    /// are vertical).
+    pub fn request_brush_box(&self, request: FfiBrushBoxRequest) -> u32 {
+        let scale = self.world_scale;
+        let center_rust = crate::convert::from_ue_world_pos(
+            request.world_x, request.world_y, request.world_z, scale,
+        );
+        // UE half-extents (X, Y, Z) → Rust (X, Z, Y) since UE Z is height.
+        let half_ext_rust = glam::Vec3::new(
+            request.half_x / scale,
+            request.half_z / scale, // UE Z (height) → Rust Y
+            request.half_y / scale, // UE Y → Rust Z
+        );
+        let yaw_rad = request.yaw_deg.to_radians();
+        match self.mine_tx.try_send(WorkerRequest::BrushBox {
+            center_rust,
+            half_ext_rust,
+            yaw_rad,
+            op: request.op,
+            material: request.material,
+        }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
+    /// Creative-mode Y-axis-aligned cylinder brush (paint/carve/fill).
+    /// `height` is in UE units along the UE Z (which becomes Rust Y).
+    pub fn request_brush_cylinder(&self, request: FfiBrushCylinderRequest) -> u32 {
+        let scale = self.world_scale;
+        let center_rust = crate::convert::from_ue_world_pos(
+            request.world_x, request.world_y, request.world_z, scale,
+        );
+        let radius = request.radius / scale;
+        let height = request.height / scale;
+        match self.mine_tx.try_send(WorkerRequest::BrushCylinder {
+            center_rust,
+            radius,
+            height,
+            op: request.op,
+            material: request.material,
+        }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
+    /// Creative-mode smooth brush.
+    pub fn request_brush_smooth(&self, request: FfiBrushSmoothRequest) -> u32 {
+        let scale = self.world_scale;
+        let center_rust = crate::convert::from_ue_world_pos(
+            request.world_x, request.world_y, request.world_z, scale,
+        );
+        let radius = request.radius / scale;
+        match self.mine_tx.try_send(WorkerRequest::BrushSmooth {
+            center_rust,
+            radius,
+            iterations: request.iterations,
+            strength: request.strength,
+        }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
+    /// Creative-mode noise brush.
+    /// `frequency` from UE is in 1/UE-units; convert by *scale (so a UE frequency of 0.01
+    /// maps to a Rust-space frequency of 0.4 at scale=40 — small numbers in UE → bigger
+    /// noise scale in Rust).
+    pub fn request_brush_noise(&self, request: FfiBrushNoiseRequest) -> u32 {
+        let scale = self.world_scale;
+        let center_rust = crate::convert::from_ue_world_pos(
+            request.world_x, request.world_y, request.world_z, scale,
+        );
+        let radius = request.radius / scale;
+        let frequency_rust = request.frequency * scale;
+        match self.mine_tx.try_send(WorkerRequest::BrushNoise {
+            center_rust,
+            radius,
+            frequency: frequency_rust,
+            strength: request.strength,
+            seed: request.seed,
+        }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
+    /// Creative-mode formation placer (one stalactite/stalagmite/column/etc.).
+    /// Returns 1 on success, 0 if queue full.
+    pub fn request_brush_formation(&self, request: FfiBrushFormationRequest) -> u32 {
+        let scale = self.world_scale;
+        let center_rust = crate::convert::from_ue_world_pos(
+            request.world_x, request.world_y, request.world_z, scale,
+        );
+        let height = request.height / scale;
+        let radius = request.radius / scale;
+        match self.mine_tx.try_send(WorkerRequest::BrushFormation {
+            center_rust,
+            formation_type: request.formation_type,
+            material: request.material,
+            height,
+            radius,
+        }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
     /// Query nearby existing terrace to snap Z for extending terraces on the same plane.
     /// Returns Some((snapped_ue_x, snapped_ue_y, snapped_ue_z)) if found within range.
     pub fn query_nearby_terrace(
@@ -1354,6 +1664,7 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
         ore_detail_multiplier: if c.ore_detail_multiplier > 0 { c.ore_detail_multiplier.min(4) } else { 1 },
         ore_protrusion: c.ore_protrusion.max(0.0).min(0.5),
         fluid_sources_enabled: c.fluid_sources_enabled != 0,
+        blank_canvas: c.blank_canvas != 0,
     }
 }
 

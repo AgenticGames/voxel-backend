@@ -37,6 +37,13 @@ pub fn generate_density(coord: ChunkCoord, config: &GenerationConfig) -> (Densit
     // Step 1: Generate base density from noise
     let mut density = density::generate_density_field(config, world_origin);
 
+    // Blank-canvas: skip all decoration phases. The density field is already
+    // uniform host rock — just compute metadata and return.
+    if config.blank_canvas {
+        density.compute_metadata();
+        return (density, Vec::new(), Vec::new(), Vec::new());
+    }
+
     // Step 2: Find cavern centers and plan worm connections
     let densities = density.densities();
     let cavern_centers = worm::connect::find_cavern_centers(&densities, density.size, world_origin);

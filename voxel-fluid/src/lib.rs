@@ -131,6 +131,11 @@ pub enum FluidEvent {
         springs: Vec<(u8, u8, u8, f32, u8)>, // (lx, ly, lz, level, fluid_type_u8)
     },
     /// Inject fluid at a specific cell (debug / scripted spawning).
+    /// `max_flow_dist`: bounded-flow limit when `is_source = true`.
+    /// 0 = unlimited (legacy behavior, used by procedural sources for backward
+    /// compat). >0 = source's children stop propagating beyond this hop count
+    /// (Minecraft-style hard length limit, with linear taper across the last
+    /// `chunk::TAPER_HOPS` cells). Ignored for non-source placements.
     AddFluid {
         chunk: (i32, i32, i32),
         x: u8,
@@ -139,6 +144,7 @@ pub enum FluidEvent {
         fluid_type: cell::FluidType,
         level: f32,
         is_source: bool,
+        max_flow_dist: u8,
     },
     /// Update fluid simulation config at runtime (grace period).
     UpdateFluidConfig {

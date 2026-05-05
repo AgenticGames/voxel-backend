@@ -171,6 +171,10 @@ impl SupportType {
 pub struct SupportField {
     pub supports: Vec<SupportType>,
     pub size: usize,
+    /// Count of cells where supports[i] != SupportType::None.
+    /// Maintained by `set()` so callers can do an O(1) "any support here?"
+    /// check before walking a per-voxel support-radius scan.
+    pub non_none_count: u32,
 }
 
 impl SupportField {
@@ -178,6 +182,7 @@ impl SupportField {
         Self {
             supports: vec![SupportType::None; size * size * size],
             size,
+            non_none_count: 0,
         }
     }
 
@@ -194,6 +199,13 @@ impl SupportField {
     #[inline]
     pub fn set(&mut self, x: usize, y: usize, z: usize, support_type: SupportType) {
         let idx = self.index(x, y, z);
+        let was_none = self.supports[idx] == SupportType::None;
+        let is_none = support_type == SupportType::None;
+        match (was_none, is_none) {
+            (true, false) => self.non_none_count = self.non_none_count.saturating_add(1),
+            (false, true) => self.non_none_count = self.non_none_count.saturating_sub(1),
+            _ => {}
+        }
         self.supports[idx] = support_type;
     }
 
@@ -201,6 +213,46 @@ impl SupportField {
     pub fn has_support(&self, x: usize, y: usize, z: usize) -> bool {
         self.get(x, y, z) != SupportType::None
     }
+
+    /// O(1): true if every cell in this chunk's support field is `SupportType::None`.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.non_none_count == 0
+    }
+}
+
+/// O(1)-per-chunk check: does any chunk in the bounding box of voxel
+/// `(wx,wy,wz)` ± `sr` voxels have at least one non-None support entry?
+///
+/// Used to fast-skip the per-voxel `(2sr+1)^3` support-radius scan in
+/// `calc_voxel_stress*` when no struts have been placed near this voxel.
+/// At most 8 chunk lookups in the worst case (typically 1 when sr < cs).
+#[inline]
+fn any_supports_in_radius_box(
+    support_fields: &HashMap<(i32, i32, i32), SupportField>,
+    wx: i32, wy: i32, wz: i32,
+    sr: i32,
+    chunk_size: usize,
+) -> bool {
+    let cs = chunk_size as i32;
+    let cx_min = (wx - sr).div_euclid(cs);
+    let cx_max = (wx + sr).div_euclid(cs);
+    let cy_min = (wy - sr).div_euclid(cs);
+    let cy_max = (wy + sr).div_euclid(cs);
+    let cz_min = (wz - sr).div_euclid(cs);
+    let cz_max = (wz + sr).div_euclid(cs);
+    for cx in cx_min..=cx_max {
+        for cy in cy_min..=cy_max {
+            for cz in cz_min..=cz_max {
+                if let Some(sf) = support_fields.get(&(cx, cy, cz)) {
+                    if !sf.is_empty() {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Default hardness per Material (index by Material as u8).
@@ -431,11 +483,45 @@ pub struct CollapseSlab {
     pub dominant_material: Material,
 }
 
+/// Data needed to apply a deferred pile placement later. Carries the
+/// snapshot of collapsed slab voxels (which still have their original
+/// material info) plus geometry.
+#[derive(Debug, Clone)]
+pub struct PendingPilePlacement {
+    pub collapsed_voxels: Vec<CollapsedVoxel>,
+    pub bb_min: (i32, i32, i32),
+    pub bb_max: (i32, i32, i32),
+    pub dominant_material: Material,
+    pub landing_offset: i32,
+}
+
 /// Enhanced collapse event with coherent slab data for animated falling.
+///
+/// `affected_chunks` is the union of `slab_chunks` and `pile_chunks` for
+/// backward compat — old code that doesn't care about the cinematic split
+/// still works. The two sub-sets exist so the worker can defer pile-chunk
+/// remeshes until after the falling-slab cinematic has impacted the floor:
+///
+/// - `slab_chunks`: chunks where slab voxels were CLEARED (cave roof opens
+///   here). Should be remeshed at fall start so the roof hole appears as
+///   the slab visually detaches.
+/// - `pile_chunks`: chunks where rubble pile was PLACED (floor pile lands
+///   here). Should be remeshed at impact so the pile appears under the
+///   falling slab right when it lands.
+///
+/// `pending_piles` is populated when the caller used the no-pile variant
+/// (`detect_collapses_v2_no_pile`) — the pile hasn't been placed yet.
+/// The caller should later call `apply_pending_pile` to actually mutate
+/// density and place the rubble. When the older
+/// `detect_and_execute_collapses_v2` is used, `pending_piles` is empty and
+/// `pile_chunks` is populated instead (pile already placed inline).
 #[derive(Debug, Clone)]
 pub struct CollapseEventV2 {
     pub slabs: Vec<CollapseSlab>,
     pub affected_chunks: Vec<(i32, i32, i32)>,
+    pub slab_chunks: Vec<(i32, i32, i32)>,
+    pub pile_chunks: Vec<(i32, i32, i32)>,
+    pub pending_piles: Vec<PendingPilePlacement>,
     pub total_volume: u32,
     pub center: (f32, f32, f32),
 }
@@ -594,18 +680,26 @@ pub fn calc_voxel_stress(
     }
 
     // 3. Support structure bonus: nearby supports reduce stress
+    //
+    // Fast skip: if no chunk in the (2sr+1)^3 voxel box around (wx,wy,wz) has
+    // any non-None supports, the entire 7^3 sample_support sweep below is pure
+    // waste. Cheap O(<=8) chunk lookups guard the 342-call HashMap walk.
+    // For early-game (0 struts placed in the world) this short-circuits ~100%
+    // of stressed voxels.
     let sr = config.support_radius as i32;
-    for dz in -sr..=sr {
-        for dy in -sr..=sr {
-            for dx in -sr..=sr {
-                if dx == 0 && dy == 0 && dz == 0 {
-                    continue;
-                }
-                let support = sample_support(support_fields, wx + dx, wy + dy, wz + dz, chunk_size);
-                if support != SupportType::None {
-                    let dist = ((dx * dx + dy * dy + dz * dz) as f32).sqrt();
-                    let support_value = config.support_hardness[support as u8 as usize];
-                    raw_stress -= support_value / dist;
+    if any_supports_in_radius_box(support_fields, wx, wy, wz, sr, chunk_size) {
+        for dz in -sr..=sr {
+            for dy in -sr..=sr {
+                for dx in -sr..=sr {
+                    if dx == 0 && dy == 0 && dz == 0 {
+                        continue;
+                    }
+                    let support = sample_support(support_fields, wx + dx, wy + dy, wz + dz, chunk_size);
+                    if support != SupportType::None {
+                        let dist = ((dx * dx + dy * dy + dz * dz) as f32).sqrt();
+                        let support_value = config.support_hardness[support as u8 as usize];
+                        raw_stress -= support_value / dist;
+                    }
                 }
             }
         }
@@ -829,19 +923,41 @@ pub fn ground_connectivity_pass(
         max_wy = max_wy.max(cy * cs as i32 + grid_size as i32 - 1);
     }
 
-    // Global flood: each column walks top-to-bottom across all chunks
+    // Global flood: each column walks top-to-bottom across all chunks.
+    //
+    // Perf: consecutive y values in the descending walk almost always land in
+    // the same chunk (only `cy` changes when crossing a chunk boundary). Cache
+    // the chunk_y and the looked-up DensityField/in_expanded flags so we only
+    // re-fetch from `density_fields`/`expanded_keys` when `cy` changes. The
+    // `scores.get_mut` write still happens per solid cell — keeping it lifted
+    // would force unsafe (mutable + immutable map borrow simultaneously) and
+    // the per-cell write path is the same cost it was before.
+    let cs_i32 = cs as i32;
     for &(wx, wz) in &columns {
-        let mut current_score = 1.0f32; // Start grounded from surface/unloaded above
+        let mut current_score = 1.0f32;
         let mut in_air_gap = false;
 
+        let mut cached_cy: Option<i32> = None;
+        let mut cached_df: Option<&DensityField> = None;
+        let mut cached_in_expanded = false;
+        let mut cached_key = (0i32, 0i32, 0i32);
+
         for wy in (min_wy..=max_wy).rev() {
-            let (key, lx, ly, lz) = world_to_chunk_local(wx, wy, wz, cs);
+            let cx = wx.div_euclid(cs_i32);
+            let cy = wy.div_euclid(cs_i32);
+            let cz = wz.div_euclid(cs_i32);
+            let lx = wx.rem_euclid(cs_i32) as usize;
+            let ly = wy.rem_euclid(cs_i32) as usize;
+            let lz = wz.rem_euclid(cs_i32) as usize;
 
-            // Only write to chunks in the expanded set
-            let in_expanded = expanded_keys.contains(&key);
+            if cached_cy != Some(cy) {
+                cached_cy = Some(cy);
+                cached_key = (cx, cy, cz);
+                cached_df = density_fields.get(&cached_key);
+                cached_in_expanded = expanded_keys.contains(&cached_key);
+            }
 
-            let is_solid = density_fields
-                .get(&key)
+            let is_solid = cached_df
                 .map(|df| df.get(lx, ly, lz).material.is_solid())
                 .unwrap_or(false);
 
@@ -851,14 +967,13 @@ pub fn ground_connectivity_pass(
                 continue;
             }
 
-            // Solid voxel
             if in_air_gap {
-                current_score = 0.0; // Below air gap = ceiling, score 0
+                current_score = 0.0;
                 in_air_gap = false;
             }
 
-            if in_expanded {
-                if let Some(sf) = scores.get_mut(&key) {
+            if cached_in_expanded {
+                if let Some(sf) = scores.get_mut(&cached_key) {
                     sf.set(lx, ly, lz, current_score);
                 }
             }
@@ -876,12 +991,29 @@ pub fn ground_connectivity_pass(
         // so collect updates first, then apply.
         let mut updates: Vec<((i32, i32, i32), usize, usize, usize, f32)> = Vec::new();
 
+        let cs_i32 = cs as i32;
+        let last_local = grid_size - 1;
         for &key in &expanded_keys {
             let df = match density_fields.get(&key) {
                 Some(d) => d,
                 None => continue,
             };
+            // Hoist the chunk's own score field outside the (z,y,x) loops:
+            // every cell inside this chunk reads `scores.get(&key)` at least
+            // once (for its `current_score`), and most neighbor reads also
+            // resolve back to this same chunk because only voxels on a chunk
+            // face cross into a different `SupportScoreField`. Caching it
+            // saves grid_size^3 redundant HashMap lookups per chunk per
+            // iteration (~29k for chunk_size=30) and an additional ~5×
+            // savings on neighbor lookups whose key matches `key`.
+            let current_sf = match scores.get(&key) {
+                Some(sf) => sf,
+                None => continue,
+            };
             let (cx, cy, cz) = key;
+            let chunk_origin_x = cx * cs_i32;
+            let chunk_origin_y = cy * cs_i32;
+            let chunk_origin_z = cz * cs_i32;
 
             for z in 0..grid_size {
                 for y in 0..grid_size {
@@ -889,38 +1021,68 @@ pub fn ground_connectivity_pass(
                         if !df.get(x, y, z).material.is_solid() {
                             continue;
                         }
-                        let current_score = scores.get(&key).unwrap().get(x, y, z);
+                        let current_score = current_sf.get(x, y, z);
                         if current_score >= 1.0 {
                             continue; // Already fully grounded
                         }
 
-                        let wx = cx * cs as i32 + x as i32;
-                        let wy = cy * cs as i32 + y as i32;
-                        let wz = cz * cs as i32 + z as i32;
+                        let wx = chunk_origin_x + x as i32;
+                        let wy = chunk_origin_y + y as i32;
+                        let wz = chunk_origin_z + z as i32;
 
                         let mut best = current_score;
 
-                        // Vertical transfer from below
-                        let (bkey, blx, bly, blz) = world_to_chunk_local(wx, wy - 1, wz, cs);
-                        if let Some(bsf) = scores.get(&bkey) {
-                            let below_score = bsf.get(blx, bly, blz);
+                        // Vertical transfer from below. Stay on the cached
+                        // `current_sf` whenever the cell-below is in the
+                        // same chunk (the common case — only y==0 crosses).
+                        if y > 0 {
+                            let below_score = current_sf.get(x, y - 1, z);
                             best = best.max(below_score * vert_transfer);
                         } else {
-                            // Unloaded neighbor = assume grounded
-                            best = best.max(vert_transfer);
+                            let bkey = (cx, cy - 1, cz);
+                            if let Some(bsf) = scores.get(&bkey) {
+                                let below_score = bsf.get(x, last_local, z);
+                                best = best.max(below_score * vert_transfer);
+                            } else {
+                                // Unloaded neighbor = assume grounded
+                                best = best.max(vert_transfer);
+                            }
                         }
 
-                        // Lateral transfer from 4 horizontal neighbors
-                        let neighbors: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
-                        for &(dx, dz) in &neighbors {
-                            let (nkey, nlx, nly, nlz) = world_to_chunk_local(
-                                wx + dx, wy, wz + dz, cs,
-                            );
-                            if let Some(nsf) = scores.get(&nkey) {
-                                let n_score = nsf.get(nlx, nly, nlz);
-                                best = best.max(n_score * lat_transfer);
-                            }
-                            // Don't assume grounded for unloaded lateral neighbors
+                        // Lateral transfer from 4 horizontal neighbors.
+                        // Same-chunk reads use the cached field; only the 4
+                        // cells on each face fall through to a HashMap lookup.
+                        // -X
+                        if x > 0 {
+                            let n_score = current_sf.get(x - 1, y, z);
+                            best = best.max(n_score * lat_transfer);
+                        } else if let Some(nsf) = scores.get(&(cx - 1, cy, cz)) {
+                            let n_score = nsf.get(last_local, y, z);
+                            best = best.max(n_score * lat_transfer);
+                        }
+                        // +X
+                        if x < last_local {
+                            let n_score = current_sf.get(x + 1, y, z);
+                            best = best.max(n_score * lat_transfer);
+                        } else if let Some(nsf) = scores.get(&(cx + 1, cy, cz)) {
+                            let n_score = nsf.get(0, y, z);
+                            best = best.max(n_score * lat_transfer);
+                        }
+                        // -Z
+                        if z > 0 {
+                            let n_score = current_sf.get(x, y, z - 1);
+                            best = best.max(n_score * lat_transfer);
+                        } else if let Some(nsf) = scores.get(&(cx, cy, cz - 1)) {
+                            let n_score = nsf.get(x, y, last_local);
+                            best = best.max(n_score * lat_transfer);
+                        }
+                        // +Z
+                        if z < last_local {
+                            let n_score = current_sf.get(x, y, z + 1);
+                            best = best.max(n_score * lat_transfer);
+                        } else if let Some(nsf) = scores.get(&(cx, cy, cz + 1)) {
+                            let n_score = nsf.get(x, y, 0);
+                            best = best.max(n_score * lat_transfer);
                         }
 
                         // No above-transfer: ceiling rock must NOT bootstrap support
@@ -1040,19 +1202,27 @@ pub fn calc_voxel_stress_v2(
     } else { 0.0 };
     raw_stress += xsec_stress;
 
-    // Support structure bonus: nearby struts reduce stress
+    // Support structure bonus: nearby struts reduce stress.
+    //
+    // Fast skip: if no chunk in the (2sr+1)^3 voxel box around (wx,wy,wz) has
+    // any non-None supports, the entire 7^3 sample_support sweep below is pure
+    // waste. Cheap O(<=8) chunk lookups guard the 342-call HashMap walk.
+    // For early-game (0 struts placed in the world) this short-circuits ~100%
+    // of stressed voxels in this hot loop.
     let sr = config.support_radius as i32;
-    for dz in -sr..=sr {
-        for dy in -sr..=sr {
-            for dx in -sr..=sr {
-                if dx == 0 && dy == 0 && dz == 0 {
-                    continue;
-                }
-                let support = sample_support(support_fields, wx + dx, wy + dy, wz + dz, chunk_size);
-                if support != SupportType::None {
-                    let dist = ((dx * dx + dy * dy + dz * dz) as f32).sqrt();
-                    let support_value = config.support_hardness[support as u8 as usize];
-                    raw_stress -= support_value / dist;
+    if any_supports_in_radius_box(support_fields, wx, wy, wz, sr, chunk_size) {
+        for dz in -sr..=sr {
+            for dy in -sr..=sr {
+                for dx in -sr..=sr {
+                    if dx == 0 && dy == 0 && dz == 0 {
+                        continue;
+                    }
+                    let support = sample_support(support_fields, wx + dx, wy + dy, wz + dz, chunk_size);
+                    if support != SupportType::None {
+                        let dist = ((dx * dx + dy * dy + dz * dz) as f32).sqrt();
+                        let support_value = config.support_hardness[support as u8 as usize];
+                        raw_stress -= support_value / dist;
+                    }
                 }
             }
         }
@@ -1463,13 +1633,66 @@ pub fn detect_and_execute_collapses(
 /// - Minimum region filter: skips tiny regions (< min_collapse_region)
 /// - Uniform slab translation: entire slab drops as a unit, preserving shape
 /// - Rubble preserves slab geometry at landing position
+/// Apply a previously-deferred pile placement. Mutates density to add the
+/// rubble pile, returns the chunks affected. The caller is responsible for
+/// remeshing those chunks after this call.
+pub fn apply_pending_pile(
+    density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
+    config: &StressConfig,
+    pending: &PendingPilePlacement,
+    chunk_size: usize,
+) -> Vec<(i32, i32, i32)> {
+    let pile_result = crate::collapse_pile::place_collapse_pile(
+        density_fields, config, &pending.collapsed_voxels,
+        pending.bb_min, pending.bb_max,
+        pending.dominant_material, pending.landing_offset, chunk_size,
+    );
+    pile_result.affected_chunks.into_iter().collect()
+}
+
+/// Like `apply_pending_pile` but returns the full `PlacementResult` so the
+/// caller can inspect `written_cells` (e.g. to extract a preview mesh and
+/// then roll back the writes).
+pub fn apply_pending_pile_with_result(
+    density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
+    config: &StressConfig,
+    pending: &PendingPilePlacement,
+    chunk_size: usize,
+) -> crate::collapse_pile::PlacementResult {
+    crate::collapse_pile::place_collapse_pile(
+        density_fields, config, &pending.collapsed_voxels,
+        pending.bb_min, pending.bb_max,
+        pending.dominant_material, pending.landing_offset, chunk_size,
+    )
+}
+
 pub fn detect_and_execute_collapses_v2(
+    density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
+    stress_fields: &mut HashMap<(i32, i32, i32), StressField>,
+    support_fields: &HashMap<(i32, i32, i32), SupportField>,
+    overstressed: &[OverstressedVoxel],
+    config: &StressConfig,
+    chunk_size: usize,
+) -> Vec<CollapseEventV2> {
+    detect_and_execute_collapses_v2_with_options(
+        density_fields, stress_fields, support_fields,
+        overstressed, config, chunk_size, false,
+    )
+}
+
+/// Same as `detect_and_execute_collapses_v2` but with an option to defer
+/// pile placement. When `defer_pile = true`, slab voxels are still cleared
+/// (cave roof opens immediately) but the rubble pile is NOT placed —
+/// instead, `pending_piles` is populated on each event so the caller can
+/// apply piles later (e.g., scheduled at impact time for the cinematic).
+pub fn detect_and_execute_collapses_v2_with_options(
     density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
     stress_fields: &mut HashMap<(i32, i32, i32), StressField>,
     _support_fields: &HashMap<(i32, i32, i32), SupportField>,
     overstressed: &[OverstressedVoxel],
     config: &StressConfig,
     chunk_size: usize,
+    defer_pile: bool,
 ) -> Vec<CollapseEventV2> {
     if overstressed.is_empty() {
         return Vec::new();
@@ -1573,8 +1796,12 @@ pub fn detect_and_execute_collapses_v2(
         let n = region.len() as f32;
         let center = (sum.0 / n, sum.1 / n, sum.2 / n);
 
+        // Filter Air out of dominant_material — stress's BFS region can
+        // include marginal air-classified cells, and "dominant=Air" then
+        // propagates everywhere as matte-black mesh material in UE.
         let dominant_material = material_counts
             .into_iter()
+            .filter(|(m, _)| (*m as u8) > 0)
             .max_by_key(|&(_, count)| count)
             .map(|(mat, _)| mat)
             .unwrap_or(Material::Granite);
@@ -1649,8 +1876,13 @@ pub fn detect_and_execute_collapses_v2(
 
         let landing_y = bb_min.1 - landing_offset;
 
-        // Record collapsed voxels with original material, then clear them
+        // Record collapsed voxels with original material, then clear them.
+        // Track slab-affected chunks separately from the wider affected_chunks
+        // set so the worker can remesh roof chunks at fall-start time and
+        // pile chunks at impact time (the cinematic-aligned split).
         let mut collapsed_voxels = Vec::with_capacity(region.len());
+        let mut slab_chunks_set: HashSet<(i32, i32, i32)> = HashSet::new();
+        let mut pile_chunks_set: HashSet<(i32, i32, i32)> = HashSet::new();
         let mut affected_chunks_set = HashSet::new();
 
         for &(wx, wy, wz) in &region {
@@ -1670,6 +1902,7 @@ pub fn detect_and_execute_collapses_v2(
             if let Some(sf) = stress_fields.get_mut(&key) {
                 sf.set(lx, ly, lz, 0.0);
             }
+            slab_chunks_set.insert(key);
             affected_chunks_set.insert(key);
 
             collapsed_voxels.push(CollapsedVoxel {
@@ -1696,7 +1929,50 @@ pub fn detect_and_execute_collapses_v2(
         // Pile sizing: cone volume = pi*R^2*H/3, solve for H from
         // collapsed_volume * rubble_fill_ratio. Seeded from collapse center
         // for determinism (multiplayer-safe).
-        if config.rubble_enabled && !collapsed_voxels.is_empty() {
+        // Cinematic collapse pile (see crate::collapse_pile). Splits the slab
+        // into fragments, runs angle-of-repose distribution for slope/cliff
+        // handling, sub-voxel pile surface, material stratification, craters,
+        // splash ring, boulder tracks, impact cracks, plus formation removal
+        // at both landing zone AND slab origin. All multi-chunk seam-aware.
+        let mut pending_piles_for_event: Vec<PendingPilePlacement> = Vec::new();
+        let pile_result_opt = if defer_pile {
+            // Save data for later application — pile cells NOT placed yet.
+            // Worker will call apply_pending_pile at the cinematic impact time.
+            pending_piles_for_event.push(PendingPilePlacement {
+                collapsed_voxels: collapsed_voxels.clone(),
+                bb_min,
+                bb_max,
+                dominant_material,
+                landing_offset,
+            });
+            None
+        } else {
+            let pr = crate::collapse_pile::place_collapse_pile(
+                density_fields, config, &collapsed_voxels,
+                bb_min, bb_max, dominant_material, landing_offset, chunk_size,
+            );
+            for k in &pr.affected_chunks {
+                pile_chunks_set.insert(*k);
+                affected_chunks_set.insert(*k);
+            }
+            Some(pr)
+        };
+
+        // ── Chained collapse hint (Tier 5I) ──
+        // The pile's added weight may tip a marginal ceiling. Add the
+        // chunks containing the settling-hint cells to the affected_chunks
+        // set so the cascade picks them up. Only available when pile was
+        // placed inline (defer_pile=false). Worker handles deferred
+        // settling separately by re-running stress after impact.
+        if let Some(pr) = pile_result_opt {
+            for &(wx, wy, wz) in &pr.settling_dirty_cells {
+                let key = world_to_chunk_local(wx, wy, wz, chunk_size).0;
+                affected_chunks_set.insert(key);
+            }
+            let _ = (pr.written_cells, pr.dust_events, pr.fragments);
+        }
+
+        if false {
             let pile_seed: u64 = (center.0 as i64 as u64)
                 .wrapping_mul(73856093)
                 ^ (center.1 as i64 as u64).wrapping_mul(19349663)
@@ -1924,6 +2200,9 @@ pub fn detect_and_execute_collapses_v2(
         events.push(CollapseEventV2 {
             slabs: vec![slab],
             affected_chunks: affected_chunks_set.into_iter().collect(),
+            slab_chunks: slab_chunks_set.into_iter().collect(),
+            pile_chunks: pile_chunks_set.into_iter().collect(),
+            pending_piles: pending_piles_for_event,
             total_volume: region.len() as u32,
             center,
         });

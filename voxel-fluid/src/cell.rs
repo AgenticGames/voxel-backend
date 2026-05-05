@@ -58,6 +58,19 @@ pub struct FluidCell {
     /// Ticks of stagnation for orphan puddle detection. Incremented when
     /// level < ORPHAN_THRESHOLD and no flow occurred. Reset on movement.
     pub stagnant_ticks: u8,
+    /// **Bounded-flow tracking** — hops from the originating source cell.
+    /// Source cells reset to 0 each tick; flow propagation increments by 1
+    /// on each transfer. Cells whose hop count meets/exceeds the source's
+    /// `max_flow_dist` will not propagate flow further (Minecraft-style
+    /// hard length limit). 255 = "no source recorded" sentinel.
+    pub hops_from_source: u8,
+    /// Maximum hops this *source* permits its children to spread.
+    /// `0` = unlimited (legacy / geological default — keeps existing behavior).
+    /// `>0` = bounded: flow stops once a child cell's `hops_from_source` reaches this value.
+    /// Only meaningful on cells where `is_source = true`; children inherit the
+    /// effective limit from the source they propagated from (carried via the
+    /// source-side check at transfer time).
+    pub max_flow_dist: u8,
 }
 
 impl Default for FluidCell {
@@ -68,6 +81,8 @@ impl Default for FluidCell {
             is_source: false,
             grace_ticks: 0,
             stagnant_ticks: 0,
+            hops_from_source: 255, // sentinel: no source recorded
+            max_flow_dist: 0,      // 0 = unlimited (legacy)
         }
     }
 }

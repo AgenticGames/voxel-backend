@@ -36,52 +36,78 @@ pub fn sdf_box(p: Vec3, half_extent: Vec3) -> f32 {
 /// `tip`, with radii `r_base` at the base end and `r_tip` at the tip end.
 /// Used to sculpt buttress shapes from the building floor down to a support
 /// hit point. Negative inside the cone, positive outside.
+///
+/// One-shot convenience wrapper. When you sample the same cone many times,
+/// build a `CompiledCone` once with `compile_cone` and call
+/// `sdf_compiled_cone` instead — it skips the per-call sqrt for axis length
+/// and the sqrt+div for the slanted-side normal.
 pub fn sdf_capped_cone(p: Vec3, base: Vec3, tip: Vec3, r_base: f32, r_tip: f32) -> f32 {
+    match compile_cone(base, tip, r_base, r_tip) {
+        Some(cone) => sdf_compiled_cone(p, &cone),
+        None => {
+            let r = (r_base + r_tip) * 0.5;
+            (p - base).length() - r
+        }
+    }
+}
+
+/// Precomputed cone parameters. Build once, sample many times.
+#[derive(Clone, Copy)]
+pub struct CompiledCone {
+    pub base: Vec3,
+    pub axis_n: Vec3,
+    pub h: f32,
+    pub r_base: f32,
+    pub r_tip: f32,
+    nx: f32,
+    ny: f32,
+}
+
+/// Precompute the per-cone constants used by `sdf_compiled_cone`. Returns
+/// `None` for a degenerate cone (caller should fall back to a sphere SDF).
+#[inline]
+pub fn compile_cone(base: Vec3, tip: Vec3, r_base: f32, r_tip: f32) -> Option<CompiledCone> {
     let axis = tip - base;
     let h = axis.length();
     if h < 1e-4 {
-        // Degenerate cone -> sphere of average radius.
-        let r = (r_base + r_tip) * 0.5;
-        return (p - base).length() - r;
+        return None;
     }
     let axis_n = axis / h;
-    let rel = p - base;
-    let along = rel.dot(axis_n);
-    let perp = rel - axis_n * along;
-    let perp_len = perp.length();
+    // Slanted-side outward normal in (perp, along) plane, precomputed.
+    let dx_side = r_tip - r_base;
+    let dy_side = h;
+    let len_side = (dx_side * dx_side + dy_side * dy_side).sqrt().max(1e-4);
+    let nx = dy_side / len_side;
+    let ny = -dx_side / len_side;
+    Some(CompiledCone { base, axis_n, h, r_base, r_tip, nx, ny })
+}
 
-    let t = (along / h).clamp(0.0, 1.0);
-    let radius_at = r_base + (r_tip - r_base) * t;
+/// Hot-path SDF using a `CompiledCone`. Saves the per-call sqrt for the axis
+/// length and the sqrt+div for the slanted-side normal. Identical numerics to
+/// `sdf_capped_cone`.
+#[inline]
+pub fn sdf_compiled_cone(p: Vec3, c: &CompiledCone) -> f32 {
+    let rel = p - c.base;
+    let along = rel.dot(c.axis_n);
+    let perp = rel - c.axis_n * along;
+    let perp_len_sq = perp.length_squared();
 
-    // Distance components in the (along, perp) plane to a trapezoid silhouette.
-    let dx = perp_len - radius_at;
-    let dy = (along - h.max(0.0).min(h)).max(0.0).max(-along);
-    // Use the cleaner standard form: clamped along-axis distance.
-    let cap_d = if along < 0.0 {
+    if along < 0.0 {
         // Below base.
-        let dr = (perp_len - r_base).max(0.0);
+        let perp_len = perp_len_sq.sqrt();
+        let dr = (perp_len - c.r_base).max(0.0);
         (dr * dr + along * along).sqrt()
-    } else if along > h {
+    } else if along > c.h {
         // Above tip.
-        let dr = (perp_len - r_tip).max(0.0);
-        let dh = along - h;
+        let perp_len = perp_len_sq.sqrt();
+        let dr = (perp_len - c.r_tip).max(0.0);
+        let dh = along - c.h;
         (dr * dr + dh * dh).sqrt()
     } else {
-        // Inside the cone's height range. Distance to slanted side.
-        // The slanted side is the line from (r_base, 0) to (r_tip, h) in the
-        // (perp, along) plane. Project perp onto that side's normal.
-        let dx_side = r_tip - r_base;
-        let dy_side = h;
-        let len_side = (dx_side * dx_side + dy_side * dy_side).sqrt().max(1e-4);
-        // Outward normal (perp positive, along negative).
-        let nx = dy_side / len_side;
-        let ny = -dx_side / len_side;
-        let signed = (perp_len - r_base) * nx + along * ny;
-        signed
-    };
-    let _ = dx;
-    let _ = dy;
-    cap_d
+        // Inside the cone's height range. Signed distance to the slanted side.
+        let perp_len = perp_len_sq.sqrt();
+        (perp_len - c.r_base) * c.nx + along * c.ny
+    }
 }
 
 // ── Density sampling ──────────────────────────────────────────────────────

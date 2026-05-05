@@ -15,6 +15,6 @@ cargo test --workspace           # run all tests
 - Always run `cargo test --workspace` before committing
 
 ## Architecture
-- 5-crate workspace: voxel-noise, voxel-core, voxel-gen, voxel-cli, voxel-viewer
+- 8-crate workspace: voxel-noise, voxel-core, voxel-gen, voxel-cli, voxel-viewer, voxel-ffi, voxel-fluid, voxel-sleep (+ nav-debug helper)
 - Viewer runs on localhost:8080, static files embedded at compile time
 - Kill old viewer before rebuilding: `taskkill //F //IM voxel-viewer.exe`

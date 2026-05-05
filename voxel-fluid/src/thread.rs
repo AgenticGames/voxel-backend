@@ -220,7 +220,7 @@ fn handle_event(
                 }
             }
         }
-        FluidEvent::AddFluid { chunk, x, y, z, fluid_type, level, is_source } => {
+        FluidEvent::AddFluid { chunk, x, y, z, fluid_type, level, is_source, max_flow_dist } => {
             ensure_grid(chunks, chunk_densities, chunk, chunk_size);
             if let Some(grid) = chunks.get_mut(&chunk) {
                 let xu = x as usize;
@@ -236,6 +236,8 @@ fn handle_event(
                     cell.is_source = is_source;
                     if is_source {
                         cell.level = crate::cell::MAX_LEVEL;
+                        cell.hops_from_source = 0;
+                        cell.max_flow_dist = max_flow_dist;
                     }
                     // Grant grace period to non-source fluid with near-full level
                     if !is_source && level >= 0.99 {

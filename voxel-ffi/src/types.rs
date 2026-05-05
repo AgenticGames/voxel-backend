@@ -57,7 +57,16 @@ pub enum FfiResultType {
     SolidifyRequest = 5,
     CollapseResult = 6,
     StressWarnings = 7,
+    /// Per-slab collapse mesh + fall data. Each result is one slab; multi-
+    /// fragment events are queued as N consecutive results.
     CollapseSlabResult = 8,
+    /// Localized pre-collapse warning. Drives Acts 1-2 of the cinematic.
+    CollapseWarning = 9,
+    /// One tier of a 4-tier pile-buildup preview. Cinematic Act 4 — sent in
+    /// 4 sequential messages right before the density commit, tier_index 0..3
+    /// stored in `slab_fall.pile_tier_index`. UE accumulates by spawn loc and
+    /// reveals tiers over `slab_fall.warning_eta_ms` ms.
+    CollapsePilePreviewTier = 10,
 }
 
 /// SoA layout for fluid mesh data. Pointers owned by Rust, freed via `voxel_free_result`.
@@ -89,10 +98,20 @@ pub struct FfiCrystalPlacement {
 }
 
 /// Crystal placement data for a chunk. Pointer owned by Rust, freed via voxel_free_result.
+///
+/// `hash` is a stable hash of the placement set (FNV-style over each
+/// placement's bytes). UE caches the last applied hash per chunk and
+/// **skips** `ApplyCrystalData` (the expensive HISM rebuild +
+/// `Foliage Create Proxy`) when the incoming hash matches — at scale
+/// (30-event burst) this dropped HISM proxy rebuilds from ~11K to ~1K.
+/// `hash` of zero means "skip the optimization, just apply" (used as a
+/// safety value when computation is uncertain).
 #[repr(C)]
 pub struct FfiCrystalData {
     pub placements: *mut FfiCrystalPlacement,
     pub count: u32,
+    pub _padding: u32,   // align hash to 8 bytes for repr(C) parity with UE
+    pub hash: u64,
 }
 
 /// Zone descriptor for UE consumption — one per detected zone in a region.
@@ -118,6 +137,71 @@ pub struct FfiZoneData {
     pub count: u32,
 }
 
+/// Cinematic-collapse metadata. When `result_type == CollapseSlabResult` the
+/// `mesh` field carries the actual DC-extracted slab mesh and this struct
+/// carries the metadata needed by the falling-slab actor (spawn pos, landing
+/// pos, aspect ratio for tumbling, volume for shake/dust scaling).
+///
+/// When `result_type == CollapseWarning` the same struct conveys severity +
+/// ETA-to-collapse + the bounds of the about-to-fall region so UE can spawn
+/// localized warning FX (cracks, dust, creaking).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiSlabFallData {
+    // Slab fall data (CollapseSlabResult)
+    pub spawn_x: f32,
+    pub spawn_y: f32,
+    pub spawn_z: f32,
+    pub land_x: f32,
+    pub land_y: f32,
+    pub land_z: f32,
+    pub fall_distance: f32,
+    /// Bounding-box extents in UE units. Used by the slab actor to compute
+    /// aspect ratio for volume-aware fall behavior (tumble, drop speed).
+    pub bounds_extent_x: f32,
+    pub bounds_extent_y: f32,
+    pub bounds_extent_z: f32,
+    pub volume: u32,
+    pub dominant_material: u8,
+    // Warning event fields (CollapseWarning)
+    /// 0=none, 1=dust, 2=creak, 3=shake, 4=imminent
+    pub warning_severity: u8,
+    /// Tier index (0..7) for CollapsePilePreviewTier results. Otherwise 0.
+    pub pile_tier_index: u8,
+    pub _padding: [u8; 1],
+    /// Estimated milliseconds until the actual collapse fires. UE uses this
+    /// to time the warning state-machine (act 1 → act 2 → fall).
+    /// For CollapsePilePreviewTier, this is the total tier-reveal duration ms.
+    pub warning_eta_ms: u32,
+    /// Leading-edge horizontal unit vector in **UE world space**, indicating
+    /// the direction the slab "leans" — long edge offset from the centroid
+    /// in the direction it will tip while falling. Magnitude in [0..1]; a
+    /// magnitude of 0 means no preferred tilt direction (chunky cube).
+    /// UE uses this to pick the tumble axis so long thin slabs tip like
+    /// dominoes mid-fall instead of randomly jittering.
+    pub leading_edge_dir_x: f32,
+    pub leading_edge_dir_y: f32,
+}
+
+impl Default for FfiSlabFallData {
+    fn default() -> Self {
+        Self {
+            spawn_x: 0.0, spawn_y: 0.0, spawn_z: 0.0,
+            land_x: 0.0, land_y: 0.0, land_z: 0.0,
+            fall_distance: 0.0,
+            bounds_extent_x: 0.0, bounds_extent_y: 0.0, bounds_extent_z: 0.0,
+            volume: 0,
+            dominant_material: 0,
+            warning_severity: 0,
+            pile_tier_index: 0,
+            _padding: [0; 1],
+            warning_eta_ms: 0,
+            leading_edge_dir_x: 0.0,
+            leading_edge_dir_y: 0.0,
+        }
+    }
+}
+
 #[repr(C)]
 pub struct FfiResult {
     pub result_type: FfiResultType,
@@ -128,6 +212,7 @@ pub struct FfiResult {
     pub fluid_mesh: FfiFluidMeshData,
     pub crystal_data: FfiCrystalData,
     pub zone_data: FfiZoneData,
+    pub slab_fall: FfiSlabFallData,
 }
 
 #[repr(C)]
@@ -997,6 +1082,10 @@ pub struct FfiEngineConfig {
     pub zone_frozen_waterfall_count: u32,
     pub zone_frozen_ice_stalactite_chance: f32,
     pub zone_frozen_mega_chance: f32,
+    // ── Blank-Canvas Mode ──
+    // 1 = skip all decoration phases (caverns, worms, pools, formations, zones)
+    // and emit uniform host rock for hand-authoring with creative brushes.
+    pub blank_canvas: u8,
 }
 
 // FfiZoneDescriptor is defined near the top of this file, alongside FfiZoneData.
@@ -1026,13 +1115,181 @@ pub struct FfiMineRequest {
     pub normal_z: f32,
 }
 
+/// Creative-mode brush request. Sphere ops (paint/carve/fill) use this struct.
+/// World coords/radius are in UE space; the worker converts them.
+///
+/// `mode`: 0 = paint material on solid voxels (no shape change)
+///         1 = carve sphere (set solid → air)
+///         2 = fill sphere (set air → solid with `material`, also overwrites
+///             material on already-solid voxels in range)
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiBrushSphereRequest {
+    pub world_x: f32,
+    pub world_y: f32,
+    pub world_z: f32,
+    pub radius: f32,
+    pub mode: u8,
+    pub material: u8,   // ignored for carve mode
+    pub _pad: [u8; 2],
+}
+
+/// Tunnel-along-polyline brush. `points` are UE world coords; the worker
+/// converts each point. If `material == 255` the tunnel carves; otherwise
+/// it fills with that material.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiBrushTunnelRequest {
+    pub points: *const FfiVec3,
+    pub point_count: u32,
+    pub radius: f32,
+    pub material: u8,
+    pub _pad: [u8; 3],
+}
+
+/// Place a single hand-authored formation at a UE world position.
+/// `formation_type`: 0=Stalactite, 1=Stalagmite, 2=Column, 3=Drapery,
+///                   4=Flowstone, 5=Shield, 6=RimstoneDam
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiBrushFormationRequest {
+    pub world_x: f32,
+    pub world_y: f32,
+    pub world_z: f32,
+    pub formation_type: u8,
+    pub material: u8,
+    pub _pad: [u8; 2],
+    pub height: f32,    // UE units
+    pub radius: f32,    // UE units
+}
+
+/// Axis-aligned-or-yawed box brush. `op`: 0=paint, 1=carve, 2=fill.
+/// Half-extents in UE units. `yaw_deg`: rotation around UE vertical (Z) axis,
+/// in degrees. 0 = AABB (no rotation).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiBrushBoxRequest {
+    pub world_x: f32,
+    pub world_y: f32,
+    pub world_z: f32,
+    pub half_x: f32,
+    pub half_y: f32,
+    pub half_z: f32,
+    pub op: u8,
+    pub material: u8,
+    pub _pad: [u8; 2],
+    pub yaw_deg: f32,
+}
+
+/// Y-axis-aligned cylinder brush. `op`: 0=paint, 1=carve, 2=fill.
+/// `radius` and `height` in UE units; `height` is the full cylinder height.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiBrushCylinderRequest {
+    pub world_x: f32,
+    pub world_y: f32,
+    pub world_z: f32,
+    pub radius: f32,
+    pub height: f32,
+    pub op: u8,
+    pub material: u8,
+    pub _pad: [u8; 2],
+}
+
+/// Smooth brush — Laplacian average of density in a sphere. Material preserved.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiBrushSmoothRequest {
+    pub world_x: f32,
+    pub world_y: f32,
+    pub world_z: f32,
+    pub radius: f32,
+    pub iterations: u32,
+    pub strength: f32,  // 0..1
+}
+
+/// Noise brush — perturb density by hash-based 3D noise within a sphere.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiBrushNoiseRequest {
+    pub world_x: f32,
+    pub world_y: f32,
+    pub world_z: f32,
+    pub radius: f32,
+    pub frequency: f32,
+    pub strength: f32,
+    pub seed: u32,
+}
+
+/// Sphere fluid brush — places (or clears) fluid within a sphere.
+/// `op`: 0=fill (level=1.0), 1=clear (level=0.0), 2=pool-dig (carve solid + fill bottom half non-source), 3=carve+full fill
+/// `fluid_type`: 1=Water, 2=Lava, 3-9=specialized water sub-types
+/// `is_source`: nonzero = treat placed fluid as an infinite source (spring); 0 = drains naturally
+/// `max_flow_dist`: bounded-flow limit when placed as a source. 0 = unlimited (legacy
+/// behavior). >0 = source's children stop propagating beyond this hop count, with
+/// linear taper across the last `chunk::TAPER_HOPS` cells.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiBrushFluidSphereRequest {
+    pub world_x: f32,
+    pub world_y: f32,
+    pub world_z: f32,
+    pub radius: f32,
+    pub fluid_type: u8,
+    pub is_source: u8,
+    pub op: u8,
+    pub max_flow_dist: u8,
+}
+
+/// Box fluid brush — fills (or clears) fluid within an axis-aligned box.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiBrushFluidBoxRequest {
+    pub world_x: f32,
+    pub world_y: f32,
+    pub world_z: f32,
+    pub half_x: f32,
+    pub half_y: f32,
+    pub half_z: f32,
+    pub fluid_type: u8,
+    pub is_source: u8,
+    pub op: u8,            // 0=fill, 1=clear, 2=carve+fill
+    pub max_flow_dist: u8, // 0 = unlimited
+}
+
+/// Capsule-chain (river/spline) fluid brush. Points are UE world coords.
+/// Fills air voxels along the path; if `op == 2`, also carves the channel first.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiBrushFluidRiverRequest {
+    pub points: *const FfiVec3,
+    pub point_count: u32,
+    pub radius: f32,
+    pub fluid_type: u8,
+    pub is_source: u8,
+    pub op: u8,            // 0=fill (only), 2=carve channel + fill
+    pub max_flow_dist: u8, // 0 = unlimited
+}
+
+// (removed FfiBrushFluidStreamRequest — replaced by bounded sources via max_flow_dist on FluidCell)
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct FfiEngineStats {
     pub chunks_loaded: u32,
     pub pending_requests: u32,
     pub completed_results: u32,
+    /// Spawn-time worker count. Static — does NOT decrement when a worker
+    /// thread panics out. Use `workers_alive` to see live thread count.
     pub worker_threads_active: u32,
+    /// Live count of worker threads currently inside the run loop. Drops
+    /// below `worker_threads_active` when a worker exhausts its respawn
+    /// budget after repeated panics.
+    pub workers_alive: u32,
+    /// Process-wide cumulative panic count since DLL load. Any nonzero
+    /// value means `voxel_panic.log` has details — most likely the cause
+    /// of any "stuck queue" symptom.
+    pub panics_observed: u32,
 }
 
 #[repr(C)]
@@ -1314,6 +1571,86 @@ pub enum WorkerRequest {
         step: u32,
         total_steps: u32,
     },
+    /// Sphere brush (paint/carve/fill) at a UE world position.
+    BrushSphere {
+        request: FfiBrushSphereRequest,
+    },
+    /// Tunnel-along-polyline brush.
+    BrushTunnel {
+        /// Points in Rust world coords (already converted from UE).
+        points: Vec<glam::Vec3>,
+        radius: f32,           // Rust world units
+        material: Option<u8>,  // None = carve, Some(u8) = fill with material
+    },
+    /// Place a single formation primitive at a UE world position.
+    BrushFormation {
+        center_rust: glam::Vec3,
+        formation_type: u8,
+        material: u8,
+        height: f32,   // Rust world units
+        radius: f32,   // Rust world units
+    },
+    /// Axis-aligned-or-yawed box brush.
+    BrushBox {
+        center_rust: glam::Vec3,
+        half_ext_rust: glam::Vec3,
+        yaw_rad: f32,
+        op: u8,
+        material: u8,
+    },
+    /// Y-axis-aligned cylinder brush.
+    BrushCylinder {
+        center_rust: glam::Vec3,
+        radius: f32,    // Rust world units
+        height: f32,    // Rust world units
+        op: u8,
+        material: u8,
+    },
+    /// Smooth brush.
+    BrushSmooth {
+        center_rust: glam::Vec3,
+        radius: f32,
+        iterations: u32,
+        strength: f32,
+    },
+    /// Noise brush.
+    BrushNoise {
+        center_rust: glam::Vec3,
+        radius: f32,
+        frequency: f32,
+        strength: f32,
+        seed: u32,
+    },
+    /// Undo the most recent brush stroke (any creative brush).
+    BrushUndo,
+    /// Sphere fluid brush.
+    BrushFluidSphere {
+        center_rust: glam::Vec3,
+        radius: f32,
+        fluid_type: u8,
+        is_source: bool,
+        op: u8,         // 0=fill, 1=clear, 2=pool-dig, 3=carve+full fill
+        max_flow_dist: u8,
+    },
+    /// Box fluid brush.
+    BrushFluidBox {
+        center_rust: glam::Vec3,
+        half_ext_rust: glam::Vec3,
+        fluid_type: u8,
+        is_source: bool,
+        op: u8,         // 0=fill, 1=clear, 2=carve+fill
+        max_flow_dist: u8,
+    },
+    /// River (capsule chain) fluid brush.
+    BrushFluidRiver {
+        points: Vec<glam::Vec3>,
+        radius: f32,
+        fluid_type: u8,
+        is_source: bool,
+        op: u8,         // 0=fill, 2=carve channel + fill
+        max_flow_dist: u8,
+    },
+    // (removed BrushFluidStream — replaced by bounded sources via max_flow_dist on FluidCell)
 }
 
 /// Results sent back from worker threads.
@@ -1394,6 +1731,26 @@ pub enum WorkerResult {
     CollapseSlabResult {
         events: Vec<FfiCollapseEventV2>,
         meshes: Vec<((i32, i32, i32), ConvertedMesh)>,
+    },
+    /// One falling-slab visual: real DC mesh + fall metadata. Cinematic Act 3.
+    /// Each fragment of a multi-fragment collapse becomes one of these.
+    SlabFall {
+        mesh: ConvertedMesh,
+        fall_data: FfiSlabFallData,
+    },
+    /// Localized pre-collapse warning. Cinematic Acts 1-2.
+    CollapseWarning {
+        center_ue: (f32, f32, f32),
+        bounds_extent_ue: (f32, f32, f32),
+        severity: u8, // 1=dust, 2=creak, 3=shake, 4=imminent
+        eta_ms: u32,
+        volume: u32,
+    },
+    /// One tier of the 4-tier pile-buildup preview. UE buffers by spawn loc,
+    /// builds a debris actor when it has 4 tiers, animates reveal.
+    PilePreviewTier {
+        mesh: ConvertedMesh,
+        fall_data: FfiSlabFallData,
     },
 }
 

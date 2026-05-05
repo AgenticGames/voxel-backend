@@ -255,11 +255,15 @@ pub fn detect_solidification(
 }
 
 /// Regenerate source blocks: source cells always maintain SOURCE_LEVEL.
+/// Also resets `hops_from_source` to 0 on each source so children re-propagate
+/// from a fresh hop count each tick (essential for bounded-flow correctness).
 pub fn regen_sources(chunks: &mut HashMap<(i32, i32, i32), ChunkFluidGrid>) {
     for grid in chunks.values_mut() {
         for cell in &mut grid.cells {
             if cell.is_source() {
                 cell.level = SOURCE_LEVEL;
+                cell.hops_from_source = 0;
+                // max_flow_dist persists (it was set when the source was placed).
             }
         }
     }

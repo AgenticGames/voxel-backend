@@ -108,7 +108,9 @@ pub fn generate(
                 let origin = Vec3::new(key.0 as f32 * eb, key.1 as f32 * eb, key.2 as f32 * eb);
 
                 for z in 0..size {
-                    for y in 0..size {
+                    // y == 0 has no voxel below in this chunk; (y - 1) on
+                    // usize would wrap and OOB into density.samples.
+                    for y in 1..size {
                         for x in 0..size {
                             let idx = z * size * size + y * size + x;
                             if density.samples[idx].density > 0.0 {

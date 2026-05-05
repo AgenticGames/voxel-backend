@@ -125,6 +125,30 @@ pub fn generate_region_densities(
         }
     }
 
+    // Blank-canvas: skip all decoration phases. Each density field is already
+    // a uniform host-rock block. Run boundary sync + metadata only.
+    if config.blank_canvas {
+        let t_bsync = Instant::now();
+        sync_region_boundary_densities(&mut density_fields, config.chunk_size);
+        timings.boundary_sync = t_bsync.elapsed();
+
+        let t6 = Instant::now();
+        for density in density_fields.values_mut() {
+            density.compute_metadata();
+        }
+        timings.metadata = t6.elapsed();
+
+        return (
+            density_fields,
+            Vec::new(),       // pool descriptors
+            Vec::new(),       // fluid seeds
+            Vec::new(),       // worm paths
+            timings,
+            Vec::new(),       // river springs
+            Vec::new(),       // zone descriptors
+        );
+    }
+
     // Phase 2: Collect cavern centers from ALL chunks
     let t1 = Instant::now();
     let all_cavern_centers: Vec<Vec3> = coords

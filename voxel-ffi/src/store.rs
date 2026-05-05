@@ -69,6 +69,11 @@ pub struct ChunkStore {
     /// hash-skip catches these on its side, this prevents Rust from even
     /// doing the convert + bucket_by_material + FFI send.
     pub last_sent_mesh_hash: HashMap<(i32, i32, i32), u64>,
+    /// Creative-mode brush undo stack — each stroke captures pre-state of all
+    /// chunks in the brush AABB. `voxel_request_undo` pops the last stroke and
+    /// restores those snapshots in-place. Bounded by `undo_max_depth`.
+    pub undo_stack: std::collections::VecDeque<crate::brushes::UndoStroke>,
+    pub undo_max_depth: usize,
 }
 
 impl ChunkStore {
@@ -92,6 +97,8 @@ impl ChunkStore {
             preserved_snapshots: BTreeMap::new(),
             pending_snapshots: None,
             last_sent_mesh_hash: HashMap::new(),
+            undo_stack: std::collections::VecDeque::new(),
+            undo_max_depth: 64,
         }
     }
 
@@ -251,30 +258,50 @@ impl ChunkStore {
         world_scale: f32,
     ) -> Vec<((i32, i32, i32), ConvertedMesh)> {
         let chunk_size = config.chunk_size;
-        let mut results = Vec::with_capacity(dirty_chunks.len());
 
-        for &(key, _min_x, _min_y, _min_z, _max_x, _max_y, _max_z) in dirty_chunks {
-            let density = match self.density_fields.get(&key) {
-                Some(d) => d,
-                None => continue,
-            };
+        // Phase 1: parallel compute. Each chunk's hermite extraction, DC solve,
+        // mesh generation, smooth, normals, boundary edges, and UE conversion
+        // are pure functions of an immutably-borrowed DensityField. Run them
+        // across rayon's pool so multi-chunk flushes (building flatten typically
+        // touches 1–8 chunks; sleep collapses can hit dozens) parallelize across
+        // cores instead of stalling the store write-lock holder for the full
+        // serial walk.
+        let voxel_scale = config.voxel_scale();
+        let smooth_iters = config.mesh_smooth_iterations;
+        let smooth_strength = config.mesh_smooth_strength;
+        let smooth_boundary = config.mesh_boundary_smooth;
+        let recalc_normals = config.mesh_recalc_normals;
 
-            // Full re-extraction ensures no stale edges from smoothing boundary effects.
-            let h = extract_hermite_data(density);
-            self.hermite_data.insert(key, h);
-            let hermite = self.hermite_data.get(&key).unwrap();
+        let outputs: Vec<((i32, i32, i32), HermiteData, Mesh, Vec<Vec3>, Vec<_>, ConvertedMesh)> =
+            dirty_chunks
+                .par_iter()
+                .filter_map(|&(key, _min_x, _min_y, _min_z, _max_x, _max_y, _max_z)| {
+                    let density = self.density_fields.get(&key)?;
 
-            let cell_size = density.size - 1;
-            let dc_vertices = solve_dc_vertices(hermite, cell_size);
-            let mut mesh = generate_mesh(hermite, &dc_vertices, cell_size);
-            mesh.smooth(config.mesh_smooth_iterations, config.mesh_smooth_strength, config.mesh_boundary_smooth, Some(cell_size));
-            if config.mesh_recalc_normals > 0 { mesh.recalculate_normals(); }
+                    // Full re-extraction ensures no stale edges from smoothing
+                    // boundary effects.
+                    let hermite = extract_hermite_data(density);
+                    let cell_size = density.size - 1;
+                    let dc_vertices = solve_dc_vertices(&hermite, cell_size);
+                    let mut mesh = generate_mesh(&hermite, &dc_vertices, cell_size);
+                    mesh.smooth(smooth_iters, smooth_strength, smooth_boundary, Some(cell_size));
+                    if recalc_normals > 0 { mesh.recalculate_normals(); }
 
-            // Cache the base mesh for fast seam pass reuse
-            self.base_meshes.insert(key, mesh.clone());
+                    let boundary_edges = region_gen::extract_boundary_edges(&hermite, chunk_size);
 
-            // Update seam data so seam stitching uses post-mining geometry
-            let boundary_edges = region_gen::extract_boundary_edges(hermite, chunk_size);
+                    let mut converted = convert_mesh_to_ue_scaled(&mesh, voxel_scale, world_scale);
+                    crate::convert::bucket_mesh_by_material(&mut converted);
+
+                    Some((key, hermite, mesh, dc_vertices, boundary_edges, converted))
+                })
+                .collect();
+
+        // Phase 2: serial write-back. The HashMaps aren't shared mutably across
+        // threads, so apply the per-chunk results here in one pass.
+        let mut results = Vec::with_capacity(outputs.len());
+        for (key, hermite, mesh, dc_vertices, boundary_edges, converted) in outputs {
+            self.hermite_data.insert(key, hermite);
+            self.base_meshes.insert(key, mesh);
             self.chunk_seam_data.insert(
                 key,
                 ChunkSeamData {
@@ -283,9 +310,6 @@ impl ChunkStore {
                     boundary_edges,
                 },
             );
-
-            let mut converted = convert_mesh_to_ue_scaled(&mesh, config.voxel_scale(), world_scale);
-            crate::convert::bucket_mesh_by_material(&mut converted);
             results.push((key, converted));
         }
 

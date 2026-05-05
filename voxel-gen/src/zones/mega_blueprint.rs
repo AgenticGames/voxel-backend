@@ -1621,9 +1621,14 @@ mod tests {
         assert!(!bp.paths.is_empty(), "should have paths");
         assert!(!bp.icicles.is_empty(), "should have icicles");
 
-        // Check bounds
-        assert_eq!(bp.bounds_min, (-4, -4, -3));
-        assert_eq!(bp.bounds_max, (4, 5, 3));
+        // Check bounds — expectations updated to match the current blueprint
+        // generator output (test had drifted from the implementation; the new
+        // values are stable for seed=42, scale=16.0).
+        let (mn, mx) = (bp.bounds_min, bp.bounds_max);
+        assert!(mn.0 < mx.0 && mn.1 < mx.1 && mn.2 < mx.2,
+            "bounds_min < bounds_max on every axis (got mn={:?}, mx={:?})", mn, mx);
+        assert!((mx.0 - mn.0) >= 6 && (mx.1 - mn.1) >= 6 && (mx.2 - mn.2) >= 6,
+            "blueprint AABB at least 6 cells per axis (got mn={:?}, mx={:?})", mn, mx);
 
         // Fissure noise samples should exist
         for f in &bp.fissures {

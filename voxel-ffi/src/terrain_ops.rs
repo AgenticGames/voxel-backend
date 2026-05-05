@@ -81,13 +81,31 @@ fn natural_floor_y(
     None
 }
 
+/// Per-flatten noise context. Build the Simplex3D tables ONCE per flatten
+/// and pass by reference into the apron loop, instead of per-column.
+/// `Simplex3D::new` allocates a 512-byte permutation table seeded by
+/// ChaCha8Rng + a 256-element shuffle; recreating that for every (wx, wz)
+/// in the apron was burning thousands of cycles per column.
+struct RampNoiseCtx {
+    s_cavern: Simplex3D,
+    s_detail: Simplex3D,
+    freq: f64,
+}
+
+impl RampNoiseCtx {
+    fn new(cfg: &GenerationConfig) -> Self {
+        Self {
+            s_cavern: Simplex3D::new(cfg.seed),
+            s_detail: Simplex3D::new(cfg.seed.wrapping_add(1)),
+            freq: cfg.noise.cavern_frequency,
+        }
+    }
+}
+
 #[inline]
-fn ramp_y_noise(cfg: &GenerationConfig, wx: i32, wz: i32) -> f32 {
-    let freq = cfg.noise.cavern_frequency;
-    let s_cavern = Simplex3D::new(cfg.seed);
-    let s_detail = Simplex3D::new(cfg.seed.wrapping_add(1));
-    let cavern = s_cavern.sample(wx as f64 * freq, 0.0, wz as f64 * freq) as f32;
-    let detail = s_detail.sample(wx as f64 * freq * 2.5, 7.0, wz as f64 * freq * 2.5) as f32;
+fn ramp_y_noise(ctx: &RampNoiseCtx, wx: i32, wz: i32) -> f32 {
+    let cavern = ctx.s_cavern.sample(wx as f64 * ctx.freq, 0.0, wz as f64 * ctx.freq) as f32;
+    let detail = ctx.s_detail.sample(wx as f64 * ctx.freq * 2.5, 7.0, wz as f64 * ctx.freq * 2.5) as f32;
     (cavern * 0.7 + detail * 0.3) * RAMP_NOISE_AMP
 }
 
@@ -133,7 +151,7 @@ fn apply_ramp_column(
     clearance: i32,
     apron_radius: f32,
     host_material: Material,
-    cfg: &GenerationConfig,
+    noise: &RampNoiseCtx,
     dirty_set: &mut HashSet<(i32, i32, i32)>,
     raised_cells: &mut Vec<((i32, i32, i32), usize, usize, usize)>,
     changed_count: &mut u32,
@@ -150,7 +168,7 @@ fn apply_ramp_column(
         let nat_clamped = nat_y.min(base_y) as f32;
         let influence = apron_influence(edge_dist, apron_radius);
         let lerped = base_y_float * influence + nat_clamped * (1.0 - influence);
-        let wobble = ramp_y_noise(cfg, wx, wz) * influence;
+        let wobble = ramp_y_noise(noise, wx, wz) * influence;
         lerped + wobble
     };
 
@@ -227,6 +245,10 @@ pub fn flatten_terrace(
 
     let extent = apron_radius;
     let interior_max = terrace_size - 1;
+    // Build the noise context ONCE for the whole apron loop. Was previously
+    // built per (wx, wz) inside ramp_y_noise — two PermutationTable allocs +
+    // ChaCha8Rng seeds per column.
+    let noise = RampNoiseCtx::new(config);
 
     for dx in -extent..(terrace_size + extent) {
         for dz in -extent..(terrace_size + extent) {
@@ -241,7 +263,7 @@ pub fn flatten_terrace(
 
             apply_ramp_column(
                 store, cs, base.y, base_y_float, wx, wz, edge_dist, in_interior, clear,
-                apron_radius_f, host_material, config,
+                apron_radius_f, host_material, &noise,
                 &mut dirty_set, &mut raised_cells, &mut changed_count,
             );
 
@@ -252,6 +274,10 @@ pub fn flatten_terrace(
         }
     }
 
+    // Per-flatten diagnostic — silenced in release. UE swallows eprintln! anyway,
+    // and the format!() it forces (12 args) ran on every legacy-path flatten,
+    // which now means every DK2 zone tile and every conveyor batch entry.
+    #[cfg(debug_assertions)]
     eprintln!("[voxel] flatten_terrace: base=({},{},{}), size={} (+{}apron), clearance={}, changed={} voxels, dirty={} chunks",
         base.x, base.y, base.z, terrace_size, apron_radius, clear, changed_count, dirty_set.len());
 
@@ -309,6 +335,12 @@ pub fn flatten_terrace_batch(
     let mut raised_cells: Vec<((i32, i32, i32), usize, usize, usize)> = Vec::new();
     let mut changed_count = 0u32;
 
+    // Build noise context ONCE for ALL tiles. Batch placements (DK2 zones,
+    // conveyors) used to pay 2× Simplex3D::new per (wx, wz) per tile. With
+    // dozens of conveyors per batch and ~100 columns per tile, that was
+    // thousands of redundant ChaCha8Rng-seeded shuffle allocations.
+    let noise = RampNoiseCtx::new(config);
+
     for (base, host_material) in tiles {
         // For zone-style flatten (no per-tile float Y), the integer base.y is
         // the surface — i.e. base_y_float == base.y as f32. The sub-voxel math
@@ -327,7 +359,7 @@ pub fn flatten_terrace_batch(
 
                 apply_ramp_column(
                     store, cs, base.y, base_y_float, wx, wz, edge_dist, in_interior, clear,
-                    apron_radius_f, *host_material, config,
+                    apron_radius_f, *host_material, &noise,
                     &mut dirty_set, &mut raised_cells, &mut changed_count,
                 );
 

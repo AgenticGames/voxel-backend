@@ -162,6 +162,19 @@ pub fn generate_density_field(config: &GenerationConfig, world_origin: glam::Vec
     let size = config.chunk_size + 1;
     let mut field = DensityField::new(size);
 
+    // Blank-canvas mode: skip all noise sampling — emit a uniform solid chunk
+    // of the host rock for the chunk's depth.
+    if config.blank_canvas {
+        let vs = config.voxel_scale() as f64;
+        let center_y = world_origin.y as f64 + (size as f64 * vs * 0.5);
+        let host_material = host_rock_for_depth(center_y, &config.ore.host_rock);
+        for sample in &mut field.samples {
+            sample.density = 1.0;
+            sample.material = host_material;
+        }
+        return field;
+    }
+
     // Use GLOBAL seed for all noise sources so that noise is continuous
     // across chunk boundaries. Every chunk samples the same noise field
     // at different world-space positions.

@@ -134,6 +134,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     fluid_mesh: empty_fluid_mesh_data(),
                     crystal_data: empty_crystal_data(),
                     zone_data: empty_zone_data(),
+                    slab_fall: FfiSlabFallData::default(),
                 };
                 Box::into_raw(Box::new(result))
             }
@@ -147,6 +148,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     fluid_mesh: empty_fluid_mesh_data(),
                     crystal_data: empty_crystal_data(),
                     zone_data: empty_zone_data(),
+                    slab_fall: FfiSlabFallData::default(),
                 };
                 Box::into_raw(Box::new(result))
             }
@@ -161,6 +163,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     fluid_mesh: converted_fluid_mesh_to_ffi(mesh),
                     crystal_data: empty_crystal_data(),
                     zone_data: empty_zone_data(),
+                    slab_fall: FfiSlabFallData::default(),
                 };
                 Box::into_raw(Box::new(result))
             }
@@ -175,6 +178,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     fluid_mesh: empty_fluid_mesh_data(),
                     crystal_data: empty_crystal_data(),
                     zone_data: empty_zone_data(),
+                    slab_fall: FfiSlabFallData::default(),
                 };
                 Box::into_raw(Box::new(result))
             }
@@ -221,6 +225,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     fluid_mesh: empty_fluid_mesh_data(),
                     crystal_data: empty_crystal_data(),
                     zone_data: empty_zone_data(),
+                    slab_fall: FfiSlabFallData::default(),
                 };
                 Box::into_raw(Box::new(result))
             }
@@ -240,6 +245,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     fluid_mesh: empty_fluid_mesh_data(),
                     crystal_data: empty_crystal_data(),
                     zone_data: empty_zone_data(),
+                    slab_fall: FfiSlabFallData::default(),
                 };
                 Box::into_raw(Box::new(result))
             }
@@ -292,12 +298,87 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     fluid_mesh: empty_fluid_mesh_data(),
                     crystal_data: empty_crystal_data(),
                     zone_data: empty_zone_data(),
+                    slab_fall: FfiSlabFallData::default(),
                 };
                 Box::into_raw(Box::new(result))
             }
             WorkerResult::CollapseSlabResult { .. } => {
-                // TODO Phase 2: serialize slab collapse data to FfiResult
+                // Aggregate variant — individual slabs are emitted via SlabFall
+                // (one result per slab fragment). Keep this as a no-op for now.
                 ptr::null_mut()
+            }
+            WorkerResult::SlabFall { mesh, fall_data } => {
+                // Individual falling-slab visual — real DC mesh + fall metadata.
+                // Populate the mesh field (UE builds a ProcMesh from it) and
+                // the slab_fall metadata block.
+                let result = FfiResult {
+                    result_type: FfiResultType::CollapseSlabResult,
+                    chunk: FfiChunkCoord {
+                        x: fall_data.land_x as i32,
+                        y: fall_data.land_y as i32,
+                        z: fall_data.land_z as i32,
+                    },
+                    mesh: converted_mesh_to_ffi(mesh),
+                    mined: FfiMinedMaterials { counts: [0; 64] },
+                    generation: fall_data.volume as u64,
+                    fluid_mesh: empty_fluid_mesh_data(),
+                    crystal_data: empty_crystal_data(),
+                    zone_data: empty_zone_data(),
+                    slab_fall: fall_data,
+                };
+                Box::into_raw(Box::new(result))
+            }
+            WorkerResult::CollapseWarning { center_ue, bounds_extent_ue, severity, eta_ms, volume } => {
+                // Localized pre-collapse warning. Drives Acts 1-2 of the
+                // cinematic — UE spawns a warning FX actor at the centre with
+                // the given bounds and ETA.
+                let mut fall = FfiSlabFallData::default();
+                fall.spawn_x = center_ue.0;
+                fall.spawn_y = center_ue.1;
+                fall.spawn_z = center_ue.2;
+                fall.bounds_extent_x = bounds_extent_ue.0;
+                fall.bounds_extent_y = bounds_extent_ue.1;
+                fall.bounds_extent_z = bounds_extent_ue.2;
+                fall.volume = volume;
+                fall.warning_severity = severity;
+                fall.warning_eta_ms = eta_ms;
+                let result = FfiResult {
+                    result_type: FfiResultType::CollapseWarning,
+                    chunk: FfiChunkCoord {
+                        x: center_ue.0 as i32,
+                        y: center_ue.1 as i32,
+                        z: center_ue.2 as i32,
+                    },
+                    mesh: empty_mesh_data(),
+                    mined: FfiMinedMaterials { counts: [0; 64] },
+                    generation: volume as u64,
+                    fluid_mesh: empty_fluid_mesh_data(),
+                    crystal_data: empty_crystal_data(),
+                    zone_data: empty_zone_data(),
+                    slab_fall: fall,
+                };
+                Box::into_raw(Box::new(result))
+            }
+            WorkerResult::PilePreviewTier { mesh, fall_data } => {
+                // One tier of the pre-commit pile preview. fall_data carries
+                // tier_index in pile_tier_index, spawn_x/y/z is the pile
+                // anchor used by UE to correlate 4 tiers into one debris actor.
+                let result = FfiResult {
+                    result_type: FfiResultType::CollapsePilePreviewTier,
+                    chunk: FfiChunkCoord {
+                        x: fall_data.spawn_x as i32,
+                        y: fall_data.spawn_y as i32,
+                        z: fall_data.spawn_z as i32,
+                    },
+                    mesh: converted_mesh_to_ffi(mesh),
+                    mined: FfiMinedMaterials { counts: [0; 64] },
+                    generation: fall_data.volume as u64,
+                    fluid_mesh: empty_fluid_mesh_data(),
+                    crystal_data: empty_crystal_data(),
+                    zone_data: empty_zone_data(),
+                    slab_fall: fall_data,
+                };
+                Box::into_raw(Box::new(result))
             }
         },
     }
@@ -430,6 +511,8 @@ pub unsafe extern "C" fn voxel_get_stats(engine: *mut c_void) -> FfiEngineStats 
             pending_requests: 0,
             completed_results: 0,
             worker_threads_active: 0,
+            workers_alive: 0,
+            panics_observed: 0,
         };
     }
     let engine = &*(engine as *const VoxelEngine);
@@ -464,8 +547,13 @@ pub unsafe extern "C" fn voxel_update_fluid_config(
 }
 
 /// Inject fluid at a UE world position.
-/// fluid_type: 1=Water, 2=Lava. is_source: 1=infinite source, 0=finite.
-/// Returns 1 on success, 0 if queue full.
+/// Inject a fluid cell at a world position.
+/// fluid_type: 1=Water, 2=Lava (3-9 specialized water sub-types).
+/// is_source: 1=infinite source, 0=finite (drains/spreads).
+/// max_flow_dist: bounded-flow limit when `is_source = 1`. 0 = unlimited (legacy).
+/// >0 = source's children stop propagating beyond this hop count, with linear
+/// taper across the last few cells (Minecraft-style hard length limit).
+/// Ignored when `is_source = 0`.
 #[no_mangle]
 pub unsafe extern "C" fn voxel_add_fluid(
     engine: *mut c_void,
@@ -475,12 +563,13 @@ pub unsafe extern "C" fn voxel_add_fluid(
     fluid_type: u8,
     is_source: u8,
     world_scale: f32,
+    max_flow_dist: u8,
 ) -> u32 {
     if engine.is_null() {
         return 0;
     }
     let engine = &*(engine as *const VoxelEngine);
-    engine.add_fluid(world_x, world_y, world_z, fluid_type, is_source != 0, world_scale)
+    engine.add_fluid(world_x, world_y, world_z, fluid_type, is_source != 0, world_scale, max_flow_dist)
 }
 
 /// Find the best cavern spring location near the player.
@@ -1382,6 +1471,170 @@ pub unsafe extern "C" fn voxel_mine_and_fill_fluid(
     engine.mine_and_fill_fluid(world_x, world_y, world_z, radius, fluid_type, world_scale)
 }
 
+/// Creative-mode sphere brush: paint material (mode=0), carve (mode=1), or fill (mode=2).
+/// `request.material` is ignored for carve mode. Returns 1 on success, 0 if queue full.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_request_brush_sphere(
+    engine: *mut c_void,
+    request: *const FfiBrushSphereRequest,
+) -> u32 {
+    if engine.is_null() || request.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.request_brush_sphere(*request)
+}
+
+/// Creative-mode tunnel brush: carves (or fills) a capsule along a polyline.
+/// `points` is a UE-coord array of length `point_count` (>=2 required).
+/// `material == 255` carves; otherwise fills with that material.
+/// Returns 1 on success, 0 if queue full or invalid input.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_request_brush_tunnel(
+    engine: *mut c_void,
+    points: *const FfiVec3,
+    point_count: u32,
+    radius: f32,
+    material: u8,
+) -> u32 {
+    if engine.is_null() || points.is_null() || point_count < 2 {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let pts_slice = std::slice::from_raw_parts(points, point_count as usize);
+    let pts: Vec<(f32, f32, f32)> = pts_slice.iter().map(|p| (p.x, p.y, p.z)).collect();
+    engine.request_brush_tunnel(&pts, radius, material)
+}
+
+/// Creative-mode formation placer (single stalactite/stalagmite/column/etc.).
+/// Returns 1 on success, 0 if queue full.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_request_brush_formation(
+    engine: *mut c_void,
+    request: *const FfiBrushFormationRequest,
+) -> u32 {
+    if engine.is_null() || request.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.request_brush_formation(*request)
+}
+
+/// Creative-mode axis-aligned box brush (paint=0/carve=1/fill=2).
+#[no_mangle]
+pub unsafe extern "C" fn voxel_request_brush_box(
+    engine: *mut c_void,
+    request: *const FfiBrushBoxRequest,
+) -> u32 {
+    if engine.is_null() || request.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.request_brush_box(*request)
+}
+
+/// Creative-mode Y-axis-aligned cylinder brush (paint=0/carve=1/fill=2).
+#[no_mangle]
+pub unsafe extern "C" fn voxel_request_brush_cylinder(
+    engine: *mut c_void,
+    request: *const FfiBrushCylinderRequest,
+) -> u32 {
+    if engine.is_null() || request.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.request_brush_cylinder(*request)
+}
+
+/// Creative-mode smooth brush.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_request_brush_smooth(
+    engine: *mut c_void,
+    request: *const FfiBrushSmoothRequest,
+) -> u32 {
+    if engine.is_null() || request.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.request_brush_smooth(*request)
+}
+
+/// Creative-mode noise brush.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_request_brush_noise(
+    engine: *mut c_void,
+    request: *const FfiBrushNoiseRequest,
+) -> u32 {
+    if engine.is_null() || request.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.request_brush_noise(*request)
+}
+
+/// Undo the most recent creative-mode brush stroke. Returns 1 if queued.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_request_brush_undo(engine: *mut c_void) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.request_brush_undo()
+}
+
+/// Number of undo strokes currently available.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_brush_undo_depth(engine: *mut c_void) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.undo_depth()
+}
+
+/// Sphere fluid brush (op: 0=fill, 1=clear, 2=pool-dig).
+#[no_mangle]
+pub unsafe extern "C" fn voxel_request_brush_fluid_sphere(
+    engine: *mut c_void,
+    request: *const FfiBrushFluidSphereRequest,
+) -> u32 {
+    if engine.is_null() || request.is_null() { return 0; }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.request_brush_fluid_sphere(*request)
+}
+
+/// Box fluid brush (op: 0=fill, 1=clear).
+#[no_mangle]
+pub unsafe extern "C" fn voxel_request_brush_fluid_box(
+    engine: *mut c_void,
+    request: *const FfiBrushFluidBoxRequest,
+) -> u32 {
+    if engine.is_null() || request.is_null() { return 0; }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.request_brush_fluid_box(*request)
+}
+
+/// River fluid brush — capsule chain along polyline of UE-world points.
+/// `op == 2` carves the channel before filling.
+/// `max_flow_dist`: bounded-flow limit when `is_source = 1`. 0 = unlimited.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_request_brush_fluid_river(
+    engine: *mut c_void,
+    points: *const FfiVec3,
+    point_count: u32,
+    radius: f32,
+    fluid_type: u8,
+    is_source: u8,
+    op: u8,
+    max_flow_dist: u8,
+) -> u32 {
+    if engine.is_null() || points.is_null() || point_count < 2 { return 0; }
+    let engine = &*(engine as *const VoxelEngine);
+    let pts_slice = std::slice::from_raw_parts(points, point_count as usize);
+    let pts: Vec<(f32, f32, f32)> = pts_slice.iter().map(|p| (p.x, p.y, p.z)).collect();
+    engine.request_brush_fluid_river(&pts, radius, fluid_type, is_source != 0, op, max_flow_dist)
+}
+
 /// Request flattening a 2x2 terrace at a UE world position.
 /// Snaps to grid and uses depth-appropriate host rock.
 /// Returns 1 on success, 0 if queue full.
@@ -1859,22 +2112,66 @@ fn convert_mesh_to_ffi_result(
         fluid_mesh: empty_fluid_mesh_data(),
         crystal_data: convert_crystal_vec_to_ffi(crystal_data),
         zone_data: convert_zone_vec_to_ffi(zone_descriptors),
+        slab_fall: FfiSlabFallData::default(),
     }
+}
+
+/// FNV-1a-like hash over the crystal placement set. UE compares this to its
+/// last-applied-hash per chunk and skips the expensive HISM rebuild when
+/// the incoming hash matches — measured to drop `Foliage Create Proxy`
+/// from ~11K calls to ~1K in a 30-event collapse stress test.
+///
+/// Hash 0 is reserved as "always apply" sentinel (never returned for
+/// non-empty data — the FNV offset basis 0xcbf29ce484222325 is non-zero,
+/// and we OR a non-zero count salt before returning).
+fn compute_crystal_hash(placements: &[FfiCrystalPlacement]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    let prime: u64 = 0x100000001b3;
+    let mut mix = |x: u64, h: &mut u64| {
+        *h ^= x;
+        *h = h.wrapping_mul(prime);
+    };
+    mix(placements.len() as u64, &mut h);
+    for p in placements {
+        mix(p.x.to_bits() as u64, &mut h);
+        mix(p.y.to_bits() as u64, &mut h);
+        mix(p.z.to_bits() as u64, &mut h);
+        mix(p.normal_x.to_bits() as u64, &mut h);
+        mix(p.normal_y.to_bits() as u64, &mut h);
+        mix(p.normal_z.to_bits() as u64, &mut h);
+        mix(p.ore_type as u64, &mut h);
+        mix(p.size_class as u64, &mut h);
+        mix(p.scale.to_bits() as u64, &mut h);
+    }
+    // Guarantee non-zero so 0 stays reserved as the "no hash / always apply"
+    // sentinel even if FNV produced a perfect collision to zero.
+    if h == 0 { 1 } else { h }
 }
 
 fn convert_crystal_vec_to_ffi(data: Vec<FfiCrystalPlacement>) -> FfiCrystalData {
     if data.is_empty() {
-        return FfiCrystalData { placements: std::ptr::null_mut(), count: 0 };
+        return FfiCrystalData {
+            placements: std::ptr::null_mut(),
+            count: 0,
+            _padding: 0,
+            hash: 0,
+        };
     }
+    let hash = compute_crystal_hash(&data);
     let count = data.len() as u32;
     let mut boxed = data.into_boxed_slice();
     let ptr = boxed.as_mut_ptr();
     std::mem::forget(boxed);
-    FfiCrystalData { placements: ptr, count }
+    FfiCrystalData { placements: ptr, count, _padding: 0, hash }
 }
 
 fn empty_crystal_data() -> FfiCrystalData {
-    FfiCrystalData { placements: std::ptr::null_mut(), count: 0 }
+    FfiCrystalData {
+        placements: std::ptr::null_mut(),
+        count: 0,
+        _padding: 0,
+        hash: 0,
+    }
 }
 
 fn convert_zone_vec_to_ffi(data: Vec<FfiZoneDescriptor>) -> FfiZoneData {
@@ -2922,6 +3219,7 @@ mod tests {
             zone_frozen_waterfall_count: 2,
             zone_frozen_ice_stalactite_chance: 0.3,
             zone_frozen_mega_chance: 0.03,
+            blank_canvas: 0,
         }
     }
 

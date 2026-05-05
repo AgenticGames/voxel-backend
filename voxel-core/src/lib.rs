@@ -6,5 +6,7 @@ pub mod chunk;
 pub mod mesh;
 pub mod export;
 pub mod density;
+pub mod density_ops;
+pub mod collapse_pile;
 pub mod stress;
 pub mod world_scan;

@@ -100,6 +100,13 @@ pub fn tick_fluid(
             if actual > MIN_LEVEL {
                 cell.level += actual;
                 cell.fluid_type = xfer.fluid_type;
+                // Propagate bounded-flow tracking. Only overwrite if we're tightening
+                // the limit (or the dst has no recorded source yet) — otherwise an
+                // existing closer source's tracking wins.
+                if cell.hops_from_source == 255 || xfer.dest_hops < cell.hops_from_source {
+                    cell.hops_from_source = xfer.dest_hops;
+                    cell.max_flow_dist = xfer.dest_max_flow;
+                }
                 grid.dirty = true;
                 grid.has_fluid = true;
                 dirty.insert(xfer.dest_key);

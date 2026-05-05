@@ -10,7 +10,7 @@ use voxel_core::density::DensityField as CoreDensityField;
 use voxel_core::dual_contouring::mesh_gen::generate_mesh;
 use voxel_core::dual_contouring::solve::solve_dc_vertices;
 use voxel_core::material::Material;
-use voxel_core::stress::{CollapseSlab, world_to_chunk_local};
+use voxel_core::stress::CollapseSlab;
 use voxel_gen::density::DensityField;
 use voxel_gen::hermite_extract::extract_hermite_data;
 
@@ -62,29 +62,32 @@ pub fn extract_slab_mesh(
         sample.material = Material::Air;
     }
 
-    // Copy slab voxels from source density fields
+    // Copy slab voxels from the slab's own data. The CollapseSlab preserves
+    // the original material per voxel, so we use that directly. Some slab
+    // voxels can have material=Air (when stress's BFS region included
+    // marginal air-classified cells); those would render as matte black in
+    // UE if we wrote them as solid+Air, so we substitute the dominant slab
+    // material. If even the dominant is Air, fall back to Granite (a safe
+    // rock material that always has a UE material instance).
+    let _ = density_fields;
+    let safe_dominant = if (slab.dominant_material as u8) > 0 {
+        slab.dominant_material
+    } else {
+        // Find the first non-Air material in the slab voxels.
+        slab.voxels.iter()
+            .map(|v| v.material)
+            .find(|m| (*m as u8) > 0)
+            .unwrap_or(Material::Granite)
+    };
     for cv in &slab.voxels {
         let lx = (cv.world_x - min_x) as usize;
         let ly = (cv.world_y - min_y) as usize;
         let lz = (cv.world_z - min_z) as usize;
-
-        if lx >= grid_size || ly >= grid_size || lz >= grid_size {
-            continue;
-        }
-
-        // Get the actual density value from the source field
-        let (key, slx, sly, slz) = world_to_chunk_local(cv.world_x, cv.world_y, cv.world_z, chunk_size);
-        if let Some(src_df) = density_fields.get(&key) {
-            let src = src_df.get(slx, sly, slz);
-            let sample = temp_df.get_mut(lx, ly, lz);
-            sample.density = src.density;
-            sample.material = src.material;
-        } else {
-            // Fallback: use the collapsed voxel's material with solid density
-            let sample = temp_df.get_mut(lx, ly, lz);
-            sample.density = 1.0;
-            sample.material = cv.material;
-        }
+        if lx >= grid_size || ly >= grid_size || lz >= grid_size { continue; }
+        let sample = temp_df.get_mut(lx, ly, lz);
+        sample.density = 1.0;
+        // Substitute Air with the slab's dominant rock so the mesh isn't black.
+        sample.material = if (cv.material as u8) > 0 { cv.material } else { safe_dominant };
     }
 
     // Run the standard mesh extraction pipeline

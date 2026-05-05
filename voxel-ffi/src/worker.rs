@@ -22,7 +22,157 @@ use crate::convert::{convert_mesh_to_ue_scaled, from_ue_normal, from_ue_world_po
 use crate::engine::terrace_size_for_scale;
 use crate::profiler::{ChunkTimings, StreamingProfiler};
 use crate::store::ChunkStore;
-use crate::types::{FfiCollapseEvent, FfiCrystalPlacement, FfiZoneDescriptor, WorkerRequest, WorkerResult};
+use crate::types::{FfiCollapseEvent, FfiCrystalPlacement, FfiSlabFallData, FfiZoneDescriptor, WorkerRequest, WorkerResult};
+
+/// Split one collapse slab into 1-5 visual sub-slabs by spatial grid.
+///
+/// The pile is still computed from the WHOLE slab (one heap), but for the
+/// FALLING animation we want big collapses to read as multiple chunks
+/// breaking off the ceiling rather than one monolithic block. Each sub-slab
+/// gets its own SlabFall emission, so UE spawns N falling-slab actors per
+/// event with independent tumble axes, materials, and impact zones.
+///
+/// Grid choice mirrors `voxel-core::collapse_pile::fragment_slab` so the
+/// visual fragments roughly correspond to the pile's peak distribution.
+fn split_slab_for_visual(
+    slab: &voxel_core::stress::CollapseSlab,
+) -> Vec<voxel_core::stress::CollapseSlab> {
+    use voxel_core::material::Material;
+    use voxel_core::stress::{CollapseSlab, CollapsedVoxel};
+
+    let volume = slab.voxels.len();
+    if volume < 24 {
+        // Tiny slabs read fine as one piece — splitting makes them too small.
+        return vec![slab.clone()];
+    }
+
+    let dx = (slab.bb_max.0 - slab.bb_min.0 + 1).max(1);
+    let dz = (slab.bb_max.2 - slab.bb_min.2 + 1).max(1);
+
+    let (nx, nz) = if volume < 60 {
+        if dx >= dz { (2, 1) } else { (1, 2) }
+    } else if volume < 200 {
+        if dx >= 2 * dz { (3, 1) }
+        else if dz >= 2 * dx { (1, 3) }
+        else { (2, 2) }
+    } else {
+        if dx >= dz { (3, 2) } else { (2, 3) }
+    };
+
+    if nx == 1 && nz == 1 {
+        return vec![slab.clone()];
+    }
+
+    let cell_dx = dx as f32 / nx as f32;
+    let cell_dz = dz as f32 / nz as f32;
+    let mut buckets: Vec<Vec<CollapsedVoxel>> = vec![Vec::new(); nx * nz];
+    for v in &slab.voxels {
+        let fx = (((v.world_x - slab.bb_min.0) as f32 / cell_dx).floor() as i32)
+            .clamp(0, nx as i32 - 1) as usize;
+        let fz = (((v.world_z - slab.bb_min.2) as f32 / cell_dz).floor() as i32)
+            .clamp(0, nz as i32 - 1) as usize;
+        buckets[fz * nx + fx].push(v.clone());
+    }
+
+    let mut out: Vec<CollapseSlab> = Vec::new();
+    for voxels in buckets.into_iter().filter(|b| !b.is_empty()) {
+        // Drop fragments that ended up too small (< 3 voxels) — they'd
+        // produce tiny meshes that read as visual noise.
+        if voxels.len() < 3 {
+            continue;
+        }
+        let mut min_x = i32::MAX; let mut max_x = i32::MIN;
+        let mut min_y = i32::MAX; let mut max_y = i32::MIN;
+        let mut min_z = i32::MAX; let mut max_z = i32::MIN;
+        let mut sum_x = 0.0f32; let mut sum_y = 0.0f32; let mut sum_z = 0.0f32;
+        let mut mat_counts: std::collections::HashMap<Material, u32> = std::collections::HashMap::new();
+        for v in &voxels {
+            min_x = min_x.min(v.world_x); max_x = max_x.max(v.world_x);
+            min_y = min_y.min(v.world_y); max_y = max_y.max(v.world_y);
+            min_z = min_z.min(v.world_z); max_z = max_z.max(v.world_z);
+            sum_x += v.world_x as f32;
+            sum_y += v.world_y as f32;
+            sum_z += v.world_z as f32;
+            *mat_counts.entry(v.material).or_insert(0) += 1;
+        }
+        let n = voxels.len() as f32;
+        // Filter Air + non-renderable (>41) materials when picking dominant
+        // for the sub-slab; fall back to parent's dominant.
+        let dom = mat_counts.iter()
+            .filter(|(m, _)| (**m as u8) > 0 && (**m as u8) <= 41)
+            .max_by_key(|(_, c)| *c)
+            .map(|(m, _)| *m)
+            .unwrap_or(slab.dominant_material);
+        out.push(CollapseSlab {
+            voxels,
+            bb_min: (min_x, min_y, min_z),
+            bb_max: (max_x, max_y, max_z),
+            center: (sum_x / n, sum_y / n, sum_z / n),
+            landing_y: slab.landing_y,
+            fall_distance: slab.fall_distance,
+            dominant_material: dom,
+        });
+    }
+
+    if out.is_empty() {
+        // All buckets were too small — fall back to the original whole slab.
+        vec![slab.clone()]
+    } else {
+        out
+    }
+}
+
+/// Global rate limiter for cinematic-collapse chunk remeshes.
+///
+/// Multi-region collapses (6 simultaneous events) used to fire all their
+/// chunk-remesh + seam-pass batches within a ~1.6 s window after impact,
+/// dumping ~24 chunk-mesh updates onto the game thread back-to-back. UE
+/// ProcMesh `CreateMeshSection`/`UpdateMeshSection` is roughly 30-80 ms per
+/// chunk depending on triangle count, so the cumulative game-thread cost
+/// during the burst was ~1-2 s of stutter — exactly what the user reported
+/// as a "2 second freeze".
+///
+/// This atomic enforces a minimum gap between collapse remesh batches:
+/// each deferred thread that's about to run `remesh_dirty + seam pass`
+/// claims a slot at `now` (or later if claims are stacking up), advances
+/// the cursor by `COLLAPSE_REMESH_GAP_MS`, and sleeps until its slot.
+///
+/// Net effect: 6 events spread across ~6 × 250 ms = 1.5 s minimum, plus
+/// natural impact-time spacing → ~3 s total. Game thread stays responsive
+/// because each remesh batch arrives in its own ~250 ms window with time
+/// to drain.
+const COLLAPSE_REMESH_GAP_MS: u64 = 250;
+static NEXT_COLLAPSE_REMESH_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Reserve a remesh slot in the global rate-limiter and sleep until it's
+/// our turn. Returns the number of ms we actually waited (for logging).
+fn throttle_collapse_remesh() -> u64 {
+    use std::sync::atomic::Ordering;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    // Compare-exchange loop: claim the next slot at max(current, now) and
+    // advance the cursor by COLLAPSE_REMESH_GAP_MS.
+    loop {
+        let current = NEXT_COLLAPSE_REMESH_MS.load(Ordering::SeqCst);
+        let target = current.max(now_ms);
+        let new_next = target + COLLAPSE_REMESH_GAP_MS;
+        if NEXT_COLLAPSE_REMESH_MS
+            .compare_exchange(current, new_next, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            let wait_ms = target.saturating_sub(now_ms);
+            if wait_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+            }
+            return wait_ms;
+        }
+        // CAS failed → another thread won; retry.
+    }
+}
 
 /// Map SpringType → FluidType u8 for debug-colored water rendering.
 fn spring_type_to_fluid_u8(st: &voxel_gen::springs::SpringType) -> u8 {
@@ -406,13 +556,18 @@ fn try_process_stress_queue(
         let collapse_start = std::time::Instant::now();
         let events = {
             let (density, stress, support) = s.sleep_fields_mut();
-            detect_and_execute_collapses_v2(
+            // defer_pile=true: clear slab cells now (cave roof opens at fall
+            // start), but DON'T place pile yet. Worker schedules each event's
+            // pile application for impact time so the floor pile lands under
+            // the visually-falling slab.
+            voxel_core::stress::detect_and_execute_collapses_v2_with_options(
                 density,
                 stress,
                 support,
                 &result.overstressed,
                 &stress_cfg,
                 chunk_size,
+                true,
             )
         };
         let collapse_ms = collapse_start.elapsed().as_secs_f64() * 1000.0;
@@ -455,18 +610,22 @@ fn try_process_stress_queue(
             let _base_meshes = s.remesh_dirty(&all_dirty, &cfg, world_scale);
             drop(s);
 
-            let mut ffi_events: Vec<FfiCollapseEvent> = events.iter().map(|e| {
-                FfiCollapseEvent {
-                    center_x: e.center.0 * world_scale,
-                    center_y: -e.center.2 * world_scale,
-                    center_z: e.center.1 * world_scale,
-                    volume: e.total_volume,
-                }
-            }).collect();
-            ffi_events.sort_by(|a, b| b.volume.cmp(&a.volume));
+            // ── Cinematic emission ──
+            //
+            // For each collapse event:
+            //   1. Emit a CollapseWarning result carrying AABB + ETA so UE can
+            //      play Acts 1-2 (warning shake, dust, cracks) BEFORE the
+            //      falling slab actor appears.
+            //   2. For each slab in the event, extract a real DC mesh (works
+            //      post-pile because the slab struct preserves voxel data),
+            //      then emit a SlabFall result with the mesh + fall metadata.
+            //      UE spawns one AVoxelCollapseSlabActor per slab fragment.
+            //
+            // The old CollapseResult emission is dropped — the slab+warning
+            // pipeline replaces it. UE consumers should switch over.
 
             // Collapse region size distribution
-            let mut vol_hist = [0u32; 5]; // [1-5, 6-15, 16-50, 51-150, 150+]
+            let mut vol_hist = [0u32; 5];
             for e in &events {
                 let bucket = if e.total_volume <= 5 { 0 }
                     else if e.total_volume <= 15 { 1 }
@@ -478,17 +637,597 @@ fn try_process_stress_queue(
             dbg(format!("  size distribution: tiny(1-5)={} small(6-15)={} medium(16-50)={} large(51-150)={} huge(150+)={}",
                 vol_hist[0], vol_hist[1], vol_hist[2], vol_hist[3], vol_hist[4]));
 
-            dbg(format!("  sending {} collapse events to UE (largest vol={})",
-                ffi_events.len(), ffi_events.first().map(|e| e.volume).unwrap_or(0)));
+            // Snapshot density field reference for slab extraction.
+            let s_ref = store.read().unwrap();
+            let voxel_scale = cfg.voxel_scale();
 
-            let _ = result_tx.send(WorkerResult::CollapseResult {
-                events: ffi_events,
-                meshes: Vec::new(),
-            });
+            // Open the cinematic diagnostics log. UE writes phase transitions
+            // to the same file (different prefix) so the timeline can be
+            // reconstructed end-to-end.
+            use std::io::Write;
+            let log_path = "D:/Unreal Projects/Mithril2026/Saved/collapse_log.txt";
+            let mut log_file = std::fs::OpenOptions::new()
+                .create(true).append(true).open(log_path).ok();
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis()).unwrap_or(0);
+            if let Some(f) = &mut log_file {
+                let _ = writeln!(f, "");
+                let _ = writeln!(f, "================================================================");
+                let _ = writeln!(f, "[{}][R] === COLLAPSE BURST: {} events ===", now_ms, events.len());
+                let _ = writeln!(f, "================================================================");
+            }
+
+            for (event_idx, event) in events.iter().enumerate() {
+                // Compute event bounds in UE units for the warning event.
+                let mut ev_min = (f32::MAX, f32::MAX, f32::MAX);
+                let mut ev_max = (f32::MIN, f32::MIN, f32::MIN);
+                for slab in &event.slabs {
+                    let lo_ue = (slab.bb_min.0 as f32 * world_scale,
+                                 -(slab.bb_min.2 as f32) * world_scale,
+                                 slab.bb_min.1 as f32 * world_scale);
+                    let hi_ue = (slab.bb_max.0 as f32 * world_scale,
+                                 -(slab.bb_max.2 as f32) * world_scale,
+                                 slab.bb_max.1 as f32 * world_scale);
+                    ev_min.0 = ev_min.0.min(lo_ue.0.min(hi_ue.0));
+                    ev_min.1 = ev_min.1.min(lo_ue.1.min(hi_ue.1));
+                    ev_min.2 = ev_min.2.min(lo_ue.2.min(hi_ue.2));
+                    ev_max.0 = ev_max.0.max(lo_ue.0.max(hi_ue.0));
+                    ev_max.1 = ev_max.1.max(lo_ue.1.max(hi_ue.1));
+                    ev_max.2 = ev_max.2.max(lo_ue.2.max(hi_ue.2));
+                }
+                let center_ue = (
+                    event.center.0 * world_scale,
+                    -event.center.2 * world_scale,
+                    event.center.1 * world_scale,
+                );
+                let extent_ue = (
+                    (ev_max.0 - ev_min.0) * 0.5,
+                    (ev_max.1 - ev_min.1) * 0.5,
+                    (ev_max.2 - ev_min.2) * 0.5,
+                );
+
+                // Volume-scaled warning ETA (1.5s for tiny → 3.5s for huge).
+                let eta_ms = (1500 + (event.total_volume.min(200) as u32) * 8).min(3500);
+                let severity = if event.total_volume >= 80 { 4 }
+                    else if event.total_volume >= 30 { 3 }
+                    else if event.total_volume >= 10 { 2 }
+                    else { 1 };
+
+                // ── Diagnostic log: event header ──
+                if let Some(f) = &mut log_file {
+                    let _ = writeln!(f, "[{}][R] --- EVENT[{}] ---", now_ms, event_idx);
+                    let _ = writeln!(f, "[{}][R]   center_rust=({:.2},{:.2},{:.2}) center_ue=({:.1},{:.1},{:.1})",
+                        now_ms, event.center.0, event.center.1, event.center.2,
+                        center_ue.0, center_ue.1, center_ue.2);
+                    let _ = writeln!(f, "[{}][R]   total_volume={} slab_count={} affected_chunks={}",
+                        now_ms, event.total_volume, event.slabs.len(), event.affected_chunks.len());
+                    let _ = writeln!(f, "[{}][R]   bounds_ue: min=({:.1},{:.1},{:.1}) max=({:.1},{:.1},{:.1}) extent=({:.1},{:.1},{:.1})",
+                        now_ms,
+                        ev_min.0, ev_min.1, ev_min.2,
+                        ev_max.0, ev_max.1, ev_max.2,
+                        extent_ue.0, extent_ue.1, extent_ue.2);
+                    let _ = writeln!(f, "[{}][R]   warning: severity={} eta_ms={} (PreFallWarning duration)",
+                        now_ms, severity, eta_ms);
+                }
+
+                let _ = result_tx.send(WorkerResult::CollapseWarning {
+                    center_ue,
+                    bounds_extent_ue: extent_ue,
+                    severity,
+                    eta_ms,
+                    volume: event.total_volume,
+                });
+
+                // Per-slab falling visuals — split each event slab into 1-5
+                // visual sub-fragments via grid partition so big collapses
+                // read as multiple chunks breaking off rather than one
+                // monolithic block. Each sub-slab gets its own falling-slab
+                // actor in UE with independent tumble axis + impact zone.
+                let visual_slabs: Vec<voxel_core::stress::CollapseSlab> = event.slabs.iter()
+                    .flat_map(|s| split_slab_for_visual(s).into_iter())
+                    .collect();
+                if let Some(f) = &mut log_file {
+                    let _ = writeln!(f, "[{}][R]   visual_split: {} event slab(s) → {} sub-slab(s)",
+                        now_ms, event.slabs.len(), visual_slabs.len());
+                }
+                for (slab_idx, slab) in visual_slabs.iter().enumerate() {
+                    // Material breakdown for the slab (top 4 materials).
+                    let mut mat_counts: std::collections::HashMap<voxel_core::material::Material, u32> = std::collections::HashMap::new();
+                    for v in &slab.voxels {
+                        *mat_counts.entry(v.material).or_insert(0) += 1;
+                    }
+                    let mut mat_breakdown: Vec<(voxel_core::material::Material, u32)> =
+                        mat_counts.into_iter().collect();
+                    mat_breakdown.sort_by(|a, b| b.1.cmp(&a.1));
+                    let breakdown_str = mat_breakdown.iter().take(4)
+                        .map(|(m, c)| format!("{:?}={}", m, c))
+                        .collect::<Vec<_>>().join(", ");
+
+                    let mesh_opt = crate::slab::extract_slab_mesh(
+                        slab, &s_ref.density_fields, chunk_size,
+                        voxel_scale, world_scale,
+                    );
+
+                    if let Some(f) = &mut log_file {
+                        let _ = writeln!(f, "[{}][R]   slab[{}]:", now_ms, slab_idx);
+                        let _ = writeln!(f, "[{}][R]     voxels={} fall_dist={} dom_mat={:?}",
+                            now_ms, slab.voxels.len(), slab.fall_distance,
+                            slab.dominant_material);
+                        let _ = writeln!(f, "[{}][R]     materials: {}", now_ms, breakdown_str);
+                        let _ = writeln!(f, "[{}][R]     bb_rust: min=({},{},{}) max=({},{},{})",
+                            now_ms, slab.bb_min.0, slab.bb_min.1, slab.bb_min.2,
+                            slab.bb_max.0, slab.bb_max.1, slab.bb_max.2);
+                        match &mesh_opt {
+                            Some(m) => {
+                                let _ = writeln!(f, "[{}][R]     mesh extracted: positions={} indices={} ({} tris)",
+                                    now_ms, m.positions.len(), m.indices.len(), m.indices.len() / 3);
+                            }
+                            None => {
+                                let _ = writeln!(f, "[{}][R]     ★ MESH EXTRACTION FAILED — slab actor will fall back to procedural box",
+                                    now_ms);
+                            }
+                        }
+                    }
+
+                    let Some(mesh) = mesh_opt else { continue };
+
+                    let center_rust = slab.center;
+                    let spawn_ue = (
+                        center_rust.0 * world_scale,
+                        -center_rust.2 * world_scale,
+                        center_rust.1 * world_scale,
+                    );
+                    let land_ue_z = (center_rust.1 - slab.fall_distance as f32) * world_scale;
+                    let land_ue = (spawn_ue.0, spawn_ue.1, land_ue_z);
+                    let slab_extent_ue = (
+                        (slab.bb_max.0 - slab.bb_min.0).max(1) as f32 * world_scale * 0.5,
+                        (slab.bb_max.2 - slab.bb_min.2).max(1) as f32 * world_scale * 0.5,
+                        (slab.bb_max.1 - slab.bb_min.1).max(1) as f32 * world_scale * 0.5,
+                    );
+
+                    // ── Principal horizontal axis = leading-edge direction ──
+                    // Compute the 2×2 XZ covariance of the slab voxels and
+                    // pick the dominant eigenvector. Magnitude scaled by
+                    // anisotropy so chunky cubes get ~0 (no preferred tilt)
+                    // and long thin slabs get ~1 (strong domino direction).
+                    let (lead_ue_x, lead_ue_y) = {
+                        let cx_r = center_rust.0;
+                        let cz_r = center_rust.2;
+                        let mut cov_xx = 0.0f32;
+                        let mut cov_xz = 0.0f32;
+                        let mut cov_zz = 0.0f32;
+                        for v in &slab.voxels {
+                            let dx = v.world_x as f32 - cx_r;
+                            let dz = v.world_z as f32 - cz_r;
+                            cov_xx += dx * dx;
+                            cov_xz += dx * dz;
+                            cov_zz += dz * dz;
+                        }
+                        let n = (slab.voxels.len().max(1)) as f32;
+                        cov_xx /= n; cov_xz /= n; cov_zz /= n;
+
+                        let trace = cov_xx + cov_zz;
+                        let det = cov_xx * cov_zz - cov_xz * cov_xz;
+                        let disc = (trace * trace - 4.0 * det).max(0.0);
+                        let s = disc.sqrt();
+                        let lambda_max = (trace + s) * 0.5;
+                        let lambda_min = (trace - s) * 0.5;
+
+                        // Eigenvector for lambda_max: v = (cov_xz, lambda_max - cov_xx)
+                        let ex = cov_xz;
+                        let ez = lambda_max - cov_xx;
+                        let mag = (ex * ex + ez * ez).sqrt();
+                        let (lead_rx, lead_rz) = if mag > 1e-4 {
+                            (ex / mag, ez / mag)
+                        } else if cov_xx >= cov_zz {
+                            (1.0, 0.0)
+                        } else {
+                            (0.0, 1.0)
+                        };
+
+                        // Anisotropy in [0..1]: 0 = round, 1 = elongated.
+                        let aniso = if lambda_max > 1e-6 {
+                            (1.0 - (lambda_min / lambda_max).max(0.0)).clamp(0.0, 1.0)
+                        } else { 0.0 };
+
+                        // Rust X → UE X; Rust Z → -UE Y. Vertical Y unused
+                        // because tilting is horizontal (no fall component).
+                        (lead_rx * aniso, -lead_rz * aniso)
+                    };
+
+                    let mut fall = FfiSlabFallData::default();
+                    fall.spawn_x = spawn_ue.0;
+                    fall.spawn_y = spawn_ue.1;
+                    fall.spawn_z = spawn_ue.2;
+                    fall.land_x = land_ue.0;
+                    fall.land_y = land_ue.1;
+                    fall.land_z = land_ue.2;
+                    fall.fall_distance = slab.fall_distance as f32 * world_scale;
+                    fall.bounds_extent_x = slab_extent_ue.0;
+                    fall.bounds_extent_y = slab_extent_ue.1;
+                    fall.bounds_extent_z = slab_extent_ue.2;
+                    fall.volume = slab.voxels.len() as u32;
+                    fall.dominant_material = slab.dominant_material as u8;
+                    // ★ CRITICAL FIX: propagate the warning ETA to every slab
+                    // so the slab actor's PreFallWarning + ImminentDetach phases
+                    // actually run. Without this, every slab skipped straight
+                    // to Falling, rendering the cinematic invisible.
+                    fall.warning_severity = severity;
+                    fall.warning_eta_ms = eta_ms;
+                    fall.leading_edge_dir_x = lead_ue_x;
+                    fall.leading_edge_dir_y = lead_ue_y;
+
+                    if let Some(f) = &mut log_file {
+                        let _ = writeln!(f, "[{}][R]     spawn_ue=({:.1},{:.1},{:.1}) land_ue=({:.1},{:.1},{:.1}) fall_dist_ue={:.1}",
+                            now_ms, spawn_ue.0, spawn_ue.1, spawn_ue.2,
+                            land_ue.0, land_ue.1, land_ue.2,
+                            fall.fall_distance);
+                        let _ = writeln!(f, "[{}][R]     extent_ue=({:.1},{:.1},{:.1}) → emitting SlabFall (eta={}ms severity={})",
+                            now_ms, slab_extent_ue.0, slab_extent_ue.1, slab_extent_ue.2,
+                            eta_ms, severity);
+                    }
+
+                    let _ = result_tx.send(WorkerResult::SlabFall {
+                        mesh,
+                        fall_data: fall,
+                    });
+                }
+            }
+            drop(s_ref);
+            if let Some(f) = &mut log_file {
+                let _ = writeln!(f, "[{}][R] === BURST COMPLETE ===", now_ms);
+            }
+
+            dbg(format!("  emitted {} CollapseWarning + per-slab SlabFall events", events.len()));
 
             let dirty_keys: Vec<(i32, i32, i32)> = all_dirty.iter().map(|&(k, ..)| k).collect();
-            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
-            dbg("  seam pass complete".to_string());
+
+            // Crystal recompute can fire NOW — UE will pick up fresh placements
+            // when each chunk mesh arrives in its scheduled batch.
+            recompute_crystals_for_chunks(store, &cfg, &dirty_keys);
+
+            // ── Per-event cinematic-aligned chunk-mesh scheduling. ──
+            //
+            // Density was already mutated (slab cells cleared + pile placed)
+            // inside detect_and_execute_collapses_v2. If we send chunk meshes
+            // for ALL affected chunks now, UE shows the cave roof hole AND
+            // the floor pile immediately, before the falling-slab actor has
+            // visually impacted.
+            //
+            // Fix: per event, split affected chunks into:
+            //   - SLAB chunks (cave roof hole) → send at fall-start time
+            //     so the roof opens up just as the slab actor visually
+            //     detaches.
+            //   - PILE chunks (floor pile) → send at impact time so the
+            //     pile appears under the slab right when it lands.
+            //   - chunks in BOTH → send at impact (the later time wins,
+            //     and the dust burst masks the transition).
+            //
+            // Each event has its own timing — short falls update fast,
+            // long falls take longer. They DON'T wait for each other.
+            const SLAB_GRAVITY: f32 = 327.0; // matches UE's slab actor
+
+            for event in &events {
+                let eta_ms = (1500u32 + (event.total_volume.min(200) as u32) * 8).min(3500);
+                // Imminent-detach beat sits between warning and falling.
+                // Bumped from 600ms → 1600ms so the fracture cracks have a
+                // full second of unobstructed peak-intensity visibility
+                // BEFORE the falling slab pulls the player's eye away.
+                // MUST stay in sync with `AVoxelCollapseSlabActor::ImminentDuration`
+                // on the UE side (currently 1.6s).
+                let imminent_ms = 1600u32;
+                let max_fall_uu = event.slabs.iter()
+                    .map(|s| s.fall_distance)
+                    .max().unwrap_or(0) as f32 * world_scale;
+                let fall_dur_ms = if max_fall_uu > 0.0 {
+                    ((2.0 * max_fall_uu / SLAB_GRAVITY).sqrt() * 1000.0).clamp(500.0, 6000.0) as u32
+                } else { 1000 };
+                let fall_start_ms = eta_ms + imminent_ms;
+                let impact_ms = fall_start_ms + fall_dur_ms;
+
+                // Split chunk sets:
+                let pile_set: std::collections::HashSet<(i32, i32, i32)> =
+                    event.pile_chunks.iter().copied().collect();
+                let slab_only: Vec<(i32, i32, i32)> = event.slab_chunks.iter()
+                    .copied()
+                    .filter(|k| !pile_set.contains(k))
+                    .collect();
+                let pile_or_both: Vec<(i32, i32, i32)> = event.pile_chunks.clone();
+
+                dbg(format!("  event center=({:.1},{:.1},{:.1}) vol={} slab_only_chunks={} pile_chunks={} fall_start={}ms impact={}ms",
+                    event.center.0, event.center.1, event.center.2, event.total_volume,
+                    slab_only.len(), pile_or_both.len(), fall_start_ms, impact_ms));
+
+                // Schedule slab-chunk remesh at fall-start (cave roof opens).
+                // At this point, density has slab cells cleared but NO pile
+                // yet (deferred), so the remesh shows roof hole only.
+                //
+                // ★ CRITICAL: must call `remesh_dirty` BEFORE the seam pass
+                // because `batched_seam_pass_mine` reads from the cached
+                // `base_meshes`. The slab cells were cleared earlier
+                // (inside `detect_and_execute_collapses_v2_with_options`)
+                // but the cached mesh still shows the slab in place. Without
+                // the explicit re-DC, the seam pass publishes stale meshes
+                // and the cave roof stays visually intact until something
+                // else (e.g., the pile thread's neighborhood seam at
+                // impact + PILE_PREVIEW_MS) eventually re-DCs the area.
+                // Symptom: "see-through wall" / cave roof opens 1.2s late.
+                if !event.slab_chunks.is_empty() {
+                    let store_c = std::sync::Arc::clone(store);
+                    let cfg_c = cfg.clone();
+                    let tx_c = result_tx.clone();
+                    let keys = event.slab_chunks.clone();
+                    let ws = world_scale;
+                    let event_center_for_log = event.center;
+                    std::thread::spawn(move || {
+                        let log_line = |msg: String| {
+                            use std::io::Write;
+                            let now_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis()).unwrap_or(0);
+                            if let Ok(mut f) = std::fs::OpenOptions::new()
+                                .create(true).append(true)
+                                .open("D:/Unreal Projects/Mithril2026/Saved/collapse_log.txt")
+                            {
+                                let _ = writeln!(f, "[{}][R-SLABFX] {}", now_ms, msg);
+                            }
+                        };
+
+                        std::thread::sleep(std::time::Duration::from_millis(fall_start_ms as u64));
+                        log_line(format!(
+                            "fall_start fired for event center=({:.1},{:.1},{:.1}) slab_chunks={}",
+                            event_center_for_log.0, event_center_for_log.1, event_center_for_log.2,
+                            keys.len()));
+
+                        // Stagger consecutive collapse remeshes via the
+                        // global rate limiter so the game thread isn't
+                        // dumped with 6 events × N chunks at once.
+                        let rate_wait = throttle_collapse_remesh();
+                        if rate_wait > 0 {
+                            log_line(format!("rate-limited: extra wait {}ms", rate_wait));
+                        }
+
+                        // Refresh base_meshes cache so the seam pass
+                        // publishes the post-clear mesh, not the pre-clear
+                        // (slab-still-there) mesh.
+                        let cs = cfg_c.chunk_size;
+                        let dirty_bounds: Vec<_> = keys.iter()
+                            .map(|&k| (k, 0usize, 0usize, 0usize, cs, cs, cs))
+                            .collect();
+                        {
+                            let mut s = store_c.write().unwrap();
+                            let _ = s.remesh_dirty(&dirty_bounds, &cfg_c, ws);
+                        }
+                        log_line(format!("remeshed {} slab chunks (cache refreshed)", keys.len()));
+
+                        // HISMs anchored on now-cleared roof surfaces must
+                        // recompute too — otherwise crystals stay floating
+                        // where the slab used to be.
+                        recompute_crystals_for_chunks(&store_c, &cfg_c, &keys);
+
+                        // Force fresh send by clearing the last-sent-hash so
+                        // the seam pass doesn't skip thinking nothing changed.
+                        {
+                            let mut s = store_c.write().unwrap();
+                            for k in &keys {
+                                s.last_sent_mesh_hash.remove(k);
+                            }
+                        }
+
+                        batched_seam_pass_mine(&keys, &cfg_c, &store_c, &tx_c, ws);
+                        log_line(format!("batched_seam_pass_mine called (cave roof now open)"));
+                    });
+                }
+
+                // Schedule pile placement at impact, then a 4-tier preview
+                // reveal over PILE_PREVIEW_MS, then the real chunk remesh.
+                //
+                // Sequence (deferred thread):
+                //   t = impact_ms                   — apply pile to density;
+                //                                     extract 4 tier preview
+                //                                     meshes; emit them.
+                //   t = impact_ms + 0..PREVIEW_MS   — UE animates debris
+                //                                     actor reveal.
+                //   t = impact_ms + PREVIEW_MS      — recompute crystals,
+                //                                     remesh pile_chunks, run
+                //                                     seam pass; the real
+                //                                     chunk mesh now matches
+                //                                     the pile and the debris
+                //                                     actor despawns.
+                //
+                // Density is applied immediately so subsequent gameplay
+                // queries (mining, flatten, stress) see the correct world;
+                // only the chunk MESH lags by PREVIEW_MS, which is the
+                // illusion window.
+                if !event.pending_piles.is_empty() {
+                    // 6 tiers × 200 ms/tier = 1200 ms total reveal. Each tier
+                    // is one cumulative slice of the heap; UE swaps which one
+                    // is visible at each slot boundary with a small dust puff
+                    // per swap. After the full window the chunk remesh fires
+                    // and the debris actor self-destructs.
+                    const PILE_PREVIEW_MS: u32 = 1200;
+                    let store_c = std::sync::Arc::clone(store);
+                    let cfg_c = cfg.clone();
+                    let stress_cfg_c = stress_cfg.clone();
+                    let tx_c = result_tx.clone();
+                    let pending = event.pending_piles.clone();
+                    let cs_c = chunk_size;
+                    let ws = world_scale;
+                    let pending_count = pending.len();
+                    let event_center = event.center;
+                    std::thread::spawn(move || {
+                        // Helper to write to the cinematic diagnostics log
+                        // (same file Rust+UE share, tagged [R-DEFERRED]).
+                        let log_line = |msg: String| {
+                            use std::io::Write;
+                            let now_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis()).unwrap_or(0);
+                            if let Ok(mut f) = std::fs::OpenOptions::new()
+                                .create(true).append(true)
+                                .open("D:/Unreal Projects/Mithril2026/Saved/collapse_log.txt")
+                            {
+                                let _ = writeln!(f, "[{}][R-DEFERRED] {}", now_ms, msg);
+                            }
+                        };
+
+                        log_line(format!(
+                            "thread-spawn impact_ms={} pending_count={} center=({:.1},{:.1},{:.1})",
+                            impact_ms, pending_count,
+                            event_center.0, event_center.1, event_center.2));
+
+                        std::thread::sleep(std::time::Duration::from_millis(impact_ms as u64));
+                        log_line(format!("woke after sleep, applying {} piles", pending_count));
+
+                        // ── Apply pile + collect written_cells for preview ──
+                        let mut pile_chunks: Vec<(i32, i32, i32)> = Vec::new();
+                        let mut all_written: Vec<voxel_core::density_ops::WrittenCell> = Vec::new();
+                        {
+                            let mut s = match store_c.write() {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    log_line(format!("FAILED to acquire store write lock: {:?}", e));
+                                    return;
+                                }
+                            };
+                            for (i, p) in pending.iter().enumerate() {
+                                let pr = voxel_core::stress::apply_pending_pile_with_result(
+                                    &mut s.density_fields, &stress_cfg_c,
+                                    p, cs_c,
+                                );
+                                log_line(format!(
+                                    "  pile[{}]: collapsed_voxels={} bb=({},{},{})..({},{},{}) → {} chunks affected, {} written cells",
+                                    i, p.collapsed_voxels.len(),
+                                    p.bb_min.0, p.bb_min.1, p.bb_min.2,
+                                    p.bb_max.0, p.bb_max.1, p.bb_max.2,
+                                    pr.affected_chunks.len(), pr.written_cells.len()));
+                                for k in pr.affected_chunks {
+                                    pile_chunks.push(k);
+                                }
+                                all_written.extend(pr.written_cells);
+                            }
+                        }
+                        pile_chunks.sort();
+                        pile_chunks.dedup();
+                        log_line(format!("total pile_chunks (deduped)={}, total written_cells={}",
+                            pile_chunks.len(), all_written.len()));
+
+                        if pile_chunks.is_empty() {
+                            log_line("⚠ pile_chunks is empty — nothing to remesh".to_string());
+                            return;
+                        }
+
+                        // ── Extract N-tier preview meshes & emit ──
+                        // Use the first pending pile's spawn coord as the
+                        // anchor UE keys the debris actor by. (Each event
+                        // has a single pending pile in practice; if there
+                        // were multiple, we'd loop and emit per-pile.)
+                        // Tier count comes from PILE_PREVIEW_TIER_COUNT
+                        // (currently 8) so this code stays correct on bumps.
+                        let voxel_scale = 1.0_f32;
+                        let tier_meshes = crate::pile_preview::extract_pile_tier_meshes(
+                            &all_written, cs_c, voxel_scale, ws,
+                        );
+                        // Anchor in UE coords: pile bbox center at landing Y.
+                        let anchor_p = &pending[0];
+                        let cx = ((anchor_p.bb_min.0 + anchor_p.bb_max.0) as f32 * 0.5
+                            + anchor_p.landing_offset as f32 * 0.0) as f32;
+                        let cy = ((anchor_p.bb_min.1 + anchor_p.bb_max.1) as f32 * 0.5
+                            - anchor_p.landing_offset as f32) as f32;
+                        let cz = ((anchor_p.bb_min.2 + anchor_p.bb_max.2) as f32 * 0.5) as f32;
+                        // Convert Rust voxel coord → UE world (Y-up→Z-up).
+                        let ue_x = cx * ws;
+                        let ue_y = -cz * ws;
+                        let ue_z = cy * ws;
+                        let bbox_x = ((anchor_p.bb_max.0 - anchor_p.bb_min.0).max(1)) as f32 * ws;
+                        let bbox_y = ((anchor_p.bb_max.1 - anchor_p.bb_min.1).max(1)) as f32 * ws;
+                        let bbox_z = ((anchor_p.bb_max.2 - anchor_p.bb_min.2).max(1)) as f32 * ws;
+                        let total_volume: u32 = pending.iter()
+                            .map(|p| p.collapsed_voxels.len() as u32).sum();
+                        let dom_mat = anchor_p.dominant_material as u8;
+
+                        for (tier_idx, mesh) in tier_meshes.into_iter().enumerate() {
+                            let mut fall = FfiSlabFallData::default();
+                            fall.spawn_x = ue_x;
+                            fall.spawn_y = ue_y;
+                            fall.spawn_z = ue_z;
+                            fall.land_x = ue_x;
+                            fall.land_y = ue_y;
+                            fall.land_z = ue_z;
+                            fall.bounds_extent_x = bbox_x;
+                            fall.bounds_extent_y = bbox_z; // Y-up→Z-up swap
+                            fall.bounds_extent_z = bbox_y;
+                            fall.volume = total_volume;
+                            fall.dominant_material = dom_mat;
+                            fall.pile_tier_index = tier_idx as u8;
+                            fall.warning_eta_ms = PILE_PREVIEW_MS;
+                            let _ = tx_c.send(WorkerResult::PilePreviewTier {
+                                mesh,
+                                fall_data: fall,
+                            });
+                        }
+                        log_line(format!("emitted {} tier preview meshes anchor=({:.1},{:.1},{:.1})",
+                            crate::pile_preview::PILE_PREVIEW_TIER_COUNT,
+                            ue_x, ue_y, ue_z));
+
+                        // ── Hold the preview window ──
+                        std::thread::sleep(std::time::Duration::from_millis(PILE_PREVIEW_MS as u64));
+
+                        // ── Throttle through the global rate limiter ──
+                        // Multi-region collapses queue 6+ deferred threads
+                        // that all wake within ~1.6 s after the first
+                        // impact. Without throttling they'd all dump their
+                        // chunk remesh + seam pass results onto the game
+                        // thread back-to-back, producing the "2 second
+                        // freeze" the user reported. Rate limiter spreads
+                        // these batches by `COLLAPSE_REMESH_GAP_MS` each.
+                        let rate_wait = throttle_collapse_remesh();
+                        if rate_wait > 0 {
+                            log_line(format!("rate-limited: extra wait {}ms before remesh", rate_wait));
+                        }
+
+                        // ── Real commit: crystals + remesh + seam ──
+                        recompute_crystals_for_chunks(&store_c, &cfg_c, &pile_chunks);
+                        log_line("crystals recomputed".to_string());
+
+                        // ★ CRITICAL: re-DC the chunks so `base_meshes` cache
+                        // reflects the just-placed pile. `batched_seam_pass_mine`
+                        // reads from `base_meshes` — without this remesh, the
+                        // seam pass would publish stale meshes.
+                        let cs = cfg_c.chunk_size;
+                        let dirty_bounds: Vec<_> = pile_chunks.iter()
+                            .map(|&k| (k, 0usize, 0usize, 0usize, cs, cs, cs))
+                            .collect();
+                        {
+                            let mut s = store_c.write().unwrap();
+                            let _ = s.remesh_dirty(&dirty_bounds, &cfg_c, ws);
+                        }
+                        log_line(format!("remeshed {} pile chunks (base_meshes cache refreshed)",
+                            pile_chunks.len()));
+
+                        // Force fresh send by clearing the last-sent-hash.
+                        {
+                            let mut s = store_c.write().unwrap();
+                            let mut cleared = 0u32;
+                            for k in &pile_chunks {
+                                if s.last_sent_mesh_hash.remove(k).is_some() {
+                                    cleared += 1;
+                                }
+                            }
+                            log_line(format!("cleared {} stale hashes from {} pile chunks",
+                                cleared, pile_chunks.len()));
+                        }
+
+                        batched_seam_pass_mine(&pile_chunks, &cfg_c, &store_c, &tx_c, ws);
+                        log_line(format!("batched_seam_pass_mine called for {} chunks", pile_chunks.len()));
+                    });
+                } else {
+                    if let Some(f) = &mut log_file {
+                        let _ = writeln!(f, "[{}][R] ⚠ event has no pending_piles — pile defer was a no-op (pile already placed inline?)", now_ms);
+                    }
+                }
+            }
         } else {
             dbg(format!("  no collapses triggered (overstressed={} but regions too small or grounded) in {:.1}ms",
                 result.overstressed.len(), collapse_ms));
@@ -593,7 +1332,15 @@ fn handle_request(
                     .entry(rk)
                     .or_insert_with(|| Arc::new(Mutex::new(())))
                     .clone();
-                let _region_guard = region_mutex.lock().unwrap();
+                // The mutex guards (), not data — there's no invariant a
+                // panicked worker could have violated. Recover from
+                // poisoning so a single panic in region-gen code (e.g. an
+                // OOB in voxel-gen) does NOT cascade through every other
+                // worker that touches the same region. Without this, every
+                // peer hits PoisonError on lock().unwrap() and the whole
+                // pool dies — which is exactly how PANIC #1 took out 4
+                // peers via worker.rs:596 PoisonError.
+                let _region_guard = region_mutex.lock().unwrap_or_else(|p| p.into_inner());
 
                 // Re-check fast path under the guard — the owner may have
                 // just finished generating this region while we were waiting.
@@ -1061,6 +1808,7 @@ fn handle_request(
                                 fluid_type: voxel_fluid::cell::FluidType::Lava,
                                 level: lv.level,
                                 is_source: true,
+                                max_flow_dist: 0, // legacy procedural source — unbounded
                             });
                         }
                     }
@@ -1085,6 +1833,7 @@ fn handle_request(
                         },
                         level: 1.0,
                         is_source: seed.is_source,
+                        max_flow_dist: 0, // legacy procedural source — unbounded
                     });
                 }
             }
@@ -1292,6 +2041,7 @@ fn handle_request(
             let dirty_keys: Vec<(i32, i32, i32)> = meshes.into_iter().map(|(k, _)| k).collect();
             drop(s);
 
+            recompute_crystals_for_chunks(store, &cfg, &dirty_keys);
             batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
         }
         WorkerRequest::FlattenBatch { tiles } => {
@@ -1301,6 +2051,7 @@ fn handle_request(
             let meshes = crate::terrain_ops::flatten_terrace_batch(&mut s, &tiles, &cfg, world_scale, ts);
             let dirty_keys: Vec<_> = meshes.into_iter().map(|(k, _)| k).collect();
             drop(s);
+            recompute_crystals_for_chunks(store, &cfg, &dirty_keys);
             batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
         }
         WorkerRequest::BuildingFlattenBatch { buildings } => {
@@ -1330,6 +2081,7 @@ fn handle_request(
             all_dirty.dedup();
             drop(s);
             // Single seam pass for all flattens combined
+            recompute_crystals_for_chunks(store, &cfg, &all_dirty);
             batched_seam_pass_mine(&all_dirty, &cfg, store, result_tx, world_scale);
         }
         WorkerRequest::BuildingFlatten { base_x, base_y, base_z, base_y_float, host_material, footprint_voxels, clearance_voxels } => {
@@ -1355,6 +2107,7 @@ fn handle_request(
             let dirty_keys: Vec<(i32, i32, i32)> = meshes.into_iter().map(|(k, _)| k).collect();
             drop(s);
 
+            recompute_crystals_for_chunks(store, &cfg, &dirty_keys);
             batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
         }
         WorkerRequest::Mine { request } => {
@@ -1471,6 +2224,7 @@ fn handle_request(
                                     fluid_type: voxel_fluid::cell::FluidType::WaterBreach,
                                     level: b.level,
                                     is_source: true,
+                                    max_flow_dist: 0, // procedural breach — unbounded
                                 });
                             }
                         }
@@ -1543,6 +2297,7 @@ fn handle_request(
                                                     fluid_type: ft,
                                                     level: 1.0,
                                                     is_source: false,
+                                                    max_flow_dist: 0, // non-source — irrelevant
                                                 });
                                             }
                                         }
@@ -1604,6 +2359,7 @@ fn handle_request(
                                     fluid_type: voxel_fluid::cell::FluidType::WaterBreach,
                                     level: b.level,
                                     is_source: true,
+                                    max_flow_dist: 0, // procedural breach — unbounded
                                 });
                             }
                         }
@@ -1614,6 +2370,353 @@ fn handle_request(
             // Step 6: Regenerate seams
             batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, ws);
         }
+        WorkerRequest::BrushSphere { request } => {
+            let cfg = config.read().unwrap().clone();
+            let center = from_ue_world_pos(
+                request.world_x, request.world_y, request.world_z, world_scale,
+            );
+            let radius = request.radius / world_scale;
+
+            let mut s = store.write().unwrap();
+            let outcome = match request.mode {
+                0 => {
+                    let mat = voxel_core::material::Material::from_u8(request.material);
+                    crate::brushes::paint_material_sphere(
+                        &mut s, center, radius, mat, &cfg, world_scale,
+                    )
+                }
+                1 => crate::brushes::carve_sphere(&mut s, center, radius, &cfg, world_scale),
+                2 => {
+                    let mat = voxel_core::material::Material::from_u8(request.material);
+                    crate::brushes::fill_sphere(
+                        &mut s, center, radius, mat, &cfg, world_scale,
+                    )
+                }
+                _ => crate::brushes::BrushOutcome { meshes: Vec::new(), flipped_chunks: Vec::new() },
+            };
+            drop(s);
+
+            let dirty_keys: Vec<(i32, i32, i32)> =
+                outcome.meshes.into_iter().map(|(k, _)| k).collect();
+            // Recompute crystal placements on flipped chunks (mirrors mine path).
+            let new_placements: Vec<_> = {
+                let s = store.read().unwrap();
+                outcome.flipped_chunks.iter().filter_map(|&key| {
+                    s.density_fields.get(&key).map(|density| {
+                        let coord = voxel_core::chunk::ChunkCoord::new(key.0, key.1, key.2);
+                        (key, voxel_gen::compute_crystals(coord, density, &cfg))
+                    })
+                }).collect()
+            };
+            {
+                let mut s = store.write().unwrap();
+                for (key, placements) in new_placements {
+                    s.crystal_placements.insert(key, placements);
+                }
+            }
+            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+        }
+        WorkerRequest::BrushTunnel { points, radius, material } => {
+            let cfg = config.read().unwrap().clone();
+            let mat = material.map(voxel_core::material::Material::from_u8);
+
+            let mut s = store.write().unwrap();
+            let outcome = crate::brushes::tunnel(
+                &mut s, &points, radius, mat, &cfg, world_scale,
+            );
+            drop(s);
+
+            let dirty_keys: Vec<(i32, i32, i32)> =
+                outcome.meshes.into_iter().map(|(k, _)| k).collect();
+            let new_placements: Vec<_> = {
+                let s = store.read().unwrap();
+                outcome.flipped_chunks.iter().filter_map(|&key| {
+                    s.density_fields.get(&key).map(|density| {
+                        let coord = voxel_core::chunk::ChunkCoord::new(key.0, key.1, key.2);
+                        (key, voxel_gen::compute_crystals(coord, density, &cfg))
+                    })
+                }).collect()
+            };
+            {
+                let mut s = store.write().unwrap();
+                for (key, placements) in new_placements {
+                    s.crystal_placements.insert(key, placements);
+                }
+            }
+            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+        }
+        WorkerRequest::BrushFormation { center_rust, formation_type, material, height, radius } => {
+            let cfg = config.read().unwrap().clone();
+            let mat = voxel_core::material::Material::from_u8(material);
+
+            let mut s = store.write().unwrap();
+            let outcome = crate::brushes::place_formation(
+                &mut s, center_rust, formation_type, height, radius, mat, &cfg, world_scale,
+            );
+            drop(s);
+
+            let dirty_keys: Vec<(i32, i32, i32)> =
+                outcome.meshes.into_iter().map(|(k, _)| k).collect();
+            let new_placements: Vec<_> = {
+                let s = store.read().unwrap();
+                outcome.flipped_chunks.iter().filter_map(|&key| {
+                    s.density_fields.get(&key).map(|density| {
+                        let coord = voxel_core::chunk::ChunkCoord::new(key.0, key.1, key.2);
+                        (key, voxel_gen::compute_crystals(coord, density, &cfg))
+                    })
+                }).collect()
+            };
+            {
+                let mut s = store.write().unwrap();
+                for (key, placements) in new_placements {
+                    s.crystal_placements.insert(key, placements);
+                }
+            }
+            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+        }
+        WorkerRequest::BrushBox { center_rust, half_ext_rust, yaw_rad, op, material } => {
+            let cfg = config.read().unwrap().clone();
+            let mat = voxel_core::material::Material::from_u8(material);
+
+            let mut s = store.write().unwrap();
+            let outcome = crate::brushes::box_brush(
+                &mut s, center_rust, half_ext_rust, yaw_rad, op, mat, &cfg, world_scale,
+            );
+            drop(s);
+
+            let dirty_keys: Vec<(i32, i32, i32)> =
+                outcome.meshes.into_iter().map(|(k, _)| k).collect();
+            let new_placements: Vec<_> = {
+                let s = store.read().unwrap();
+                outcome.flipped_chunks.iter().filter_map(|&key| {
+                    s.density_fields.get(&key).map(|density| {
+                        let coord = voxel_core::chunk::ChunkCoord::new(key.0, key.1, key.2);
+                        (key, voxel_gen::compute_crystals(coord, density, &cfg))
+                    })
+                }).collect()
+            };
+            {
+                let mut s = store.write().unwrap();
+                for (key, placements) in new_placements {
+                    s.crystal_placements.insert(key, placements);
+                }
+            }
+            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+        }
+        WorkerRequest::BrushCylinder { center_rust, radius, height, op, material } => {
+            let cfg = config.read().unwrap().clone();
+            let mat = voxel_core::material::Material::from_u8(material);
+
+            let mut s = store.write().unwrap();
+            let outcome = crate::brushes::cylinder_brush(
+                &mut s, center_rust, radius, height, op, mat, &cfg, world_scale,
+            );
+            drop(s);
+
+            let dirty_keys: Vec<(i32, i32, i32)> =
+                outcome.meshes.into_iter().map(|(k, _)| k).collect();
+            let new_placements: Vec<_> = {
+                let s = store.read().unwrap();
+                outcome.flipped_chunks.iter().filter_map(|&key| {
+                    s.density_fields.get(&key).map(|density| {
+                        let coord = voxel_core::chunk::ChunkCoord::new(key.0, key.1, key.2);
+                        (key, voxel_gen::compute_crystals(coord, density, &cfg))
+                    })
+                }).collect()
+            };
+            {
+                let mut s = store.write().unwrap();
+                for (key, placements) in new_placements {
+                    s.crystal_placements.insert(key, placements);
+                }
+            }
+            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+        }
+        WorkerRequest::BrushSmooth { center_rust, radius, iterations, strength } => {
+            let cfg = config.read().unwrap().clone();
+            let mut s = store.write().unwrap();
+            let outcome = crate::brushes::smooth_brush(
+                &mut s, center_rust, radius, iterations, strength, &cfg, world_scale,
+            );
+            drop(s);
+            let dirty_keys: Vec<(i32, i32, i32)> =
+                outcome.meshes.into_iter().map(|(k, _)| k).collect();
+            // Smooth doesn't change material, so crystal recompute isn't strictly needed —
+            // but keep consistent with other brush handlers for safety.
+            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+        }
+        WorkerRequest::BrushUndo => {
+            let cfg = config.read().unwrap().clone();
+            let mut s = store.write().unwrap();
+            let outcome = crate::brushes::apply_undo(&mut s, &cfg, world_scale);
+            drop(s);
+            if let Some(outcome) = outcome {
+                let dirty_keys: Vec<(i32, i32, i32)> =
+                    outcome.meshes.into_iter().map(|(k, _)| k).collect();
+                let new_placements: Vec<_> = {
+                    let s = store.read().unwrap();
+                    outcome.flipped_chunks.iter().filter_map(|&key| {
+                        s.density_fields.get(&key).map(|density| {
+                            let coord = voxel_core::chunk::ChunkCoord::new(key.0, key.1, key.2);
+                            (key, voxel_gen::compute_crystals(coord, density, &cfg))
+                        })
+                    }).collect()
+                };
+                {
+                    let mut s = store.write().unwrap();
+                    for (key, placements) in new_placements {
+                        s.crystal_placements.insert(key, placements);
+                    }
+                }
+                batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+            }
+        }
+        WorkerRequest::BrushNoise { center_rust, radius, frequency, strength, seed } => {
+            let cfg = config.read().unwrap().clone();
+            let mut s = store.write().unwrap();
+            let outcome = crate::brushes::noise_brush(
+                &mut s, center_rust, radius, frequency, strength, seed, &cfg, world_scale,
+            );
+            drop(s);
+            let dirty_keys: Vec<(i32, i32, i32)> =
+                outcome.meshes.into_iter().map(|(k, _)| k).collect();
+            let new_placements: Vec<_> = {
+                let s = store.read().unwrap();
+                outcome.flipped_chunks.iter().filter_map(|&key| {
+                    s.density_fields.get(&key).map(|density| {
+                        let coord = voxel_core::chunk::ChunkCoord::new(key.0, key.1, key.2);
+                        (key, voxel_gen::compute_crystals(coord, density, &cfg))
+                    })
+                }).collect()
+            };
+            {
+                let mut s = store.write().unwrap();
+                for (key, placements) in new_placements {
+                    s.crystal_placements.insert(key, placements);
+                }
+            }
+            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+        }
+        WorkerRequest::BrushFluidSphere { center_rust, radius, fluid_type, is_source, op, max_flow_dist } => {
+            // op semantics:
+            //   0 = fill air (no carve)
+            //   1 = clear (level=0)
+            //   2 = pool-dig (carve solid + bottom-half non-source — designer's "make a basin")
+            //   3 = carve + full fill (carve solid + fill entire sphere; respects is_source)
+            let cfg = config.read().unwrap().clone();
+            let ft = voxel_fluid::cell::FluidType::from_u8(fluid_type);
+            let level = if op == 1 { 0.0 } else { 1.0 };
+            let does_carve = op == 2 || op == 3;
+            let bottom_half_only = op == 2;
+            let force_non_source = op == 2; // pool-dig body always drains
+
+            // Carve first (if applicable).
+            let mut dig_outcome = None;
+            if does_carve {
+                let mut s = store.write().unwrap();
+                dig_outcome = Some(crate::brushes::carve_sphere(&mut s, center_rust, radius, &cfg, world_scale));
+                drop(s);
+            }
+
+            let cells = {
+                let s = store.read().unwrap();
+                crate::brushes::collect_fluid_cells_in_sphere(&s, center_rust, radius, bottom_half_only, &cfg)
+            };
+            for cell in cells {
+                let cell_is_source = if force_non_source { false } else { is_source };
+                let _ = fluid_event_tx.send(FluidEvent::AddFluid {
+                    chunk: cell.chunk,
+                    x: cell.x, y: cell.y, z: cell.z,
+                    fluid_type: ft,
+                    level,
+                    is_source: cell_is_source,
+                    // Bounded-flow only meaningful on sources.
+                    max_flow_dist: if cell_is_source { max_flow_dist } else { 0 },
+                });
+            }
+
+            if let Some(outcome) = dig_outcome {
+                let dirty_keys: Vec<(i32, i32, i32)> =
+                    outcome.meshes.into_iter().map(|(k, _)| k).collect();
+                if !dirty_keys.is_empty() {
+                    batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+                }
+            }
+        }
+        WorkerRequest::BrushFluidBox { center_rust, half_ext_rust, fluid_type, is_source, op, max_flow_dist } => {
+            let cfg = config.read().unwrap().clone();
+            let ft = voxel_fluid::cell::FluidType::from_u8(fluid_type);
+            let level = if op == 1 { 0.0 } else { 1.0 };
+
+            // Op 2 (carve+fill): carve the box region first, then fill all air cells inside.
+            // Fluid box brush is unrotated for now — add yaw_rad to FfiBrushFluidBoxRequest if needed.
+            let mut dig_outcome = None;
+            if op == 2 {
+                let mut s = store.write().unwrap();
+                dig_outcome = Some(crate::brushes::box_brush(
+                    &mut s, center_rust, half_ext_rust, /*yaw_rad*/0.0, 1, // op=1 (carve)
+                    voxel_core::material::Material::Air, &cfg, world_scale));
+                drop(s);
+            }
+
+            let cells = {
+                let s = store.read().unwrap();
+                crate::brushes::collect_fluid_cells_in_box(&s, center_rust, half_ext_rust, &cfg)
+            };
+            for cell in cells {
+                let cell_is_source = if op == 2 { false } else { is_source };
+                let _ = fluid_event_tx.send(FluidEvent::AddFluid {
+                    chunk: cell.chunk,
+                    x: cell.x, y: cell.y, z: cell.z,
+                    fluid_type: ft,
+                    level,
+                    // Carve-and-fill semantics: the body becomes non-source so it drains/spreads.
+                    is_source: cell_is_source,
+                    max_flow_dist: if cell_is_source { max_flow_dist } else { 0 },
+                });
+            }
+            if let Some(outcome) = dig_outcome {
+                let dirty_keys: Vec<(i32, i32, i32)> =
+                    outcome.meshes.into_iter().map(|(k, _)| k).collect();
+                if !dirty_keys.is_empty() {
+                    batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+                }
+            }
+        }
+        WorkerRequest::BrushFluidRiver { points, radius, fluid_type, is_source, op, max_flow_dist } => {
+            let cfg = config.read().unwrap().clone();
+            let ft = voxel_fluid::cell::FluidType::from_u8(fluid_type);
+
+            // Op 2: carve a channel first using the existing tunnel brush, then fill it.
+            let mut dig_outcome = None;
+            if op == 2 {
+                let mut s = store.write().unwrap();
+                dig_outcome = Some(crate::brushes::tunnel(&mut s, &points, radius, None, &cfg, world_scale));
+                drop(s);
+            }
+            let cells = {
+                let s = store.read().unwrap();
+                crate::brushes::collect_fluid_cells_in_capsule_chain(&s, &points, radius, &cfg)
+            };
+            for cell in cells {
+                let _ = fluid_event_tx.send(FluidEvent::AddFluid {
+                    chunk: cell.chunk,
+                    x: cell.x, y: cell.y, z: cell.z,
+                    fluid_type: ft,
+                    level: 1.0,
+                    is_source,
+                    max_flow_dist: if is_source { max_flow_dist } else { 0 },
+                });
+            }
+            if let Some(outcome) = dig_outcome {
+                let dirty_keys: Vec<(i32, i32, i32)> =
+                    outcome.meshes.into_iter().map(|(k, _)| k).collect();
+                if !dirty_keys.is_empty() {
+                    batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+                }
+            }
+        }
+        // (removed BrushFluidStream handler — replaced by bounded sources via max_flow_dist on FluidCell)
         WorkerRequest::Unload { chunk } => {
             let mut s = store.write().unwrap();
             s.unload(chunk);
@@ -2310,6 +3413,7 @@ fn handle_request(
                     fluid_type: ft,
                     level: 1.0,
                     is_source: seed.is_source,
+                    max_flow_dist: 0, // procedural pool seed — unbounded
                 });
             }
 
@@ -2467,6 +3571,41 @@ fn incremental_seam_pass(
 /// Computes the union of all 27-neighborhoods and runs each candidate exactly once,
 /// avoiding the N× duplication when overlapping neighborhoods re-generate the same seams.
 ///
+/// Recompute crystal placements for chunks whose density was just modified.
+///
+/// Crystals are spawned by `voxel_gen::compute_crystals` based on current
+/// material+density state. When mining/flatten/collapse changes a chunk's
+/// density, any crystals that were on now-air cells become "floating"
+/// HISM instances in UE because UE's `ApplyMeshData` clears+reapplies the
+/// HISM list from `crystal_placements`, but if `crystal_placements` still
+/// holds the old list (computed against the old density), the HISMs come
+/// back at the old positions.
+///
+/// This helper recomputes the list against the current density and writes
+/// it back to the store so the next ChunkMesh send carries the fresh data.
+/// Mining already has an inline equivalent — this exists for the non-mine
+/// paths (single/batch flatten, collapse, levelling).
+fn recompute_crystals_for_chunks(
+    store: &Arc<RwLock<ChunkStore>>,
+    cfg: &GenerationConfig,
+    chunks: &[(i32, i32, i32)],
+) {
+    if chunks.is_empty() { return; }
+    let new_placements: Vec<_> = {
+        let s = store.read().unwrap();
+        chunks.iter().filter_map(|&key| {
+            s.density_fields.get(&key).map(|density| {
+                let coord = voxel_core::chunk::ChunkCoord::new(key.0, key.1, key.2);
+                (key, voxel_gen::compute_crystals(coord, density, cfg))
+            })
+        }).collect()
+    };
+    let mut s = store.write().unwrap();
+    for (key, placements) in new_placements {
+        s.crystal_placements.insert(key, placements);
+    }
+}
+
 /// Dirty chunks are guaranteed to have their mesh sent even if they have no seam quads,
 /// since callers rely on this function as the sole sender for mine/flatten results.
 fn batched_seam_pass(
@@ -2573,29 +3712,35 @@ fn batched_seam_pass_inner(
     // a write lock sandwiched between them — 3 acquisitions total). Hashes are now
     // recorded in a single write lock AFTER the read, and crystal data is carried
     // by-value so the send loop doesn't .cloned() it per target.
-    let mut kept: Vec<((i32, i32, i32), voxel_core::mesh::Mesh, u64, Vec<FfiCrystalPlacement>)> =
+    // `was_previously_sent` lets the empty-mesh skip distinguish "first-time
+    // empty chunk" (drop, no UE actor needed) from "chunk that just became
+    // empty after a carve" (must send so UE clears the old mesh + collision —
+    // otherwise a fully-carved chunk leaves a ghost actor visible until reload).
+    let mut kept: Vec<((i32, i32, i32), voxel_core::mesh::Mesh, u64, Vec<FfiCrystalPlacement>, bool)> =
         Vec::with_capacity(hashed.len());
     {
         let s = store.read().unwrap();
         for (target, mesh, new_hash) in hashed {
-            if let Some(&prev) = s.last_sent_mesh_hash.get(&target) {
+            let prev_entry = s.last_sent_mesh_hash.get(&target).copied();
+            if let Some(prev) = prev_entry {
                 if prev == new_hash {
                     continue;
                 }
             }
+            let was_previously_sent = prev_entry.is_some();
             let crystal_data = match s.crystal_placements.get(&target) {
                 Some(p) if !p.is_empty() => {
                     crate::convert::convert_crystals_to_ue(p, cfg.voxel_scale(), world_scale)
                 }
                 _ => Vec::new(),
             };
-            kept.push((target, mesh, new_hash, crystal_data));
+            kept.push((target, mesh, new_hash, crystal_data, was_previously_sent));
         }
     }
     // Record new hashes (brief write lock)
     if !kept.is_empty() {
         let mut s = store.write().unwrap();
-        for (target, _mesh, new_hash, _crystals) in &kept {
+        for (target, _mesh, new_hash, _crystals, _was_prev) in &kept {
             s.last_sent_mesh_hash.insert(*target, *new_hash);
         }
     }
@@ -2603,20 +3748,22 @@ fn batched_seam_pass_inner(
     if batch_as_mine {
         // Send all mine mesh updates as one atomic result — no pop-in
         let mut batch = Vec::new();
-        for (target, combined, _hash, crystal_data) in kept {
+        for (target, combined, _hash, crystal_data, was_previously_sent) in kept {
             let mut converted = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
             crate::convert::bucket_mesh_by_material(&mut converted);
-            if converted.indices.is_empty() { continue; }
+            // Only drop empties for chunks that were never sent — for chunks
+            // UE already has, an empty mesh is a clear command, not a no-op.
+            if converted.indices.is_empty() && !was_previously_sent { continue; }
             batch.push((target, converted, crystal_data));
         }
         if !batch.is_empty() {
             let _ = result_tx.send(WorkerResult::MineBatchMesh { meshes: batch });
         }
     } else {
-        for (target, combined, _hash, crystal_data) in kept {
+        for (target, combined, _hash, crystal_data, was_previously_sent) in kept {
             let mut converted = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
             crate::convert::bucket_mesh_by_material(&mut converted);
-            if converted.indices.is_empty() { continue; }
+            if converted.indices.is_empty() && !was_previously_sent { continue; }
             let _ = result_tx.send(WorkerResult::ChunkMesh {
                 chunk: target, mesh: converted, generation: 0, crystal_data,
                 zone_descriptors: Vec::new(),
