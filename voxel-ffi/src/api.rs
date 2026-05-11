@@ -662,6 +662,7 @@ pub unsafe extern "C" fn voxel_query_stress(
             classification: ptr::null_mut(),
             count: 0,
             valid: 0,
+            painted_values: ptr::null_mut(),
         };
     }
     let engine = &*(engine as *const VoxelEngine);
@@ -670,6 +671,17 @@ pub unsafe extern "C" fn voxel_query_stress(
     match engine.query_stress(key) {
         Some(sf) => {
             let count = sf.stress.len() as u32;
+            // The painted layer is optional — when the chunk has never had a
+            // PaintStress stroke we return a null pointer so UE can short-circuit.
+            let painted_ptr = if sf.painted_stress.is_empty() {
+                ptr::null_mut()
+            } else {
+                let mut painted_data = sf.painted_stress.into_boxed_slice();
+                let p = painted_data.as_mut_ptr();
+                std::mem::forget(painted_data);
+                p
+            };
+
             let mut stress_data = sf.stress.into_boxed_slice();
             let stress_ptr = stress_data.as_mut_ptr();
             std::mem::forget(stress_data);
@@ -683,6 +695,7 @@ pub unsafe extern "C" fn voxel_query_stress(
                 classification: class_ptr,
                 count,
                 valid: 1,
+                painted_values: painted_ptr,
             }
         }
         None => FfiStressData {
@@ -690,6 +703,7 @@ pub unsafe extern "C" fn voxel_query_stress(
             classification: ptr::null_mut(),
             count: 0,
             valid: 0,
+            painted_values: ptr::null_mut(),
         },
     }
 }
@@ -707,6 +721,13 @@ pub unsafe extern "C" fn voxel_free_stress_data(data: FfiStressData) {
     if !data.classification.is_null() && data.count > 0 {
         drop(Vec::from_raw_parts(
             data.classification,
+            data.count as usize,
+            data.count as usize,
+        ));
+    }
+    if !data.painted_values.is_null() && data.count > 0 {
+        drop(Vec::from_raw_parts(
+            data.painted_values,
             data.count as usize,
             data.count as usize,
         ));
@@ -1489,6 +1510,22 @@ pub unsafe extern "C" fn voxel_request_brush_sphere(
     }
     let engine = &*(engine as *const VoxelEngine);
     engine.request_brush_sphere(*request)
+}
+
+/// Creative "PaintStress" brush — additive sphere over the per-voxel painted-stress
+/// overlay. Does NOT change density/material (no remesh emitted).
+/// op: 0=add, 1=subtract, 2=clear. falloff: 0=constant, 1=linear, 2=smoothstep.
+/// Returns 1 on success, 0 if queue full.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_request_brush_paint_stress(
+    engine: *mut c_void,
+    request: *const FfiBrushPaintStressRequest,
+) -> u32 {
+    if engine.is_null() || request.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.request_brush_paint_stress(*request)
 }
 
 /// Creative-mode tunnel brush: carves (or fills) a capsule along a polyline.

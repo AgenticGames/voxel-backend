@@ -9,6 +9,7 @@ use std::io::{self, Read, Write};
 
 use voxel_core::material::Material;
 use voxel_core::octree::node::VoxelSample;
+use voxel_core::stress::StressField;
 use voxel_gen::density::DensityField;
 
 /// Magic bytes for the save file header.
@@ -18,7 +19,8 @@ const MAGIC: [u8; 4] = *b"MXSV";
 /// Version history:
 ///   1 — chunk snapshots + terraced cells/columns
 ///   2 — adds editor collapse triggers + next_trigger_id (see triggers.rs)
-const VERSION: u32 = 2;
+///   3 — adds per-chunk painted-stress overlay (creative PaintStress brush)
+const VERSION: u32 = 3;
 
 // ── Data structures ────────────────────────────────────────────────────
 
@@ -30,6 +32,11 @@ pub struct ChunkSnapshot {
     /// Packed samples: 5 bytes each (4 f32 density LE + 1 u8 material).
     /// Length = size^3 * 5.
     pub packed: Vec<u8>,
+    /// Optional painted-stress overlay (creative PaintStress brush).
+    /// `None` = snapshot was captured before any painted-stress layer existed.
+    /// `Some(bytes)` = length size^3 * 4 (LE f32 per voxel). On apply, this
+    /// overwrites the chunk's `StressField::painted_stress` in full.
+    pub painted_stress: Option<Vec<u8>>,
 }
 
 /// All world modification data needed to restore a saved game.
@@ -59,7 +66,9 @@ pub struct ModificationTracker {
 // ── Snapshot capture & apply ───────────────────────────────────────────
 
 impl ChunkSnapshot {
-    /// Capture a snapshot from a live DensityField.
+    /// Capture a snapshot from a live DensityField (density+material only).
+    /// `painted_stress` is `None` — see [`Self::from_chunk`] to also capture
+    /// the painted-stress overlay.
     pub fn from_density(df: &DensityField) -> Self {
         let total = df.samples.len();
         let mut packed = Vec::with_capacity(total * 5);
@@ -70,7 +79,25 @@ impl ChunkSnapshot {
         ChunkSnapshot {
             size: df.size as u32,
             packed,
+            painted_stress: None,
         }
+    }
+
+    /// Capture density+material AND the painted-stress overlay if `sf` has one.
+    /// Used by every brush so undo can restore the full chunk state, including
+    /// any PaintStress strokes that touched the chunk.
+    pub fn from_chunk(df: &DensityField, sf: Option<&StressField>) -> Self {
+        let mut snap = Self::from_density(df);
+        if let Some(sf) = sf {
+            if sf.has_painted_layer() {
+                let mut bytes = Vec::with_capacity(sf.painted_stress.len() * 4);
+                for &v in &sf.painted_stress {
+                    bytes.extend_from_slice(&v.to_le_bytes());
+                }
+                snap.painted_stress = Some(bytes);
+            }
+        }
+        snap
     }
 
     /// Apply this snapshot onto a DensityField, overwriting all samples.
@@ -110,6 +137,40 @@ impl ChunkSnapshot {
     pub fn sample_count(&self) -> usize {
         let s = self.size as usize;
         s * s * s
+    }
+
+    /// Restore the painted-stress overlay on `sf` from this snapshot.
+    ///
+    /// * `painted_stress == None` → wipes `sf.painted_stress` back to empty
+    ///   (so undo of "first PaintStress stroke" reverts the layer's existence).
+    /// * `painted_stress == Some(bytes)` → unpacks into `sf.painted_stress`,
+    ///   allocating it if needed. Mismatched byte count is a silent no-op.
+    pub fn apply_painted_stress_to(&self, sf: &mut StressField) {
+        let n = sf.size * sf.size * sf.size;
+        match &self.painted_stress {
+            None => {
+                // No painted layer at snapshot time — drop the current one entirely.
+                sf.painted_stress = Vec::new();
+            }
+            Some(bytes) => {
+                if bytes.len() != n * 4 {
+                    return;
+                }
+                if sf.painted_stress.len() != n {
+                    sf.painted_stress = vec![0.0; n];
+                }
+                for i in 0..n {
+                    let off = i * 4;
+                    let v = f32::from_le_bytes([
+                        bytes[off],
+                        bytes[off + 1],
+                        bytes[off + 2],
+                        bytes[off + 3],
+                    ]);
+                    sf.painted_stress[i] = v;
+                }
+            }
+        }
     }
 }
 
@@ -208,6 +269,32 @@ impl WorldSaveData {
             write_trigger(w, trig)?;
         }
 
+        // v3: painted-stress overlays — a sparse list of (chunk_coord, bytes)
+        // entries. Only chunks whose snapshot has Some(painted_stress) appear,
+        // so worlds that never used the PaintStress brush pay almost nothing.
+        //
+        // Format:
+        //   [4] painted_count u32
+        //   per entry:
+        //     [4] cx i32, [4] cy i32, [4] cz i32
+        //     [4] byte_count u32   (= size^3 * 4)
+        //     [byte_count] bytes   (LE f32 per voxel)
+        // The chunk_size for the overlay must match the chunk_snapshot above —
+        // we don't re-emit `size` since it'd duplicate the density snapshot's.
+        let painted_entries: Vec<(&(i32, i32, i32), &Vec<u8>)> = self
+            .chunk_snapshots
+            .iter()
+            .filter_map(|(k, snap)| snap.painted_stress.as_ref().map(|b| (k, b)))
+            .collect();
+        w.write_all(&(painted_entries.len() as u32).to_le_bytes())?;
+        for (&(cx, cy, cz), bytes) in painted_entries {
+            w.write_all(&cx.to_le_bytes())?;
+            w.write_all(&cy.to_le_bytes())?;
+            w.write_all(&cz.to_le_bytes())?;
+            w.write_all(&(bytes.len() as u32).to_le_bytes())?;
+            w.write_all(bytes)?;
+        }
+
         Ok(())
     }
 
@@ -226,9 +313,9 @@ impl WorldSaveData {
             return Err(DeltaError::BadMagic);
         }
 
-        // Version. Accept v1 (legacy, no triggers) and v2 (current).
+        // Version. Accept v1 (legacy, no triggers), v2 (triggers), v3 (current — adds painted_stress).
         let version = read_u32(r)?;
-        if version != 1 && version != VERSION {
+        if version != 1 && version != 2 && version != VERSION {
             return Err(DeltaError::UnsupportedVersion(version));
         }
 
@@ -250,7 +337,10 @@ impl WorldSaveData {
             let byte_count = total_samples * 5;
             let mut packed = vec![0u8; byte_count];
             r.read_exact(&mut packed).map_err(|_| DeltaError::TruncatedData)?;
-            chunk_snapshots.insert((cx, cy, cz), ChunkSnapshot { size, packed });
+            chunk_snapshots.insert(
+                (cx, cy, cz),
+                ChunkSnapshot { size, packed, painted_stress: None },
+            );
         }
 
         // Terraced cells
@@ -294,6 +384,30 @@ impl WorldSaveData {
         } else {
             (Vec::new(), 1)
         };
+
+        // v3: per-chunk painted-stress overlays. v1/v2 saves end here.
+        if version >= 3 {
+            let painted_count = read_u32(r)? as usize;
+            if painted_count > 100_000 {
+                return Err(DeltaError::TooManyChunks(painted_count));
+            }
+            for _ in 0..painted_count {
+                let cx = read_i32(r)?;
+                let cy = read_i32(r)?;
+                let cz = read_i32(r)?;
+                let byte_count = read_u32(r)? as usize;
+                if byte_count > 256 * 256 * 256 * 4 {
+                    return Err(DeltaError::TruncatedData);
+                }
+                let mut bytes = vec![0u8; byte_count];
+                r.read_exact(&mut bytes).map_err(|_| DeltaError::TruncatedData)?;
+                if let Some(snap) = chunk_snapshots.get_mut(&(cx, cy, cz)) {
+                    snap.painted_stress = Some(bytes);
+                }
+                // Painted overlay for a chunk that has no density snapshot is
+                // dropped — the overlay only matters once the density side exists.
+            }
+        }
 
         Ok(WorldSaveData {
             chunk_snapshots,

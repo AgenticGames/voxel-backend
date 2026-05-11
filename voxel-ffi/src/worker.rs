@@ -3227,6 +3227,18 @@ fn handle_request(
             // but keep consistent with other brush handlers for safety.
             batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, fluid_event_tx, world_scale);
         }
+        WorkerRequest::BrushPaintStress { center_rust, radius, amount, cap, op, falloff } => {
+            let cfg = config.read().unwrap().clone();
+            let mut s = store.write().unwrap();
+            let _outcome = crate::brushes::paint_stress_sphere(
+                &mut s, center_rust, radius, amount, falloff, op, cap, &cfg, world_scale,
+            );
+            // PaintStress does not change density/material → no remesh or seam
+            // pass is needed. The UE side picks up the updated painted overlay
+            // on the next `voxel_query_stress` call (and the V-key overlay
+            // recalc preview already drives that path).
+            drop(s);
+        }
         WorkerRequest::BrushUndo => {
             let cfg = config.read().unwrap().clone();
             let mut s = store.write().unwrap();

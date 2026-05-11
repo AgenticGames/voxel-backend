@@ -1293,6 +1293,29 @@ pub struct FfiBrushCylinderRequest {
     pub _pad: [u8; 2],
 }
 
+/// Creative-mode "PaintStress" brush — additively writes into the per-voxel
+/// painted-stress overlay (`StressField::painted_stress`) inside a sphere.
+/// Does not change density/material, so no remesh is emitted; the new stress
+/// is folded into `effective()` reads and drives extra collapses during sleep.
+///
+/// `op`:    0 = add, 1 = subtract, 2 = clear (zero the painted overlay inside the sphere)
+/// `falloff`: 0 = constant, 1 = linear, 2 = smoothstep
+/// `amount`: peak per-stroke additive (typical 0.2–0.8)
+/// `cap`:    per-cell accumulation ceiling (typical 2.0)
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiBrushPaintStressRequest {
+    pub world_x: f32,
+    pub world_y: f32,
+    pub world_z: f32,
+    pub radius: f32,    // UE units
+    pub amount: f32,
+    pub cap: f32,
+    pub op: u8,         // 0=add, 1=sub, 2=clear
+    pub falloff: u8,    // 0=constant, 1=linear, 2=smoothstep
+    pub _pad: [u8; 2],
+}
+
 /// Smooth brush — Laplacian average of density in a sphere. Material preserved.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -1396,6 +1419,11 @@ pub struct FfiStressData {
     pub classification: *mut u8,  // Per-voxel: top 4 = surface type, bottom 4 = stress source
     pub count: u32,
     pub valid: u32,
+    /// Player-painted additive stress overlay (creative PaintStress brush).
+    /// `painted_values` is null if the chunk has no painted layer (treat as
+    /// all-zeros). When non-null, length matches `count` and the effective
+    /// stress at voxel i is `stress_values[i] + painted_values[i]`.
+    pub painted_values: *mut f32,
 }
 
 #[repr(C)]
@@ -1747,6 +1775,15 @@ pub enum WorkerRequest {
         frequency: f32,
         strength: f32,
         seed: u32,
+    },
+    /// Creative "PaintStress" brush — additive sphere over the painted-stress overlay.
+    BrushPaintStress {
+        center_rust: glam::Vec3,
+        radius: f32,    // Rust world units
+        amount: f32,
+        cap: f32,
+        op: u8,
+        falloff: u8,
     },
     /// Undo the most recent brush stroke (any creative brush).
     BrushUndo,

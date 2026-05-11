@@ -193,10 +193,13 @@ impl ChunkStore {
     }
 
     pub fn unload(&mut self, key: (i32, i32, i32)) {
-        // Preserve density snapshot if this chunk was modified (mining/flatten/sleep)
+        // Preserve density+painted-stress snapshot if this chunk was modified
+        // (mining/flatten/sleep/PaintStress brush). Capturing the painted overlay
+        // here means it round-trips through unload→reload without leaking memory.
         if self.modification_tracker.dirty_chunks.contains(&key) {
             if let Some(df) = self.density_fields.get(&key) {
-                self.preserved_snapshots.insert(key, ChunkSnapshot::from_density(df));
+                let sf = self.stress_fields.get(&key);
+                self.preserved_snapshots.insert(key, ChunkSnapshot::from_chunk(df, sf));
             }
             self.modification_tracker.remove(&key);
         }
@@ -1444,10 +1447,12 @@ impl ChunkStore {
             snapshots.insert(*k, snap.clone());
         }
 
-        // Tier 3: currently loaded dirty chunks (freshest).
+        // Tier 3: currently loaded dirty chunks (freshest). Capture the
+        // painted-stress overlay too so PaintStress brush strokes persist.
         for key in &self.modification_tracker.dirty_chunks {
             if let Some(df) = self.density_fields.get(key) {
-                snapshots.insert(*key, ChunkSnapshot::from_density(df));
+                let sf = self.stress_fields.get(key);
+                snapshots.insert(*key, ChunkSnapshot::from_chunk(df, sf));
             }
         }
 
@@ -1516,6 +1521,12 @@ impl ChunkStore {
         if let Some(snap) = snap {
             if let Some(df) = self.density_fields.get_mut(&key) {
                 if snap.apply_to(df) {
+                    // Also restore the painted-stress overlay, if any. The
+                    // stress_field is created lazily in `insert()` so it
+                    // exists by the time we get here.
+                    if let Some(sf) = self.stress_fields.get_mut(&key) {
+                        snap.apply_painted_stress_to(sf);
+                    }
                     // Successfully restored — drop the preserved entry so memory
                     // doesn't grow unbounded across re-stream cycles. Save-file
                     // pending_snapshots stays put: a future re-stream might still

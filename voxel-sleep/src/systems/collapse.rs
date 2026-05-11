@@ -85,10 +85,12 @@ pub fn apply_collapse(
 
                         let survival_rate = config.strut_survival[support as u8 as usize];
 
-                        // Get stress at this voxel
+                        // Get stress at this voxel — use effective (base + painted)
+                        // so creative-mode PaintStress strokes increase strut
+                        // failure chance alongside geological stress.
                         let stress_at_voxel = stress_fields
                             .get(&chunk_key)
-                            .map(|sf| sf.get(x, y, z))
+                            .map(|sf| sf.effective(x, y, z))
                             .unwrap_or(0.0);
 
                         // Apply stress penalty to failure chance

@@ -101,6 +101,11 @@ pub struct StressField {
     /// Per-voxel classification: surface type (top 4 bits) + stress source (bottom 4 bits)
     pub classification: Vec<u8>,
     pub size: usize,
+    /// Player-painted additive stress overlay (creative-mode "PaintStress" brush).
+    /// Empty Vec = no painted layer (no allocation). When non-empty, len = size^3.
+    /// `effective_stress = stress + painted_stress` — survives recalc passes since
+    /// the recalc only writes into `stress[]`.
+    pub painted_stress: Vec<f32>,
 }
 
 impl StressField {
@@ -110,6 +115,7 @@ impl StressField {
             stress: vec![0.0; count],
             classification: vec![0u8; count],
             size,
+            painted_stress: Vec::new(),
         }
     }
 
@@ -138,6 +144,81 @@ impl StressField {
     pub fn set_class(&mut self, x: usize, y: usize, z: usize, val: u8) {
         let idx = self.index(x, y, z);
         self.classification[idx] = val;
+    }
+
+    /// True if any painted-stress value has ever been written into this chunk.
+    /// When false, the painted overlay is treated as all-zeros at zero memory cost.
+    #[inline]
+    pub fn has_painted_layer(&self) -> bool {
+        !self.painted_stress.is_empty()
+    }
+
+    /// Read the painted-stress overlay (0.0 if no layer allocated).
+    #[inline]
+    pub fn painted(&self, x: usize, y: usize, z: usize) -> f32 {
+        if self.painted_stress.is_empty() {
+            0.0
+        } else {
+            self.painted_stress[self.index(x, y, z)]
+        }
+    }
+
+    /// Effective stress = base + painted overlay.
+    /// Use this where you want player-painted stress to influence behavior
+    /// (collapse-failure rolls, overstressed test, debug viz).
+    #[inline]
+    pub fn effective(&self, x: usize, y: usize, z: usize) -> f32 {
+        let i = self.index(x, y, z);
+        let base = self.stress[i];
+        let painted = if self.painted_stress.is_empty() {
+            0.0
+        } else {
+            self.painted_stress[i]
+        };
+        base + painted
+    }
+
+    /// Lazy-allocate the painted overlay. No-op if already allocated.
+    fn ensure_painted_alloc(&mut self) {
+        if self.painted_stress.is_empty() {
+            self.painted_stress = vec![0.0; self.size * self.size * self.size];
+        }
+    }
+
+    /// Add to the painted-stress overlay at one cell, clamped to `[0, cap]`.
+    /// Negative `delta` subtracts (allowing right-click "lighten" semantics).
+    /// `cap` is the per-cell ceiling for accumulated paint (typical: 2.0).
+    pub fn add_painted(&mut self, x: usize, y: usize, z: usize, delta: f32, cap: f32) {
+        if delta == 0.0 {
+            return;
+        }
+        self.ensure_painted_alloc();
+        let i = self.index(x, y, z);
+        let v = (self.painted_stress[i] + delta).clamp(0.0, cap);
+        self.painted_stress[i] = v;
+    }
+
+    /// Set the painted-stress overlay at one cell to an exact value (clamped to >= 0).
+    pub fn set_painted(&mut self, x: usize, y: usize, z: usize, val: f32) {
+        self.ensure_painted_alloc();
+        let i = self.index(x, y, z);
+        self.painted_stress[i] = val.max(0.0);
+    }
+
+    /// Zero the painted overlay at one cell. Doesn't deallocate the layer.
+    pub fn clear_painted(&mut self, x: usize, y: usize, z: usize) {
+        if self.painted_stress.is_empty() {
+            return;
+        }
+        let i = self.index(x, y, z);
+        self.painted_stress[i] = 0.0;
+    }
+
+    /// Zero the entire painted overlay (called by the "clear all painted stress" tool).
+    pub fn clear_all_painted(&mut self) {
+        if !self.painted_stress.is_empty() {
+            self.painted_stress.fill(0.0);
+        }
     }
 }
 
@@ -1371,15 +1452,22 @@ pub fn recalc_stress_region_v2_filtered(
                         config, wx, wy, wz, cs,
                     );
 
+                    // Painted overlay (creative-mode PaintStress brush) is
+                    // captured BEFORE the set, since set() doesn't touch it.
+                    let painted = stress_fields
+                        .get(&(cx, cy, cz))
+                        .map(|sf| sf.painted(x, y, z))
+                        .unwrap_or(0.0);
                     if let Some(sf) = stress_fields.get_mut(&(cx, cy, cz)) {
                         sf.set(x, y, z, stress);
                         sf.set_class(x, y, z, classification);
                         affected_chunks.insert((cx, cy, cz));
                     }
 
-                    if stress >= 1.0 {
+                    let eff = stress + painted;
+                    if eff >= 1.0 {
                         overstressed.push(OverstressedVoxel {
-                            world_x: wx, world_y: wy, world_z: wz, stress,
+                            world_x: wx, world_y: wy, world_z: wz, stress: eff,
                         });
                     }
                 }
@@ -1420,15 +1508,21 @@ pub fn recalc_stress_region(
                     density_fields, support_fields, config, wx, wy, wz, chunk_size,
                 );
 
-                // Store stress value
+                // Store stress value and fold in the painted overlay before the
+                // overstressed test so creative-mode painted regions can drive
+                // collapses just like organic geological stress.
                 let (key, lx, ly, lz) = world_to_chunk_local(wx, wy, wz, chunk_size);
+                let painted = stress_fields
+                    .get(&key)
+                    .map(|sf| sf.painted(lx, ly, lz))
+                    .unwrap_or(0.0);
                 if let Some(sf) = stress_fields.get_mut(&key) {
                     sf.set(lx, ly, lz, stress);
                     affected_chunks.insert(key);
                 }
 
-                // Check for overstress
-                if stress >= 1.0 {
+                let eff = stress + painted;
+                if eff >= 1.0 {
                     // Verify this is actually a solid voxel
                     if let Some((_, mat)) = sample_world(density_fields, wx, wy, wz, chunk_size) {
                         if mat.is_solid() {
@@ -1436,7 +1530,7 @@ pub fn recalc_stress_region(
                                 world_x: wx,
                                 world_y: wy,
                                 world_z: wz,
-                                stress,
+                                stress: eff,
                             });
                         }
                     }

@@ -1207,6 +1207,28 @@ impl VoxelEngine {
         }
     }
 
+    /// Creative "PaintStress" brush — additively paints into the per-voxel
+    /// painted-stress overlay inside a sphere.
+    /// Returns 1 on success, 0 if queue full.
+    pub fn request_brush_paint_stress(&self, request: crate::types::FfiBrushPaintStressRequest) -> u32 {
+        let scale = self.world_scale;
+        let center_rust = crate::convert::from_ue_world_pos(
+            request.world_x, request.world_y, request.world_z, scale,
+        );
+        let radius = request.radius / scale;
+        match self.mine_tx.try_send(WorkerRequest::BrushPaintStress {
+            center_rust,
+            radius,
+            amount: request.amount,
+            cap: request.cap,
+            op: request.op,
+            falloff: request.falloff,
+        }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
     /// Creative-mode tunnel-along-polyline brush.
     /// `points` are UE world coords; converted to Rust space here.
     /// `material == 255` means carve; otherwise fill with that material.

@@ -30,6 +30,10 @@ pub struct UndoStroke {
 /// Capture pre-state snapshots for any density-loaded chunks in `[lo..=hi]`,
 /// push as a single undo stroke. Bounded by `store.undo_max_depth` — oldest
 /// strokes are dropped when full.
+///
+/// Captures BOTH density+material and (if present) the painted-stress overlay
+/// so PaintStress-brush undo round-trips correctly. Chunks with no painted
+/// layer still cost ~0 extra bytes (Option<Vec<u8>> stays `None`).
 fn capture_undo_for_range(
     store: &mut ChunkStore,
     lo: (i32, i32, i32),
@@ -39,8 +43,10 @@ fn capture_undo_for_range(
     for cz in lo.2..=hi.2 {
         for cy in lo.1..=hi.1 {
             for cx in lo.0..=hi.0 {
-                if let Some(density) = store.density_fields.get(&(cx, cy, cz)) {
-                    snapshots.push(((cx, cy, cz), ChunkSnapshot::from_density(density)));
+                let key = (cx, cy, cz);
+                if let Some(density) = store.density_fields.get(&key) {
+                    let sf = store.stress_fields.get(&key);
+                    snapshots.push((key, ChunkSnapshot::from_chunk(density, sf)));
                 }
             }
         }
@@ -184,6 +190,146 @@ pub fn paint_material_sphere(
     }
 
     finalize_brush(store, dirty_chunks, config, world_scale)
+}
+
+/// PaintStress brush — additively writes into each chunk's painted-stress overlay
+/// (`StressField::painted_stress`) inside a sphere. The brush does NOT change
+/// density or material, so no remesh is required. The painted layer is
+/// preserved across `recalc_stress_region*` passes and is folded into the
+/// effective stress that drives collapses during sleep.
+///
+/// * `amount` — peak per-stroke additive value at the sphere center (typical: 0.2–0.8)
+/// * `falloff`
+///     - 0 = constant (everything inside the sphere gets the full `amount`)
+///     - 1 = linear   (peak at center, 0 at the rim)
+///     - 2 = smooth   (cosine smoothstep — easier to layer without hard edges)
+/// * `op`
+///     - 0 = add (`amount` is added to existing painted value, clamped to `cap`)
+///     - 1 = subtract (right-click "lighten" — `amount` is subtracted; clamps to 0)
+///     - 2 = clear (zero the painted overlay inside the sphere; ignores `amount`)
+/// * `cap` — per-cell ceiling for the painted accumulator (typical: 2.0).
+///
+/// Returns an empty `BrushOutcome` (no meshes emitted) — the caller still uses
+/// it to keep the per-brush "did we make changes" return shape consistent.
+pub fn paint_stress_sphere(
+    store: &mut ChunkStore,
+    center: Vec3,
+    radius: f32,
+    amount: f32,
+    falloff: u8,
+    op: u8,
+    cap: f32,
+    config: &GenerationConfig,
+    _world_scale: f32,
+) -> BrushOutcome {
+    let eb = config.effective_bounds();
+    let vs = config.voxel_scale();
+    let r = radius.max(0.0);
+    let r2 = r * r;
+    if r <= 0.0 {
+        return BrushOutcome { meshes: Vec::new(), flipped_chunks: Vec::new() };
+    }
+    let (lo, hi) = chunk_range_for_sphere(center, r, eb);
+
+    capture_undo_for_range(store, lo, hi);
+
+    let chunk_size = config.chunk_size;
+    let grid_size = chunk_size + 1;
+    let mut touched_chunks: Vec<(i32, i32, i32)> = Vec::new();
+
+    for cz in lo.2..=hi.2 {
+        for cy in lo.1..=hi.1 {
+            for cx in lo.0..=hi.0 {
+                let key = (cx, cy, cz);
+
+                // We only paint stress in chunks that have a density field —
+                // painting into the void is pointless and the stress consumers
+                // index the chunk by the same key.
+                if !store.density_fields.contains_key(&key) {
+                    continue;
+                }
+
+                // Lazily initialize the stress field if the chunk has none yet.
+                // ChunkStore::insert already does this on first generate, but
+                // pre-existing saves or unusual streaming orders can leave it
+                // missing — make the brush self-healing.
+                let sf = store
+                    .stress_fields
+                    .entry(key)
+                    .or_insert_with(|| voxel_core::stress::StressField::new(grid_size));
+
+                let origin = Vec3::new(cx as f32 * eb, cy as f32 * eb, cz as f32 * eb);
+                let (_, _, lo_x, lo_y, lo_z, hi_x, hi_y, hi_z) =
+                    local_sphere_bounds(center, r, origin, vs, sf.size);
+
+                let mut changed = false;
+                for z in lo_z..hi_z {
+                    for y in lo_y..hi_y {
+                        for x in lo_x..hi_x {
+                            let world_pos = origin
+                                + Vec3::new(x as f32 * vs, y as f32 * vs, z as f32 * vs);
+                            let d2 = (world_pos - center).length_squared();
+                            if d2 > r2 {
+                                continue;
+                            }
+                            // Weight by falloff.
+                            let w = match falloff {
+                                0 => 1.0,
+                                1 => {
+                                    // Linear: 1 at center, 0 at rim.
+                                    let d = d2.sqrt();
+                                    (1.0 - (d / r)).max(0.0)
+                                }
+                                _ => {
+                                    // Smoothstep on (1 - d/r): a cosine-ish bell.
+                                    let d = d2.sqrt();
+                                    let t = (1.0 - (d / r)).clamp(0.0, 1.0);
+                                    t * t * (3.0 - 2.0 * t)
+                                }
+                            };
+
+                            match op {
+                                // Add
+                                0 => {
+                                    let delta = amount * w;
+                                    if delta != 0.0 {
+                                        sf.add_painted(x, y, z, delta, cap);
+                                        changed = true;
+                                    }
+                                }
+                                // Subtract
+                                1 => {
+                                    let delta = -(amount * w);
+                                    if delta != 0.0 {
+                                        sf.add_painted(x, y, z, delta, cap);
+                                        changed = true;
+                                    }
+                                }
+                                // Clear
+                                _ => {
+                                    sf.clear_painted(x, y, z);
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if changed {
+                    touched_chunks.push(key);
+                }
+            }
+        }
+    }
+
+    if !touched_chunks.is_empty() {
+        store.modification_tracker.mark_dirty_many(&touched_chunks);
+    }
+
+    // No mesh updates emitted — painted_stress doesn't affect geometry. The UE
+    // side can re-`voxel_query_stress` the affected chunks to refresh its
+    // overlay (the V/C-key stress preview already drives the same path).
+    BrushOutcome { meshes: Vec::new(), flipped_chunks: Vec::new() }
 }
 
 /// Carve a sphere — set solid voxels to Air. Same shape as `mining::mine_sphere` but
@@ -1275,6 +1421,12 @@ pub fn apply_undo(
             let s_max = density.size - 1;
             dirty_chunks.push((*key, 0, 0, 0, s_max, s_max, s_max));
         }
+        // Restore the painted-stress overlay (no-op for non-PaintStress strokes
+        // — their snapshots have painted_stress: None and that just wipes the
+        // overlay back to empty, which is the pre-state if it was empty before).
+        if let Some(sf) = store.stress_fields.get_mut(key) {
+            snapshot.apply_painted_stress_to(sf);
+        }
     }
 
     if dirty_chunks.is_empty() {
@@ -2092,6 +2244,219 @@ mod tests {
             (f.get(4, 4, 4).density, f.get(4, 4, 4).material)
         };
         assert_eq!(after, before, "undo restored exact pre-state");
+    }
+
+    #[test]
+    fn paint_stress_adds_to_overlay() {
+        let (mut store, config) = make_store_with_solid_chunk(8);
+        // Before: no painted layer.
+        assert!(!store
+            .stress_fields
+            .get(&(0, 0, 0))
+            .map(|sf| sf.has_painted_layer())
+            .unwrap_or(false));
+
+        // Paint a sphere — additive, smoothstep falloff.
+        let _ = paint_stress_sphere(
+            &mut store,
+            Vec3::new(4.0, 4.0, 4.0),
+            2.5,
+            /*amount*/ 0.5,
+            /*falloff*/ 2,
+            /*op*/ 0,
+            /*cap*/ 2.0,
+            &config,
+            1.0,
+        );
+
+        let sf = store.stress_fields.get(&(0, 0, 0)).unwrap();
+        assert!(sf.has_painted_layer(), "painted layer allocated");
+        // Voxel at sphere center gets close to full amount.
+        let v_center = sf.painted(4, 4, 4);
+        assert!(v_center > 0.4, "center painted (got {v_center})");
+        // Voxel far outside sphere stays 0.
+        assert_eq!(sf.painted(0, 0, 0), 0.0);
+        // Effective stress = base (0) + painted at center.
+        assert!((sf.effective(4, 4, 4) - v_center).abs() < 1e-6);
+    }
+
+    #[test]
+    fn paint_stress_accumulates_capped() {
+        let (mut store, config) = make_store_with_solid_chunk(8);
+        // Two strokes, each 0.6, cap 1.0 — total should clamp at 1.0.
+        for _ in 0..2 {
+            let _ = paint_stress_sphere(
+                &mut store,
+                Vec3::new(4.0, 4.0, 4.0),
+                1.0,
+                /*amount*/ 0.6,
+                /*falloff*/ 0, // constant
+                /*op*/ 0,
+                /*cap*/ 1.0,
+                &config,
+                1.0,
+            );
+        }
+        let sf = store.stress_fields.get(&(0, 0, 0)).unwrap();
+        assert!((sf.painted(4, 4, 4) - 1.0).abs() < 1e-6, "capped at 1.0");
+    }
+
+    #[test]
+    fn paint_stress_clear_op_resets_overlay() {
+        let (mut store, config) = make_store_with_solid_chunk(8);
+        // First, paint some stress.
+        let _ = paint_stress_sphere(
+            &mut store,
+            Vec3::new(4.0, 4.0, 4.0),
+            2.0,
+            0.5,
+            0,
+            0,
+            2.0,
+            &config,
+            1.0,
+        );
+        assert!(store.stress_fields.get(&(0, 0, 0)).unwrap().painted(4, 4, 4) > 0.0);
+
+        // Then clear inside a sphere with op=2.
+        let _ = paint_stress_sphere(
+            &mut store,
+            Vec3::new(4.0, 4.0, 4.0),
+            2.0,
+            0.0,
+            0,
+            /*op=clear*/ 2,
+            2.0,
+            &config,
+            1.0,
+        );
+        assert_eq!(
+            store.stress_fields.get(&(0, 0, 0)).unwrap().painted(4, 4, 4),
+            0.0,
+            "clear op zeroed the painted overlay"
+        );
+    }
+
+    #[test]
+    fn paint_stress_undo_restores_overlay() {
+        let (mut store, config) = make_store_with_solid_chunk(8);
+
+        // No painted layer yet.
+        let _ = paint_stress_sphere(
+            &mut store,
+            Vec3::new(4.0, 4.0, 4.0),
+            2.0,
+            0.5,
+            2,
+            0,
+            2.0,
+            &config,
+            1.0,
+        );
+        let painted_after_paint = store
+            .stress_fields
+            .get(&(0, 0, 0))
+            .unwrap()
+            .painted(4, 4, 4);
+        assert!(painted_after_paint > 0.0, "PaintStress wrote a value");
+
+        // Undo — overlay should be wiped back to empty (its pre-state).
+        let outcome = apply_undo(&mut store, &config, 1.0);
+        assert!(outcome.is_some(), "undo returned an outcome");
+        let sf = store.stress_fields.get(&(0, 0, 0)).unwrap();
+        assert!(
+            !sf.has_painted_layer(),
+            "undo wiped the painted overlay back to empty pre-state"
+        );
+    }
+
+    #[test]
+    fn paint_stress_drives_overstressed_threshold() {
+        use voxel_core::stress::{recalc_stress_region_v2, StressConfig};
+        use voxel_core::stress::SupportField;
+
+        let (mut store, config) = make_store_with_solid_chunk(8);
+        // Add a stress_field so painted_stress survives the recalc.
+        let size = config.chunk_size + 1;
+        store
+            .stress_fields
+            .insert((0, 0, 0), voxel_core::stress::StressField::new(size));
+        store
+            .support_fields
+            .insert((0, 0, 0), SupportField::new(size));
+
+        // Paint stress past 1.0 at the center.
+        let _ = paint_stress_sphere(
+            &mut store,
+            Vec3::new(4.0, 4.0, 4.0),
+            1.5,
+            /*amount*/ 1.5,
+            /*falloff*/ 0,
+            /*op*/ 0,
+            /*cap*/ 2.0,
+            &config,
+            1.0,
+        );
+
+        // Recalc — overstressed list should include the painted voxels even
+        // though raw geological stress is 0 (the chunk is solid all around).
+        // We don't assert exact counts (the recalc skips fully-grounded
+        // voxels), just that the painted value rides through to effective().
+        let stress_config = StressConfig::default();
+        let chunks: Vec<_> = vec![(0, 0, 0)];
+        let _ = recalc_stress_region_v2(
+            &store.density_fields,
+            &mut store.stress_fields,
+            &store.support_fields,
+            &stress_config,
+            &chunks,
+            config.chunk_size,
+        );
+
+        // The painted layer must survive the recalc (only `stress[]` is rewritten).
+        let sf = store.stress_fields.get(&(0, 0, 0)).unwrap();
+        assert!(
+            sf.painted(4, 4, 4) > 0.0,
+            "painted layer survives recalc_stress_region_v2"
+        );
+        assert!(
+            sf.effective(4, 4, 4) >= sf.painted(4, 4, 4),
+            "effective folds in painted layer"
+        );
+    }
+
+    #[test]
+    fn chunk_snapshot_painted_stress_roundtrip() {
+        use crate::delta::ChunkSnapshot;
+        use voxel_core::stress::StressField;
+
+        let (store, _config) = make_store_with_solid_chunk(8);
+        let df = store.density_fields.get(&(0, 0, 0)).unwrap();
+        let mut sf = StressField::new(df.size);
+
+        // Capture None when nothing has been painted.
+        let snap_empty = ChunkSnapshot::from_chunk(df, Some(&sf));
+        assert!(snap_empty.painted_stress.is_none(), "None when no overlay");
+
+        // Paint a few cells and re-capture.
+        sf.add_painted(4, 4, 4, 0.7, 2.0);
+        sf.add_painted(5, 4, 4, 0.4, 2.0);
+        let snap_with = ChunkSnapshot::from_chunk(df, Some(&sf));
+        assert!(snap_with.painted_stress.is_some(), "Some after paint");
+
+        // Restore onto a fresh field.
+        let mut sf2 = StressField::new(df.size);
+        snap_with.apply_painted_stress_to(&mut sf2);
+        assert!((sf2.painted(4, 4, 4) - 0.7).abs() < 1e-6);
+        assert!((sf2.painted(5, 4, 4) - 0.4).abs() < 1e-6);
+
+        // Restoring `None` wipes the overlay back to empty.
+        let mut sf3 = sf2.clone();
+        snap_empty.apply_painted_stress_to(&mut sf3);
+        assert!(
+            !sf3.has_painted_layer(),
+            "applying None-snapshot wipes the overlay"
+        );
     }
 
     #[test]
