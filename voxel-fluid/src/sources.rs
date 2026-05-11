@@ -66,6 +66,7 @@ pub fn place_sources(
                         grid.dirty = true;
                         grid.has_fluid = true;
                         grid.has_lava = true;
+                        grid.has_sources = true;
                     }
                 }
             }

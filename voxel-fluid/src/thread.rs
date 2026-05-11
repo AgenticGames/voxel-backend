@@ -628,6 +628,7 @@ fn handle_event(
                         cell.is_source = true; // geological springs are infinite sources
                         grid.dirty = true;
                         grid.has_fluid = true;
+                        grid.has_sources = true;
                         if ft.is_lava() {
                             grid.has_lava = true;
                         }
@@ -667,6 +668,9 @@ fn handle_event(
                     grid.has_fluid = true;
                     if fluid_type.is_lava() {
                         grid.has_lava = true;
+                    }
+                    if is_source {
+                        grid.has_sources = true;
                     }
                 }
             }
@@ -732,6 +736,7 @@ fn apply_pending_fluid(
             dst.level = crate::cell::MAX_LEVEL.min(cap);
             dst.hops_from_source = 0;
             dst.max_flow_dist = cell.max_flow_dist;
+            grid.has_sources = true;
         } else if cell.level >= 0.99 {
             dst.grace_ticks = config.source_grace_ticks;
         }

@@ -660,12 +660,14 @@ pub(super) fn tick_chunk(
         }
     }
 
-    // Clean up negative from overdrain and track has_fluid + has_lava.
-    // has_lava is recomputed here so the per-tick lava↔water quench scan
-    // can skip whole chunks that have no lava — paid for by a single fused
-    // pass instead of a full N³ probe in `detect_lava_water_quench`.
+    // Clean up negative from overdrain and track has_fluid + has_lava +
+    // has_sources. The latter two are recomputed here so per-tick passes
+    // (`detect_lava_water_quench`, `regen_sources`) can skip whole chunks
+    // that have no lava / no sources — paid for by a single fused pass
+    // instead of a full N³ probe per chunk.
     let mut any_fluid = false;
     let mut any_lava = false;
+    let mut any_source = false;
     for cell in &mut new_cells {
         if cell.level < MIN_LEVEL {
             cell.level = 0.0;
@@ -673,6 +675,7 @@ pub(super) fn tick_chunk(
         if cell.level >= MIN_LEVEL {
             any_fluid = true;
             if cell.fluid_type.is_lava() { any_lava = true; }
+            if cell.is_source { any_source = true; }
         }
     }
 
@@ -853,6 +856,7 @@ pub(super) fn tick_chunk(
         }
         grid.has_fluid = any_fluid;
         grid.has_lava = any_lava;
+        grid.has_sources = any_source;
         grid.scratch_cells = new_cells;
         grid.scratch_weights = fluid_weight;
         grid.scratch_drain = drain_scratch;

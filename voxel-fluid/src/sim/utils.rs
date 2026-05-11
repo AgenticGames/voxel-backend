@@ -482,8 +482,16 @@ pub fn detect_solidification(
 ///
 /// Also resets `hops_from_source` to 0 on each source so children re-propagate
 /// from a fresh hop count each tick (essential for bounded-flow correctness).
+///
+/// Skips chunks with `has_sources == false`. That flag is set on every
+/// source-placing path (AddFluid, geological springs, place_sources,
+/// pending_fluid_load) and recomputed each tick by tick_chunk, so the
+/// common "chunk has no sources" case pays nothing here.
 pub fn regen_sources(chunks: &mut HashMap<(i32, i32, i32), ChunkFluidGrid>) {
     for grid in chunks.values_mut() {
+        if !grid.has_sources {
+            continue;
+        }
         let total = grid.size * grid.size * grid.size;
         for idx in 0..total {
             if grid.cells[idx].is_source() {

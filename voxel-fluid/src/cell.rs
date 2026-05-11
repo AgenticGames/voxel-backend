@@ -210,6 +210,11 @@ pub struct ChunkFluidGrid {
     /// the per-tick lava↔water quench scan, which is otherwise an N³ cost
     /// paid even for water-only worlds.
     pub has_lava: bool,
+    /// True if any cell is a source (`is_source = true` with level above
+    /// MIN_LEVEL). Used to skip whole chunks in the per-tick `regen_sources`
+    /// pass — otherwise it's an N³ walk per chunk per water tick paying for
+    /// the common case where most chunks have no sources at all.
+    pub has_sources: bool,
     /// Reusable scratch buffer for `tick_chunk`'s double-buffered cell write.
     /// Owning this on the grid lets the simulator `mem::take` it instead of
     /// `cells.clone()`-ing every substep — eliminates the dominant per-tick
@@ -234,6 +239,7 @@ impl ChunkFluidGrid {
             dirty: false,
             has_fluid: false,
             has_lava: false,
+            has_sources: false,
             scratch_cells: Vec::new(),
             scratch_weights: Vec::new(),
             scratch_drain: Vec::new(),
@@ -262,6 +268,7 @@ impl ChunkFluidGrid {
             dirty: false,
             has_fluid: false,
             has_lava: false,
+            has_sources: false,
             scratch_cells: Vec::new(),
             scratch_weights: Vec::new(),
             scratch_drain: Vec::new(),
