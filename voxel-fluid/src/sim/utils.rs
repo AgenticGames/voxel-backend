@@ -81,10 +81,6 @@ pub fn equalize_horizontal(
     // Key: (world_x, world_y, world_z) → (chunk_key, local_x, local_y, local_z, level, capacity)
     let mut water_cells: HashMap<(i32, i32, i32), ((i32, i32, i32), usize, usize, usize, f32, f32)> = HashMap::new();
 
-    // Determine the Y range across all chunks
-    let mut min_world_y = i32::MAX;
-    let mut max_world_y = i32::MIN;
-
     for (&chunk_key, grid) in chunks.iter() {
         if !grid.has_fluid {
             continue;
@@ -112,8 +108,6 @@ pub fn equalize_horizontal(
                     let wy = chunk_key.1 * chunk_size as i32 + y as i32;
                     let wz = chunk_key.2 * chunk_size as i32 + z as i32;
                     water_cells.insert((wx, wy, wz), (chunk_key, x, y, z, cell.level, cap));
-                    min_world_y = min_world_y.min(wy);
-                    max_world_y = max_world_y.max(wy);
                 }
             }
         }
@@ -123,74 +117,75 @@ pub fn equalize_horizontal(
         return dirty;
     }
 
-    // For each Y level, flood-fill connected regions on XZ plane and average levels
+    // Flood-fill connected regions on the XZ plane (BFS neighbors hold Y fixed,
+    // so regions are naturally Y-disjoint). Iterating water_cells once and
+    // letting `visited` dedup is equivalent to — and substantially cheaper
+    // than — looping over every Y in [min..=max] and re-filtering by Y, which
+    // is O(Y_range * |water_cells|). Collect starts to a Vec so the chunks
+    // mutation inside the loop doesn't conflict with iterating water_cells.
+    let starts: Vec<(i32, i32, i32)> = water_cells.keys().copied().collect();
     let mut visited: HashSet<(i32, i32, i32)> = HashSet::new();
+    let mut region: Vec<(i32, i32, i32)> = Vec::new();
+    let mut queue: std::collections::VecDeque<(i32, i32, i32)> = std::collections::VecDeque::new();
 
-    for wy in min_world_y..=max_world_y {
-        // Find all unvisited water cells at this Y
-        let cells_at_y: Vec<(i32, i32, i32)> = water_cells.keys()
-            .filter(|&&(_, y, _)| y == wy)
-            .copied()
-            .collect();
+    for start in starts {
+        if visited.contains(&start) {
+            continue;
+        }
 
-        for start in cells_at_y {
-            if visited.contains(&start) {
-                continue;
-            }
+        // BFS flood-fill on XZ plane at this Y level. Reuse `region` and
+        // `queue` across regions to avoid per-region allocations.
+        region.clear();
+        queue.clear();
+        queue.push_back(start);
+        visited.insert(start);
 
-            // BFS flood-fill on XZ plane at this Y level
-            let mut region: Vec<(i32, i32, i32)> = Vec::new();
-            let mut queue = std::collections::VecDeque::new();
-            queue.push_back(start);
-            visited.insert(start);
-
-            while let Some(pos) = queue.pop_front() {
-                region.push(pos);
-                // 4-connected on XZ plane
-                for &(dx, dz) in &[(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
-                    let neighbor = (pos.0 + dx, pos.1, pos.2 + dz);
-                    if !visited.contains(&neighbor) && water_cells.contains_key(&neighbor) {
-                        visited.insert(neighbor);
-                        queue.push_back(neighbor);
-                    }
+        while let Some(pos) = queue.pop_front() {
+            region.push(pos);
+            // 4-connected on XZ plane
+            for &(dx, dz) in &[(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+                let neighbor = (pos.0 + dx, pos.1, pos.2 + dz);
+                if !visited.contains(&neighbor) && water_cells.contains_key(&neighbor) {
+                    visited.insert(neighbor);
+                    queue.push_back(neighbor);
                 }
             }
+        }
 
-            if region.len() < 2 {
-                continue; // single cell, nothing to equalize
-            }
+        if region.len() < 2 {
+            continue; // single cell, nothing to equalize
+        }
 
-            // Compute total water and cell count, then average
-            let mut total_water = 0.0f32;
-            let mut total_cap = 0.0f32;
-            for &pos in &region {
-                let (_, _, _, _, level, cap) = water_cells[&pos];
-                total_water += level;
-                total_cap += cap;
-            }
+        // Compute total water and cell count, then average
+        let mut total_water = 0.0f32;
+        let mut total_cap = 0.0f32;
+        for &pos in &region {
+            let (_, _, _, _, level, cap) = water_cells[&pos];
+            total_water += level;
+            total_cap += cap;
+        }
 
-            // Don't equalize if total capacity is near zero
-            if total_cap < MIN_LEVEL {
-                continue;
-            }
+        // Don't equalize if total capacity is near zero
+        if total_cap < MIN_LEVEL {
+            continue;
+        }
 
-            // Damped equalization: blend toward the average rather than snapping.
-            // This preserves flow gradients toward drains while still leveling pools.
-            let avg_fill = total_water / total_cap;
-            const EQ_DAMPING: f32 = 0.3; // blend 30% toward average each tick
+        // Damped equalization: blend toward the average rather than snapping.
+        // This preserves flow gradients toward drains while still leveling pools.
+        let avg_fill = total_water / total_cap;
+        const EQ_DAMPING: f32 = 0.3; // blend 30% toward average each tick
 
-            for &pos in &region {
-                let (chunk_key, lx, ly, lz, old_level, cap) = water_cells[&pos];
-                let target = (avg_fill * cap).min(cap);
-                let new_level = old_level + EQ_DAMPING * (target - old_level);
-                if (new_level - old_level).abs() > MIN_LEVEL {
-                    if let Some(grid) = chunks.get_mut(&chunk_key) {
-                        let cell = grid.get_mut(lx, ly, lz);
-                        cell.level = new_level;
-                        grid.dirty = true;
-                    }
-                    dirty.insert(chunk_key);
+        for &pos in &region {
+            let (chunk_key, lx, ly, lz, old_level, cap) = water_cells[&pos];
+            let target = (avg_fill * cap).min(cap);
+            let new_level = old_level + EQ_DAMPING * (target - old_level);
+            if (new_level - old_level).abs() > MIN_LEVEL {
+                if let Some(grid) = chunks.get_mut(&chunk_key) {
+                    let cell = grid.get_mut(lx, ly, lz);
+                    cell.level = new_level;
+                    grid.dirty = true;
                 }
+                dirty.insert(chunk_key);
             }
         }
     }
