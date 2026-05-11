@@ -7,7 +7,8 @@ mod chunk;
 mod utils;
 
 pub use utils::{squeeze_excess_fluid, equalize_horizontal, detect_solidification, regen_sources,
-    detect_lava_water_quench, try_grow_pillow_voxel, QuenchPlan, CellAddr};
+    detect_lava_water_quench, detect_lava_water_quench_with_scratch,
+    try_grow_pillow_voxel, QuenchPlan, QuenchScratch, CellAddr};
 
 use chunk::{CrossChunkTransfer, tick_chunk};
 

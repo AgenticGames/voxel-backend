@@ -12,7 +12,7 @@ use rand_chacha::ChaCha8Rng;
 
 use std::collections::VecDeque;
 
-use crate::sim::{detect_lava_water_quench, equalize_horizontal, regen_sources, squeeze_excess_fluid, tick_fluid, try_grow_pillow_voxel};
+use crate::sim::{detect_lava_water_quench_with_scratch, equalize_horizontal, regen_sources, squeeze_excess_fluid, tick_fluid, try_grow_pillow_voxel, QuenchScratch};
 
 /// "Pool pull" — when a water cell is drained at the heat interface, also
 /// drain one extra connected water cell from the network behind it via BFS.
@@ -127,6 +127,10 @@ pub fn fluid_sim_loop(
     // Deterministic RNG for inward growth probability rolls — seeded so that
     // the wall grows the same way across reproducible test runs.
     let mut quench_rng = ChaCha8Rng::seed_from_u64(0xC001_5C04_C001_BABEu64);
+    // Long-lived scratch for the per-tick lava↔water quench scan; lets us
+    // skip allocating the 4 working HashSets + per-contact-cell BFS sets/vecs
+    // every tick. Cleared internally at the start of each detect call.
+    let mut quench_scratch = QuenchScratch::default();
     // Tunables. Hardcoded for now; can be promoted to FluidConfig later.
     const PILLOW_GROWTH_INTERVAL_TICKS: u64 = 150; // ~5s @ 30Hz
     const PILLOW_MAX_VOXELS: u32 = 30;
@@ -207,7 +211,7 @@ pub fn fluid_sim_loop(
         // ── Live lava↔water quench ───────────────────────────────────────
         // Detect contact zones and build a structured plan (obsidian rim +
         // volume-aware scoria halo + drained water + pillow source registry).
-        let plan = detect_lava_water_quench(&chunks);
+        let plan = detect_lava_water_quench_with_scratch(&chunks, &mut quench_scratch);
 
         // Locally drain the lava cells we're turning into solid voxels and
         // the water cells we're vaporizing — keeps the fluid grid consistent

@@ -230,6 +230,36 @@ fn in_bounds(p: (i32, i32, i32), size: i32) -> bool {
     p.0 >= 0 && p.0 < size && p.1 >= 0 && p.1 < size && p.2 >= 0 && p.2 < size
 }
 
+/// Reusable working sets for `detect_lava_water_quench`. Held by the fluid
+/// thread across ticks so the hot quench scan doesn't allocate four HashSets
+/// + one Vec + a per-contact-cell BFS HashSet/Vec/Vec on every tick.
+///
+/// Cleared at the start of each detection. The final `QuenchPlan` still
+/// allocates its own Vecs since they're consumed downstream over a channel.
+#[derive(Default)]
+pub struct QuenchScratch {
+    obsidian_set: HashSet<CellAddr>,
+    scoria_set: HashSet<CellAddr>,
+    drained_set: HashSet<CellAddr>,
+    pillow_set: HashSet<(i32, i32, i32)>,
+    contact_cells: Vec<CellAddr>,
+    bfs_visited: HashSet<(usize, usize, usize)>,
+    bfs_frontier: Vec<(usize, usize, usize)>,
+    bfs_next: Vec<(usize, usize, usize)>,
+}
+
+impl QuenchScratch {
+    #[inline]
+    fn reset(&mut self) {
+        self.obsidian_set.clear();
+        self.scoria_set.clear();
+        self.drained_set.clear();
+        self.pillow_set.clear();
+        self.contact_cells.clear();
+        // bfs_* are cleared per contact-cell inside the BFS phase
+    }
+}
+
 /// Detect lava-water contacts and build a structured solidification plan.
 ///
 /// Replaces the older `detect_solidification` which only knew about "one
@@ -244,18 +274,28 @@ fn in_bounds(p: (i32, i32, i32), size: i32) -> bool {
 /// over many ticks. The BFS for scoria stays inside the contact cell's
 /// chunk — cross-chunk continuation gets a slightly thinner scoria layer
 /// at the boundary, which is acceptable for visual purposes.
+///
+/// Convenience wrapper that allocates a fresh scratch per call. Hot-path
+/// callers (the fluid sim thread) should use
+/// `detect_lava_water_quench_with_scratch` with a long-lived `QuenchScratch`.
 pub fn detect_lava_water_quench(
     chunks: &HashMap<(i32, i32, i32), ChunkFluidGrid>,
 ) -> QuenchPlan {
-    let mut obsidian_set: HashSet<CellAddr> = HashSet::new();
-    let mut scoria_set: HashSet<CellAddr> = HashSet::new();
-    let mut drained_set: HashSet<CellAddr> = HashSet::new();
-    let mut pillow_set: HashSet<(i32, i32, i32)> = HashSet::new();
+    let mut scratch = QuenchScratch::default();
+    detect_lava_water_quench_with_scratch(chunks, &mut scratch)
+}
+
+/// Same as `detect_lava_water_quench` but reuses caller-owned scratch sets
+/// across ticks. Eliminates ~4 HashSet + N_contact_cells × (HashSet + 2 Vecs)
+/// allocations per tick during active quench scenes.
+pub fn detect_lava_water_quench_with_scratch(
+    chunks: &HashMap<(i32, i32, i32), ChunkFluidGrid>,
+    scratch: &mut QuenchScratch,
+) -> QuenchPlan {
+    scratch.reset();
 
     // First pass: identify contact lava cells (non-source) + drain candidates.
     // Each entry: (chunk_key, x, y, z) of a lava cell touching water.
-    let mut contact_cells: Vec<CellAddr> = Vec::new();
-
     for (&key, grid) in chunks {
         if !grid.has_fluid {
             continue;
@@ -287,7 +327,7 @@ pub fn detect_lava_water_quench(
                         }
                         touches_water = true;
                         if !n.is_source {
-                            drained_set.insert((key, np.0 as usize, np.1 as usize, np.2 as usize));
+                            scratch.drained_set.insert((key, np.0 as usize, np.1 as usize, np.2 as usize));
                         }
                     }
                     if !touches_water {
@@ -298,10 +338,10 @@ pub fn detect_lava_water_quench(
                         let wx = key.0 * sz + x as i32;
                         let wy = key.1 * sz + y as i32;
                         let wz = key.2 * sz + z as i32;
-                        pillow_set.insert((wx, wy, wz));
+                        scratch.pillow_set.insert((wx, wy, wz));
                     } else {
-                        obsidian_set.insert((key, x, y, z));
-                        contact_cells.push((key, x, y, z));
+                        scratch.obsidian_set.insert((key, x, y, z));
+                        scratch.contact_cells.push((key, x, y, z));
                     }
                 }
             }
@@ -310,8 +350,20 @@ pub fn detect_lava_water_quench(
 
     // Second pass: BFS inward from each obsidian cell through lava to build
     // the scoria halo. Depth is volume-aware (count of lava face-neighbors
-    // at the contact point).
-    for &(key, x, y, z) in &contact_cells {
+    // at the contact point). Iterating `contact_cells` directly conflicts
+    // with mutating `scratch.bfs_*` inside, so we destructure to split the
+    // borrows.
+    let QuenchScratch {
+        ref contact_cells,
+        ref obsidian_set,
+        ref mut scoria_set,
+        ref mut bfs_visited,
+        ref mut bfs_frontier,
+        ref mut bfs_next,
+        ..
+    } = *scratch;
+
+    for &(key, x, y, z) in contact_cells {
         let Some(grid) = chunks.get(&key) else { continue; };
         let size = grid.size;
         let sz = size as i32;
@@ -328,37 +380,38 @@ pub fn detect_lava_water_quench(
         }
         let scoria_depth: u8 = if lava_n >= 5 { 3 } else if lava_n >= 3 { 2 } else { 1 };
 
-        // Frontier BFS within this chunk
-        let mut visited: HashSet<(usize, usize, usize)> = HashSet::new();
-        visited.insert((x, y, z));
-        let mut frontier: Vec<(usize, usize, usize)> = vec![(x, y, z)];
+        // Frontier BFS within this chunk — reuses scratch sets/vecs.
+        bfs_visited.clear();
+        bfs_visited.insert((x, y, z));
+        bfs_frontier.clear();
+        bfs_frontier.push((x, y, z));
         for _ in 0..scoria_depth {
-            let mut next: Vec<(usize, usize, usize)> = Vec::new();
-            for (px, py, pz) in frontier.drain(..) {
+            bfs_next.clear();
+            for (px, py, pz) in bfs_frontier.drain(..) {
                 for &(dx, dy, dz) in &QUENCH_FACE_OFFSETS {
                     let np = (px as i32 + dx, py as i32 + dy, pz as i32 + dz);
                     if !in_bounds(np, sz) { continue; }
                     let pos = (np.0 as usize, np.1 as usize, np.2 as usize);
-                    if !visited.insert(pos) { continue; }
+                    if !bfs_visited.insert(pos) { continue; }
                     let n = grid.get(pos.0, pos.1, pos.2);
                     if n.level < MIN_LEVEL || !n.fluid_type.is_lava() { continue; }
                     if n.is_source { continue; }
                     let addr = (key, pos.0, pos.1, pos.2);
                     if obsidian_set.contains(&addr) { continue; }
                     scoria_set.insert(addr);
-                    next.push(pos);
+                    bfs_next.push(pos);
                 }
             }
-            frontier = next;
-            if frontier.is_empty() { break; }
+            std::mem::swap(bfs_frontier, bfs_next);
+            if bfs_frontier.is_empty() { break; }
         }
     }
 
     QuenchPlan {
-        obsidian: obsidian_set.into_iter().collect(),
-        scoria: scoria_set.into_iter().collect(),
-        drained_water: drained_set.into_iter().collect(),
-        pillow_sources: pillow_set.into_iter().collect(),
+        obsidian: scratch.obsidian_set.iter().copied().collect(),
+        scoria: scratch.scoria_set.iter().copied().collect(),
+        drained_water: scratch.drained_set.iter().copied().collect(),
+        pillow_sources: scratch.pillow_set.iter().copied().collect(),
     }
 }
 
