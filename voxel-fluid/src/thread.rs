@@ -596,6 +596,11 @@ fn handle_event(
                             grid.cells[idx].is_source = false;
                         }
                     }
+                    // All lava in this chunk is drained — clear the flag so the
+                    // per-tick quench scan stops visiting it. (next tick_chunk
+                    // would also recompute it, but clearing here means we save
+                    // the next scan immediately.)
+                    grid.has_lava = false;
                     grid.dirty = true;
                 }
             }
@@ -611,12 +616,17 @@ fn handle_event(
                         && grid.cell_capacity(xu, yu, zu) > crate::cell::MIN_LEVEL
                         && !grid.is_mostly_solid(xu, yu, zu, config.solid_corner_threshold)
                     {
+                        let cap = grid.cell_capacity(xu, yu, zu);
+                        let ft = crate::cell::FluidType::from_u8(fluid_type_u8);
                         let cell = grid.get_mut(xu, yu, zu);
-                        cell.fluid_type = crate::cell::FluidType::from_u8(fluid_type_u8);
-                        cell.level = level.min(crate::cell::MAX_LEVEL);
+                        cell.fluid_type = ft;
+                        cell.level = level.min(crate::cell::MAX_LEVEL).min(cap);
                         cell.is_source = true; // geological springs are infinite sources
                         grid.dirty = true;
                         grid.has_fluid = true;
+                        if ft.is_lava() {
+                            grid.has_lava = true;
+                        }
                     }
                 }
             }
@@ -631,12 +641,17 @@ fn handle_event(
                     && grid.cell_capacity(xu, yu, zu) > crate::cell::MIN_LEVEL
                     && !grid.is_mostly_solid(xu, yu, zu, config.solid_corner_threshold)
                 {
+                    let cap = grid.cell_capacity(xu, yu, zu);
                     let cell = grid.get_mut(xu, yu, zu);
                     cell.fluid_type = fluid_type;
-                    cell.level = level;
+                    // Cell capacity is now fractional (air_corners/8); clamp the
+                    // requested level so a brush placement on a half-rock cell
+                    // doesn't sit over capacity and trigger redistribution every
+                    // tick.
+                    cell.level = level.min(cap);
                     cell.is_source = is_source;
                     if is_source {
-                        cell.level = crate::cell::MAX_LEVEL;
+                        cell.level = crate::cell::MAX_LEVEL.min(cap);
                         cell.hops_from_source = 0;
                         cell.max_flow_dist = max_flow_dist;
                     }
@@ -646,6 +661,9 @@ fn handle_event(
                     }
                     grid.dirty = true;
                     grid.has_fluid = true;
+                    if fluid_type.is_lava() {
+                        grid.has_lava = true;
+                    }
                 }
             }
         }
@@ -701,12 +719,13 @@ fn apply_pending_fluid(
         if grid.cell_capacity(xu, yu, zu) <= crate::cell::MIN_LEVEL { continue; }
         if grid.is_mostly_solid(xu, yu, zu, config.solid_corner_threshold) { continue; }
 
+        let cap = grid.cell_capacity(xu, yu, zu);
         let dst = grid.get_mut(xu, yu, zu);
         dst.fluid_type = cell.fluid_type;
-        dst.level = cell.level;
+        dst.level = cell.level.min(cap);
         dst.is_source = cell.is_source;
         if cell.is_source {
-            dst.level = crate::cell::MAX_LEVEL;
+            dst.level = crate::cell::MAX_LEVEL.min(cap);
             dst.hops_from_source = 0;
             dst.max_flow_dist = cell.max_flow_dist;
         } else if cell.level >= 0.99 {
@@ -714,6 +733,9 @@ fn apply_pending_fluid(
         }
         grid.dirty = true;
         grid.has_fluid = true;
+        if cell.fluid_type.is_lava() {
+            grid.has_lava = true;
+        }
     }
 }
 

@@ -116,6 +116,25 @@ const CELL_CORNER_OFFSETS: [[usize; 3]; 8] = [
     [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1],
 ];
 
+/// Convert 8 corner densities into a [0.0, 1.0] fluid capacity for the cell.
+///
+/// Counts air corners (density <= 0). cap = air_corners / 8.
+/// Returns 1.0 for fully-air cells, 0.0 for fully-solid, and a fraction in
+/// between for boundary cells. This makes the simulator's notion of free
+/// space match the marching-cubes mesh surface — without it, a cell with
+/// 5 of 8 corners inside rock could still hold full water and the fluid
+/// would visibly clip through the wall (the mesher carves the geometry,
+/// but the simulator kept pouring more fluid in).
+#[inline]
+pub fn capacity_from_corners(corners: &[f32]) -> f32 {
+    debug_assert_eq!(corners.len(), 8);
+    let mut air = 0u8;
+    for &d in corners {
+        if d <= 0.0 { air += 1; }
+    }
+    air as f32 * 0.125 // /8
+}
+
 /// Lightweight density-only cache for chunks that have no fluid yet.
 /// Avoids allocating 4096 FluidCells until fluid actually enters the chunk.
 pub struct ChunkDensityCache {
@@ -179,12 +198,27 @@ pub struct ChunkFluidGrid {
     pub cell_corners: Vec<f32>,
     /// Precomputed: true if ALL 8 corner densities > 0 (fully solid cell).
     pub cell_solid: Vec<bool>,
-    /// Precomputed fractional capacity per cell (0.0 = blocked, 1.0 = fully open).
+    /// Precomputed fractional capacity per cell (0.0 = fully solid, 1.0 = fully open).
+    /// Computed as `air_corner_count / 8` so the sim respects partial-volume
+    /// rock just like the mesher does — fluid no longer clips through walls.
     pub cell_cap: Vec<f32>,
     pub size: usize,
     pub dirty: bool,
     /// True if any cell has level > MIN_LEVEL. Used to skip empty chunks in sim.
     pub has_fluid: bool,
+    /// True if any cell has fluid AND is lava. Used to skip whole chunks in
+    /// the per-tick lava↔water quench scan, which is otherwise an N³ cost
+    /// paid even for water-only worlds.
+    pub has_lava: bool,
+    /// Reusable scratch buffer for `tick_chunk`'s double-buffered cell write.
+    /// Owning this on the grid lets the simulator `mem::take` it instead of
+    /// `cells.clone()`-ing every substep — eliminates the dominant per-tick
+    /// allocation (≈540KB at chunk_size=30, ×6 substeps × N chunks/sec).
+    pub scratch_cells: Vec<FluidCell>,
+    /// Reusable per-tick column-weight buffer for upward-pressure equalization.
+    pub scratch_weights: Vec<f32>,
+    /// Reusable per-tick drain-delta buffer for entrainment.
+    pub scratch_drain: Vec<f32>,
 }
 
 impl ChunkFluidGrid {
@@ -199,6 +233,10 @@ impl ChunkFluidGrid {
             size,
             dirty: false,
             has_fluid: false,
+            has_lava: false,
+            scratch_cells: Vec::new(),
+            scratch_weights: Vec::new(),
+            scratch_drain: Vec::new(),
         }
     }
 
@@ -209,9 +247,10 @@ impl ChunkFluidGrid {
         let cell_solid: Vec<bool> = (0..total)
             .map(|idx| (0..8).all(|c| cache.cell_corners[idx * 8 + c] > 0.0))
             .collect();
-        // Binary classification: center density > 0 = solid, <= 0 = air
+        // Fractional capacity from corner counts — matches the MC mesh surface
+        // so fluid can't pour into mostly-solid cells and visibly clip walls.
         let cell_cap: Vec<f32> = (0..total)
-            .map(|idx| if cache.cell_density[idx] > 0.0 { 0.0 } else { 1.0 })
+            .map(|idx| capacity_from_corners(&cache.cell_corners[idx * 8 .. idx * 8 + 8]))
             .collect();
         Self {
             cells: vec![FluidCell::default(); total],
@@ -222,6 +261,10 @@ impl ChunkFluidGrid {
             size,
             dirty: false,
             has_fluid: false,
+            has_lava: false,
+            scratch_cells: Vec::new(),
+            scratch_weights: Vec::new(),
+            scratch_drain: Vec::new(),
         }
     }
 
@@ -265,12 +308,14 @@ impl ChunkFluidGrid {
         count >= threshold as usize
     }
 
-    /// Recompute cell capacity using binary classification based on center density.
-    /// Center density > 0 = solid (cap 0.0), <= 0 = air (cap 1.0).
+    /// Recompute cell capacity from corner densities (fractional: air_corners/8).
+    /// Replaces the previous binary classification; cells straddling the
+    /// solid/air boundary now hold partial capacity matching the mesh surface.
     pub fn recompute_capacity(&mut self) {
         let total = self.size * self.size * self.size;
         for idx in 0..total {
-            self.cell_cap[idx] = if self.cell_density[idx] > 0.0 { 0.0 } else { 1.0 };
+            self.cell_cap[idx] =
+                capacity_from_corners(&self.cell_corners[idx * 8 .. idx * 8 + 8]);
         }
     }
 
@@ -285,6 +330,8 @@ impl ChunkFluidGrid {
             self.cell_corners[idx * 8 + c] = density;
         }
         self.cell_solid[idx] = density > 0.0; // all corners set to same value
+        // All 8 corners share the same sign here, so fractional cap collapses
+        // to the binary 0/1 it always was for set_density callers.
         self.cell_cap[idx] = if density > 0.0 { 0.0 } else { 1.0 };
     }
 
@@ -332,8 +379,9 @@ impl ChunkFluidGrid {
                     self.cell_density[cell_idx] = sum / 8.0;
                     // Fully solid only if ALL 8 corners are positive
                     self.cell_solid[cell_idx] = (0..8).all(|c| self.cell_corners[cell_idx * 8 + c] > 0.0);
-                    // Binary classification: center density > 0 = solid, <= 0 = air
-                    self.cell_cap[cell_idx] = if self.cell_density[cell_idx] > 0.0 { 0.0 } else { 1.0 };
+                    // Fractional capacity from corner counts (matches MC mesh surface).
+                    self.cell_cap[cell_idx] =
+                        capacity_from_corners(&self.cell_corners[cell_idx * 8 .. cell_idx * 8 + 8]);
                 }
             }
         }

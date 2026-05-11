@@ -146,20 +146,38 @@ pub(super) fn tick_chunk(
     config: &FluidConfig,
     decrement_grace: bool,
 ) -> (bool, Vec<CrossChunkTransfer>) {
-    let grid = match chunks.get(&key) {
-        Some(g) => g,
+    let (size, total, has_fluid) = match chunks.get(&key) {
+        Some(g) => (g.size, g.size * g.size * g.size, g.has_fluid),
         None => return (false, Vec::new()),
     };
 
-    let size = grid.size;
-
     // Early return: if no cell has fluid, nothing to simulate
-    if !grid.has_fluid {
+    if !has_fluid {
         return (false, Vec::new());
     }
 
-    // Create new buffer + snapshot density/solid
-    let mut new_cells = grid.cells.clone();
+    // Take ALL scratch buffers off the grid up front, before we hold any
+    // immutable borrow of `cell_cap`/`cell_solid` etc. Restored at the end.
+    // Reusing these allocations is the single biggest win for tick perf —
+    // at chunk_size=30 each scratch is ≈540KB / ≈108KB / ≈108KB, allocated
+    // 6× per water tick × N chunks/sec on the old code path.
+    let (mut new_cells, mut fluid_weight, mut drain_scratch) = {
+        let g = chunks.get_mut(&key).unwrap();
+        let mut nc = std::mem::take(&mut g.scratch_cells);
+        let mut fw = std::mem::take(&mut g.scratch_weights);
+        let dd = std::mem::take(&mut g.scratch_drain);
+        if nc.len() == total {
+            nc.copy_from_slice(&g.cells);
+        } else {
+            nc.clear();
+            nc.extend_from_slice(&g.cells);
+        }
+        fw.clear();
+        fw.resize(total, 0.0);
+        (nc, fw, dd)
+    };
+
+    let grid = chunks.get(&key).unwrap();
     let cell_solid = &grid.cell_solid;
     let cell_cap = &grid.cell_cap;
     let mut changed = false;
@@ -168,8 +186,6 @@ pub(super) fn tick_chunk(
     // Pre-compute column fluid weight for pressure equalization.
     // fluid_weight[idx] = total fluid in this cell plus all cells above in the same column.
     // A taller column has higher weight at its base, driving upward pressure in shorter neighbors.
-    let total = size * size * size;
-    let mut fluid_weight = vec![0.0f32; total];
     for z in 0..size {
         for x in 0..size {
             let mut cumulative = 0.0f32;
@@ -644,14 +660,19 @@ pub(super) fn tick_chunk(
         }
     }
 
-    // Clean up negative from overdrain and track has_fluid
+    // Clean up negative from overdrain and track has_fluid + has_lava.
+    // has_lava is recomputed here so the per-tick lava↔water quench scan
+    // can skip whole chunks that have no lava — paid for by a single fused
+    // pass instead of a full N³ probe in `detect_lava_water_quench`.
     let mut any_fluid = false;
+    let mut any_lava = false;
     for cell in &mut new_cells {
         if cell.level < MIN_LEVEL {
             cell.level = 0.0;
         }
         if cell.level >= MIN_LEVEL {
             any_fluid = true;
+            if cell.fluid_type.is_lava() { any_lava = true; }
         }
     }
 
@@ -758,12 +779,15 @@ pub(super) fn tick_chunk(
         let entrain_threshold = flow_rate * 0.5;
         let entrain_rate = flow_rate * 2.0;
 
-        // Pre-compute drain deltas (positive = cell lost water this tick)
+        // Pre-compute drain deltas (positive = cell lost water this tick).
+        // Reuses the per-grid scratch buffer (taken at the top of the fn).
+        drain_scratch.clear();
+        drain_scratch.resize(total, 0.0);
         let old_cells = &chunks.get(&key).unwrap().cells;
-        let mut drain_delta = vec![0.0f32; total];
         for idx in 0..total {
-            drain_delta[idx] = (old_cells[idx].level - new_cells[idx].level).max(0.0);
+            drain_scratch[idx] = (old_cells[idx].level - new_cells[idx].level).max(0.0);
         }
+        let drain_delta = &mut drain_scratch;
 
         for z in 0..size {
             for y in 0..size {
@@ -816,18 +840,22 @@ pub(super) fn tick_chunk(
                 }
             }
         }
+
     }
 
-    // Swap buffer
-    if changed {
-        if let Some(grid) = chunks.get_mut(&key) {
-            grid.cells = new_cells;
+    // Swap buffer + return scratches to the grid for the next tick.
+    // We swap rather than overwrite so the OLD `cells` allocation becomes
+    // the next tick's scratch — zero new heap traffic in steady state.
+    if let Some(grid) = chunks.get_mut(&key) {
+        if changed {
+            std::mem::swap(&mut grid.cells, &mut new_cells);
             grid.dirty = true;
-            grid.has_fluid = any_fluid;
         }
-    } else if let Some(grid) = chunks.get_mut(&key) {
-        // Even without changes, update has_fluid status
         grid.has_fluid = any_fluid;
+        grid.has_lava = any_lava;
+        grid.scratch_cells = new_cells;
+        grid.scratch_weights = fluid_weight;
+        grid.scratch_drain = drain_scratch;
     }
 
     (changed, cross_transfers)

@@ -265,6 +265,12 @@ pub fn detect_lava_water_quench(
         if !grid.has_fluid {
             continue;
         }
+        // Skip chunks with no lava — quench is a lava-side scan and the flag
+        // is recomputed each tick by tick_chunk, so this is a tight short-
+        // circuit for the common water-only / empty-chunk case.
+        if !grid.has_lava {
+            continue;
+        }
         let size = grid.size;
         let sz = size as i32;
         for z in 0..size {
@@ -420,15 +426,22 @@ pub fn detect_solidification(
     detect_lava_water_quench(chunks).obsidian
 }
 
-/// Regenerate source blocks: source cells always maintain SOURCE_LEVEL.
+/// Regenerate source blocks: source cells always maintain SOURCE_LEVEL,
+/// clamped to the cell's actual capacity. Capacity is now fractional
+/// (air_corners/8) so a source landing in a partial-rock boundary cell
+/// would otherwise over-pour every tick, leaking unbounded fluid through
+/// the redistribution pass.
+///
 /// Also resets `hops_from_source` to 0 on each source so children re-propagate
 /// from a fresh hop count each tick (essential for bounded-flow correctness).
 pub fn regen_sources(chunks: &mut HashMap<(i32, i32, i32), ChunkFluidGrid>) {
     for grid in chunks.values_mut() {
-        for cell in &mut grid.cells {
-            if cell.is_source() {
-                cell.level = SOURCE_LEVEL;
-                cell.hops_from_source = 0;
+        let total = grid.size * grid.size * grid.size;
+        for idx in 0..total {
+            if grid.cells[idx].is_source() {
+                let cap = grid.cell_cap[idx];
+                grid.cells[idx].level = SOURCE_LEVEL.min(cap);
+                grid.cells[idx].hops_from_source = 0;
                 // max_flow_dist persists (it was set when the source was placed).
             }
         }
@@ -479,6 +492,7 @@ mod tests {
         grid.get_mut(9, 8, 8).level = 0.5;
         grid.get_mut(9, 8, 8).fluid_type = FluidType::Water;
         grid.has_fluid = true;
+        grid.has_lava = true;
         chunks.insert(key, grid);
 
         let solidify = detect_solidification(&chunks);
@@ -495,6 +509,7 @@ mod tests {
         grid.get_mut(9, 8, 8).level = 0.5;
         grid.get_mut(9, 8, 8).fluid_type = FluidType::WaterSpringLine;
         grid.has_fluid = true;
+        grid.has_lava = true;
         chunks.insert(key, grid);
 
         let solidify = detect_solidification(&chunks);

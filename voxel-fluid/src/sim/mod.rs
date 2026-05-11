@@ -1045,7 +1045,12 @@ mod tests {
     }
 
     #[test]
-    fn bowl_binary_boundary_conservation() {
+    fn bowl_fractional_boundary_conservation() {
+        // Capacity is now fractional (air_corners/8) so the simulator's notion
+        // of free space matches the marching-cubes mesh surface — fluid no
+        // longer clips through partial-rock cells. Boundary cells legitimately
+        // hold partial capacity in [0, 1]; the test asserts conservation, not
+        // a binary cap.
         let size = 16;
         let stride = size + 1;
         let mut densities = vec![1.0f32; stride * stride * stride];
@@ -1067,7 +1072,8 @@ mod tests {
         apply_density(&mut grid, &densities, &config);
         for z in 0..size { for y in 0..size { for x in 0..size {
             let cap = grid.cell_capacity(x, y, z);
-            assert!(cap == 0.0 || cap == 1.0, "Binary capacity violated at ({},{},{}): cap={}", x, y, z, cap);
+            assert!(cap >= 0.0 && cap <= 1.0,
+                "Capacity out of [0,1] at ({},{},{}): cap={}", x, y, z, cap);
         }}}
         fill_air_to_capacity(&mut grid, 0..size);
 
@@ -1078,7 +1084,7 @@ mod tests {
         for _ in 0..500 { tick_fluid(&mut chunks, &dc, size, false, &config, true); }
         let final_w = total_water(&chunks);
         let loss_pct = ((initial - final_w) / initial * 100.0).abs();
-        assert!(loss_pct < 1.0, "Binary boundary conservation: initial={:.2}, final={:.2}, loss={:.2}%", initial, final_w, loss_pct);
+        assert!(loss_pct < 1.0, "Fractional boundary conservation: initial={:.2}, final={:.2}, loss={:.2}%", initial, final_w, loss_pct);
     }
 
     #[test]

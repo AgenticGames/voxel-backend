@@ -64,6 +64,8 @@ pub fn place_sources(
                         cell.fluid_type = FluidType::Lava;
                         cell.is_source = true;
                         grid.dirty = true;
+                        grid.has_fluid = true;
+                        grid.has_lava = true;
                     }
                 }
             }
