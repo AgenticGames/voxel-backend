@@ -14,7 +14,11 @@ use voxel_gen::density::DensityField;
 /// Magic bytes for the save file header.
 const MAGIC: [u8; 4] = *b"MXSV";
 /// Current binary format version.
-const VERSION: u32 = 1;
+///
+/// Version history:
+///   1 — chunk snapshots + terraced cells/columns
+///   2 — adds editor collapse triggers + next_trigger_id (see triggers.rs)
+const VERSION: u32 = 2;
 
 // ── Data structures ────────────────────────────────────────────────────
 
@@ -37,6 +41,12 @@ pub struct WorldSaveData {
     pub terraced_cells: Vec<(i32, i32, i32)>,
     /// Terraced column floor heights: (world_x, world_z) → floor_y.
     pub terraced_columns: BTreeMap<(i32, i32), i32>,
+    /// Editor-authored collapse triggers (introduced in v2). v1 saves
+    /// deserialize this as an empty vec.
+    pub triggers: Vec<crate::triggers::EditorCollapseTrigger>,
+    /// Monotonic trigger id counter. Persists so reload doesn't recycle
+    /// ids that already exist. v1 reads this as 1.
+    pub next_trigger_id: u32,
 }
 
 /// Tracks which chunks have been modified at runtime so we know what to save.
@@ -82,7 +92,14 @@ impl ChunkSnapshot {
                 self.packed[offset + 2],
                 self.packed[offset + 3],
             ];
-            sample.density = f32::from_le_bytes(density_bytes);
+            let raw = f32::from_le_bytes(density_bytes);
+            // Clamp on load: existing saves from buggy versions can contain
+            // density values outside [-1, 1] (e.g. -5.6 from accumulated
+            // noise-brush strokes). DC's edge-intersection math behaves
+            // poorly with extreme values — clamping on snapshot apply heals
+            // those saves transparently. NaN passes through unchanged so
+            // the diagnostic can still surface them.
+            sample.density = if raw.is_nan() { raw } else { raw.clamp(-1.0, 1.0) };
             sample.material = Material::from_u8(self.packed[offset + 4]);
         }
         df.compute_metadata();
@@ -184,6 +201,13 @@ impl WorldSaveData {
             w.write_all(&floor_y.to_le_bytes())?;
         }
 
+        // v2: editor collapse triggers + next_trigger_id
+        w.write_all(&self.next_trigger_id.to_le_bytes())?;
+        w.write_all(&(self.triggers.len() as u32).to_le_bytes())?;
+        for trig in &self.triggers {
+            write_trigger(w, trig)?;
+        }
+
         Ok(())
     }
 
@@ -202,9 +226,9 @@ impl WorldSaveData {
             return Err(DeltaError::BadMagic);
         }
 
-        // Version
+        // Version. Accept v1 (legacy, no triggers) and v2 (current).
         let version = read_u32(r)?;
-        if version != VERSION {
+        if version != 1 && version != VERSION {
             return Err(DeltaError::UnsupportedVersion(version));
         }
 
@@ -255,10 +279,28 @@ impl WorldSaveData {
             terraced_columns.insert((wx, wz), floor_y);
         }
 
+        // v2: editor collapse triggers. v1 saves end here; default to empty.
+        let (triggers, next_trigger_id) = if version >= 2 {
+            let next_id = read_u32(r)?;
+            let trig_count = read_u32(r)? as usize;
+            if trig_count > 100_000 {
+                return Err(DeltaError::TooManyChunks(trig_count));
+            }
+            let mut triggers = Vec::with_capacity(trig_count);
+            for _ in 0..trig_count {
+                triggers.push(read_trigger(r)?);
+            }
+            (triggers, next_id.max(1))
+        } else {
+            (Vec::new(), 1)
+        };
+
         Ok(WorldSaveData {
             chunk_snapshots,
             terraced_cells,
             terraced_columns,
+            triggers,
+            next_trigger_id,
         })
     }
 
@@ -267,6 +309,7 @@ impl WorldSaveData {
         self.chunk_snapshots.is_empty()
             && self.terraced_cells.is_empty()
             && self.terraced_columns.is_empty()
+            && self.triggers.is_empty()
     }
 }
 
@@ -315,6 +358,189 @@ fn read_i32<R: Read>(r: &mut R) -> Result<i32, DeltaError> {
     let mut buf = [0u8; 4];
     r.read_exact(&mut buf).map_err(|_| DeltaError::TruncatedData)?;
     Ok(i32::from_le_bytes(buf))
+}
+
+fn read_f32<R: Read>(r: &mut R) -> Result<f32, DeltaError> {
+    let mut buf = [0u8; 4];
+    r.read_exact(&mut buf).map_err(|_| DeltaError::TruncatedData)?;
+    Ok(f32::from_le_bytes(buf))
+}
+
+// ── Trigger (de)serialization ──────────────────────────────────────────
+//
+// Format per trigger (all little-endian):
+//   [4] id u32
+//   [4] name_len u32, [name_len] name utf8 bytes
+//   [1] armed u8
+//   [4] fall_distance_uu f32
+//   [1] activation_tag u8  (0 = OnFirstMine, 1 = OnPillarLoss)
+//     OnFirstMine: [24] trigger_volume (6×i32)
+//     OnPillarLoss:
+//       [4] pillar_count u32
+//       per pillar: [24] volume (6×i32) + [4] baseline_solid u32
+//       [1] condition_tag u8 (0=Any, 1=N, 2=All), [1] n_value u8
+//       [4] loss_threshold f32
+//   [4] slab_count u32, per voxel: [12] (3×i32)
+//   [4] pile_chunk_count u32, per chunk: [12] (3×i32)
+
+fn write_aabb<W: Write>(w: &mut W, aabb: &crate::triggers::VoxelAabb) -> io::Result<()> {
+    w.write_all(&aabb.min.0.to_le_bytes())?;
+    w.write_all(&aabb.min.1.to_le_bytes())?;
+    w.write_all(&aabb.min.2.to_le_bytes())?;
+    w.write_all(&aabb.max.0.to_le_bytes())?;
+    w.write_all(&aabb.max.1.to_le_bytes())?;
+    w.write_all(&aabb.max.2.to_le_bytes())?;
+    Ok(())
+}
+
+fn read_aabb<R: Read>(r: &mut R) -> Result<crate::triggers::VoxelAabb, DeltaError> {
+    let mn = (read_i32(r)?, read_i32(r)?, read_i32(r)?);
+    let mx = (read_i32(r)?, read_i32(r)?, read_i32(r)?);
+    Ok(crate::triggers::VoxelAabb { min: mn, max: mx })
+}
+
+fn write_trigger<W: Write>(
+    w: &mut W,
+    t: &crate::triggers::EditorCollapseTrigger,
+) -> io::Result<()> {
+    use crate::triggers::{LossCondition, TriggerActivation};
+
+    w.write_all(&t.id.to_le_bytes())?;
+    let name_bytes = t.name.as_bytes();
+    w.write_all(&(name_bytes.len() as u32).to_le_bytes())?;
+    w.write_all(name_bytes)?;
+    w.write_all(&[if t.armed { 1 } else { 0 }])?;
+    w.write_all(&t.fall_distance_uu.to_le_bytes())?;
+
+    match &t.activation {
+        TriggerActivation::OnFirstMine { trigger_volume } => {
+            w.write_all(&[0u8])?;
+            write_aabb(w, trigger_volume)?;
+        }
+        TriggerActivation::OnPillarLoss {
+            pillars,
+            condition,
+            loss_threshold,
+        } => {
+            w.write_all(&[1u8])?;
+            w.write_all(&(pillars.len() as u32).to_le_bytes())?;
+            for p in pillars {
+                write_aabb(w, &p.volume)?;
+                w.write_all(&p.baseline_solid.to_le_bytes())?;
+            }
+            match condition {
+                LossCondition::AnyPillar => w.write_all(&[0u8, 0u8])?,
+                LossCondition::NPillars(n) => w.write_all(&[1u8, *n])?,
+                LossCondition::AllPillars => w.write_all(&[2u8, 0u8])?,
+            }
+            w.write_all(&loss_threshold.to_le_bytes())?;
+        }
+    }
+
+    w.write_all(&(t.target_slab_voxels.len() as u32).to_le_bytes())?;
+    for &(x, y, z) in &t.target_slab_voxels {
+        w.write_all(&x.to_le_bytes())?;
+        w.write_all(&y.to_le_bytes())?;
+        w.write_all(&z.to_le_bytes())?;
+    }
+
+    w.write_all(&(t.pile_chunks.len() as u32).to_le_bytes())?;
+    for &(x, y, z) in &t.pile_chunks {
+        w.write_all(&x.to_le_bytes())?;
+        w.write_all(&y.to_le_bytes())?;
+        w.write_all(&z.to_le_bytes())?;
+    }
+    Ok(())
+}
+
+fn read_trigger<R: Read>(
+    r: &mut R,
+) -> Result<crate::triggers::EditorCollapseTrigger, DeltaError> {
+    use crate::triggers::{
+        EditorCollapseTrigger, LossCondition, PillarRef, TriggerActivation,
+    };
+
+    let id = read_u32(r)?;
+    let name_len = read_u32(r)? as usize;
+    if name_len > 1024 {
+        return Err(DeltaError::TruncatedData);
+    }
+    let mut name_buf = vec![0u8; name_len];
+    r.read_exact(&mut name_buf).map_err(|_| DeltaError::TruncatedData)?;
+    let name = String::from_utf8(name_buf).unwrap_or_else(|_| String::new());
+    let mut armed_byte = [0u8; 1];
+    r.read_exact(&mut armed_byte).map_err(|_| DeltaError::TruncatedData)?;
+    let armed = armed_byte[0] != 0;
+    let fall_distance_uu = read_f32(r)?;
+
+    let mut tag = [0u8; 1];
+    r.read_exact(&mut tag).map_err(|_| DeltaError::TruncatedData)?;
+    let activation = match tag[0] {
+        0 => {
+            let trigger_volume = read_aabb(r)?;
+            TriggerActivation::OnFirstMine { trigger_volume }
+        }
+        1 => {
+            let pillar_count = read_u32(r)? as usize;
+            if pillar_count > 256 {
+                return Err(DeltaError::TruncatedData);
+            }
+            let mut pillars = Vec::with_capacity(pillar_count);
+            for _ in 0..pillar_count {
+                let volume = read_aabb(r)?;
+                let baseline_solid = read_u32(r)?;
+                pillars.push(PillarRef { volume, baseline_solid });
+            }
+            let mut cond_buf = [0u8; 2];
+            r.read_exact(&mut cond_buf).map_err(|_| DeltaError::TruncatedData)?;
+            let condition = match cond_buf[0] {
+                0 => LossCondition::AnyPillar,
+                1 => LossCondition::NPillars(cond_buf[1]),
+                _ => LossCondition::AllPillars,
+            };
+            let loss_threshold = read_f32(r)?;
+            TriggerActivation::OnPillarLoss {
+                pillars,
+                condition,
+                loss_threshold,
+            }
+        }
+        _ => return Err(DeltaError::TruncatedData),
+    };
+
+    let slab_count = read_u32(r)? as usize;
+    if slab_count > 10_000_000 {
+        return Err(DeltaError::TooManyTerraces(slab_count));
+    }
+    let mut target_slab_voxels = Vec::with_capacity(slab_count);
+    for _ in 0..slab_count {
+        let x = read_i32(r)?;
+        let y = read_i32(r)?;
+        let z = read_i32(r)?;
+        target_slab_voxels.push((x, y, z));
+    }
+
+    let pile_count = read_u32(r)? as usize;
+    if pile_count > 1_000_000 {
+        return Err(DeltaError::TooManyTerraces(pile_count));
+    }
+    let mut pile_chunks = Vec::with_capacity(pile_count);
+    for _ in 0..pile_count {
+        let x = read_i32(r)?;
+        let y = read_i32(r)?;
+        let z = read_i32(r)?;
+        pile_chunks.push((x, y, z));
+    }
+
+    Ok(EditorCollapseTrigger {
+        id,
+        name,
+        armed,
+        activation,
+        target_slab_voxels,
+        pile_chunks,
+        fall_distance_uu,
+    })
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────

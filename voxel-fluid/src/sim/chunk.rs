@@ -53,9 +53,16 @@ pub fn bounded_blocks_transfer(src_hops: u8, src_max_flow: u8) -> bool {
 }
 
 /// Count how many of the 6 face neighbors are solid (or out of bounds).
-fn count_solid_face_neighbors(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> u8 {
-    let size = grid.size;
+///
+/// Operates on the precomputed `cell_solid` bitfield directly so callers in
+/// the inner xyz loop don't have to do a `chunks.get(&key)` HashMap probe per
+/// voxel just to reach the same data they already hold above the loop.
+#[inline]
+fn count_solid_face_neighbors(cell_solid: &[bool], size: usize, x: usize, y: usize, z: usize) -> u8 {
+    let s = size as i32;
     let mut count: u8 = 0;
+    let stride_y = size;
+    let stride_z = size * size;
     let deltas: [(i32, i32, i32); 6] = [
         (1, 0, 0), (-1, 0, 0),
         (0, 1, 0), (0, -1, 0),
@@ -65,10 +72,11 @@ fn count_solid_face_neighbors(grid: &ChunkFluidGrid, x: usize, y: usize, z: usiz
         let nx = x as i32 + dx;
         let ny = y as i32 + dy;
         let nz = z as i32 + dz;
-        if nx < 0 || nx >= size as i32 || ny < 0 || ny >= size as i32 || nz < 0 || nz >= size as i32 {
+        if nx < 0 || nx >= s || ny < 0 || ny >= s || nz < 0 || nz >= s {
             count += 1; // out of bounds = solid
         } else {
-            if grid.is_solid(nx as usize, ny as usize, nz as usize) {
+            let ni = (nz as usize) * stride_z + (ny as usize) * stride_y + (nx as usize);
+            if cell_solid[ni] {
                 count += 1;
             }
         }
@@ -199,10 +207,11 @@ pub(super) fn tick_chunk(
                     continue;
                 }
 
-                // Skip flow for sources trapped in solid rock pockets
-                let solid_neighbors = count_solid_face_neighbors(
-                    chunks.get(&key).unwrap(), x, y, z,
-                );
+                // Skip flow for sources trapped in solid rock pockets.
+                // Reads the borrowed cell_solid slice directly — avoids the
+                // per-voxel HashMap.get(&key) probe that the previous version
+                // performed in the inner xyz loop.
+                let solid_neighbors = count_solid_face_neighbors(cell_solid, size, x, y, z);
                 if solid_neighbors >= 5 {
                     continue;
                 }

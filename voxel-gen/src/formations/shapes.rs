@@ -290,9 +290,18 @@ pub(super) fn write_mega_column(
                 let final_r = r + junction_bulge;
 
                 if dist < final_r {
-                    let falloff = 1.0 - (dist / final_r).powi(2);
+                    // Smooth SDF: linear distance-to-surface, NOT multiplied by
+                    // config.smoothness. The smoothness boost saturated 86% of
+                    // the cylinder volume to a flat density=1.0 interior, which
+                    // when combined with the chunk seam sync (`min(a,b)` writes
+                    // neighbor air into the boundary cell) produced a
+                    // many-cells-wide hard step from 1.0 to ~-0.07 → DC's QEF
+                    // clamped all those vertices to the same x≈boundary-plane
+                    // → ~770 coplanar triangles → "slate cube" flat wall.
+                    // Linear falloff makes adjacent cells differ by ~1/final_r
+                    // in density, breaking the coplanar pattern.
+                    let new_density = 1.0 - (dist / final_r);
                     let sample = density.get_mut(ix, iy, iz);
-                    let new_density = falloff * config.smoothness;
                     if new_density > sample.density {
                         sample.density = new_density;
                         sample.material = material;
@@ -316,6 +325,7 @@ pub(super) fn write_drapery(
     config: &FormationConfig,
     size: usize,
 ) {
+    // DIAG-BISECT-β1: write_drapery re-enabled.
     let steps = (length * 2.0) as usize;
     if steps == 0 {
         return;
@@ -343,16 +353,22 @@ pub(super) fn write_drapery(
 
         if ix < size && iy < size && iz < size {
             let sample = density.get_mut(ix, iy, iz);
-            if config.smoothness > sample.density {
-                sample.density = config.smoothness;
+            let new_density = config.smoothness.min(1.0);
+            // Air-only density overwrite — see comment at line ~297.
+            if sample.density <= 0.0 && new_density > sample.density {
+                sample.density = new_density;
+                sample.material = material;
+            } else if sample.density > 0.0 && sample.material != material {
                 sample.material = material;
             }
             // Also fill the voxel above for thickness
             if iy + 1 < size {
                 let sample2 = density.get_mut(ix, iy + 1, iz);
-                let half_smooth = config.smoothness * 0.5;
-                if half_smooth > sample2.density {
+                let half_smooth = (config.smoothness * 0.5).min(1.0);
+                if sample2.density <= 0.0 && half_smooth > sample2.density {
                     sample2.density = half_smooth;
+                    sample2.material = material;
+                } else if sample2.density > 0.0 && sample2.material != material {
                     sample2.material = material;
                 }
             }
@@ -414,8 +430,12 @@ pub(super) fn write_rimstone_dam(
             for dy in 0..=h {
                 if wy + dy < size {
                     let sample = density.get_mut(wx, wy + dy, wz);
-                    if config.smoothness > sample.density {
-                        sample.density = config.smoothness;
+                    let new_density = config.smoothness.min(1.0);
+                    // Air-only density overwrite — see comment at line ~297.
+                    if sample.density <= 0.0 && new_density > sample.density {
+                        sample.density = new_density;
+                        sample.material = material;
+                    } else if sample.density > 0.0 && sample.material != material {
                         sample.material = material;
                     }
                 }
@@ -522,10 +542,13 @@ pub(super) fn write_cave_shield(
 
             if ix < size && iy < size && iz < size {
                 let falloff = 1.0 - (rdist / radius).powi(2);
-                let new_density = falloff * config.smoothness;
+                let new_density = (falloff * config.smoothness).min(1.0);
                 let sample = density.get_mut(ix, iy, iz);
-                if new_density > sample.density {
+                // Air-only density overwrite — see comment at line ~297.
+                if sample.density <= 0.0 && new_density > sample.density {
                     sample.density = new_density;
+                    sample.material = material;
+                } else if sample.density > 0.0 && sample.material != material {
                     sample.material = material;
                 }
             }

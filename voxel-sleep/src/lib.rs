@@ -313,6 +313,24 @@ fn compute_resource_census(
 /// Phase 2: "The Aureole" (100,000 years) — contact metamorphism, water erosion
 /// Phase 3: "The Veins" (500,000 years) — hydrothermal ore deposition, formation growth
 /// Phase 4: "The Deep Time" (1,250,000 years) — enrichment, thickening, formations, collapse
+/// Append one line to a debug trace file so we can diagnose sleep hangs.
+/// Best-effort, ignored if the file can't be opened.
+pub(crate) fn trace(msg: &str) {
+    use std::io::Write;
+    eprintln!("{}", msg);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true).append(true)
+        .open("D:/Unreal Projects/Mithril2026/Saved/sleep_trace.log")
+    {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        let _ = writeln!(f, "[{:.3}] {}", ts, msg);
+        let _ = f.flush();
+    }
+}
+
 pub fn execute_sleep(
     config: &SleepConfig,
     density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
@@ -323,12 +341,14 @@ pub fn execute_sleep(
     sleep_count: u32,
     progress_tx: Option<&Sender<SleepProgress>>,
 ) -> SleepResult {
+    trace(&format!("execute_sleep start player_chunk=({},{},{}) sleep_count={}", player_chunk.0, player_chunk.1, player_chunk.2, sleep_count));
     // Derive chunk_size from actual density field grid size (df.size - 1).
     // When bounds_size != 0 (e.g. 24), the grid is 25x25x25 and chunk keys use 24.
     let chunk_size: usize = density_fields.values()
         .next()
         .map(|df| df.size - 1)
         .unwrap_or(16);
+    trace(&format!("execute_sleep chunk_size={} radius={}", chunk_size, config.chunk_radius));
     let t_total = Instant::now();
 
     // Deterministic RNG seeded from sleep_count
@@ -493,6 +513,7 @@ pub fn execute_sleep(
     let t_p1 = Instant::now();
     send_progress(progress_tx, 0, "The Aureole", 100_000, 0.0, 0, total_chunks, None, 0, String::new());
 
+    trace(&format!("Phase 2 (aureole) start phase2_enabled={}", config.phase2_enabled));
     if config.phase2_enabled {
         let aureole_result = apply_aureole(
             &config.aureole, &config.groundwater, density_fields, fluid_snapshot,
@@ -528,9 +549,10 @@ pub fn execute_sleep(
             all_dirty.insert(*key);
         }
         let aureole_summary = if aureole_result.lava_zones_found > 0 {
-            format!("{} metamorphosed ({} hornfels, {} skarn, {} veins), {} eroded, {} zones",
+            format!("{} metamorphosed ({} hornfels, {} skarn, {} amphibolite, {} veins), {} eroded, {} zones",
                 total_metamorphosed, aureole_result.hornfels_placed, aureole_result.skarn_placed,
-                aureole_result.veins_placed, aureole_result.channels_eroded, aureole_result.lava_zones_found)
+                aureole_result.amphibolite_placed, aureole_result.veins_placed,
+                aureole_result.channels_eroded, aureole_result.lava_zones_found)
         } else {
             format!("{} voxels metamorphosed, {} eroded", total_metamorphosed, aureole_result.channels_eroded)
         };
@@ -541,11 +563,13 @@ pub fn execute_sleep(
         send_progress(progress_tx, 0, "The Aureole", 100_000, 1.0, total_chunks, total_chunks, None, 0, String::new());
     }
     let t_p1_elapsed = t_p1.elapsed();
+    trace(&format!("Phase 2 (aureole) end in {:.2}ms", t_p1_elapsed.as_secs_f64() * 1000.0));
 
     // ═══ Phase 2: The Reaction (10,000 years) ═══
     let t_p2 = Instant::now();
     send_progress(progress_tx, 1, "The Reaction", 10_000, 0.0, 0, total_chunks, None, 0, String::new());
 
+    trace(&format!("Phase 1 (reaction) start phase1_enabled={}", config.phase1_enabled));
     if config.phase1_enabled {
         let reaction_result = apply_reaction(
             &config.reaction, density_fields, fluid_snapshot,
@@ -568,11 +592,13 @@ pub fn execute_sleep(
         send_progress(progress_tx, 1, "The Reaction", 10_000, 1.0, total_chunks, total_chunks, None, 0, String::new());
     }
     let t_p2_elapsed = t_p2.elapsed();
+    trace(&format!("Phase 1 (reaction) end in {:.2}ms", t_p2_elapsed.as_secs_f64() * 1000.0));
 
     // ═══ Phase 3: The Veins (500,000 years) ═══
     let t_p3 = Instant::now();
     send_progress(progress_tx, 2, "The Veins", 500_000, 0.0, 0, mineral_chunks.len() as u32, None, 0, String::new());
 
+    trace(&format!("Phase 3 (veins) start phase3_enabled={}", config.phase3_enabled));
     if config.phase3_enabled {
         let vein_result = apply_veins(
             &config.veins, &config.groundwater, density_fields, fluid_snapshot,
@@ -595,11 +621,13 @@ pub fn execute_sleep(
             mineral_chunks.len() as u32, mineral_chunks.len() as u32, None, 0, String::new());
     }
     let t_p3_elapsed = t_p3.elapsed();
+    trace(&format!("Phase 3 (veins) end in {:.2}ms", t_p3_elapsed.as_secs_f64() * 1000.0));
 
     // ═══ Phase 4: The Deep Time (1,250,000 years) ═══
     let t_p4 = Instant::now();
     send_progress(progress_tx, 3, "The Deep Time", 1_250_000, 0.0, 0, collapse_chunks.len() as u32, None, 0, String::new());
 
+    trace(&format!("Phase 4 (deeptime) start phase4_enabled={}", config.phase4_enabled));
     if config.phase4_enabled {
         let dt_result = apply_deeptime(
             &config.deeptime, &config.groundwater, density_fields, stress_fields, support_fields,
@@ -837,6 +865,10 @@ pub fn execute_sleep(
         .filter(|h| h.source_type == crate::phases::aureole::HeatSourceType::Lava)
         .map(|h| h.pos)
         .collect();
+
+    trace(&format!("execute_sleep returning: dirty_chunks={} metamorphosed={} veins={} collapses={} elapsed={:.2}ms",
+        dirty_chunks.len(), total_metamorphosed, total_veins, total_collapses,
+        t_total.elapsed().as_secs_f64() * 1000.0));
 
     SleepResult {
         success: true,

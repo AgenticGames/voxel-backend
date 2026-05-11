@@ -50,7 +50,7 @@ pub struct ChunkStore {
     /// Per-chunk crystal placement data (computed during generation).
     pub crystal_placements: HashMap<(i32, i32, i32), Vec<voxel_gen::CrystalPlacement>>,
     /// Region size for computing region keys (needed by unload).
-    region_size: i32,
+    pub region_size: i32,
     /// Localized stress recalculation events (queued by mining).
     pub stress_dirty_events: Vec<voxel_core::stress::StressDirtyEvent>,
     /// Timestamp of the last mine action that dirtied stress.
@@ -74,6 +74,18 @@ pub struct ChunkStore {
     /// restores those snapshots in-place. Bounded by `undo_max_depth`.
     pub undo_stack: std::collections::VecDeque<crate::brushes::UndoStroke>,
     pub undo_max_depth: usize,
+    /// Editor-authored scripted collapse triggers (tunnel gates, boss arena
+    /// pillars). Evaluated after every carve event; firing one synthesizes
+    /// a `CollapseEventV2` and runs the existing cinematic pipeline.
+    /// Persisted in the world save alongside chunk snapshots.
+    pub triggers: Vec<crate::triggers::EditorCollapseTrigger>,
+    /// Monotonic id allocator for triggers. Survives across save/load.
+    pub next_trigger_id: u32,
+    /// Trigger ids the player/editor has flagged for "fire now" preview.
+    /// The stress queue eval skips `should_fire` for ids in this set —
+    /// they fire unconditionally on the next tick. Cleared when consumed.
+    /// Never persisted (transient editor convenience).
+    pub force_fire_trigger_ids: Vec<u32>,
 }
 
 impl ChunkStore {
@@ -99,6 +111,38 @@ impl ChunkStore {
             last_sent_mesh_hash: HashMap::new(),
             undo_stack: std::collections::VecDeque::new(),
             undo_max_depth: 64,
+            triggers: Vec::new(),
+            next_trigger_id: 1,
+            force_fire_trigger_ids: Vec::new(),
+        }
+    }
+
+    /// Allocate the next available trigger id (does not insert).
+    pub fn alloc_trigger_id(&mut self) -> u32 {
+        let id = self.next_trigger_id;
+        self.next_trigger_id = self.next_trigger_id.saturating_add(1);
+        id
+    }
+
+    /// Look up a trigger by id.
+    pub fn find_trigger(&self, id: u32) -> Option<&crate::triggers::EditorCollapseTrigger> {
+        self.triggers.iter().find(|t| t.id == id)
+    }
+
+    /// Mutable lookup of a trigger by id.
+    pub fn find_trigger_mut(
+        &mut self,
+        id: u32,
+    ) -> Option<&mut crate::triggers::EditorCollapseTrigger> {
+        self.triggers.iter_mut().find(|t| t.id == id)
+    }
+
+    /// Remove a trigger by id. Returns the removed trigger if it existed.
+    pub fn remove_trigger(&mut self, id: u32) -> Option<crate::triggers::EditorCollapseTrigger> {
+        if let Some(pos) = self.triggers.iter().position(|t| t.id == id) {
+            Some(self.triggers.remove(pos))
+        } else {
+            None
         }
     }
 
@@ -1193,6 +1237,83 @@ impl ChunkStore {
         Some(CavernLocations { spring, chrysalis, spawn })
     }
 
+    /// Sync this chunk's boundaries with all 26 neighbors (faces + edges +
+    /// corners). Used by the diagnostic Force Resync button — more thorough
+    /// than `sync_cross_region_densities` (which only does 6 face neighbors)
+    /// because seam mismatches at edge/corner cells are common after mid-
+    /// session brush ops. Returns the set of chunks whose density was
+    /// modified — caller re-extracts hermite + remeshes those.
+    pub fn sync_chunk_full_boundaries(
+        &mut self,
+        chunk: (i32, i32, i32),
+        chunk_size: usize,
+    ) -> Vec<(i32, i32, i32)> {
+        let gs = chunk_size;
+        // 13 forward offsets covering faces (3) + edges (6) + corners (4).
+        // Each pair of (chunk, neighbor) syncs once; both sides written.
+        let offsets: [(i32, i32, i32); 13] = [
+            (1, 0, 0), (0, 1, 0), (0, 0, 1),
+            (1, 1, 0), (1, -1, 0), (1, 0, 1), (1, 0, -1), (0, 1, 1), (0, 1, -1),
+            (1, 1, 1), (1, 1, -1), (1, -1, 1), (1, -1, -1),
+        ];
+        // Also include the reverse 13 so we cover ALL 26 face/edge/corner
+        // neighbors of `chunk` (not just the forward half-set).
+        let all_offsets: Vec<(i32, i32, i32)> = offsets
+            .iter()
+            .copied()
+            .chain(offsets.iter().map(|&(dx, dy, dz)| (-dx, -dy, -dz)))
+            .collect();
+
+        let mut updates: Vec<((i32, i32, i32), usize, usize, usize, f32, voxel_core::material::Material)> = Vec::new();
+        let mut dirty: HashSet<(i32, i32, i32)> = HashSet::new();
+
+        for (dx, dy, dz) in all_offsets {
+            let neighbor = (chunk.0 + dx, chunk.1 + dy, chunk.2 + dz);
+            if !self.density_fields.contains_key(&neighbor) {
+                continue;
+            }
+            // Build per-axis pair iterators: 1=>(gs, 0), -1=>(0, gs), 0=>full range.
+            let pair_for = |d: i32| -> Vec<(usize, usize)> {
+                if d == 1 { vec![(gs, 0)] }
+                else if d == -1 { vec![(0, gs)] }
+                else { (0..=gs).map(|i| (i, i)).collect() }
+            };
+            let xs = pair_for(dx);
+            let ys = pair_for(dy);
+            let zs = pair_for(dz);
+            for &(az, bz) in &zs {
+                for &(ay, by) in &ys {
+                    for &(ax, bx) in &xs {
+                        let sa = self.density_fields[&chunk].get(ax, ay, az);
+                        let sb = self.density_fields[&neighbor].get(bx, by, bz);
+                        let (d, m) = average_boundary_voxel(sa, sb);
+                        if sa.density != d || sa.material != m {
+                            updates.push((chunk, ax, ay, az, d, m));
+                            dirty.insert(chunk);
+                        }
+                        if sb.density != d || sb.material != m {
+                            updates.push((neighbor, bx, by, bz, d, m));
+                            dirty.insert(neighbor);
+                        }
+                    }
+                }
+            }
+        }
+        for (key, x, y, z, d, m) in updates {
+            if let Some(field) = self.density_fields.get_mut(&key) {
+                let s = field.get_mut(x, y, z);
+                s.density = d;
+                s.material = m;
+            }
+        }
+        for &k in &dirty {
+            if let Some(df) = self.density_fields.get_mut(&k) {
+                df.compute_metadata();
+            }
+        }
+        dirty.into_iter().collect()
+    }
+
     /// Sync boundary densities between newly generated region chunks and their
     /// already-loaded cross-region face neighbors. Only marks chunks dirty when
     /// voxel values actually change. Returns ALL dirty keys (both region and
@@ -1288,14 +1409,42 @@ impl ChunkStore {
 
     /// Collect all world modification data needed for saving.
     ///
-    /// Gathers snapshots from:
-    /// - Currently loaded modified chunks (in density_fields + modification_tracker)
-    /// - Previously unloaded modified chunks (in preserved_snapshots)
-    /// - Terrace data (terraced_cells + terraced_columns)
+    /// Gathers snapshots from THREE tiers (later ones override earlier ones):
+    ///
+    /// 1. **Carry-forward from `pending_snapshots`** — the previous save file's
+    ///    chunks that haven't been visited yet this session. CRITICAL: without
+    ///    this, the second save after loading a world drops every snapshot the
+    ///    player didn't walk to. The chunk has no preserved entry (never
+    ///    unloaded this session) and no dirty entry (never edited this
+    ///    session), so it would silently disappear from the new save and
+    ///    re-generate as fresh worldgen on next load — appearing as "the world
+    ///    ate the chunks past where I explored". Bug spotted by user
+    ///    2026-05-09: cave systems sealed off with uniform host-rock past the
+    ///    chunks they personally re-visited.
+    ///
+    /// 2. **`preserved_snapshots`** — chunks the player modified earlier this
+    ///    session and then walked away from (snapshot captured on unload).
+    ///    Always at least as fresh as #1 for the same key.
+    ///
+    /// 3. **Currently loaded dirty chunks** (in `density_fields` +
+    ///    `modification_tracker`) — captured fresh from live density. Always
+    ///    at least as fresh as #1 and #2 for the same key.
+    ///
+    /// `BTreeMap::insert` overwrites in tier order, so freshest wins.
     pub fn collect_save_data(&self) -> WorldSaveData {
-        let mut snapshots = self.preserved_snapshots.clone();
+        // Tier 1: carry forward unvisited entries from the loaded save file.
+        let mut snapshots: BTreeMap<(i32, i32, i32), ChunkSnapshot> = match &self.pending_snapshots
+        {
+            Some(data) => data.chunk_snapshots.clone(),
+            None => BTreeMap::new(),
+        };
 
-        // Add snapshots for currently loaded modified chunks
+        // Tier 2: chunks unloaded this session.
+        for (k, snap) in &self.preserved_snapshots {
+            snapshots.insert(*k, snap.clone());
+        }
+
+        // Tier 3: currently loaded dirty chunks (freshest).
         for key in &self.modification_tracker.dirty_chunks {
             if let Some(df) = self.density_fields.get(key) {
                 snapshots.insert(*key, ChunkSnapshot::from_density(df));
@@ -1315,6 +1464,8 @@ impl ChunkStore {
             chunk_snapshots: snapshots,
             terraced_cells,
             terraced_columns,
+            triggers: self.triggers.clone(),
+            next_trigger_id: self.next_trigger_id,
         }
     }
 
@@ -1328,21 +1479,48 @@ impl ChunkStore {
         self.terraced_cells = data.terraced_cells.iter().copied().collect();
         self.terraced_columns = data.terraced_columns.iter().map(|(&k, &v)| (k, v)).collect();
 
+        // Restore editor collapse triggers. Loaded eagerly (not deferred like
+        // chunk snapshots) because their evaluation needs to be live from the
+        // first mining event of the session.
+        self.triggers = data.triggers.clone();
+        if data.next_trigger_id > self.next_trigger_id {
+            self.next_trigger_id = data.next_trigger_id;
+        }
+
         // Store chunk snapshots for on-demand application during generation
         self.pending_snapshots = Some(data);
     }
 
-    /// Check if a pending snapshot exists for a chunk and apply it if so.
+    /// Check if a snapshot exists for a chunk and apply it if so.
+    /// Two sources, preserved_snapshots wins because it's always at least as fresh:
+    ///   1. preserved_snapshots — chunks the player modified earlier this session
+    ///      then walked away from. Streaming re-loads them here.
+    ///   2. pending_snapshots — save-file deltas loaded via Ctrl+L.
     /// Returns true if a snapshot was applied (density field was patched).
+    ///
+    /// Without checking preserved_snapshots, walking away and back to a modified
+    /// chunk silently buries the player's hand-authored work under fresh worldgen.
     pub fn apply_pending_snapshot(&mut self, key: (i32, i32, i32)) -> bool {
-        let snap = match &self.pending_snapshots {
-            Some(data) => data.chunk_snapshots.get(&key).cloned(),
-            None => return false,
-        };
+        // Prefer the in-session preserved snapshot — it's the most recent state.
+        // Clone, not remove, so a failed apply (e.g. wrong size, density not yet
+        // inserted) doesn't lose the snapshot — we only drop it on success.
+        let snap = self
+            .preserved_snapshots
+            .get(&key)
+            .cloned()
+            .or_else(|| {
+                self.pending_snapshots
+                    .as_ref()
+                    .and_then(|d| d.chunk_snapshots.get(&key).cloned())
+            });
         if let Some(snap) = snap {
             if let Some(df) = self.density_fields.get_mut(&key) {
                 if snap.apply_to(df) {
-                    // Mark as modified so it persists across future saves
+                    // Successfully restored — drop the preserved entry so memory
+                    // doesn't grow unbounded across re-stream cycles. Save-file
+                    // pending_snapshots stays put: a future re-stream might still
+                    // legitimately need to re-apply (e.g. region regen from disk).
+                    self.preserved_snapshots.remove(&key);
                     self.modification_tracker.mark_dirty(key);
                     return true;
                 }
@@ -1357,6 +1535,7 @@ impl ChunkStore {
             || !self.preserved_snapshots.is_empty()
             || !self.terraced_cells.is_empty()
     }
+
 }
 
 /// Extract a solid mask bitfield from a density field.
@@ -1427,6 +1606,13 @@ pub(crate) fn sync_boundary_density(
     for &(key, min_x, min_y, min_z, max_x, max_y, max_z) in dirty_chunks {
         let (cx, cy, cz) = key;
 
+        // Per-axis dirty range, indexed [X=0, Y=1, Z=2]. Used to clamp face/
+        // edge iteration to only the cells the caller actually modified —
+        // critical for mining (~5×5 dirty patch in a 31×31 face), modest for
+        // wide ops like flatten that pass full chunk bounds.
+        let dirty_min: [usize; 3] = [min_x, min_y, min_z];
+        let dirty_max: [usize; 3] = [max_x, max_y, max_z];
+
         let faces: [(bool, (i32, i32, i32), usize, usize); 6] = [
             // (dirty touches this face?, neighbor key, coord in A, coord in B)
             (max_x >= cs, (cx + 1, cy, cz), cs, 0),     // +X
@@ -1448,9 +1634,21 @@ pub(crate) fn sync_boundary_density(
 
             let axis = face_idx / 2; // 0=X, 1=Y, 2=Z
 
-            // Iterate over the face plane (the two non-axis dimensions, 0..=cs)
-            for u in 0..=cs {
-                for v in 0..=cs {
+            // The two free dimensions for this face axis: u and v.
+            // axis=0 (X face) → u=Y, v=Z. axis=1 (Y face) → u=X, v=Z. axis=2 (Z face) → u=X, v=Y.
+            let (u_axis, v_axis) = match axis {
+                0 => (1usize, 2usize),
+                1 => (0usize, 2usize),
+                _ => (0usize, 1usize),
+            };
+            let u_lo = dirty_min[u_axis];
+            let u_hi = dirty_max[u_axis].min(cs);
+            let v_lo = dirty_min[v_axis];
+            let v_hi = dirty_max[v_axis].min(cs);
+
+            // Iterate over the face plane, clamped to the projected dirty bounds.
+            for u in u_lo..=u_hi {
+                for v in v_lo..=v_hi {
                     let (ax, ay, az) = match axis {
                         0 => (coord_a, u, v),
                         1 => (u, coord_a, v),
@@ -1513,7 +1711,11 @@ pub(crate) fn sync_boundary_density(
             }
             // Free axis is the one that's neither axis_i nor axis_j: 0+1+2=3
             let free_axis = 3 - axis_i - axis_j;
-            for t in 0..=cs {
+            // Clamp the 1D edge sweep to the dirty range on the free axis —
+            // same rationale as the face clamp above.
+            let t_lo = dirty_min[free_axis as usize];
+            let t_hi = dirty_max[free_axis as usize].min(cs);
+            for t in t_lo..=t_hi {
                 let (ax, ay, az) = {
                     let mut c = [0usize; 3];
                     c[axis_i as usize] = ca_i;

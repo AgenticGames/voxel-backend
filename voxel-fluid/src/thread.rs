@@ -7,9 +7,91 @@ use crossbeam_channel::{Receiver, Sender};
 
 use crate::cell::{ChunkDensityCache, ChunkFluidGrid};
 use crate::mesh::{mesh_fluid, BoundaryLevels};
-use crate::sim::{detect_solidification, equalize_horizontal, regen_sources, squeeze_excess_fluid, tick_fluid};
+use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha8Rng;
+
+use std::collections::VecDeque;
+
+use crate::sim::{detect_lava_water_quench, equalize_horizontal, regen_sources, squeeze_excess_fluid, tick_fluid, try_grow_pillow_voxel};
+
+/// "Pool pull" — when a water cell is drained at the heat interface, also
+/// drain one extra connected water cell from the network behind it via BFS.
+/// Without this, the main water blob barely shrinks during the steaming
+/// phase: flow refills the contact cell as fast as we drain it, so the pool's
+/// *total volume* stays roughly constant. The pull propagates the
+/// consumption back into the blob so the player sees water visibly receding
+/// from the contact area, not just the thin flow at the edge being eaten.
+///
+/// Source cells are never drained (they're infinite reservoirs by design)
+/// but we walk *through* them in the BFS so a chain of sources separating
+/// us from a drainable pool doesn't block the pull.
+fn pool_pull_drain(
+    chunks: &mut HashMap<(i32, i32, i32), ChunkFluidGrid>,
+    chunk_size: usize,
+    start_world: (i32, i32, i32),
+) {
+    const POOL_PULL_BFS_LIMIT: usize = 16;
+    const FACE_OFFSETS: [(i32, i32, i32); 6] = [
+        (1, 0, 0), (-1, 0, 0),
+        (0, 1, 0), (0, -1, 0),
+        (0, 0, 1), (0, 0, -1),
+    ];
+    let cs_i = chunk_size as i32;
+    let mut visited: HashSet<(i32, i32, i32)> = HashSet::new();
+    visited.insert(start_world);
+    let mut queue: VecDeque<(i32, i32, i32)> = VecDeque::new();
+    queue.push_back(start_world);
+    let mut explored: usize = 0;
+    while let Some(pos) = queue.pop_front() {
+        explored += 1;
+        if explored > POOL_PULL_BFS_LIMIT { return; }
+        for &(dx, dy, dz) in &FACE_OFFSETS {
+            let nw = (pos.0 + dx, pos.1 + dy, pos.2 + dz);
+            if !visited.insert(nw) { continue; }
+            let key = (nw.0.div_euclid(cs_i), nw.1.div_euclid(cs_i), nw.2.div_euclid(cs_i));
+            let lx = nw.0.rem_euclid(cs_i) as usize;
+            let ly = nw.1.rem_euclid(cs_i) as usize;
+            let lz = nw.2.rem_euclid(cs_i) as usize;
+            if let Some(grid) = chunks.get_mut(&key) {
+                let cell = grid.get_mut(lx, ly, lz);
+                if cell.level > crate::cell::MIN_LEVEL && cell.fluid_type.is_water() {
+                    if !cell.is_source {
+                        cell.level = 0.0;
+                        grid.dirty = true;
+                        return; // drained one extra cell — done
+                    }
+                    // Source cells: walk through but don't drain
+                    queue.push_back(nw);
+                }
+            }
+        }
+    }
+}
+
+/// Per-source pillow growth state. Created when a lava source first contacts
+/// water; ticked forward periodically to grow one obsidian voxel at a time
+/// outward from the source, mimicking pillow lava accretion.
+#[derive(Debug, Clone, Copy)]
+struct PillowState {
+    growth_count: u32,
+    last_growth_tick: u64,
+}
+
+/// Per-quenched-voxel heat & depth info. Depth = distance (in voxel hops) from
+/// the original water-side rim:
+///   * 0 = outer Obsidian (where water originally touched lava)
+///   * 1 = initial Scoria halo (immediate cooling shell from the BFS)
+///   * 2+ = inward-growth Scoria (forms slowly as the wall thickens
+///     toward equilibrium)
+/// Conversion probability halves every depth level so the wall converges
+/// to a stable thickness instead of consuming the chamber forever.
+#[derive(Debug, Clone, Copy)]
+struct HotInfo {
+    expires_tick: u64,
+    depth: u8,
+}
 use crate::sources::place_sources;
-use crate::{FluidConfig, FluidEvent, FluidResult, FluidSnapshot};
+use crate::{FluidConfig, FluidEvent, FluidResult, FluidSnapshot, PendingFluidCell};
 
 /// Main fluid simulation loop running on its own thread.
 ///
@@ -25,6 +107,48 @@ pub fn fluid_sim_loop(
     let mut chunks: HashMap<(i32, i32, i32), ChunkFluidGrid> = HashMap::new();
     // Lightweight density-only storage for chunks without fluid
     let mut chunk_densities: HashMap<(i32, i32, i32), ChunkDensityCache> = HashMap::new();
+    // Save-load fluid restoration buffer. Entries are queued by
+    // `PendingFluidLoad` events at load time and applied to the grid the
+    // moment the matching chunk's density is in cache (DensityUpdate or
+    // TerrainModified). Without the wait, AddFluid would land on a default
+    // grid (cell_cap=1.0 everywhere) and end up with fluid in cells that
+    // turn out to be solid once density arrives.
+    let mut pending_fluid: HashMap<(i32, i32, i32), Vec<PendingFluidCell>> = HashMap::new();
+    // Active pillow sources — lava vent positions (world voxel coords) that
+    // are growing obsidian mounds. Cleared when growth_count hits the cap or
+    // no water remains within reach. See sim::try_grow_pillow_voxel.
+    let mut active_pillows: HashMap<(i32, i32, i32), PillowState> = HashMap::new();
+    // **Heat zone** — world voxel positions of freshly-quenched rock that
+    // continue to vaporize any non-source water touching them. Refreshed
+    // each tick for positions still face-adjacent to active lava (chamber-
+    // wall rim with magma behind it stays hot indefinitely; outer rim
+    // whose lava has retreated via inward growth cools after the timer).
+    let mut hot_positions: HashMap<(i32, i32, i32), HotInfo> = HashMap::new();
+    // Deterministic RNG for inward growth probability rolls — seeded so that
+    // the wall grows the same way across reproducible test runs.
+    let mut quench_rng = ChaCha8Rng::seed_from_u64(0xC001_5C04_C001_BABEu64);
+    // Tunables. Hardcoded for now; can be promoted to FluidConfig later.
+    const PILLOW_GROWTH_INTERVAL_TICKS: u64 = 150; // ~5s @ 30Hz
+    const PILLOW_MAX_VOXELS: u32 = 30;
+    const PILLOW_SEARCH_RADIUS: i32 = 4;
+    const HEAT_COOLING_TICKS: u64 = 150;            // ~5s — how long quenched rock vaporizes water
+    const HEAT_FACE_OFFSETS: [(i32, i32, i32); 6] = [
+        (1, 0, 0), (-1, 0, 0),
+        (0, 1, 0), (0, -1, 0),
+        (0, 0, 1), (0, 0, -1),
+    ];
+    // Inward-growth tunables.
+    // Base probability for converting a lava cell at depth-1 (immediately
+    // behind the initial scoria layer). Halves every depth level beyond.
+    // 1/30 ≈ ~3% per tick → at 30Hz, a depth-2 lava cell converts in ~2s of
+    // continuous contact; depth-3 in ~8s; depth-4+ effectively never.
+    const INWARD_GROWTH_BASE_PROB: f32 = 1.0 / 30.0;
+    /// Maximum inward depth — at this depth conversion probability is
+    /// already negligible; treat as hard stop so the wall stabilizes.
+    /// Lowered from 4 → 3 for the demo: shallower wall, less lava consumed,
+    /// outer rock cools (stops vaporizing nearby water) sooner once the
+    /// lava behind the rim retreats past the cap.
+    const INWARD_GROWTH_MAX_DEPTH: u8 = 3;
     let chunk_size = config.chunk_size;
 
     let tick_interval = Duration::from_secs_f32(1.0 / config.tick_rate);
@@ -39,7 +163,7 @@ pub fn fluid_sim_loop(
         // Drain all pending events
         loop {
             match event_rx.try_recv() {
-                Ok(event) => handle_event(event, &mut chunks, &mut chunk_densities, chunk_size, &mut config),
+                Ok(event) => handle_event(event, &mut chunks, &mut chunk_densities, &mut pending_fluid, chunk_size, &mut config),
                 Err(_) => break,
             }
         }
@@ -80,9 +204,22 @@ pub fn fluid_sim_loop(
             HashSet::new()
         };
 
-        // Detect solidification (lava+water contact)
-        let solidify = detect_solidification(&chunks);
-        for (key, x, y, z) in &solidify {
+        // ── Live lava↔water quench ───────────────────────────────────────
+        // Detect contact zones and build a structured plan (obsidian rim +
+        // volume-aware scoria halo + drained water + pillow source registry).
+        let plan = detect_lava_water_quench(&chunks);
+
+        // Locally drain the lava cells we're turning into solid voxels and
+        // the water cells we're vaporizing — keeps the fluid grid consistent
+        // with what the worker is about to write into density_fields.
+        for (key, x, y, z) in plan.obsidian.iter().chain(plan.scoria.iter()) {
+            if let Some(grid) = chunks.get_mut(key) {
+                let cell = grid.get_mut(*x, *y, *z);
+                cell.level = 0.0;
+                grid.dirty = true;
+            }
+        }
+        for (key, x, y, z) in &plan.drained_water {
             if let Some(grid) = chunks.get_mut(key) {
                 let cell = grid.get_mut(*x, *y, *z);
                 cell.level = 0.0;
@@ -90,10 +227,209 @@ pub fn fluid_sim_loop(
             }
         }
 
-        // Send solidification requests to the main engine
-        if !solidify.is_empty() {
-            let positions: Vec<((i32, i32, i32), usize, usize, usize)> = solidify;
-            let _ = result_tx.send(FluidResult::SolidifyRequest { positions });
+        // Register any newly-contacted lava sources for pillow growth.
+        for src in &plan.pillow_sources {
+            active_pillows.entry(*src).or_insert(PillowState {
+                growth_count: 0,
+                last_growth_tick: tick_count,
+            });
+        }
+
+        // Aggregated obsidian + scoria positions to send to the worker this
+        // tick — starts with contact rim + halo, pillow growths get appended
+        // below, and inward-growth scoria gets appended after that.
+        let mut quench_obsidian = plan.obsidian.clone();
+        let mut quench_scoria = plan.scoria.clone();
+        let quench_drained = plan.drained_water.clone();
+
+        // ── Pillow growth tick ────────────────────────────────────────────
+        // Each active pillow grows by one obsidian voxel every PILLOW_GROWTH_INTERVAL_TICKS,
+        // up to PILLOW_MAX_VOXELS per source. The growth point is the closest
+        // water cell to the source — gives an outward, bulbous accretion shape.
+        let mut pillows_to_drop: Vec<(i32, i32, i32)> = Vec::new();
+        for (src_pos, state) in active_pillows.iter_mut() {
+            if state.growth_count >= PILLOW_MAX_VOXELS {
+                pillows_to_drop.push(*src_pos);
+                continue;
+            }
+            if tick_count.saturating_sub(state.last_growth_tick) < PILLOW_GROWTH_INTERVAL_TICKS {
+                continue;
+            }
+            if let Some(addr) = try_grow_pillow_voxel(*src_pos, &mut chunks, chunk_size, PILLOW_SEARCH_RADIUS) {
+                quench_obsidian.push(addr);
+                state.growth_count += 1;
+                state.last_growth_tick = tick_count;
+            }
+            // If no water in reach this tick, the pillow stalls but stays
+            // registered — water may flow back near the vent later.
+        }
+        for k in pillows_to_drop {
+            active_pillows.remove(&k);
+        }
+
+        // ── Heat zone bookkeeping ────────────────────────────────────────
+        // Add this tick's quench voxels to the hot zone (world coords) with
+        // depth info. Obsidian (rim contact + pillow growth) is depth 0;
+        // initial scoria halo is depth 1.
+        let cs_i = chunk_size as i32;
+        let cool_at = tick_count + HEAT_COOLING_TICKS;
+        for (key, lx, ly, lz) in &quench_obsidian {
+            let wx = key.0 * cs_i + *lx as i32;
+            let wy = key.1 * cs_i + *ly as i32;
+            let wz = key.2 * cs_i + *lz as i32;
+            // Don't overwrite a deeper-depth entry with depth 0 if one exists
+            // (shouldn't happen in practice but defensive).
+            hot_positions.entry((wx, wy, wz))
+                .and_modify(|info| {
+                    info.expires_tick = cool_at;
+                    info.depth = info.depth.min(0);
+                })
+                .or_insert(HotInfo { expires_tick: cool_at, depth: 0 });
+        }
+        for (key, lx, ly, lz) in &quench_scoria {
+            let wx = key.0 * cs_i + *lx as i32;
+            let wy = key.1 * cs_i + *ly as i32;
+            let wz = key.2 * cs_i + *lz as i32;
+            hot_positions.entry((wx, wy, wz))
+                .and_modify(|info| {
+                    info.expires_tick = cool_at;
+                    info.depth = info.depth.min(1);
+                })
+                .or_insert(HotInfo { expires_tick: cool_at, depth: 1 });
+        }
+
+        // ── Inward-growth pass ───────────────────────────────────────────
+        // Each tick, walk the hot rim; for every face-neighbor lava cell,
+        // roll for conversion to new scoria at depth = parent_depth + 1.
+        // Probability halves with each additional depth so the wall reaches
+        // a stable thickness (~3-4 voxels) instead of consuming the chamber.
+        //
+        // We iterate hot positions (small bounded set around contacts) not
+        // all lava cells, so cost is O(N_hot * 6) per tick — trivial.
+        let mut inward_new_scoria: Vec<((i32, i32, i32), usize, usize, usize)> = Vec::new();
+        let mut inward_new_depths: Vec<((i32, i32, i32), u8)> = Vec::new();
+        let mut converted_this_tick: HashSet<(i32, i32, i32)> = HashSet::new();
+        let hot_snapshot: Vec<((i32, i32, i32), HotInfo)> =
+            hot_positions.iter().map(|(k, v)| (*k, *v)).collect();
+        for ((wx, wy, wz), info) in &hot_snapshot {
+            let new_depth = info.depth.saturating_add(1);
+            if new_depth > INWARD_GROWTH_MAX_DEPTH {
+                continue;
+            }
+            // Halves per depth step beyond the contact: depth 2 → BASE/2,
+            // depth 3 → BASE/4, depth 4 → BASE/8 (~0.4% per tick).
+            let shift = new_depth.saturating_sub(1) as u32;
+            let denom = 1u32.checked_shl(shift).unwrap_or(u32::MAX) as f32;
+            let prob = INWARD_GROWTH_BASE_PROB / denom.max(1.0);
+
+            for &(dx, dy, dz) in &HEAT_FACE_OFFSETS {
+                let nw = (wx + dx, wy + dy, wz + dz);
+                if converted_this_tick.contains(&nw) { continue; }
+                if hot_positions.contains_key(&nw) { continue; }  // already solid
+                let key = (nw.0.div_euclid(cs_i), nw.1.div_euclid(cs_i), nw.2.div_euclid(cs_i));
+                let lx = nw.0.rem_euclid(cs_i) as usize;
+                let ly = nw.1.rem_euclid(cs_i) as usize;
+                let lz = nw.2.rem_euclid(cs_i) as usize;
+                let Some(grid) = chunks.get(&key) else { continue; };
+                let cell = grid.get(lx, ly, lz);
+                if cell.level < crate::cell::MIN_LEVEL || !cell.fluid_type.is_lava() {
+                    continue;
+                }
+                if cell.is_source { continue; }  // sources never convert (pillow handles them)
+                if quench_rng.gen::<f32>() < prob {
+                    converted_this_tick.insert(nw);
+                    inward_new_scoria.push((key, lx, ly, lz));
+                    inward_new_depths.push((nw, new_depth));
+                }
+            }
+        }
+        // Apply: drain the converted lava cells locally + register hot info
+        // so the next inward-growth tick uses the deeper depth.
+        for (key, lx, ly, lz) in &inward_new_scoria {
+            if let Some(grid) = chunks.get_mut(key) {
+                grid.get_mut(*lx, *ly, *lz).level = 0.0;
+                grid.dirty = true;
+            }
+        }
+        for (pos, depth) in inward_new_depths {
+            hot_positions.insert(pos, HotInfo { expires_tick: cool_at, depth });
+        }
+        // Send the newly-grown scoria to the worker too.
+        quench_scoria.extend(inward_new_scoria);
+
+        // Drain non-source water face-adjacent to any hot position +
+        // propagate one cell of consumption back into the connected pool
+        // (pool_pull_drain). Without the pull the main blob stays at the
+        // same volume — flow refills the contact cell as fast as it drains,
+        // so only the thin flow looks like it's being eaten. The pull pulls
+        // a connected water cell out of the back of the blob so the player
+        // sees the pool itself receding during the steaming phase.
+        let hot_snapshot_for_drain: Vec<(i32, i32, i32)> =
+            hot_positions.keys().copied().collect();
+        for (wx, wy, wz) in hot_snapshot_for_drain {
+            for &(dx, dy, dz) in &HEAT_FACE_OFFSETS {
+                let (nx, ny, nz) = (wx + dx, wy + dy, wz + dz);
+                let key = (nx.div_euclid(cs_i), ny.div_euclid(cs_i), nz.div_euclid(cs_i));
+                let lx = nx.rem_euclid(cs_i) as usize;
+                let ly = ny.rem_euclid(cs_i) as usize;
+                let lz = nz.rem_euclid(cs_i) as usize;
+                let mut drained_here = false;
+                if let Some(grid) = chunks.get_mut(&key) {
+                    let cell = grid.get_mut(lx, ly, lz);
+                    if cell.level > crate::cell::MIN_LEVEL
+                        && cell.fluid_type.is_water()
+                        && !cell.is_source
+                    {
+                        cell.level = 0.0;
+                        grid.dirty = true;
+                        drained_here = true;
+                    }
+                }
+                if drained_here {
+                    pool_pull_drain(&mut chunks, chunk_size, (nx, ny, nz));
+                }
+            }
+        }
+
+        // Refresh hot positions still face-adjacent to active lava (anywhere)
+        // — these are chamber-wall rims with magma behind them and should
+        // stay hot indefinitely. Positions whose lava has been fully sealed
+        // off or converted via inward growth will not get refreshed and will
+        // eventually cool out, letting water flow over them.
+        let now = tick_count;
+        let positions_to_check: Vec<(i32, i32, i32)> = hot_positions.keys().copied().collect();
+        for pos in positions_to_check {
+            let (wx, wy, wz) = pos;
+            for &(dx, dy, dz) in &HEAT_FACE_OFFSETS {
+                let (nx, ny, nz) = (wx + dx, wy + dy, wz + dz);
+                let key = (nx.div_euclid(cs_i), ny.div_euclid(cs_i), nz.div_euclid(cs_i));
+                let lx = nx.rem_euclid(cs_i) as usize;
+                let ly = ny.rem_euclid(cs_i) as usize;
+                let lz = nz.rem_euclid(cs_i) as usize;
+                if let Some(grid) = chunks.get(&key) {
+                    let cell = grid.get(lx, ly, lz);
+                    if cell.level > crate::cell::MIN_LEVEL && cell.fluid_type.is_lava() {
+                        if let Some(info) = hot_positions.get_mut(&pos) {
+                            info.expires_tick = cool_at;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Expire cooled-down hot positions.
+        hot_positions.retain(|_, info| info.expires_tick > now);
+
+        // Send the per-tick quench plan to the worker (engine forwards as
+        // a WorkerRequest). Voxels are written into density_fields and chunks
+        // are remeshed there.
+        if !quench_obsidian.is_empty() || !quench_scoria.is_empty() || !quench_drained.is_empty() {
+            let _ = result_tx.send(FluidResult::LavaQuench {
+                obsidian: quench_obsidian,
+                scoria: quench_scoria,
+                drained_water: quench_drained,
+            });
         }
 
         // Collect all dirty chunks
@@ -136,6 +472,7 @@ fn handle_event(
     event: FluidEvent,
     chunks: &mut HashMap<(i32, i32, i32), ChunkFluidGrid>,
     chunk_densities: &mut HashMap<(i32, i32, i32), ChunkDensityCache>,
+    pending_fluid: &mut HashMap<(i32, i32, i32), Vec<PendingFluidCell>>,
     chunk_size: usize,
     config: &mut FluidConfig,
 ) {
@@ -152,6 +489,10 @@ fn handle_event(
                 grid.update_density(&densities);
                 grid.dirty = true;
             }
+
+            // Drain any save-load pending fluid for this chunk now that the
+            // density (and therefore cell_capacity) is current.
+            apply_pending_fluid(chunks, chunk_densities, pending_fluid, chunk, chunk_size, config);
         }
         FluidEvent::PlaceSources { chunk } => {
             // Only create grid if density exists and sources are actually placed
@@ -173,14 +514,74 @@ fn handle_event(
                 squeeze_excess_fluid(grid);
                 grid.dirty = true;
             }
+
+            // Drain any save-load pending fluid for this chunk now that the
+            // density is current.
+            apply_pending_fluid(chunks, chunk_densities, pending_fluid, chunk, chunk_size, config);
         }
         FluidEvent::ChunkUnloaded { chunk } => {
+            // Preserve worth-saving fluid into pending_fluid BEFORE dropping
+            // the grid. When the chunk later re-streams, the DensityUpdate
+            // event drains pending_fluid back into the new grid via
+            // apply_pending_fluid — exactly the chunk_store
+            // preserved_snapshots lifecycle, but for fluid.
+            //
+            // Without this, walking out of a region and back loses every
+            // brush-placed lava pool / water source: ChunkUnloaded would
+            // simply remove the grid and the next DensityUpdate would land
+            // on an empty grid with no source to repopulate it.
+            //
+            // SnapshotRequest synthesizes cells for unloaded chunks from
+            // this same map so a save taken while the chunk is unloaded
+            // still captures the fluid.
+            if let Some(grid) = chunks.get(&chunk) {
+                let mut preserved: Vec<PendingFluidCell> = Vec::new();
+                for (idx, cell) in grid.cells.iter().enumerate() {
+                    if cell.is_source || cell.level > crate::cell::MIN_LEVEL {
+                        preserved.push(PendingFluidCell {
+                            idx: idx as u32,
+                            fluid_type: cell.fluid_type,
+                            level: cell.level,
+                            is_source: cell.is_source,
+                            max_flow_dist: cell.max_flow_dist,
+                        });
+                    }
+                }
+                if !preserved.is_empty() {
+                    // Replace any stale pending entries (would only exist if
+                    // a save-load PendingFluidLoad raced with this unload —
+                    // the live grid is the freshest copy).
+                    pending_fluid.insert(chunk, preserved);
+                }
+            }
             chunks.remove(&chunk);
             chunk_densities.remove(&chunk);
         }
         FluidEvent::SnapshotRequest { reply_tx } => {
+            // Loaded chunks: clone the live grid cells.
+            let mut snapshot_chunks: HashMap<(i32, i32, i32), Vec<crate::cell::FluidCell>> =
+                chunks.iter().map(|(&k, g)| (k, g.cells.clone())).collect();
+            // Unloaded chunks with preserved fluid: synthesize a sparse cell
+            // array from pending_fluid so save export sees them too. This is
+            // what makes "place fluid → walk away → save → reload" survive
+            // even when the player is far from where the fluid was placed.
+            let total = chunk_size * chunk_size * chunk_size;
+            for (chunk_key, pending) in pending_fluid.iter() {
+                if snapshot_chunks.contains_key(chunk_key) { continue; }
+                let mut cells = vec![crate::cell::FluidCell::default(); total];
+                for p in pending {
+                    let idx = p.idx as usize;
+                    if idx < total {
+                        cells[idx].fluid_type = p.fluid_type;
+                        cells[idx].level = p.level;
+                        cells[idx].is_source = p.is_source;
+                        cells[idx].max_flow_dist = p.max_flow_dist;
+                    }
+                }
+                snapshot_chunks.insert(*chunk_key, cells);
+            }
             let snapshot = FluidSnapshot {
-                chunks: chunks.iter().map(|(&k, g)| (k, g.cells.clone())).collect(),
+                chunks: snapshot_chunks,
                 chunk_size,
             };
             let _ = reply_tx.send(snapshot);
@@ -259,6 +660,60 @@ fn handle_event(
                 }
             }
         }
+        FluidEvent::PendingFluidLoad { chunk, cells } => {
+            // Stash the cells; they'll be applied on the next DensityUpdate
+            // or TerrainModified for this chunk. If the density is already
+            // cached (chunk was streamed before fluid load was issued), drain
+            // immediately so the player sees fluid without waiting.
+            pending_fluid.entry(chunk).or_default().extend(cells);
+            if chunk_densities.contains_key(&chunk) {
+                apply_pending_fluid(chunks, chunk_densities, pending_fluid, chunk, chunk_size, config);
+            }
+        }
+    }
+}
+
+/// Drain pending fluid for `chunk` and apply each cell to the live grid.
+/// Same gating logic as the AddFluid event handler: requires the cell to
+/// be reachable (cell_capacity > MIN_LEVEL and not mostly solid). Sources
+/// are restored at MAX_LEVEL with hops_from_source=0.
+fn apply_pending_fluid(
+    chunks: &mut HashMap<(i32, i32, i32), ChunkFluidGrid>,
+    chunk_densities: &HashMap<(i32, i32, i32), ChunkDensityCache>,
+    pending_fluid: &mut HashMap<(i32, i32, i32), Vec<PendingFluidCell>>,
+    chunk: (i32, i32, i32),
+    chunk_size: usize,
+    config: &FluidConfig,
+) {
+    let Some(cells) = pending_fluid.remove(&chunk) else { return; };
+    if cells.is_empty() { return; }
+
+    ensure_grid(chunks, chunk_densities, chunk, chunk_size);
+    let Some(grid) = chunks.get_mut(&chunk) else { return; };
+    let size = chunk_size;
+    for cell in cells {
+        let idx = cell.idx as usize;
+        let total = size * size * size;
+        if idx >= total { continue; }
+        let xu = idx % size;
+        let yu = (idx / size) % size;
+        let zu = idx / (size * size);
+        if grid.cell_capacity(xu, yu, zu) <= crate::cell::MIN_LEVEL { continue; }
+        if grid.is_mostly_solid(xu, yu, zu, config.solid_corner_threshold) { continue; }
+
+        let dst = grid.get_mut(xu, yu, zu);
+        dst.fluid_type = cell.fluid_type;
+        dst.level = cell.level;
+        dst.is_source = cell.is_source;
+        if cell.is_source {
+            dst.level = crate::cell::MAX_LEVEL;
+            dst.hops_from_source = 0;
+            dst.max_flow_dist = cell.max_flow_dist;
+        } else if cell.level >= 0.99 {
+            dst.grace_ticks = config.source_grace_ticks;
+        }
+        grid.dirty = true;
+        grid.has_fluid = true;
     }
 }
 

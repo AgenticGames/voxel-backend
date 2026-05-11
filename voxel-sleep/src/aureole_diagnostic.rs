@@ -558,6 +558,67 @@ mod tests {
         eprintln!("═══ PASS ═══\n");
     }
 
+    // ─── Test 4b: Basalt-hosted aureole produces Amphibolite ─────────────
+
+    #[test]
+    fn test_aureole_basalt_produces_amphibolite() {
+        eprintln!("\n═══ TEST: Basalt + Lava → Amphibolite aureole ═══");
+
+        let mut density_fields: HashMap<(i32, i32, i32), DensityField> = HashMap::new();
+        let mut chunks = Vec::new();
+        for cx in -1..=1 {
+            for cy in -1..=1 {
+                for cz in -1..=1 {
+                    let key = (cx, cy, cz);
+                    density_fields.insert(key, make_solid_field(Material::Basalt));
+                    chunks.push(key);
+                }
+            }
+        }
+        chunks.sort();
+
+        let mut fluid = FluidSnapshot::default();
+        let mut lava_positions = Vec::new();
+        for lz in 7..=9 {
+            for ly in 7..=9 {
+                for lx in 7..=9 {
+                    lava_positions.push((lx, ly, lz));
+                }
+            }
+        }
+        place_lava(&mut fluid, (0, 0, 0), &lava_positions);
+
+        let mut config = AureoleConfig::default();
+        config.zone_enabled = true;
+        config.metamorphism_enabled = true;
+        config.water_erosion_enabled = false;
+        config.min_lava_zone_size = 1;
+
+        let heat_map = build_heat_map(&density_fields, &fluid, &chunks, CHUNK_SIZE);
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let groundwater = GroundwaterConfig::default();
+        let census = make_empty_census();
+
+        let result = apply_aureole(
+            &config, &groundwater, &mut density_fields, &mut fluid,
+            &heat_map, &chunks, CHUNK_SIZE, &mut rng, &census,
+        );
+
+        eprintln!("  Result: {} amphibolite, {} hornfels, {} skarn, {} veins",
+            result.amphibolite_placed, result.hornfels_placed,
+            result.skarn_placed, result.veins_placed);
+
+        // Basalt → Amphibolite (NOT Hornfels, NOT Skarn)
+        assert!(result.amphibolite_placed > 0, "Expected amphibolite from basalt aureole");
+        assert_eq!(result.skarn_placed, 0, "Expected NO skarn in pure basalt world");
+        assert_eq!(result.hornfels_placed, 0, "Expected NO hornfels in pure basalt world");
+        // Veins=0 is fine in a pure-solid world (no air for boundary seeds);
+        // a real game world has caves, so vein seeding kicks in there.
+        eprintln!("  ✓ Basalt correctly produces Amphibolite (vein seeding requires air-adjacent voxels)");
+
+        eprintln!("═══ PASS ═══\n");
+    }
+
     // ─── Test 5: No lava → no aureole ─────────────────────────────────────
 
     #[test]

@@ -198,60 +198,226 @@ pub fn equalize_horizontal(
     dirty
 }
 
-/// Detect water-lava contact and return cells to solidify (become basalt).
+/// (chunk_key, local x, y, z) — chunk-local cell address used by quench plans.
+pub type CellAddr = ((i32, i32, i32), usize, usize, usize);
+
+/// Result of `detect_lava_water_quench` — structured plan for one tick's worth
+/// of contact-driven solidification. Applied by the worker thread (which owns
+/// the density fields) on the next FluidResult poll.
+#[derive(Debug, Default, Clone)]
+pub struct QuenchPlan {
+    /// Lava cells in direct contact with water — become **Obsidian** voxels.
+    /// (Glassy quench skin: real-world lava entering water freezes into a
+    /// thin obsidian rind in seconds.)
+    pub obsidian: Vec<CellAddr>,
+    /// Lava cells one or more rings inward from the obsidian rim — become
+    /// **Scoria** voxels. Depth is volume-aware: bigger lava chambers produce
+    /// thicker scoria zones (1 voxel for an isolated drip, up to 3 for a
+    /// chamber interior).
+    pub scoria: Vec<CellAddr>,
+    /// Water cells touching the obsidian rim — drained (vaporized as steam).
+    pub drained_water: Vec<CellAddr>,
+    /// World voxel positions of lava SOURCE cells currently touching water.
+    /// Sources are never solidified (real-world pillow lava: the vent keeps
+    /// producing magma indefinitely); instead they're registered for ongoing
+    /// pillow-mound growth handled by the fluid sim's pillow state machine.
+    pub pillow_sources: Vec<(i32, i32, i32)>,
+}
+
+const QUENCH_FACE_OFFSETS: [(i32, i32, i32); 6] = [
+    (1, 0, 0), (-1, 0, 0),
+    (0, 1, 0), (0, -1, 0),
+    (0, 0, 1), (0, 0, -1),
+];
+
+#[inline]
+fn in_bounds(p: (i32, i32, i32), size: i32) -> bool {
+    p.0 >= 0 && p.0 < size && p.1 >= 0 && p.1 < size && p.2 >= 0 && p.2 < size
+}
+
+/// Detect lava-water contacts and build a structured solidification plan.
 ///
-/// A water cell adjacent to a lava source becomes basalt (obsidian-like).
-/// Returns list of (chunk_key, x, y, z) positions to solidify.
-pub fn detect_solidification(
+/// Replaces the older `detect_solidification` which only knew about "one
+/// material" rims. This version produces a layered Obsidian + Scoria wall
+/// with thickness scaled to the local lava cluster size:
+/// - 0..=2 lava face-neighbors of the contact cell → scoria depth 1
+/// - 3..=4 → scoria depth 2
+/// - 5..=6 → scoria depth 3 (the contact cell sits at a chamber face)
+///
+/// Sources are never marked for solidification themselves; they are returned
+/// in `pillow_sources` so the caller can grow a pillow mound around them
+/// over many ticks. The BFS for scoria stays inside the contact cell's
+/// chunk — cross-chunk continuation gets a slightly thinner scoria layer
+/// at the boundary, which is acceptable for visual purposes.
+pub fn detect_lava_water_quench(
     chunks: &HashMap<(i32, i32, i32), ChunkFluidGrid>,
-) -> Vec<((i32, i32, i32), usize, usize, usize)> {
-    let mut solidify = Vec::new();
+) -> QuenchPlan {
+    let mut obsidian_set: HashSet<CellAddr> = HashSet::new();
+    let mut scoria_set: HashSet<CellAddr> = HashSet::new();
+    let mut drained_set: HashSet<CellAddr> = HashSet::new();
+    let mut pillow_set: HashSet<(i32, i32, i32)> = HashSet::new();
+
+    // First pass: identify contact lava cells (non-source) + drain candidates.
+    // Each entry: (chunk_key, x, y, z) of a lava cell touching water.
+    let mut contact_cells: Vec<CellAddr> = Vec::new();
 
     for (&key, grid) in chunks {
         if !grid.has_fluid {
             continue;
         }
         let size = grid.size;
+        let sz = size as i32;
         for z in 0..size {
             for y in 0..size {
                 for x in 0..size {
                     let cell = grid.get(x, y, z);
-                    if cell.level < MIN_LEVEL {
+                    if cell.level < MIN_LEVEL || !cell.fluid_type.is_lava() {
                         continue;
                     }
-
-                    // Check if this is a lava cell adjacent to water (or vice versa)
-                    let is_lava = cell.fluid_type.is_lava();
-                    let neighbors: [(i32, i32, i32); 6] = [
-                        (x as i32 + 1, y as i32, z as i32),
-                        (x as i32 - 1, y as i32, z as i32),
-                        (x as i32, y as i32 + 1, z as i32),
-                        (x as i32, y as i32 - 1, z as i32),
-                        (x as i32, y as i32, z as i32 + 1),
-                        (x as i32, y as i32, z as i32 - 1),
-                    ];
-
-                    for (nx, ny, nz) in neighbors {
-                        if nx < 0 || nx >= size as i32 || ny < 0 || ny >= size as i32 || nz < 0 || nz >= size as i32 {
+                    let mut touches_water = false;
+                    for &(dx, dy, dz) in &QUENCH_FACE_OFFSETS {
+                        let np = (x as i32 + dx, y as i32 + dy, z as i32 + dz);
+                        if !in_bounds(np, sz) {
                             continue;
                         }
-                        let n = grid.get(nx as usize, ny as usize, nz as usize);
-                        if n.level < MIN_LEVEL {
+                        let n = grid.get(np.0 as usize, np.1 as usize, np.2 as usize);
+                        if n.level < MIN_LEVEL || !n.fluid_type.is_water() {
                             continue;
                         }
-                        let n_is_lava = n.fluid_type.is_lava();
-                        if is_lava && !n_is_lava {
-                            // Lava touched water: lava solidifies
-                            solidify.push((key, x, y, z));
-                            break;
+                        touches_water = true;
+                        if !n.is_source {
+                            drained_set.insert((key, np.0 as usize, np.1 as usize, np.2 as usize));
                         }
+                    }
+                    if !touches_water {
+                        continue;
+                    }
+                    if cell.is_source {
+                        // Source vent: register for pillow growth, don't quench the source itself.
+                        let wx = key.0 * sz + x as i32;
+                        let wy = key.1 * sz + y as i32;
+                        let wz = key.2 * sz + z as i32;
+                        pillow_set.insert((wx, wy, wz));
+                    } else {
+                        obsidian_set.insert((key, x, y, z));
+                        contact_cells.push((key, x, y, z));
                     }
                 }
             }
         }
     }
 
-    solidify
+    // Second pass: BFS inward from each obsidian cell through lava to build
+    // the scoria halo. Depth is volume-aware (count of lava face-neighbors
+    // at the contact point).
+    for &(key, x, y, z) in &contact_cells {
+        let Some(grid) = chunks.get(&key) else { continue; };
+        let size = grid.size;
+        let sz = size as i32;
+
+        // Volume sense: how surrounded by lava is the contact cell?
+        let mut lava_n: u8 = 0;
+        for &(dx, dy, dz) in &QUENCH_FACE_OFFSETS {
+            let np = (x as i32 + dx, y as i32 + dy, z as i32 + dz);
+            if !in_bounds(np, sz) { continue; }
+            let n = grid.get(np.0 as usize, np.1 as usize, np.2 as usize);
+            if n.level >= MIN_LEVEL && n.fluid_type.is_lava() {
+                lava_n += 1;
+            }
+        }
+        let scoria_depth: u8 = if lava_n >= 5 { 3 } else if lava_n >= 3 { 2 } else { 1 };
+
+        // Frontier BFS within this chunk
+        let mut visited: HashSet<(usize, usize, usize)> = HashSet::new();
+        visited.insert((x, y, z));
+        let mut frontier: Vec<(usize, usize, usize)> = vec![(x, y, z)];
+        for _ in 0..scoria_depth {
+            let mut next: Vec<(usize, usize, usize)> = Vec::new();
+            for (px, py, pz) in frontier.drain(..) {
+                for &(dx, dy, dz) in &QUENCH_FACE_OFFSETS {
+                    let np = (px as i32 + dx, py as i32 + dy, pz as i32 + dz);
+                    if !in_bounds(np, sz) { continue; }
+                    let pos = (np.0 as usize, np.1 as usize, np.2 as usize);
+                    if !visited.insert(pos) { continue; }
+                    let n = grid.get(pos.0, pos.1, pos.2);
+                    if n.level < MIN_LEVEL || !n.fluid_type.is_lava() { continue; }
+                    if n.is_source { continue; }
+                    let addr = (key, pos.0, pos.1, pos.2);
+                    if obsidian_set.contains(&addr) { continue; }
+                    scoria_set.insert(addr);
+                    next.push(pos);
+                }
+            }
+            frontier = next;
+            if frontier.is_empty() { break; }
+        }
+    }
+
+    QuenchPlan {
+        obsidian: obsidian_set.into_iter().collect(),
+        scoria: scoria_set.into_iter().collect(),
+        drained_water: drained_set.into_iter().collect(),
+        pillow_sources: pillow_set.into_iter().collect(),
+    }
+}
+
+/// Try to grow one new obsidian voxel around an active pillow source.
+/// Picks the closest water cell (Chebyshev distance) within `max_radius` of
+/// the source and converts it to obsidian, draining it locally. Returns the
+/// cell address to add to the next QuenchPlan, or None if no suitable water
+/// is within reach (pillow stalls until water returns / cap is hit).
+///
+/// The closest-first scan gives bulbous outward growth: the pillow expands
+/// uniformly around the source instead of streaking in one direction.
+pub fn try_grow_pillow_voxel(
+    source_pos_world: (i32, i32, i32),
+    chunks: &mut HashMap<(i32, i32, i32), ChunkFluidGrid>,
+    chunk_size: usize,
+    max_radius: i32,
+) -> Option<CellAddr> {
+    let (sx, sy, sz) = source_pos_world;
+    let cs = chunk_size as i32;
+    let r = max_radius.max(1);
+    // Scan rings of increasing Chebyshev distance so we pick the closest water.
+    for d in 1..=r {
+        for dz in -d..=d {
+            for dy in -d..=d {
+                for dx in -d..=d {
+                    // Only consider the ring at exactly Chebyshev distance `d`
+                    if dx.abs().max(dy.abs()).max(dz.abs()) != d {
+                        continue;
+                    }
+                    let (wx, wy, wz) = (sx + dx, sy + dy, sz + dz);
+                    let key = (wx.div_euclid(cs), wy.div_euclid(cs), wz.div_euclid(cs));
+                    let lx = wx.rem_euclid(cs) as usize;
+                    let ly = wy.rem_euclid(cs) as usize;
+                    let lz = wz.rem_euclid(cs) as usize;
+                    let Some(grid) = chunks.get_mut(&key) else { continue; };
+                    let cell = grid.get_mut(lx, ly, lz);
+                    if cell.level < MIN_LEVEL { continue; }
+                    if !cell.fluid_type.is_water() { continue; }
+                    if cell.is_source { continue; }
+                    // Drain the water cell locally; the worker will turn its
+                    // voxel into Obsidian on the next FluidResult poll.
+                    cell.level = 0.0;
+                    grid.dirty = true;
+                    return Some((key, lx, ly, lz));
+                }
+            }
+        }
+    }
+    None
+}
+
+// Kept for ABI compatibility — callers should migrate to detect_lava_water_quench.
+/// Detect water-lava contact and return cells to solidify (legacy single-list path).
+/// **DEPRECATED**: use `detect_lava_water_quench` for the layered obsidian + scoria
+/// + pillow source plan.
+#[allow(dead_code)]
+pub fn detect_solidification(
+    chunks: &HashMap<(i32, i32, i32), ChunkFluidGrid>,
+) -> Vec<((i32, i32, i32), usize, usize, usize)> {
+    detect_lava_water_quench(chunks).obsidian
 }
 
 /// Regenerate source blocks: source cells always maintain SOURCE_LEVEL.

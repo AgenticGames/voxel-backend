@@ -6,16 +6,20 @@ use voxel_noise::{simplex::Simplex3D, NoiseSource};
 use crate::density::DensityField;
 use crate::material::Material;
 
-/// Serde helper for [f32; 47] (serde doesn't impl Serialize/Deserialize for arrays > 32).
-mod serde_f32_array_47 {
+/// Serde helper for [f32; 50] (serde doesn't impl Serialize/Deserialize for arrays > 32).
+mod serde_f32_array_50 {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    pub fn serialize<S: Serializer>(arr: &[f32; 47], s: S) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(arr: &[f32; 50], s: S) -> Result<S::Ok, S::Error> {
         arr.as_slice().serialize(s)
     }
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[f32; 47], D::Error> {
-        let v: Vec<f32> = Vec::deserialize(d)?;
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[f32; 50], D::Error> {
+        let mut v: Vec<f32> = Vec::deserialize(d)?;
+        // Tolerate older saved configs sized 47 by zero-padding the new tail entries.
+        if v.len() == 47 {
+            v.resize(50, 0.0);
+        }
         v.try_into().map_err(|v: Vec<f32>| serde::de::Error::custom(
-            format!("expected 47 elements, got {}", v.len())))
+            format!("expected 50 elements, got {}", v.len())))
     }
 }
 
@@ -257,7 +261,7 @@ fn any_supports_in_radius_box(
 
 /// Default hardness per Material (index by Material as u8).
 /// Air = 0.0 (no resistance). Higher = harder to collapse.
-pub const DEFAULT_MATERIAL_HARDNESS: [f32; 47] = [
+pub const DEFAULT_MATERIAL_HARDNESS: [f32; 50] = [
     0.0,   // Air
     0.45,  // Sandstone (soft)
     0.55,  // Limestone
@@ -305,6 +309,9 @@ pub const DEFAULT_MATERIAL_HARDNESS: [f32; 47] = [
     0.10,  // PurpleCap (organic, soft)
     0.10,  // TealCap (organic, soft)
     0.10,  // AmberCap (organic, soft)
+    0.20,  // IceSheet (chunky fractured ice)
+    0.15,  // FrozenGlow (luminous icicle drip)
+    0.78,  // Amphibolite (hard metabasite, hornblende-rich)
 ];
 
 /// Support hardness values (how much stress each support type absorbs).
@@ -325,8 +332,8 @@ pub const SUPPORT_HARDNESS: [f32; 8] = [
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StressConfig {
     /// Per-material hardness thresholds (indexed by Material as u8).
-    #[serde(with = "serde_f32_array_47")]
-    pub material_hardness: [f32; 47],
+    #[serde(with = "serde_f32_array_50")]
+    pub material_hardness: [f32; 50],
     /// Weight per solid voxel above (column load factor).
     pub gravity_weight: f32,
     /// Contribution factor for lateral (side) neighbors.
@@ -1694,6 +1701,34 @@ pub fn detect_and_execute_collapses_v2_with_options(
     chunk_size: usize,
     defer_pile: bool,
 ) -> Vec<CollapseEventV2> {
+    detect_and_execute_collapses_v2_with_force(
+        density_fields,
+        stress_fields,
+        _support_fields,
+        overstressed,
+        config,
+        chunk_size,
+        defer_pile,
+        false, // force_collapse — default off, natural filters apply
+    )
+}
+
+/// Like `detect_and_execute_collapses_v2_with_options` but with an extra
+/// `force_collapse` flag. When set, the grounding filter (`landing_offset
+/// <= 0`) is bypassed and grounded regions are forced to "fall" a small
+/// default distance — used by scripted editor triggers that need to
+/// collapse cave walls / pillars / dome rock that's physically supported
+/// by surrounding terrain but the designer has authored to fall anyway.
+pub fn detect_and_execute_collapses_v2_with_force(
+    density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
+    stress_fields: &mut HashMap<(i32, i32, i32), StressField>,
+    _support_fields: &HashMap<(i32, i32, i32), SupportField>,
+    overstressed: &[OverstressedVoxel],
+    config: &StressConfig,
+    chunk_size: usize,
+    defer_pile: bool,
+    force_collapse: bool,
+) -> Vec<CollapseEventV2> {
     if overstressed.is_empty() {
         return Vec::new();
     }
@@ -1738,9 +1773,22 @@ pub fn detect_and_execute_collapses_v2_with_options(
                             continue;
                         }
 
-                        // Include if overstressed OR if solid with stress >= cohesion threshold
+                        // Include neighbor if:
+                        //  - it's already in the overstressed seed set, OR
+                        //  - (natural only) it's solid AND has natural stress
+                        //    above the cohesion threshold.
+                        //
+                        // For force_collapse, the slab is EXACTLY the painted
+                        // seed set. We do NOT BFS-expand into surrounding rock —
+                        // earlier attempts at "expand to all connected solid"
+                        // flooded ±2000 cells around the painted region, creating
+                        // collapses far from where the designer painted. Stick
+                        // to what was painted; if the designer wants a bigger
+                        // slab, they paint more cells.
                         let include = if overstressed_set.contains(&neighbor) {
                             true
+                        } else if force_collapse {
+                            false
                         } else {
                             let (nkey, nlx, nly, nlz) = world_to_chunk_local(
                                 neighbor.0, neighbor.1, neighbor.2, chunk_size,
@@ -1829,8 +1877,11 @@ pub fn detect_and_execute_collapses_v2_with_options(
             .map(|(&k, &v)| (k, v))
             .collect();
 
-        if fallable_columns.is_empty() {
-            continue; // No columns can fall — entire region is embedded in solid
+        if fallable_columns.is_empty() && !force_collapse {
+            continue; // No columns can fall — entire region is embedded in solid.
+            // Scripted triggers (force_collapse=true) still proceed: the
+            // grounding bypass below applies a default fall distance so the
+            // cinematic plays even for rock with no natural fall path.
         }
 
         // Compute fall offset per column, then use MEDIAN (not minimum).
@@ -1864,15 +1915,29 @@ pub fn detect_and_execute_collapses_v2_with_options(
         }
 
         column_offsets.sort();
-        let landing_offset = if column_offsets.is_empty() {
+        let mut landing_offset = if column_offsets.is_empty() {
             0
         } else {
             column_offsets[column_offsets.len() / 2] // median
         };
 
         if landing_offset <= 0 {
-            continue; // Median says slab is grounded
+            if force_collapse {
+                // Scripted trigger AND no natural fall path. Use a small
+                // default so the pile lands close to the painted region
+                // rather than tunneling far below into solid rock.
+                landing_offset = 4;
+            } else {
+                continue; // Median says slab is grounded
+            }
         }
+        // Note: for force_collapse with a meaningful natural fall distance,
+        // trust the natural median. The earlier behavior (force min 8) put
+        // the pile too far below the painted region — e.g. painted tunnel
+        // ceiling, pile would land 320 UU below the tunnel floor inside
+        // solid rock, making the cinematic look like "rock appeared
+        // somewhere unrelated." Now the pile lands on the tunnel floor,
+        // right under the hole, like a normal cave-in.
 
         let landing_y = bb_min.1 - landing_offset;
 
@@ -2388,7 +2453,7 @@ mod tests {
 
     #[test]
     fn hardness_tables_correct_length() {
-        assert_eq!(DEFAULT_MATERIAL_HARDNESS.len(), 47);
+        assert_eq!(DEFAULT_MATERIAL_HARDNESS.len(), 50);
         assert_eq!(SUPPORT_HARDNESS.len(), 8);
     }
 

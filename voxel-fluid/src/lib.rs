@@ -160,6 +160,25 @@ pub enum FluidEvent {
     DrainLavaChunks {
         chunks: Vec<(i32, i32, i32)>,
     },
+    /// Restore fluid state from a save file. The fluid thread holds these
+    /// entries until the matching chunk receives a DensityUpdate or
+    /// TerrainModified event (so cell_capacity matches the post-load
+    /// terrain), then applies them via the same path as AddFluid.
+    PendingFluidLoad {
+        chunk: (i32, i32, i32),
+        cells: Vec<PendingFluidCell>,
+    },
+}
+
+/// One fluid cell waiting to be applied once the chunk's density arrives.
+#[derive(Debug, Clone, Copy)]
+pub struct PendingFluidCell {
+    /// Linear cell index inside the chunk's flat array (z*size² + y*size + x).
+    pub idx: u32,
+    pub fluid_type: cell::FluidType,
+    pub level: f32,
+    pub is_source: bool,
+    pub max_flow_dist: u8,
 }
 
 /// Results sent from the fluid simulation thread back to the engine.
@@ -169,8 +188,23 @@ pub enum FluidResult {
         chunk: (i32, i32, i32),
         mesh: FluidMeshData,
     },
-    /// Request to solidify lava cells into basalt in the terrain.
+    /// **DEPRECATED**: legacy single-list quench (lava→basalt). Replaced by
+    /// `LavaQuench` which carries the full Obsidian + Scoria + drain plan.
+    /// Kept so older callers don't fail to compile.
     SolidifyRequest {
         positions: Vec<((i32, i32, i32), usize, usize, usize)>,
+    },
+    /// Live lava↔water contact solidification plan, produced by the fluid
+    /// sim each tick. The worker thread applies these voxel writes:
+    /// `obsidian` cells become Material::Obsidian voxels (glassy quench skin),
+    /// `scoria` cells become Material::Scoria (steam-altered halo, thicker
+    /// for bigger lava chambers), `drained_water` cells get their fluid level
+    /// zeroed in the density field's neighbor sync. `pillow_sources` tracks
+    /// lava SOURCE cells currently in contact — the fluid sim grows a
+    /// pillow mound around each of them over many ticks.
+    LavaQuench {
+        obsidian: Vec<((i32, i32, i32), usize, usize, usize)>,
+        scoria: Vec<((i32, i32, i32), usize, usize, usize)>,
+        drained_water: Vec<((i32, i32, i32), usize, usize, usize)>,
     },
 }

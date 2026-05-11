@@ -249,6 +249,13 @@ pub fn natural_floor_y_iso(
 /// Apply a write decision to ALL chunks sharing this world cell. The decision
 /// closure looks at current density+material and returns Some((new_density,
 /// new_material)) or None to skip. Tracks every actual write in `written`.
+///
+/// Hot path: ~95% of cells inside a flatten/pile/brush zone are *interior*
+/// (`lx,ly,lz` all > 0) and live in exactly one chunk. The fast path below
+/// does the single-chunk write directly and skips `cell_locations` —
+/// avoiding the 8-slot `[Option<...>; 8]` build, the 3 nested for-loops, and
+/// the `into_iter().flatten()` machinery. Only cells that sit on a chunk
+/// boundary (any of `lx`/`ly`/`lz` == 0) take the multi-chunk fan-out path.
 pub fn write_all_locations<F>(
     fields: &mut HashMap<(i32, i32, i32), DensityField>,
     cs: i32,
@@ -261,6 +268,40 @@ pub fn write_all_locations<F>(
 where
     F: Fn(f32, Material) -> Option<(f32, Material)>,
 {
+    // Interior fast path — single chunk, no fan-out needed.
+    let lx_i = wx.rem_euclid(cs);
+    let ly_i = wy.rem_euclid(cs);
+    let lz_i = wz.rem_euclid(cs);
+    if lx_i > 0 && ly_i > 0 && lz_i > 0 {
+        let key = (wx.div_euclid(cs), wy.div_euclid(cs), wz.div_euclid(cs));
+        if let Some(df) = fields.get_mut(&key) {
+            let lx = lx_i as usize;
+            let ly = ly_i as usize;
+            let lz = lz_i as usize;
+            let s = df.get_mut(lx, ly, lz);
+            let orig_density = s.density;
+            let orig_material = s.material;
+            if let Some((new_d, new_m)) = decide(orig_density, orig_material) {
+                if (orig_density - new_d).abs() > 1e-3 || orig_material != new_m {
+                    *changed_count += 1;
+                }
+                s.density = new_d;
+                s.material = new_m;
+                dirty_set.insert(key);
+                written.push(WrittenCell {
+                    key,
+                    lx, ly, lz,
+                    new_density: new_d,
+                    new_material: new_m,
+                    orig_density,
+                    orig_material,
+                });
+            }
+        }
+        return;
+    }
+
+    // Boundary fan-out path — cell is shared by 2/4/8 chunks; write to each.
     for slot in cell_locations(cs, wx, wy, wz).into_iter().flatten() {
         let (key, lx, ly, lz) = slot;
         if let Some(df) = fields.get_mut(&key) {

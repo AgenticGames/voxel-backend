@@ -16,6 +16,56 @@ pub struct FfiChunkCoord {
     pub z: i32,
 }
 
+/// Voxel coordinate (3 × i32). Identical layout to FfiChunkCoord — kept as
+/// a distinct type so call sites self-document whether they're passing a
+/// per-voxel position or a chunk key.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiVoxelCoord {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+}
+
+/// Inclusive AABB in world voxel coordinates. Matches
+/// `crate::triggers::VoxelAabb`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiVoxelAabb {
+    pub min: FfiVoxelCoord,
+    pub max: FfiVoxelCoord,
+}
+
+/// Summary record for an editor collapse trigger. Returned by
+/// `voxel_get_trigger_info`. Names are stored inline (truncated to 63
+/// chars + NUL) so UE never has to free per-trigger heap allocations.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiTriggerInfo {
+    pub id: u32,
+    pub armed: u8,
+    /// 0 = OnFirstMine, 1 = OnPillarLoss
+    pub activation_kind: u8,
+    /// For OnPillarLoss: number of pillars (max 8 reported here; the trigger
+    /// internally can hold more). For OnFirstMine: 1 (the trigger volume).
+    pub volume_count: u8,
+    /// 0 = AnyPillar, 1 = NPillars, 2 = AllPillars. Ignored for OnFirstMine.
+    pub loss_condition: u8,
+    pub loss_n: u8,
+    pub _padding: [u8; 3],
+    pub loss_threshold: f32,
+    pub fall_distance_uu: f32,
+    pub slab_voxel_count: u32,
+    pub pile_chunk_count: u32,
+    /// Primary volume: trigger_volume (OnFirstMine) or volumes[0] (OnPillarLoss).
+    pub primary_volume: FfiVoxelAabb,
+    /// Up to 8 pillar volumes inline (OnPillarLoss only). Unused entries are
+    /// zeroed. For triggers with >8 pillars, only the first 8 are reported.
+    pub pillar_volumes: [FfiVoxelAabb; 8],
+    /// Name as UTF-8, NUL-terminated, max 63 chars + NUL.
+    pub name: [u8; 64],
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct FfiSubmesh {
@@ -1086,6 +1136,21 @@ pub struct FfiEngineConfig {
     // 1 = skip all decoration phases (caverns, worms, pools, formations, zones)
     // and emit uniform host rock for hand-authoring with creative brushes.
     pub blank_canvas: u8,
+    // ── Basalt aureole (Amphibolite) deposit settings ──
+    // Appended at the end to avoid shifting offsets of pre-existing fields.
+    pub sleep_amphibolite_pyrite_pocket_count: u32,
+    pub sleep_amphibolite_garnet_pocket_count: u32,
+    pub sleep_amphibolite_pyrite_compact_size: u32,
+    pub sleep_aureole_amphibolite_pyrite_per_n_cells: f32,
+    pub sleep_aureole_amphibolite_garnet_per_n_cells: f32,
+    // ── Hydrothermal water-boost v2 (Phase 1 BFS + connected supply network) ──
+    // Appended at end (FFI sync rule: never insert into middle).
+    pub sleep_aureole_water_phase1_weight: f32,
+    pub sleep_aureole_water_phase2_weight: f32,
+    pub sleep_aureole_water_network_max_hops: u32,
+    pub sleep_aureole_water_to_lava_ratio: f32,
+    pub sleep_aureole_water_phase1_max_floor: u32,
+    pub sleep_aureole_water_count_mult: f32,
 }
 
 // FfiZoneDescriptor is defined near the top of this file, alongside FfiZoneData.
@@ -1161,6 +1226,38 @@ pub struct FfiBrushFormationRequest {
     pub _pad: [u8; 2],
     pub height: f32,    // UE units
     pub radius: f32,    // UE units
+}
+
+/// Formation Stamp brush — runs the full worldgen formation pipeline
+/// (random mix of stalactites/columns/drapery/etc. picked per the live
+/// FormationConfig) on chunks overlapping a sphere, anchored within it.
+/// `seed` randomizes the pick so re-stamping gives a different vibe.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiBrushFormationStampRequest {
+    pub world_x: f32,
+    pub world_y: f32,
+    pub world_z: f32,
+    pub radius: f32,    // UE units
+    pub seed: u32,
+}
+
+/// Cavern Stamp brush — chunk-snapped cave generator. Runs worldgen worm
+/// carving (additively — existing edits in the chunks survive) on a NxMxK
+/// chunk region, optionally with lava tubes/rivers + pools/formations.
+/// `chunk_x/y/z` is the lo-corner chunk in Rust chunk coords.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiBrushCavernStampRequest {
+    pub chunk_x: i32,
+    pub chunk_y: i32,
+    pub chunk_z: i32,
+    pub extent_x: u8,
+    pub extent_y: u8,
+    pub extent_z: u8,
+    pub decorate: u8,  // 0/1 — also run pools + formations
+    pub fluids: u8,    // 0/1 — also run lava tubes + rivers
+    pub seed: u32,
 }
 
 /// Axis-aligned-or-yawed box brush. `op`: 0=paint, 1=carve, 2=fill.
@@ -1373,7 +1470,7 @@ unsafe impl Sync for FfiCollapseEventV2 {}
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct FfiStressConfig {
-    pub material_hardness: [f32; 47],
+    pub material_hardness: [f32; 50],
     pub gravity_weight: f32,
     pub lateral_support_factor: f32,
     pub vertical_support_factor: f32,
@@ -1489,6 +1586,15 @@ pub struct ConvertedFluidMesh {
 
 /// Messages sent to worker threads.
 pub enum WorkerRequest {
+    /// Apply a lava↔water quench plan from the fluid sim.
+    /// Writes Obsidian voxels at the contact rim and Scoria voxels in the
+    /// inward halo, then remeshes the affected chunks. Sources are NOT in
+    /// this list — they stay alive and grow via the fluid sim's pillow state.
+    ApplyLavaQuench {
+        obsidian: Vec<((i32, i32, i32), usize, usize, usize)>,
+        scoria: Vec<((i32, i32, i32), usize, usize, usize)>,
+        drained_water: Vec<((i32, i32, i32), usize, usize, usize)>,
+    },
     Generate {
         chunk: (i32, i32, i32),
         generation: u64,
@@ -1590,6 +1696,27 @@ pub enum WorkerRequest {
         height: f32,   // Rust world units
         radius: f32,   // Rust world units
     },
+    /// Formation Stamp brush — runs the full worldgen formation pipeline,
+    /// spatially clipped to a sphere, with per-call randomized seed.
+    BrushFormationStamp {
+        center_rust: glam::Vec3,
+        radius: f32,   // Rust world units
+        seed: u32,
+    },
+    /// Cavern Stamp brush — chunk-snapped cave generator over NxMxK chunks.
+    BrushCavernStamp {
+        chunk_origin: (i32, i32, i32),
+        extent: (u8, u8, u8),
+        decorate: bool,
+        fluids: bool,
+        seed: u32,
+    },
+    /// Diagnostic action: re-sync a single chunk's boundaries with all 6
+    /// face neighbors and re-mesh anything modified. Used by the UE
+    /// "Force Resync" button to repair seam mismatches without a full
+    /// quit+reload — handy when the in-memory state has drifted from
+    /// neighbors via mid-session brush/snapshot/regen paths.
+    ForceChunkResync { chunk: (i32, i32, i32) },
     /// Axis-aligned-or-yawed box brush.
     BrushBox {
         center_rust: glam::Vec3,
@@ -1679,6 +1806,13 @@ pub enum WorkerResult {
     },
     SolidifyRequest {
         positions: Vec<((i32, i32, i32), usize, usize, usize)>,
+    },
+    /// Live lava↔water quench plan from the fluid sim — apply Obsidian +
+    /// Scoria voxel writes, drain water cells, and remesh affected chunks.
+    LavaQuench {
+        obsidian: Vec<((i32, i32, i32), usize, usize, usize)>,
+        scoria: Vec<((i32, i32, i32), usize, usize, usize)>,
+        drained_water: Vec<((i32, i32, i32), usize, usize, usize)>,
     },
     CollapseResult {
         events: Vec<FfiCollapseEvent>,

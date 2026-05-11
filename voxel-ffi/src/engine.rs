@@ -446,6 +446,17 @@ impl VoxelEngine {
                 }
                 None
             }
+            Ok(WorkerResult::LavaQuench { obsidian, scoria, drained_water }) => {
+                // Re-dispatch to the worker thread so the voxel writes +
+                // remesh happen off the API/game thread. The worker emits
+                // ChunkMesh results normally; UE picks them up via poll.
+                if !obsidian.is_empty() || !scoria.is_empty() || !drained_water.is_empty() {
+                    let _ = self.mine_tx.send(WorkerRequest::ApplyLavaQuench {
+                        obsidian, scoria, drained_water,
+                    });
+                }
+                None
+            }
             Ok(other) => Some(other),
             Err(_) => None,
         }
@@ -1429,6 +1440,60 @@ impl VoxelEngine {
         }
     }
 
+    /// Diagnostic: force a single chunk to re-sync its boundaries with all
+    /// face-adjacent neighbors and remesh anything modified. Use when seam
+    /// mismatches accumulate (visible as flat walls or mesh holes) and
+    /// you want to repair them without a full quit+reload.
+    /// Returns 1 if queued, 0 if queue full.
+    pub fn request_force_chunk_resync(&self, cx: i32, cy: i32, cz: i32) -> u32 {
+        match self.mine_tx.try_send(WorkerRequest::ForceChunkResync {
+            chunk: (cx, cy, cz),
+        }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
+    /// Creative-mode cavern stamp brush — chunk-snapped cave generator.
+    /// `chunk_x/y/z` is the lo-corner chunk in Rust chunk coords; the brush
+    /// affects an `extent_x × extent_y × extent_z` chunk region.
+    /// Returns 1 on success, 0 if queue full.
+    pub fn request_brush_cavern_stamp(&self, request: FfiBrushCavernStampRequest) -> u32 {
+        match self.mine_tx.try_send(WorkerRequest::BrushCavernStamp {
+            chunk_origin: (request.chunk_x, request.chunk_y, request.chunk_z),
+            extent: (
+                request.extent_x.max(1),
+                request.extent_y.max(1),
+                request.extent_z.max(1),
+            ),
+            decorate: request.decorate != 0,
+            fluids: request.fluids != 0,
+            seed: request.seed,
+        }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
+    /// Creative-mode formation stamp brush — runs the worldgen formation
+    /// pipeline within a sphere with a randomized seed. Returns 1 on success,
+    /// 0 if queue full.
+    pub fn request_brush_formation_stamp(&self, request: FfiBrushFormationStampRequest) -> u32 {
+        let scale = self.world_scale;
+        let center_rust = crate::convert::from_ue_world_pos(
+            request.world_x, request.world_y, request.world_z, scale,
+        );
+        let radius = request.radius / scale;
+        match self.mine_tx.try_send(WorkerRequest::BrushFormationStamp {
+            center_rust,
+            radius,
+            seed: request.seed,
+        }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
     /// Query nearby existing terrace to snap Z for extending terraces on the same plane.
     /// Returns Some((snapped_ue_x, snapped_ue_y, snapped_ue_z)) if found within range.
     pub fn query_nearby_terrace(
@@ -1554,6 +1619,42 @@ impl VoxelEngine {
         &self.profiler
     }
 
+    /// Build a multi-line plain-text diagnostic dump for a single chunk —
+    /// density boundary slices, mesh stats, coplanar-tri analysis, edit
+    /// state. Used by the UE creative-mode "Chunk Diagnostic" component
+    /// so the user can copy-paste a problem chunk's stats into chat.
+    pub fn build_chunk_diagnostic(&self, chunk: (i32, i32, i32)) -> String {
+        // Backward-compatible wrapper — derives UE coord via the inverse
+        // transform. Prefer build_chunk_diagnostic_with_ue when calling
+        // from FFI (the caller has the UE coord directly).
+        let ue_chunk = crate::convert::rust_chunk_to_ue(chunk.0, chunk.1, chunk.2);
+        self.build_chunk_diagnostic_with_ue(chunk, ue_chunk)
+    }
+
+    /// Same as `build_chunk_diagnostic` but accepts both the Rust (HashMap-key)
+    /// chunk coord AND the original UE chunk coord, so the dump can label
+    /// them correctly without relying on the inverse transform. The two
+    /// must satisfy `rust = ue_chunk_to_rust(ue)`.
+    pub fn build_chunk_diagnostic_with_ue(
+        &self,
+        rust_chunk: (i32, i32, i32),
+        ue_chunk: (i32, i32, i32),
+    ) -> String {
+        let cfg = self.config.read().unwrap();
+        let chunk_size = cfg.chunk_size;
+        let voxel_scale = cfg.voxel_scale();
+        drop(cfg);
+        let store = self.store.read().unwrap();
+        crate::diagnostics::build_chunk_diagnostic_with_ue(
+            &store,
+            rust_chunk,
+            ue_chunk,
+            chunk_size,
+            voxel_scale,
+            self.world_scale,
+        )
+    }
+
     /// Gracefully shut down all workers and wait for them to finish.
     // ── Save/Load ──────────────────────────────────────────────────────
 
@@ -1605,10 +1706,355 @@ impl VoxelEngine {
                 }
             }
         }
+        // Per-snapshot smart re-seam companion: drop last_sent_mesh_hash for
+        // every patched chunk and its 3 backward face neighbors. The caller
+        // will RequestPriorityGenerate each patched chunk; that path's
+        // incremental_seam_pass would otherwise hash-skip the backward
+        // neighbors' updated combined meshes (their hashes were recorded
+        // before the snapshots existed). Mirrors the in-flight regen
+        // counterpart in worker.rs's GenerateChunk handler.
         if !patched.is_empty() {
+            let bwd_offsets: [(i32, i32, i32); 3] = [(-1, 0, 0), (0, -1, 0), (0, 0, -1)];
+            for &k in &patched {
+                store.last_sent_mesh_hash.remove(&k);
+                for &(dx, dy, dz) in &bwd_offsets {
+                    store.last_sent_mesh_hash.remove(&(k.0 + dx, k.1 + dy, k.2 + dz));
+                }
+            }
             eprintln!("[voxel-ffi] Applied {} loaded snapshots for mid-game reload", patched.len());
         }
         patched
+    }
+
+    // ── Editor collapse triggers ───────────────────────────────────────
+
+    /// Create a new editor collapse trigger. Returns the newly assigned id,
+    /// or 0 on validation failure (no slab voxels, no volumes, etc.).
+    ///
+    /// `activation_kind`: 0 = OnFirstMine (uses `volumes[0]` as the trigger
+    /// volume), 1 = OnPillarLoss (each entry of `volumes` is one pillar).
+    /// The trigger is armed by default; pillar baselines are captured
+    /// immediately against the current density.
+    pub fn create_trigger(
+        &self,
+        activation_kind: u8,
+        name: &str,
+        volumes: &[crate::triggers::VoxelAabb],
+        loss_condition: u8,
+        loss_n: u8,
+        loss_threshold: f32,
+        target_slab: &[(i32, i32, i32)],
+        pile_chunks: &[(i32, i32, i32)],
+        fall_distance_uu: f32,
+    ) -> u32 {
+        use crate::triggers::{
+            EditorCollapseTrigger, LossCondition, PillarRef, TriggerActivation,
+        };
+
+        if target_slab.is_empty() || volumes.is_empty() {
+            eprintln!("[voxel-ffi] create_trigger rejected: needs >=1 volume and >=1 slab voxel");
+            return 0;
+        }
+
+        let activation = match activation_kind {
+            0 => TriggerActivation::OnFirstMine {
+                trigger_volume: volumes[0],
+            },
+            1 => {
+                let pillars: Vec<PillarRef> = volumes
+                    .iter()
+                    .map(|&v| PillarRef {
+                        volume: v,
+                        baseline_solid: 0, // captured after insert
+                    })
+                    .collect();
+                let condition = match loss_condition {
+                    0 => LossCondition::AnyPillar,
+                    1 => LossCondition::NPillars(loss_n.max(1)),
+                    _ => LossCondition::AllPillars,
+                };
+                TriggerActivation::OnPillarLoss {
+                    pillars,
+                    condition,
+                    loss_threshold: loss_threshold.clamp(0.01, 1.0),
+                }
+            }
+            _ => {
+                eprintln!(
+                    "[voxel-ffi] create_trigger rejected: unknown activation_kind {}",
+                    activation_kind
+                );
+                return 0;
+            }
+        };
+
+        let mut store = self.store.write().unwrap();
+        let id = store.alloc_trigger_id();
+        let mut trig = EditorCollapseTrigger {
+            id,
+            name: name.to_string(),
+            armed: true,
+            activation,
+            target_slab_voxels: target_slab.to_vec(),
+            pile_chunks: pile_chunks.to_vec(),
+            fall_distance_uu,
+        };
+        crate::triggers::refresh_pillar_baselines(
+            &mut trig,
+            &store.density_fields,
+            self.cached_chunk_size(),
+        );
+        store.triggers.push(trig);
+        eprintln!(
+            "[voxel-ffi] created trigger {} '{}' kind={} slab_voxels={} pile_chunks={}",
+            id,
+            name,
+            activation_kind,
+            target_slab.len(),
+            pile_chunks.len()
+        );
+        id
+    }
+
+    /// List all current trigger ids (any state). Order is creation order.
+    pub fn list_trigger_ids(&self) -> Vec<u32> {
+        let store = self.store.read().unwrap();
+        store.triggers.iter().map(|t| t.id).collect()
+    }
+
+    /// Fetch summary info for a single trigger. Returns `None` if no
+    /// trigger has that id.
+    pub fn get_trigger_info(&self, id: u32) -> Option<crate::types::FfiTriggerInfo> {
+        use crate::triggers::TriggerActivation;
+        let store = self.store.read().unwrap();
+        let trig = store.find_trigger(id)?;
+
+        let mut info = crate::types::FfiTriggerInfo {
+            id: trig.id,
+            armed: if trig.armed { 1 } else { 0 },
+            activation_kind: 0,
+            volume_count: 0,
+            loss_condition: 0,
+            loss_n: 0,
+            _padding: [0; 3],
+            loss_threshold: 0.0,
+            fall_distance_uu: trig.fall_distance_uu,
+            slab_voxel_count: trig.target_slab_voxels.len() as u32,
+            pile_chunk_count: trig.pile_chunks.len() as u32,
+            primary_volume: zero_aabb(),
+            pillar_volumes: [zero_aabb(); 8],
+            name: [0u8; 64],
+        };
+
+        // Pack name (UTF-8, NUL-terminated, truncate to 63).
+        let bytes = trig.name.as_bytes();
+        let take = bytes.len().min(63);
+        info.name[..take].copy_from_slice(&bytes[..take]);
+
+        match &trig.activation {
+            TriggerActivation::OnFirstMine { trigger_volume } => {
+                info.activation_kind = 0;
+                info.volume_count = 1;
+                info.primary_volume = aabb_to_ffi(trigger_volume);
+            }
+            TriggerActivation::OnPillarLoss {
+                pillars,
+                condition,
+                loss_threshold,
+            } => {
+                info.activation_kind = 1;
+                info.volume_count = pillars.len().min(255) as u8;
+                info.loss_threshold = *loss_threshold;
+                use crate::triggers::LossCondition::*;
+                let (tag, n) = match condition {
+                    AnyPillar => (0u8, 0u8),
+                    NPillars(n) => (1u8, *n),
+                    AllPillars => (2u8, 0u8),
+                };
+                info.loss_condition = tag;
+                info.loss_n = n;
+                if let Some(p) = pillars.first() {
+                    info.primary_volume = aabb_to_ffi(&p.volume);
+                }
+                for (i, p) in pillars.iter().take(8).enumerate() {
+                    info.pillar_volumes[i] = aabb_to_ffi(&p.volume);
+                }
+            }
+        }
+        Some(info)
+    }
+
+    /// Remove a trigger by id. Returns true if it existed.
+    pub fn remove_trigger(&self, id: u32) -> bool {
+        let mut store = self.store.write().unwrap();
+        store.remove_trigger(id).is_some()
+    }
+
+    /// Arm or disarm a trigger. When transitioning to armed, pillar
+    /// baselines are recaptured (a previously-fired boss arena can be
+    /// re-armed for iteration testing).
+    pub fn set_trigger_armed(&self, id: u32, armed: bool) -> bool {
+        let chunk_size = self.cached_chunk_size();
+        let mut store = self.store.write().unwrap();
+        let Some(trig) = store.find_trigger_mut(id) else {
+            return false;
+        };
+        let was_armed = trig.armed;
+        trig.armed = armed;
+        // Recapture pillar baselines if newly armed (transition false→true).
+        if armed && !was_armed {
+            // Clone to break mutable borrow of `store` so we can read density.
+            let trig_id = trig.id;
+            drop(trig);
+            // Now re-borrow mutably with a fresh lookup.
+            let densities = store.density_fields.clone();
+            if let Some(t) = store.find_trigger_mut(trig_id) {
+                crate::triggers::refresh_pillar_baselines(t, &densities, chunk_size);
+            }
+        }
+        true
+    }
+
+    /// Queue a trigger for force-fire on the next stress process tick. The
+    /// trigger fires regardless of its `should_fire` evaluation — useful
+    /// for editor "preview" buttons. Also queues a tiny stress dirty event
+    /// so the stress queue wakes up promptly.
+    pub fn fire_trigger_now(&self, id: u32) -> bool {
+        let chunk_size = self.cached_chunk_size();
+        let mut store = self.store.write().unwrap();
+        let Some(trig) = store.find_trigger(id) else {
+            return false;
+        };
+        // Center of primary volume (trigger_volume / pillars[0]).
+        let center = match &trig.activation {
+            crate::triggers::TriggerActivation::OnFirstMine { trigger_volume } => {
+                aabb_center(trigger_volume)
+            }
+            crate::triggers::TriggerActivation::OnPillarLoss { pillars, .. } => pillars
+                .first()
+                .map(|p| aabb_center(&p.volume))
+                .unwrap_or((0, 0, 0)),
+        };
+        if !store.force_fire_trigger_ids.contains(&id) {
+            store.force_fire_trigger_ids.push(id);
+        }
+        // Ensure the trigger is armed so the dispatch picks it up.
+        if let Some(t) = store.find_trigger_mut(id) {
+            t.armed = true;
+        }
+        // Wake the stress queue.
+        store
+            .stress_dirty_events
+            .push(voxel_core::stress::StressDirtyEvent {
+                center,
+                radius: 1,
+            });
+        store.stress_dirty_time = Some(std::time::Instant::now());
+        let _ = chunk_size;
+        true
+    }
+
+    /// Helper: snapshot the engine's chunk_size from the live config.
+    fn cached_chunk_size(&self) -> usize {
+        self.config.read().unwrap().chunk_size
+    }
+
+    /// Fill `out` with the world voxel coords of every CELL whose center
+    /// density is positive (i.e. the cell has rock at its interior) inside
+    /// a sphere of `radius` voxels centered on `center`. Used by the
+    /// in-engine Trigger Author brush so its slab paint only registers
+    /// cells that the cinematic will actually treat as solid mass.
+    ///
+    /// Cell-center density = average of the cell's 8 corner samples. This
+    /// is the same definition the DC mesh extraction uses to decide
+    /// whether a cell has interior rock, so paint markers and cinematic
+    /// slab will always agree. A single-corner read (the previous test)
+    /// missed every cave-ceiling cell because its bottom corner sits in
+    /// the cave air while the top four corners are in the rock above.
+    ///
+    /// Cells in unloaded chunks are skipped (treated as not-solid).
+    pub fn query_solid_voxels_in_sphere(
+        &self,
+        center: (i32, i32, i32),
+        radius: i32,
+        out: &mut Vec<(i32, i32, i32)>,
+    ) {
+        out.clear();
+        if radius < 0 {
+            return;
+        }
+        let chunk_size = self.cached_chunk_size() as i32;
+        let store = self.store.read().unwrap();
+        let r2 = radius * radius;
+        for dz in -radius..=radius {
+            for dy in -radius..=radius {
+                for dx in -radius..=radius {
+                    if dx * dx + dy * dy + dz * dz > r2 {
+                        continue;
+                    }
+                    let wx = center.0 + dx;
+                    let wy = center.1 + dy;
+                    let wz = center.2 + dz;
+                    if cell_has_solid_center(&store, wx, wy, wz, chunk_size) {
+                        out.push((wx, wy, wz));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Export fluid simulation state (player-placed lava/water) as a binary
+    /// buffer. Asks the fluid thread for a snapshot via `SnapshotRequest` and
+    /// hands the payload to `crate::fluid_save::serialize`. Returns an empty
+    /// vec on timeout or shutdown — callers should treat that as "no fluid
+    /// to save" and not write a file (load skips missing files).
+    pub fn export_fluid_data(&self) -> Vec<u8> {
+        use crossbeam_channel::bounded;
+        let (reply_tx, reply_rx) = bounded::<voxel_fluid::FluidSnapshot>(1);
+        if self
+            .fluid_event_tx
+            .try_send(voxel_fluid::FluidEvent::SnapshotRequest { reply_tx })
+            .is_err()
+        {
+            eprintln!("[voxel-ffi] export_fluid_data: failed to enqueue snapshot request");
+            return Vec::new();
+        }
+        match reply_rx.recv_timeout(std::time::Duration::from_millis(500)) {
+            Ok(snapshot) => crate::fluid_save::serialize(&snapshot),
+            Err(_) => {
+                eprintln!("[voxel-ffi] export_fluid_data: fluid thread snapshot timed out");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Import fluid simulation state from a binary buffer. The cells are
+    /// queued in the fluid thread's pending-load map and applied per-chunk
+    /// the moment that chunk's density arrives — this avoids landing fluid
+    /// in cells whose `cell_capacity` would later read as solid.
+    pub fn import_fluid_data(&self, bytes: &[u8]) -> bool {
+        if bytes.is_empty() {
+            return true; // nothing to do is success
+        }
+        match crate::fluid_save::deserialize(bytes) {
+            Ok(per_chunk) => {
+                let chunks = per_chunk.len();
+                let cells: usize = per_chunk.values().map(|v| v.len()).sum();
+                for (chunk, cells) in per_chunk {
+                    let _ = self
+                        .fluid_event_tx
+                        .try_send(voxel_fluid::FluidEvent::PendingFluidLoad { chunk, cells });
+                }
+                eprintln!(
+                    "[voxel-ffi] import_fluid_data: queued {chunks} chunks / {cells} cells",
+                );
+                true
+            }
+            Err(e) => {
+                eprintln!("[voxel-ffi] import_fluid_data: parse error {e:?}");
+                false
+            }
+        }
     }
 
     /// Check if the world has any unsaved modifications.
@@ -2395,10 +2841,10 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
             garnet_pocket_count: if c.sleep_garnet_pocket_count > 0 { c.sleep_garnet_pocket_count } else { 2 },
             diopside_pocket_count: if c.sleep_diopside_pocket_count > 0 { c.sleep_diopside_pocket_count } else { 1 },
             aureole_vein_spread: c.sleep_aureole_vein_spread,
-            aureole_lava_volume_max_cells: if c.sleep_aureole_lava_max_cells > 0 { c.sleep_aureole_lava_max_cells } else { 50 },
+            aureole_lava_volume_max_cells: if c.sleep_aureole_lava_max_cells > 0 { c.sleep_aureole_lava_max_cells } else { 10000 },
             aureole_lava_deposit_mult: c.sleep_aureole_lava_deposit_mult,
             aureole_lava_count_mult: c.sleep_aureole_lava_count_mult,
-            aureole_water_search_radius: if c.sleep_aureole_water_search_radius > 0 { c.sleep_aureole_water_search_radius } else { 3 },
+            aureole_water_search_radius: if c.sleep_aureole_water_search_radius > 0 { c.sleep_aureole_water_search_radius } else { 45 },
             aureole_water_max_cells: if c.sleep_aureole_water_max_cells > 0 { c.sleep_aureole_water_max_cells } else { 30 },
             aureole_water_deposit_mult: c.sleep_aureole_water_deposit_mult,
             aureole_wall_climbing: c.sleep_aureole_wall_climbing != 0,
@@ -2411,7 +2857,19 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
             aureole_veins_per_n_cells: c.sleep_aureole_veins_per_n_cells,
             aureole_garnet_per_n_cells: c.sleep_aureole_garnet_per_n_cells,
             aureole_diopside_per_n_cells: c.sleep_aureole_diopside_per_n_cells,
-            aureole_cells_per_extra: if c.sleep_aureole_cells_per_extra > 0 { c.sleep_aureole_cells_per_extra } else { 20 },
+            aureole_cells_per_extra: if c.sleep_aureole_cells_per_extra > 0 { c.sleep_aureole_cells_per_extra } else { 90 },
+            amphibolite_pyrite_pocket_count: if c.sleep_amphibolite_pyrite_pocket_count > 0 { c.sleep_amphibolite_pyrite_pocket_count } else { 2 },
+            amphibolite_garnet_pocket_count: if c.sleep_amphibolite_garnet_pocket_count > 0 { c.sleep_amphibolite_garnet_pocket_count } else { 1 },
+            amphibolite_pyrite_compact_size: if c.sleep_amphibolite_pyrite_compact_size > 0 { c.sleep_amphibolite_pyrite_compact_size } else { 8 },
+            aureole_amphibolite_pyrite_per_n_cells: c.sleep_aureole_amphibolite_pyrite_per_n_cells,
+            aureole_amphibolite_garnet_per_n_cells: c.sleep_aureole_amphibolite_garnet_per_n_cells,
+            // Hydrothermal water-boost v2: defaults applied when UE side passes 0
+            aureole_water_phase1_weight: if c.sleep_aureole_water_phase1_weight > 0.0 { c.sleep_aureole_water_phase1_weight } else { 1.0 },
+            aureole_water_phase2_weight: if c.sleep_aureole_water_phase2_weight > 0.0 { c.sleep_aureole_water_phase2_weight } else { 0.25 },
+            aureole_water_network_max_hops: if c.sleep_aureole_water_network_max_hops > 0 { c.sleep_aureole_water_network_max_hops } else { 50 },
+            aureole_water_to_lava_ratio: if c.sleep_aureole_water_to_lava_ratio > 0.0 { c.sleep_aureole_water_to_lava_ratio } else { 1.2 },
+            aureole_water_phase1_max_floor: if c.sleep_aureole_water_phase1_max_floor > 0 { c.sleep_aureole_water_phase1_max_floor } else { 50 },
+            aureole_water_count_mult: if c.sleep_aureole_water_count_mult > 0.0 { c.sleep_aureole_water_count_mult } else { 1.0 },
         },
         veins: VeinConfig {
             vein_deposition_prob: if c.sleep_vein_deposition_prob > 0.0 { c.sleep_vein_deposition_prob } else { 0.85 },
@@ -2600,7 +3058,21 @@ fn fluid_sim_loop_wrapper(
                     });
                 }
                 FluidResult::SolidifyRequest { positions } => {
-                    let _ = result_tx.send(WorkerResult::SolidifyRequest { positions });
+                    // Legacy single-list path. Treat as Obsidian-only quench
+                    // so any old code that emits SolidifyRequest still produces
+                    // a visible wall instead of being dropped.
+                    let _ = result_tx.send(WorkerResult::LavaQuench {
+                        obsidian: positions,
+                        scoria: Vec::new(),
+                        drained_water: Vec::new(),
+                    });
+                }
+                FluidResult::LavaQuench { obsidian, scoria, drained_water } => {
+                    let _ = result_tx.send(WorkerResult::LavaQuench {
+                        obsidian,
+                        scoria,
+                        drained_water,
+                    });
                 }
             },
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
@@ -2665,4 +3137,84 @@ fn num_cpus() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
+}
+
+// ── Trigger helpers ────────────────────────────────────────────────────
+
+fn aabb_to_ffi(a: &crate::triggers::VoxelAabb) -> crate::types::FfiVoxelAabb {
+    crate::types::FfiVoxelAabb {
+        min: crate::types::FfiVoxelCoord {
+            x: a.min.0,
+            y: a.min.1,
+            z: a.min.2,
+        },
+        max: crate::types::FfiVoxelCoord {
+            x: a.max.0,
+            y: a.max.1,
+            z: a.max.2,
+        },
+    }
+}
+
+fn zero_aabb() -> crate::types::FfiVoxelAabb {
+    crate::types::FfiVoxelAabb {
+        min: crate::types::FfiVoxelCoord { x: 0, y: 0, z: 0 },
+        max: crate::types::FfiVoxelCoord { x: 0, y: 0, z: 0 },
+    }
+}
+
+fn aabb_center(a: &crate::triggers::VoxelAabb) -> (i32, i32, i32) {
+    (
+        (a.min.0 + a.max.0) / 2,
+        (a.min.1 + a.max.1) / 2,
+        (a.min.2 + a.max.2) / 2,
+    )
+}
+
+/// Test whether a cell at world voxel `(wx,wy,wz)` has positive center
+/// density — i.e. its interior is rock and the cinematic will treat it
+/// as a falling solid. Samples all 8 corners (potentially across chunk
+/// borders) and returns true if their average is > 0.
+///
+/// This is the cell-aware test used by both `query_solid_voxels_in_sphere`
+/// (paint filter) and `synthesize_collapse_event` (synth filter). A
+/// previous single-corner test silently skipped every cell at the
+/// rock/air boundary — most importantly cave-ceiling cells, where the
+/// bottom corner sits in cave air below.
+pub(crate) fn cell_has_solid_center(
+    store: &crate::store::ChunkStore,
+    wx: i32,
+    wy: i32,
+    wz: i32,
+    chunk_size: i32,
+) -> bool {
+    let mut sum: f32 = 0.0;
+    let mut samples: u32 = 0;
+    for c in 0..8 {
+        let ox = (c & 1) as i32;
+        let oy = ((c >> 1) & 1) as i32;
+        let oz = ((c >> 2) & 1) as i32;
+        let sx = wx + ox;
+        let sy = wy + oy;
+        let sz = wz + oz;
+        let cx = sx.div_euclid(chunk_size);
+        let cy = sy.div_euclid(chunk_size);
+        let cz = sz.div_euclid(chunk_size);
+        let lx = sx.rem_euclid(chunk_size) as usize;
+        let ly = sy.rem_euclid(chunk_size) as usize;
+        let lz = sz.rem_euclid(chunk_size) as usize;
+        if let Some(df) = store.density_fields.get(&(cx, cy, cz)) {
+            // df.size = chunk_size + 1, so the +1 corner indices on the
+            // far side of a chunk are valid (they index the shared
+            // boundary slice that overlaps with the next chunk).
+            if lx < df.size && ly < df.size && lz < df.size {
+                sum += df.get(lx, ly, lz).density;
+                samples += 1;
+            }
+        }
+    }
+    if samples == 0 {
+        return false;
+    }
+    (sum / samples as f32) > 0.0
 }

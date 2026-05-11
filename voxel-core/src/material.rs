@@ -87,6 +87,9 @@ pub enum Material {
     AmberCap = 46,      // burnt orange mushroom cap
     IceSheet = 47,      // chunky fractured glacial ice — wall interiors, ledge undersides
     FrozenGlow = 48,    // bioluminescent frozen drip — glowing icicle tips
+
+    // Metabasite (basalt contact aureole) — amphibolite facies hornblende-plagioclase
+    Amphibolite = 49,
 }
 
 impl Material {
@@ -140,6 +143,7 @@ impl Material {
             46 => Material::AmberCap,
             47 => Material::IceSheet,
             48 => Material::FrozenGlow,
+            49 => Material::Amphibolite,
             _ => Material::Air,
         }
     }
@@ -179,6 +183,7 @@ impl Material {
                 | Material::Marble
                 | Material::Hornfels
                 | Material::Skarn
+                | Material::Amphibolite
                 | Material::Travertine
         )
     }
@@ -195,7 +200,7 @@ impl Material {
     pub fn is_hard_rock(self) -> bool {
         matches!(self, Material::Granite | Material::Basalt | Material::Slate | Material::Marble
             | Material::Hornfels | Material::Garnet | Material::Diopside | Material::Skarn
-            | Material::Obsidian)
+            | Material::Amphibolite | Material::Obsidian)
     }
 
     pub fn is_geode_shell(self) -> bool {
@@ -212,7 +217,7 @@ impl Material {
     pub fn is_impermeable(self) -> bool {
         matches!(self, Material::Granite | Material::Basalt | Material::Slate | Material::Marble
             | Material::Hornfels | Material::Garnet | Material::Diopside | Material::Skarn
-            | Material::Obsidian | Material::Ice | Material::BlackIce | Material::Permafrost)
+            | Material::Amphibolite | Material::Obsidian | Material::Ice | Material::BlackIce | Material::Permafrost)
     }
 
     /// Porosity value (0.0 = impervious, 1.0 = highly porous).
@@ -235,6 +240,7 @@ impl Material {
             Material::Garnet => 0.05,
             Material::Diopside => 0.1,
             Material::Skarn => 0.08,
+            Material::Amphibolite => 0.05,
             Material::Obsidian => 0.01,
             Material::Ice | Material::BlackIce | Material::Permafrost => 0.0,
             Material::Hoarfrost => 0.1,
@@ -305,6 +311,7 @@ impl Material {
             Material::AmberCap => "Amber Cap",
             Material::IceSheet => "Ice Sheet",
             Material::FrozenGlow => "Frozen Glow",
+            Material::Amphibolite => "Amphibolite",
         }
     }
 
@@ -359,6 +366,7 @@ impl Material {
             Material::AmberCap => 0xA04820,        // burnt orange
             Material::IceSheet => 0x8CBFC8,        // pale teal-grey fractured ice
             Material::FrozenGlow => 0x80D0FF,       // bright blue-white luminous ice
+            Material::Amphibolite => 0x3A4838,     // dark hornblende-green with feldspar speckle
         }
     }
 
@@ -413,6 +421,7 @@ impl Material {
             Material::AmberCap,
             Material::IceSheet,
             Material::FrozenGlow,
+            Material::Amphibolite,
         ]
     }
 }

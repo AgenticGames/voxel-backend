@@ -259,7 +259,7 @@ pub fn worker_loop(
 
         // Priority 1.5: deferred stress recalculation (only worker 0 handles this)
         if worker_id == 0 {
-            if try_process_stress_queue(&store, &stress_config, &config, &result_tx, world_scale) {
+            if try_process_stress_queue(&store, &stress_config, &config, &result_tx, &fluid_event_tx, world_scale) {
                 continue;
             }
         }
@@ -326,7 +326,7 @@ fn try_handle_mine(
                 s.queue_stress_dirty(stress_center, stress_radius);
                 drop(s);
                 let _ = result_tx.send(WorkerResult::MinedMaterials { mined });
-                batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+                batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, fluid_event_tx, world_scale);
                 return true;
             }
             _ => {} // non-mine request, ignore
@@ -343,6 +343,7 @@ fn try_process_stress_queue(
     stress_config: &Arc<RwLock<StressConfig>>,
     config: &Arc<RwLock<GenerationConfig>>,
     result_tx: &Sender<WorkerResult>,
+    fluid_event_tx: &Sender<FluidEvent>,
     world_scale: f32,
 ) -> bool {
     use voxel_core::stress::{
@@ -371,12 +372,17 @@ fn try_process_stress_queue(
         _ => return false,
     };
 
+    // Keep a parallel reference for editor-trigger evaluation later — the
+    // local `events` gets shadowed by the v2 collapse events vec further
+    // down, but trigger eval still needs to know which AABBs were mined.
+    let mined_dirty_events: Vec<voxel_core::stress::StressDirtyEvent> = events.clone();
+
     let cfg = config.read().unwrap().clone();
     let stress_cfg = stress_config.read().unwrap().clone();
     let chunk_size = cfg.chunk_size;
 
     // Derive affected chunks from events (union of all event bounding boxes)
-    let dirty_chunks: Vec<(i32, i32, i32)> = {
+    let mut dirty_chunks: Vec<(i32, i32, i32)> = {
         let s = store.read().unwrap();
         let mut chunk_set: HashSet<(i32, i32, i32)> = HashSet::new();
         for event in &events {
@@ -404,7 +410,7 @@ fn try_process_stress_queue(
     let recalc_start = std::time::Instant::now();
 
     // Run v2 stress recalculation — only voxels within event radii are recalculated
-    let result = {
+    let mut result = {
         let mut s = store.write().unwrap();
         let (density, stress, support) = s.sleep_fields_mut();
         recalc_stress_region_v2_filtered(
@@ -494,6 +500,121 @@ fn try_process_stress_queue(
         drop(s);
     }
 
+    // ── Editor trigger pre-pass ──
+    //
+    // CRITICAL: evaluate scripted triggers BEFORE the warning scan below so
+    // the seed cells get their stress written into the stress field. Without
+    // this, the dust/creak/shake warnings (and the on-screen cracks, smoke,
+    // wall-shake effects on UE side) appear only at the natural overstressed
+    // cells around the mine point — which is NOT where the designer painted.
+    // Writing the seed stress here makes the cinematic warning visuals show
+    // up at the painted region instead of at the mining point.
+    let (early_has_armed, early_has_force) = {
+        let s = store.read().unwrap();
+        (
+            s.triggers.iter().any(|t| t.armed),
+            !s.force_fire_trigger_ids.is_empty(),
+        )
+    };
+    // Build the painted-seed overstressed list AND write seed stress into
+    // the stress field in one pass. The result feeds both:
+    //   (a) the warning scan below — so cracks/dust/shake appear at the
+    //       painted region instead of only at the mine point.
+    //   (b) the force_collapse detect call further down (post-pass).
+    let mut trigger_seed_overstressed: Vec<voxel_core::stress::OverstressedVoxel> = Vec::new();
+    let mut trigger_extra_dirty_chunks: HashSet<(i32, i32, i32)> = HashSet::new();
+    let mut trigger_eval_log_pending: Vec<String> = Vec::new();
+    if early_has_armed || early_has_force {
+        let mined_aabbs: Vec<crate::triggers::VoxelAabb> = mined_dirty_events
+            .iter()
+            .map(|ev| {
+                let r = ev.radius.max(1);
+                crate::triggers::VoxelAabb {
+                    min: (ev.center.0 - r, ev.center.1 - r, ev.center.2 - r),
+                    max: (ev.center.0 + r, ev.center.1 + r, ev.center.2 + r),
+                }
+            })
+            .collect();
+
+        let mut s = store.write().unwrap();
+        let forced_ids: Vec<u32> = std::mem::take(&mut s.force_fire_trigger_ids);
+        let mut fired_ids: Vec<u32> = forced_ids.clone();
+        for trig in &s.triggers {
+            if !trig.armed || forced_ids.contains(&trig.id) {
+                continue;
+            }
+            let fires = mined_aabbs
+                .iter()
+                .any(|aabb| trig.should_fire(aabb, &s.density_fields, chunk_size));
+            if fires {
+                fired_ids.push(trig.id);
+            }
+        }
+        trigger_eval_log_pending.push(format!(
+            "  TRIGGER eval: fired_ids={:?} (from {} mined AABBs, force-fire={})",
+            fired_ids, mined_aabbs.len(), forced_ids.len()
+        ));
+
+        for tid in &fired_ids {
+            let trig_clone = match s.find_trigger(*tid) {
+                Some(t) => t.clone(),
+                None => continue,
+            };
+            let mut seeded_count: u32 = 0;
+            let cs = chunk_size as i32;
+            for &(wx, wy, wz) in &trig_clone.target_slab_voxels {
+                if !crate::engine::cell_has_solid_center(&s, wx, wy, wz, cs) {
+                    continue;
+                }
+                let cx = wx.div_euclid(cs);
+                let cy = wy.div_euclid(cs);
+                let cz = wz.div_euclid(cs);
+                let lx = wx.rem_euclid(cs) as usize;
+                let ly = wy.rem_euclid(cs) as usize;
+                let lz = wz.rem_euclid(cs) as usize;
+                // Write stress into the field so the warning scan picks it
+                // up (cracks/dust/shake at the painted region, not just the
+                // mine point).
+                if let Some(sf) = s.stress_fields.get_mut(&(cx, cy, cz)) {
+                    sf.set(lx, ly, lz, 1.5);
+                }
+                trigger_extra_dirty_chunks.insert((cx, cy, cz));
+                // Push onto the forced overstressed list for the force
+                // collapse pass downstream.
+                trigger_seed_overstressed.push(voxel_core::stress::OverstressedVoxel {
+                    world_x: wx,
+                    world_y: wy,
+                    world_z: wz,
+                    stress: 1.5,
+                });
+                seeded_count += 1;
+            }
+            // Disarm now — this trigger has fired.
+            if let Some(t) = s.find_trigger_mut(*tid) {
+                t.armed = false;
+            }
+            trigger_eval_log_pending.push(format!(
+                "  TRIGGER {} ('{}') fired: {}/{} solid seed cells (stress_field bumped + queued for force collapse)",
+                tid, trig_clone.name, seeded_count, trig_clone.target_slab_voxels.len()
+            ));
+        }
+    }
+    for line in &trigger_eval_log_pending {
+        dbg(line.clone());
+    }
+
+    // Merge seed chunks into dirty_chunks so the warning scan visits them.
+    // Mining-driven dirty_chunks alone might not cover seed locations far
+    // from the mine point.
+    if !trigger_extra_dirty_chunks.is_empty() {
+        let existing: HashSet<(i32, i32, i32)> = dirty_chunks.iter().copied().collect();
+        for k in &trigger_extra_dirty_chunks {
+            if !existing.contains(k) {
+                dirty_chunks.push(*k);
+            }
+        }
+    }
+
     // Emit stress warnings for UE — scan ALL voxels with stress above dust threshold.
     // This is push-based: Rust tells UE where the stress is, UE checks proximity to player.
     {
@@ -549,27 +670,41 @@ fn try_process_stress_queue(
         }
     }
 
-    // Run collapse detection if there are overstressed voxels
-    if !result.overstressed.is_empty() {
+    // Trigger eval was done in the pre-pass above (so warning visuals
+    // appear at the painted region). Here we just need to run the natural
+    // + forced collapse detections using already-collected data.
+    if !result.overstressed.is_empty() || !trigger_seed_overstressed.is_empty() {
         let mut s = store.write().unwrap();
 
         let collapse_start = std::time::Instant::now();
-        let events = {
+        let mut events: Vec<voxel_core::stress::CollapseEventV2> = Vec::new();
+        // Natural collapse pass: only stress-recalc'd overstressed cells.
+        // Filters (size / grounding / cohesion) apply normally so player
+        // mining doesn't trigger spurious cave-ins on supported rock.
+        if !result.overstressed.is_empty() {
             let (density, stress, support) = s.sleep_fields_mut();
-            // defer_pile=true: clear slab cells now (cave roof opens at fall
-            // start), but DON'T place pile yet. Worker schedules each event's
-            // pile application for impact time so the floor pile lands under
-            // the visually-falling slab.
-            voxel_core::stress::detect_and_execute_collapses_v2_with_options(
-                density,
-                stress,
-                support,
+            let natural = voxel_core::stress::detect_and_execute_collapses_v2_with_options(
+                density, stress, support,
                 &result.overstressed,
-                &stress_cfg,
-                chunk_size,
-                true,
-            )
-        };
+                &stress_cfg, chunk_size,
+                true, // defer_pile
+            );
+            events.extend(natural);
+        }
+        // Scripted-trigger pass: force_collapse=true. Bypasses the
+        // grounding filter; designer-painted regions on cave walls or
+        // pillars fall even though they're physically supported.
+        if !trigger_seed_overstressed.is_empty() {
+            let (density, stress, support) = s.sleep_fields_mut();
+            let forced = voxel_core::stress::detect_and_execute_collapses_v2_with_force(
+                density, stress, support,
+                &trigger_seed_overstressed,
+                &stress_cfg, chunk_size,
+                true,  // defer_pile
+                true,  // force_collapse
+            );
+            events.extend(forced);
+        }
         let collapse_ms = collapse_start.elapsed().as_secs_f64() * 1000.0;
 
         if !events.is_empty() {
@@ -957,6 +1092,7 @@ fn try_process_stress_queue(
                     let store_c = std::sync::Arc::clone(store);
                     let cfg_c = cfg.clone();
                     let tx_c = result_tx.clone();
+                    let fluid_tx_c = fluid_event_tx.clone();
                     let keys = event.slab_chunks.clone();
                     let ws = world_scale;
                     let event_center_for_log = event.center;
@@ -1015,7 +1151,7 @@ fn try_process_stress_queue(
                             }
                         }
 
-                        batched_seam_pass_mine(&keys, &cfg_c, &store_c, &tx_c, ws);
+                        batched_seam_pass_mine(&keys, &cfg_c, &store_c, &tx_c, &fluid_tx_c, ws);
                         log_line(format!("batched_seam_pass_mine called (cave roof now open)"));
                     });
                 }
@@ -1051,6 +1187,7 @@ fn try_process_stress_queue(
                     let cfg_c = cfg.clone();
                     let stress_cfg_c = stress_cfg.clone();
                     let tx_c = result_tx.clone();
+                    let fluid_tx_c = fluid_event_tx.clone();
                     let pending = event.pending_piles.clone();
                     let cs_c = chunk_size;
                     let ws = world_scale;
@@ -1219,7 +1356,7 @@ fn try_process_stress_queue(
                                 cleared, pile_chunks.len()));
                         }
 
-                        batched_seam_pass_mine(&pile_chunks, &cfg_c, &store_c, &tx_c, ws);
+                        batched_seam_pass_mine(&pile_chunks, &cfg_c, &store_c, &tx_c, &fluid_tx_c, ws);
                         log_line(format!("batched_seam_pass_mine called for {} chunks", pile_chunks.len()));
                     });
                 } else {
@@ -1287,6 +1424,21 @@ fn handle_request(
             let mut t_worm_backward_carve = Duration::ZERO;
             let mut t_worm_backward_remesh = Duration::ZERO;
             let mut backward_dirty_count: u32 = 0;
+
+            // Tracked across the slow-path block so the per-snapshot smart
+            // re-seam below (after incremental_seam_pass) knows which chunks
+            // had snapshots restored during this region regen. Required to
+            // force-clear stale hashes for their backward face neighbors —
+            // otherwise hash-skip suppresses the new combined meshes.
+            let mut applied_snapshots: Vec<(i32, i32, i32)> = Vec::new();
+
+            // Tracks chunks whose seam_data + base_mesh were freshly regenerated
+            // by the post-sync DC re-solve (STALE-SEAM_DATA fix). Their old
+            // dc_vertices baked against pre-sync hermite would have produced
+            // degenerate seams when neighbors stitched against them; after
+            // re-solving we need to ship the new combined meshes via a final
+            // batched_seam_pass so UE actually receives the correct geometry.
+            let mut sync_remeshed: Vec<(i32, i32, i32)> = Vec::new();
 
             // Fast path: region generated AND this chunk has data → mesh under one read lock
             let mesh_result = {
@@ -1463,20 +1615,125 @@ fn handle_request(
                     if profiling { t_store_write_wait += t1.elapsed(); }
 
                     if !s.is_region_generated(&rk) || !s.has_density(&chunk) {
+                        let mut newly_inserted: Vec<(i32, i32, i32)> = Vec::new();
                         for (key, density, hermite) in keyed_data {
                             if !s.has_density(&key) {
                                 s.insert(key, density, hermite);
+                                newly_inserted.push(key);
                                 // Apply saved snapshot if loading a saved game
                                 if s.apply_pending_snapshot(key) {
-                                    // Density was patched — re-extract hermite from patched data
+                                    applied_snapshots.push(key);
+                                    // Density was patched — re-extract hermite from patched data.
+                                    // (May be re-extracted again below if re-sync touches this chunk.)
                                     if let Some(df) = s.density_fields.get(&key) {
-                                        let new_hermite = extract_hermite_data(df);
+                                        let df_clone = df.clone();
+                                        let new_hermite = extract_hermite_data(&df_clone);
                                         s.hermite_data.insert(key, new_hermite);
                                     }
                                 }
                             }
                         }
                         s.mark_region_generated(rk);
+
+                        // ── CRITICAL: re-sync ALL region chunks after insert ──
+                        //
+                        // Two bug classes covered here:
+                        //
+                        // 1) SNAPSHOT-OVERWRITE: apply_pending_snapshot rewrites
+                        //    all 29 791 cells of restored chunks — including
+                        //    boundary cells that sync_region_boundary_densities
+                        //    just made consistent in the temp HashMap. Without
+                        //    re-sync, restored chunk boundaries diverge from
+                        //    neighbors → seam holes / mesh gaps.
+                        //
+                        // 2) STALE-PRE-EXISTING: the insert loop above uses
+                        //    `if !s.has_density(&key)` so it SKIPS chunks
+                        //    already in store. If region regen runs a second
+                        //    time (e.g. region marker cleared by an unload but
+                        //    some chunks stayed loaded, OR config changed
+                        //    mid-session like BlankCanvas being toggled), the
+                        //    fresh sync'd density gets discarded for those
+                        //    pre-existing chunks. They keep their old values
+                        //    and disagree with their freshly-streamed
+                        //    neighbors → 961-cell face mismatches in the
+                        //    diagnostic.
+                        //
+                        // Fix: re-sync EVERY chunk in `coords` against its 26
+                        // neighbors using the store's current density. This
+                        // cleans up both bug classes regardless of which
+                        // chunks were freshly inserted vs already-existing,
+                        // and regardless of whether snapshots were applied.
+                        //
+                        // sync_chunk_full_boundaries is idempotent (min(a,b) =
+                        // min(min(a,b),b)) so duplicate work between adjacent
+                        // chunks in the region is harmless. Hermite
+                        // re-extraction only fires for chunks whose density
+                        // actually changed, so the cost scales with the size
+                        // of inconsistency — typically zero on a clean region.
+                        {
+                            use std::collections::HashSet;
+                            let mut hermite_dirty: HashSet<(i32, i32, i32)> = HashSet::new();
+                            for &chunk_key in coords.iter() {
+                                if !s.density_fields.contains_key(&chunk_key) {
+                                    continue;
+                                }
+                                let resync_dirty = s
+                                    .sync_chunk_full_boundaries(chunk_key, cfg.chunk_size);
+                                for k in resync_dirty {
+                                    hermite_dirty.insert(k);
+                                }
+                            }
+                            for key in hermite_dirty {
+                                // Re-extract hermite from patched density.
+                                let new_hermite_opt = s.density_fields.get(&key).map(|df| {
+                                    let df_clone = df.clone();
+                                    extract_hermite_data(&df_clone)
+                                });
+                                let Some(new_hermite) = new_hermite_opt else { continue; };
+
+                                // STALE-SEAM_DATA fix: if this chunk was previously
+                                // fully meshed (has seam_data + base_mesh from a prior
+                                // load), the dc_vertices in its seam_data were solved
+                                // against the OLD hermite. After sync touched its
+                                // boundary, the dc_vertices are now stale — neighbors
+                                // looking up cell positions from this chunk's seam_data
+                                // get coordinates that don't match the current density,
+                                // producing degenerate/missing seam quads at the shared
+                                // face. Symptom: chunks render with their base mesh but
+                                // have a black gap toward this neighbor that only
+                                // Force Resync clears.
+                                //
+                                // Re-solve DC + regen base_mesh + boundary_edges
+                                // against the fresh hermite so seam computations against
+                                // this chunk produce correct geometry. Track the keys so
+                                // a batched seam pass can re-emit downstream.
+                                let prev_meshed = s.chunk_seam_data.contains_key(&key)
+                                    && s.base_meshes.contains_key(&key);
+                                if prev_meshed {
+                                    let cell_size = cfg.chunk_size;
+                                    let dc_verts = solve_dc_vertices(&new_hermite, cell_size);
+                                    let mut mesh = generate_mesh(&new_hermite, &dc_verts, cell_size);
+                                    mesh.smooth(
+                                        cfg.mesh_smooth_iterations,
+                                        cfg.mesh_smooth_strength,
+                                        cfg.mesh_boundary_smooth,
+                                        Some(cell_size),
+                                    );
+                                    if cfg.mesh_recalc_normals > 0 { mesh.recalculate_normals(); }
+                                    let b_edges = region_gen::extract_boundary_edges(&new_hermite, cfg.chunk_size);
+                                    s.hermite_data.insert(key, new_hermite);
+                                    s.base_meshes.insert(key, mesh);
+                                    s.add_seam_data(key, ChunkSeamData {
+                                        dc_vertices: dc_verts,
+                                        world_origin: glam::Vec3::ZERO,
+                                        boundary_edges: b_edges,
+                                    });
+                                    sync_remeshed.push(key);
+                                } else {
+                                    s.hermite_data.insert(key, new_hermite);
+                                }
+                            }
+                        }
                     }
                     s.store_region_worms(rk, worm_paths.clone());
                 }
@@ -1504,6 +1761,17 @@ fn handle_request(
                                     for cx in min_cx..=max_cx {
                                         let key = (cx, cy, cz);
                                         if coords.contains(&key) { continue; }
+                                        // Critical: skip chunks the user has hand-edited.
+                                        // Backward worm carving writes directly into live
+                                        // density without going through the snapshot
+                                        // preserve/restore mechanism — without this guard,
+                                        // entering a fresh region next to a hand-authored
+                                        // area destroys the player's custom geometry
+                                        // (walls, structures, painted detail) by carving
+                                        // worm tunnels through it.
+                                        if s.modification_tracker.dirty_chunks.contains(&key) {
+                                            continue;
+                                        }
                                         if let Some(density) = s.density_fields.get_mut(&key) {
                                             let coord = voxel_core::chunk::ChunkCoord::new(cx, cy, cz);
                                             if !voxel_gen::worm::carve::worm_overlaps_chunk(
@@ -1604,7 +1872,7 @@ fn handle_request(
                     // land on UE via ClearAllMeshSections, wiping any seams those chunks
                     // had before. Re-stitch seams now so the chunks don't show gaps.
                     if !backward_dirty.is_empty() {
-                        batched_seam_pass(&backward_dirty, &cfg, store, result_tx, world_scale);
+                        batched_seam_pass(&backward_dirty, &cfg, store, result_tx, fluid_event_tx, world_scale);
                     }
                 }
 
@@ -1673,7 +1941,7 @@ fn handle_request(
 
                     // Seam pass for cross-region dirty chunks: sole sender.
                     if !non_region_dirty.is_empty() {
-                        batched_seam_pass(&non_region_dirty, &cfg, store, result_tx, world_scale);
+                        batched_seam_pass(&non_region_dirty, &cfg, store, result_tx, fluid_event_tx, world_scale);
                     }
                 }
 
@@ -1717,6 +1985,138 @@ fn handle_request(
                 (m, dc_verts, b_edges)
                 }
             };
+
+            // Targeted dump: when worldgen finishes for the suspect chunk(s),
+            // write the full mesh + density stats to a focused log so we can
+            // see what produced the visible "slate cube wall" without sifting
+            // through every chunk in the world. Targets are hardcoded; flip
+            // the empty array off when not debugging.
+            {
+                const TARGETS: &[(i32, i32, i32)] = &[
+                    (-2, -1, -1), // user-confirmed slate-cube chunk
+                    (-1, -1, -1), (-3, -1, -1),
+                    (-2, 0, -1), (-2, -2, -1),
+                    (-2, -1, 0), (-2, -1, -2),
+                ];
+                if TARGETS.contains(&chunk) {
+                    use std::io::Write;
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+                        .open("D:/Unreal Projects/Mithril2026/Saved/chunk_dump.txt")
+                    {
+                        let s = store.read().unwrap();
+                        let df = s.density_fields.get(&chunk);
+                        let _ = writeln!(f, "\n=== chunk {:?} ===", chunk);
+                        // Sample density slices on each chunk boundary face — if the
+                        // cells just INSIDE a boundary are uniformly solid (e.g. all 1.0)
+                        // and the boundary cell got sync'd to air, DC produces a flat
+                        // wall. If they have natural noise variation (0.3, 0.7, 0.5),
+                        // the wall is just a normal rock face.
+                        if let Some(df) = df {
+                            let cs = cfg.chunk_size;
+                            // For each face, sample density at lx=cs-1 (just inside)
+                            // and lx=cs (boundary itself), in a 5x5 grid spread.
+                            let _ = writeln!(f, "boundary slice +X (interior cell x=cs-1=29):");
+                            for v in (0..=cs).step_by(cs/4) {
+                                let mut row = String::new();
+                                for u in (0..=cs).step_by(cs/4) {
+                                    let s_in = df.get(cs-1, u, v);
+                                    let s_b = df.get(cs, u, v);
+                                    row += &format!(" [{:>5.2}|{:>5.2}]", s_in.density, s_b.density);
+                                }
+                                let _ = writeln!(f, "  y/z={}:{}", v, row);
+                            }
+                            let _ = writeln!(f, "boundary slice +Y (interior cell y=cs-1=29):");
+                            for v in (0..=cs).step_by(cs/4) {
+                                let mut row = String::new();
+                                for u in (0..=cs).step_by(cs/4) {
+                                    let s_in = df.get(u, cs-1, v);
+                                    let s_b = df.get(u, cs, v);
+                                    row += &format!(" [{:>5.2}|{:>5.2}]", s_in.density, s_b.density);
+                                }
+                                let _ = writeln!(f, "  x/z={}:{}", v, row);
+                            }
+                            let _ = writeln!(f, "boundary slice -Z (interior cell z=1, vs boundary z=0):");
+                            for v in (0..=cs).step_by(cs/4) {
+                                let mut row = String::new();
+                                for u in (0..=cs).step_by(cs/4) {
+                                    let s_in = df.get(u, v, 1);
+                                    let s_b = df.get(u, v, 0);
+                                    row += &format!(" [{:>5.2}|{:>5.2}]", s_in.density, s_b.density);
+                                }
+                                let _ = writeln!(f, "  x/y={}:{}", v, row);
+                            }
+                        }
+                        if let Some(df) = df {
+                            let total = df.samples.len();
+                            let mut solid = 0u32;
+                            let mut air = 0u32;
+                            let mut min_d = f32::INFINITY;
+                            let mut max_d = f32::NEG_INFINITY;
+                            let mut mat_counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+                            for sm in &df.samples {
+                                if sm.density > 0.0 { solid += 1; } else { air += 1; }
+                                if sm.density < min_d { min_d = sm.density; }
+                                if sm.density > max_d { max_d = sm.density; }
+                                *mat_counts.entry(format!("{:?}", sm.material)).or_insert(0) += 1;
+                            }
+                            let _ = writeln!(f, "density: total={} solid={} air={} min={:.3} max={:.3}",
+                                total, solid, air, min_d, max_d);
+                            let _ = writeln!(f, "materials: {:?}", mat_counts);
+                        } else {
+                            let _ = writeln!(f, "(no density field in store)");
+                        }
+
+                        // Mesh stats
+                        let _ = writeln!(f, "mesh: vertices={} triangles={}",
+                            mesh.vertices.len(), mesh.triangles.len());
+                        let mut vmin = glam::Vec3::splat(f32::INFINITY);
+                        let mut vmax = glam::Vec3::splat(f32::NEG_INFINITY);
+                        for v in &mesh.vertices {
+                            vmin = vmin.min(v.position);
+                            vmax = vmax.max(v.position);
+                        }
+                        let _ = writeln!(f, "mesh AABB: min=({:.2},{:.2},{:.2}) max=({:.2},{:.2},{:.2})",
+                            vmin.x, vmin.y, vmin.z, vmax.x, vmax.y, vmax.z);
+
+                        // Coplanar tri counts: bin all triangles by which axis-aligned
+                        // plane they're on. A flat planar wall = many tris in one bin.
+                        let eps = 0.05_f32;
+                        let mut x_bins: std::collections::HashMap<i32, u32> = std::collections::HashMap::new();
+                        let mut y_bins: std::collections::HashMap<i32, u32> = std::collections::HashMap::new();
+                        let mut z_bins: std::collections::HashMap<i32, u32> = std::collections::HashMap::new();
+                        for tri in &mesh.triangles {
+                            let p0 = mesh.vertices[tri.indices[0] as usize].position;
+                            let p1 = mesh.vertices[tri.indices[1] as usize].position;
+                            let p2 = mesh.vertices[tri.indices[2] as usize].position;
+                            if (p0.x - p1.x).abs() < eps && (p1.x - p2.x).abs() < eps {
+                                *x_bins.entry((p0.x * 2.0).round() as i32).or_insert(0) += 1;
+                            }
+                            if (p0.y - p1.y).abs() < eps && (p1.y - p2.y).abs() < eps {
+                                *y_bins.entry((p0.y * 2.0).round() as i32).or_insert(0) += 1;
+                            }
+                            if (p0.z - p1.z).abs() < eps && (p1.z - p2.z).abs() < eps {
+                                *z_bins.entry((p0.z * 2.0).round() as i32).or_insert(0) += 1;
+                            }
+                        }
+                        let mut x_top: Vec<_> = x_bins.iter().collect();
+                        x_top.sort_by_key(|(_, &c)| std::cmp::Reverse(c));
+                        let mut y_top: Vec<_> = y_bins.iter().collect();
+                        y_top.sort_by_key(|(_, &c)| std::cmp::Reverse(c));
+                        let mut z_top: Vec<_> = z_bins.iter().collect();
+                        z_top.sort_by_key(|(_, &c)| std::cmp::Reverse(c));
+                        let _ = writeln!(f, "coplanar tris top X-planes (x*2 → count): {:?}",
+                            x_top.iter().take(5).collect::<Vec<_>>());
+                        let _ = writeln!(f, "coplanar tris top Y-planes: {:?}",
+                            y_top.iter().take(5).collect::<Vec<_>>());
+                        let _ = writeln!(f, "coplanar tris top Z-planes: {:?}",
+                            z_top.iter().take(5).collect::<Vec<_>>());
+                        let _ = writeln!(f, "boundary edges: {}", boundary_edges.len());
+                        let _ = writeln!(f, "dc_vertices: {} (NaN-count={})",
+                            dc_vertices.len(),
+                            dc_vertices.iter().filter(|v| v.x.is_nan()).count());
+                    }
+                }
+            }
 
             // Cache seam data and base mesh for this chunk
             {
@@ -1918,6 +2318,34 @@ fn handle_request(
                 s.last_sent_mesh_hash.insert(chunk, base_hash);
             }
 
+            // Debug throttle: GLOBAL mutex so all 8 workers serialize through
+            // a single send queue. Each chunk waits its turn → real one-at-a-time
+            // streaming the user can observe. File-controlled delay (no rebuild).
+            {
+                use std::sync::Mutex;
+                static THROTTLE: Mutex<()> = Mutex::new(());
+                let delay_ms = std::fs::read_to_string(
+                    "D:/Unreal Projects/Mithril2026/Saved/voxel_stream_delay_ms.txt"
+                ).ok().and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(0);
+                if delay_ms > 0 {
+                    let _guard = THROTTLE.lock().unwrap_or_else(|p| p.into_inner());
+                    use std::io::Write;
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+                        .open("D:/Unreal Projects/Mithril2026/Saved/voxel_stream_log.txt")
+                    {
+                        const WS: f32 = 40.0;
+                        let ux = chunk.0 as f32 * cfg.chunk_size as f32 * WS;
+                        let uy = -(chunk.2 as f32) * cfg.chunk_size as f32 * WS;
+                        let uz = chunk.1 as f32 * cfg.chunk_size as f32 * WS;
+                        let _ = writeln!(f,
+                            "[STREAM] sending chunk_rust=({},{},{}) chunk_ue=({:.0},{:.0},{:.0}) delay_ms={}",
+                            chunk.0, chunk.1, chunk.2, ux, uy, uz, delay_ms
+                        );
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                }
+            }
+
             let t_send_start = Instant::now();
             let _ = result_tx.send(WorkerResult::ChunkMesh {
                 chunk,
@@ -1942,6 +2370,83 @@ fn handle_request(
             #[cfg(not(feature = "diag-gate-3"))]
             let seam_timings = incremental_seam_pass(chunk, &cfg, store, result_tx, world_scale);
             let t_seam_pass = if profiling { seam_timings.total } else { Duration::ZERO };
+
+            // ── Per-snapshot smart re-seam ────────────────────────────────
+            //
+            // When chunks in this region had their pending snapshots applied
+            // during region regen, every backward face neighbor of those
+            // chunks may have a STALE last_sent_mesh_hash recorded from when
+            // it was originally meshed without these chunks loaded. The
+            // hash skip in incremental_seam_pass / batched_seam_pass then
+            // suppresses the new combined meshes that include the seams to
+            // the freshly-restored chunks — leading to chunks that show
+            // their base mesh in UE but never receive the seam quads
+            // pointing toward the restored neighbor.
+            //
+            // Force-clear the hash for every snapshot-applied chunk and
+            // its 3 backward face neighbors (-X/-Y/-Z), then run a
+            // batched_seam_pass over the union. batched_seam_pass expands
+            // the dirty set into its 27-neighborhood, so this also catches
+            // diagonal/edge neighbors. Hash-skip would have re-suppressed
+            // any genuine no-op so we have to remove the hashes BEFORE
+            // running the pass — relying on hash-skip after force-clear
+            // gives us cheap dedup for chunks whose seams genuinely
+            // didn't change.
+            //
+            // Cost: a batched_seam_pass over <region_size>³ chunks is
+            // single-digit ms in the worker thread; the game thread sees
+            // small mesh updates trickle through. See
+            // [streaming-perf.md] notes — these are existing-actor updates
+            // and bypass per-tick spawn budgets.
+            if !applied_snapshots.is_empty() {
+                use std::collections::HashSet;
+                let bwd_offsets: [(i32, i32, i32); 3] = [(-1, 0, 0), (0, -1, 0), (0, 0, -1)];
+                let mut targets: HashSet<(i32, i32, i32)> = HashSet::new();
+                for &k in &applied_snapshots {
+                    targets.insert(k);
+                    for &(dx, dy, dz) in &bwd_offsets {
+                        targets.insert((k.0 + dx, k.1 + dy, k.2 + dz));
+                    }
+                }
+                {
+                    let mut s = store.write().unwrap();
+                    for &t in &targets {
+                        s.last_sent_mesh_hash.remove(&t);
+                    }
+                }
+                let target_vec: Vec<(i32, i32, i32)> = targets.into_iter().collect();
+                batched_seam_pass(&target_vec, &cfg, store, result_tx, fluid_event_tx, world_scale);
+            }
+
+            // ── STALE-SEAM_DATA fix: ship the regenerated meshes ──
+            //
+            // The post-sync DC re-solve in the region-regen block freshened
+            // base_mesh + seam_data for every sync-dirty chunk that already
+            // had a mesh. Now we have to:
+            //   (a) drop their last_sent_mesh_hash so the upcoming
+            //       batched_seam_pass can't be hash-skipped, and
+            //   (b) run batched_seam_pass over the union, which will fan
+            //       out into their 27-neighborhood and emit every combined
+            //       mesh whose dc_vertices are now valid.
+            //
+            // Without this, the regenerated seam_data sits in the store
+            // unused — UE keeps showing the stale combined or base-only.
+            if !sync_remeshed.is_empty() {
+                {
+                    let mut s = store.write().unwrap();
+                    for &k in &sync_remeshed {
+                        s.last_sent_mesh_hash.remove(&k);
+                        // Also drop hashes of the 3 backward face neighbors —
+                        // their previously-sent combined included this chunk's
+                        // stale dc_vertices, so it's also out of date.
+                        let bwd: [(i32,i32,i32); 3] = [(-1,0,0),(0,-1,0),(0,0,-1)];
+                        for &(dx,dy,dz) in &bwd {
+                            s.last_sent_mesh_hash.remove(&(k.0+dx, k.1+dy, k.2+dz));
+                        }
+                    }
+                }
+                batched_seam_pass(&sync_remeshed, &cfg, store, result_tx, fluid_event_tx, world_scale);
+            }
 
             // Write pipeline timing report
             {
@@ -2042,7 +2547,7 @@ fn handle_request(
             drop(s);
 
             recompute_crystals_for_chunks(store, &cfg, &dirty_keys);
-            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, fluid_event_tx, world_scale);
         }
         WorkerRequest::FlattenBatch { tiles } => {
             let cfg = config.read().unwrap().clone();
@@ -2052,7 +2557,7 @@ fn handle_request(
             let dirty_keys: Vec<_> = meshes.into_iter().map(|(k, _)| k).collect();
             drop(s);
             recompute_crystals_for_chunks(store, &cfg, &dirty_keys);
-            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, fluid_event_tx, world_scale);
         }
         WorkerRequest::BuildingFlattenBatch { buildings } => {
             // Cheap path: per-tile call to the legacy ramp flatten. Each tile
@@ -2082,7 +2587,7 @@ fn handle_request(
             drop(s);
             // Single seam pass for all flattens combined
             recompute_crystals_for_chunks(store, &cfg, &all_dirty);
-            batched_seam_pass_mine(&all_dirty, &cfg, store, result_tx, world_scale);
+            batched_seam_pass_mine(&all_dirty, &cfg, store, result_tx, fluid_event_tx, world_scale);
         }
         WorkerRequest::BuildingFlatten { base_x, base_y, base_z, base_y_float, host_material, footprint_voxels, clearance_voxels } => {
             let cfg = config.read().unwrap().clone();
@@ -2108,7 +2613,7 @@ fn handle_request(
             drop(s);
 
             recompute_crystals_for_chunks(store, &cfg, &dirty_keys);
-            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, fluid_event_tx, world_scale);
         }
         WorkerRequest::Mine { request } => {
             let cfg = config.read().unwrap().clone();
@@ -2232,7 +2737,7 @@ fn handle_request(
                 }
             }
 
-            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, fluid_event_tx, world_scale);
         }
         WorkerRequest::MineAndFillFluid { world_x, world_y, world_z, radius, fluid_type, world_scale: ws } => {
             let cfg = config.read().unwrap().clone();
@@ -2368,7 +2873,7 @@ fn handle_request(
             }
 
             // Step 6: Regenerate seams
-            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, ws);
+            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, fluid_event_tx, ws);
         }
         WorkerRequest::BrushSphere { request } => {
             let cfg = config.read().unwrap().clone();
@@ -2414,7 +2919,7 @@ fn handle_request(
                     s.crystal_placements.insert(key, placements);
                 }
             }
-            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, fluid_event_tx, world_scale);
         }
         WorkerRequest::BrushTunnel { points, radius, material } => {
             let cfg = config.read().unwrap().clone();
@@ -2443,7 +2948,7 @@ fn handle_request(
                     s.crystal_placements.insert(key, placements);
                 }
             }
-            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, fluid_event_tx, world_scale);
         }
         WorkerRequest::BrushFormation { center_rust, formation_type, material, height, radius } => {
             let cfg = config.read().unwrap().clone();
@@ -2472,7 +2977,184 @@ fn handle_request(
                     s.crystal_placements.insert(key, placements);
                 }
             }
-            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, fluid_event_tx, world_scale);
+        }
+        WorkerRequest::ForceChunkResync { chunk } => {
+            let cfg = config.read().unwrap().clone();
+            let neighbors_face: [(i32, i32, i32); 6] = [
+                (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
+            ];
+            // Trace file so we can confirm the request reached the worker
+            // and what the seam pass actually emitted. Lives next to other
+            // worker logs the user already collects.
+            let log_line = |line: String| {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+                    .open("D:/Unreal Projects/Mithril2026/Saved/voxel_force_resync.txt")
+                {
+                    let _ = writeln!(f, "[ForceResync] {}", line);
+                }
+            };
+            log_line(format!("BEGIN chunk={:?}", chunk));
+
+            // Phase 1: sync boundaries
+            {
+                let mut s = store.write().unwrap();
+                let modified = s.sync_chunk_full_boundaries(chunk, cfg.chunk_size);
+                log_line(format!("sync_chunk_full_boundaries → {} chunks modified", modified.len()));
+            }
+
+            // Phase 2: collect targets (chunk + 6 face neighbors that exist)
+            let mut targets: Vec<(i32, i32, i32)> = vec![chunk];
+            {
+                let s = store.read().unwrap();
+                for &(dx, dy, dz) in &neighbors_face {
+                    let n = (chunk.0 + dx, chunk.1 + dy, chunk.2 + dz);
+                    if s.density_fields.contains_key(&n) {
+                        targets.push(n);
+                    }
+                }
+            }
+            log_line(format!("targets: {:?}", targets));
+
+            // Phase 3: regenerate base mesh + hermite + seam_data for each
+            // target.
+            let chunk_size = cfg.chunk_size;
+            for &target in &targets {
+                let density_clone = {
+                    let s = store.read().unwrap();
+                    s.density_fields.get(&target).cloned()
+                };
+                let Some(density) = density_clone else { continue; };
+                let hermite = extract_hermite_data(&density);
+                let cell_size = density.size - 1;
+                let dc_vertices = solve_dc_vertices(&hermite, cell_size);
+                let mut mesh = generate_mesh(&hermite, &dc_vertices, cell_size);
+                mesh.smooth(
+                    cfg.mesh_smooth_iterations,
+                    cfg.mesh_smooth_strength,
+                    cfg.mesh_boundary_smooth,
+                    Some(cell_size),
+                );
+                if cfg.mesh_recalc_normals > 0 { mesh.recalculate_normals(); }
+                let boundary_edges = voxel_gen::region_gen::extract_boundary_edges(&hermite, chunk_size);
+                let base_verts = mesh.vertices.len();
+                {
+                    let mut s = store.write().unwrap();
+                    s.hermite_data.insert(target, hermite);
+                    s.base_meshes.insert(target, mesh);
+                    s.add_seam_data(target, ChunkSeamData {
+                        dc_vertices,
+                        world_origin: glam::Vec3::ZERO,
+                        boundary_edges,
+                    });
+                }
+                log_line(format!("regenerated target {:?}: base verts={}", target, base_verts));
+            }
+
+            // Phase 4: combine base + seam quads and send DIRECTLY as
+            // ChunkMesh results. Bypasses the MineBatchMesh requeue dance
+            // which seems to drop seam updates for Force Resync. Also
+            // forcibly invalidates last_sent_mesh_hash so hash-skip can't
+            // suppress the send (the user explicitly asked for a refresh).
+            for &target in &targets {
+                let combined: Option<voxel_core::mesh::Mesh> = {
+                    let s = store.read().unwrap();
+                    let base = match s.base_meshes.get(&target) { Some(m) => m.clone(), None => { continue; } };
+                    let seam = voxel_gen::region_gen::generate_chunk_seam_quads(target, &s.chunk_seam_data, cfg.chunk_size);
+                    let seam_tris = seam.triangles.len();
+                    let mut combined = base;
+                    combined.append(seam);
+                    if cfg.mesh_recalc_normals > 0 { combined.recalculate_normals(); }
+                    log_line(format!("target {:?}: base+seam → {} verts / {} tris (seam_tris={})",
+                        target, combined.vertices.len(), combined.triangles.len(), seam_tris));
+                    Some(combined)
+                };
+                let Some(combined) = combined else { continue; };
+
+                // Force-invalidate hash so send isn't skipped.
+                {
+                    let mut s = store.write().unwrap();
+                    s.last_sent_mesh_hash.remove(&target);
+                }
+
+                let mut converted = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
+                crate::convert::bucket_mesh_by_material(&mut converted);
+                let v = converted.positions.len();
+                let i = converted.indices.len();
+                log_line(format!("target {:?}: sending ChunkMesh — {} verts / {} indices", target, v, i));
+                let _ = result_tx.send(WorkerResult::ChunkMesh {
+                    chunk: target,
+                    mesh: converted,
+                    generation: 0,
+                    crystal_data: Vec::new(),
+                    zone_descriptors: Vec::new(),
+                });
+
+                // Record new hash so subsequent passes don't redo it
+                let h = hash_mesh(&combined);
+                {
+                    let mut s = store.write().unwrap();
+                    s.last_sent_mesh_hash.insert(target, h);
+                }
+            }
+            log_line(format!("END chunk={:?}", chunk));
+        }
+        WorkerRequest::BrushCavernStamp { chunk_origin, extent, decorate, fluids, seed } => {
+            let cfg = config.read().unwrap().clone();
+
+            let mut s = store.write().unwrap();
+            let outcome = crate::brushes::cavern_stamp_brush(
+                &mut s, chunk_origin, extent, decorate, fluids, seed as u64, &cfg, world_scale,
+            );
+            drop(s);
+
+            let dirty_keys: Vec<(i32, i32, i32)> =
+                outcome.meshes.into_iter().map(|(k, _)| k).collect();
+            let new_placements: Vec<_> = {
+                let s = store.read().unwrap();
+                outcome.flipped_chunks.iter().filter_map(|&key| {
+                    s.density_fields.get(&key).map(|density| {
+                        let coord = voxel_core::chunk::ChunkCoord::new(key.0, key.1, key.2);
+                        (key, voxel_gen::compute_crystals(coord, density, &cfg))
+                    })
+                }).collect()
+            };
+            {
+                let mut s = store.write().unwrap();
+                for (key, placements) in new_placements {
+                    s.crystal_placements.insert(key, placements);
+                }
+            }
+            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, fluid_event_tx, world_scale);
+        }
+        WorkerRequest::BrushFormationStamp { center_rust, radius, seed } => {
+            let cfg = config.read().unwrap().clone();
+
+            let mut s = store.write().unwrap();
+            let outcome = crate::brushes::random_formations_brush(
+                &mut s, center_rust, radius, seed as u64, &cfg, world_scale,
+            );
+            drop(s);
+
+            let dirty_keys: Vec<(i32, i32, i32)> =
+                outcome.meshes.into_iter().map(|(k, _)| k).collect();
+            let new_placements: Vec<_> = {
+                let s = store.read().unwrap();
+                outcome.flipped_chunks.iter().filter_map(|&key| {
+                    s.density_fields.get(&key).map(|density| {
+                        let coord = voxel_core::chunk::ChunkCoord::new(key.0, key.1, key.2);
+                        (key, voxel_gen::compute_crystals(coord, density, &cfg))
+                    })
+                }).collect()
+            };
+            {
+                let mut s = store.write().unwrap();
+                for (key, placements) in new_placements {
+                    s.crystal_placements.insert(key, placements);
+                }
+            }
+            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, fluid_event_tx, world_scale);
         }
         WorkerRequest::BrushBox { center_rust, half_ext_rust, yaw_rad, op, material } => {
             let cfg = config.read().unwrap().clone();
@@ -2501,7 +3183,7 @@ fn handle_request(
                     s.crystal_placements.insert(key, placements);
                 }
             }
-            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, fluid_event_tx, world_scale);
         }
         WorkerRequest::BrushCylinder { center_rust, radius, height, op, material } => {
             let cfg = config.read().unwrap().clone();
@@ -2530,7 +3212,7 @@ fn handle_request(
                     s.crystal_placements.insert(key, placements);
                 }
             }
-            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, fluid_event_tx, world_scale);
         }
         WorkerRequest::BrushSmooth { center_rust, radius, iterations, strength } => {
             let cfg = config.read().unwrap().clone();
@@ -2543,7 +3225,7 @@ fn handle_request(
                 outcome.meshes.into_iter().map(|(k, _)| k).collect();
             // Smooth doesn't change material, so crystal recompute isn't strictly needed —
             // but keep consistent with other brush handlers for safety.
-            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, fluid_event_tx, world_scale);
         }
         WorkerRequest::BrushUndo => {
             let cfg = config.read().unwrap().clone();
@@ -2568,7 +3250,7 @@ fn handle_request(
                         s.crystal_placements.insert(key, placements);
                     }
                 }
-                batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+                batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, fluid_event_tx, world_scale);
             }
         }
         WorkerRequest::BrushNoise { center_rust, radius, frequency, strength, seed } => {
@@ -2595,7 +3277,7 @@ fn handle_request(
                     s.crystal_placements.insert(key, placements);
                 }
             }
-            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, fluid_event_tx, world_scale);
         }
         WorkerRequest::BrushFluidSphere { center_rust, radius, fluid_type, is_source, op, max_flow_dist } => {
             // op semantics:
@@ -2622,6 +3304,48 @@ fn handle_request(
                 let s = store.read().unwrap();
                 crate::brushes::collect_fluid_cells_in_sphere(&s, center_rust, radius, bottom_half_only, &cfg)
             };
+
+            // Refresh the fluid thread's density cache for every chunk this
+            // brush touches. The fluid thread keeps its own density cache and
+            // AddFluid checks `cell_capacity > MIN_LEVEL` against it. The
+            // cache only refreshes when the worker sends DensityUpdate (at
+            // gen time) or TerrainModified (after density changes).
+            //
+            // This needs to fire BOTH when carving (cells just changed
+            // solid→air, fluid thread's cache still says solid) AND when
+            // painting without carving (the cache may be stale from any
+            // prior carve / config change / save-load cycle that didn't
+            // notify the fluid thread). Without this, AddFluid silently
+            // rejects every event because cell_capacity reads 0.
+            //
+            // Driving the chunk list from `cells` (rather than just the
+            // carve outcome) covers paint-only mode too — the worker has
+            // already filtered the cell list to "store thinks this is
+            // air", so refreshing those chunks brings the fluid thread's
+            // cache into agreement before AddFluid lands.
+            {
+                use std::collections::HashSet;
+                let mut chunks_to_refresh: HashSet<(i32, i32, i32)> = HashSet::new();
+                for c in &cells {
+                    chunks_to_refresh.insert(c.chunk);
+                }
+                if let Some(ref outcome) = dig_outcome {
+                    for (key, _) in &outcome.meshes {
+                        chunks_to_refresh.insert(*key);
+                    }
+                }
+                let s = store.read().unwrap();
+                for key in chunks_to_refresh {
+                    if let Some(density) = s.density_fields.get(&key) {
+                        let densities: Vec<f32> = density.samples.iter().map(|s| s.density).collect();
+                        let _ = fluid_event_tx.send(FluidEvent::TerrainModified {
+                            chunk: key,
+                            densities,
+                        });
+                    }
+                }
+            }
+
             for cell in cells {
                 let cell_is_source = if force_non_source { false } else { is_source };
                 let _ = fluid_event_tx.send(FluidEvent::AddFluid {
@@ -2639,7 +3363,7 @@ fn handle_request(
                 let dirty_keys: Vec<(i32, i32, i32)> =
                     outcome.meshes.into_iter().map(|(k, _)| k).collect();
                 if !dirty_keys.is_empty() {
-                    batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+                    batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, fluid_event_tx, world_scale);
                 }
             }
         }
@@ -2663,6 +3387,33 @@ fn handle_request(
                 let s = store.read().unwrap();
                 crate::brushes::collect_fluid_cells_in_box(&s, center_rust, half_ext_rust, &cfg)
             };
+
+            // Refresh fluid thread density cache for every chunk touched —
+            // covers carve mode AND paint-only mode. See BrushFluidSphere
+            // for full rationale.
+            {
+                use std::collections::HashSet;
+                let mut chunks_to_refresh: HashSet<(i32, i32, i32)> = HashSet::new();
+                for c in &cells {
+                    chunks_to_refresh.insert(c.chunk);
+                }
+                if let Some(ref outcome) = dig_outcome {
+                    for (key, _) in &outcome.meshes {
+                        chunks_to_refresh.insert(*key);
+                    }
+                }
+                let s = store.read().unwrap();
+                for key in chunks_to_refresh {
+                    if let Some(density) = s.density_fields.get(&key) {
+                        let densities: Vec<f32> = density.samples.iter().map(|s| s.density).collect();
+                        let _ = fluid_event_tx.send(FluidEvent::TerrainModified {
+                            chunk: key,
+                            densities,
+                        });
+                    }
+                }
+            }
+
             for cell in cells {
                 let cell_is_source = if op == 2 { false } else { is_source };
                 let _ = fluid_event_tx.send(FluidEvent::AddFluid {
@@ -2679,7 +3430,7 @@ fn handle_request(
                 let dirty_keys: Vec<(i32, i32, i32)> =
                     outcome.meshes.into_iter().map(|(k, _)| k).collect();
                 if !dirty_keys.is_empty() {
-                    batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+                    batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, fluid_event_tx, world_scale);
                 }
             }
         }
@@ -2694,10 +3445,37 @@ fn handle_request(
                 dig_outcome = Some(crate::brushes::tunnel(&mut s, &points, radius, None, &cfg, world_scale));
                 drop(s);
             }
+
             let cells = {
                 let s = store.read().unwrap();
                 crate::brushes::collect_fluid_cells_in_capsule_chain(&s, &points, radius, &cfg)
             };
+
+            // Refresh fluid thread density cache for every chunk touched —
+            // covers carve mode AND paint-only mode. See BrushFluidSphere
+            // for full rationale.
+            {
+                use std::collections::HashSet;
+                let mut chunks_to_refresh: HashSet<(i32, i32, i32)> = HashSet::new();
+                for c in &cells {
+                    chunks_to_refresh.insert(c.chunk);
+                }
+                if let Some(ref outcome) = dig_outcome {
+                    for (key, _) in &outcome.meshes {
+                        chunks_to_refresh.insert(*key);
+                    }
+                }
+                let s = store.read().unwrap();
+                for key in chunks_to_refresh {
+                    if let Some(density) = s.density_fields.get(&key) {
+                        let densities: Vec<f32> = density.samples.iter().map(|s| s.density).collect();
+                        let _ = fluid_event_tx.send(FluidEvent::TerrainModified {
+                            chunk: key,
+                            densities,
+                        });
+                    }
+                }
+            }
             for cell in cells {
                 let _ = fluid_event_tx.send(FluidEvent::AddFluid {
                     chunk: cell.chunk,
@@ -2712,11 +3490,108 @@ fn handle_request(
                 let dirty_keys: Vec<(i32, i32, i32)> =
                     outcome.meshes.into_iter().map(|(k, _)| k).collect();
                 if !dirty_keys.is_empty() {
-                    batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, world_scale);
+                    batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, fluid_event_tx, world_scale);
                 }
             }
         }
         // (removed BrushFluidStream handler — replaced by bounded sources via max_flow_dist on FluidCell)
+        WorkerRequest::ApplyLavaQuench { obsidian, scoria, drained_water: _ } => {
+            // Apply the live lava↔water quench plan emitted by the fluid sim.
+            // - obsidian cells: Material::Obsidian (glassy quench skin, hardness 0.85)
+            // - scoria cells:   Material::Scoria   (steam-altered halo, hardness 0.45)
+            // The fluid grid already drained these cells locally; here we make
+            // the underlying voxels solid + remesh + nudge the fluid sim's
+            // density cache so it knows the cells are now solid.
+            if obsidian.is_empty() && scoria.is_empty() {
+                return;
+            }
+            let cfg = config.read().unwrap().clone();
+            let cs = cfg.chunk_size as i32;
+
+            let mut s = store.write().unwrap();
+            let mut dirty_set: HashSet<(i32, i32, i32)> = HashSet::new();
+            let mut written: Vec<voxel_core::density_ops::WrittenCell> = Vec::new();
+            let mut changed: u32 = 0;
+
+            // Helper: convert local (key, lx, ly, lz) → world coords + write
+            // through density_ops::write_all_locations so chunk-boundary
+            // mirrors stay in sync.
+            for (key, lx, ly, lz) in &obsidian {
+                let wx = key.0 * cs + *lx as i32;
+                let wy = key.1 * cs + *ly as i32;
+                let wz = key.2 * cs + *lz as i32;
+                voxel_core::density_ops::write_all_locations(
+                    &mut s.density_fields, cs, wx, wy, wz,
+                    |_old_d, _old_m| Some((1.0, voxel_core::material::Material::Obsidian)),
+                    &mut dirty_set, &mut written, &mut changed,
+                );
+            }
+            for (key, lx, ly, lz) in &scoria {
+                let wx = key.0 * cs + *lx as i32;
+                let wy = key.1 * cs + *ly as i32;
+                let wz = key.2 * cs + *lz as i32;
+                voxel_core::density_ops::write_all_locations(
+                    &mut s.density_fields, cs, wx, wy, wz,
+                    |_old_d, old_m| {
+                        // Don't overwrite obsidian we just placed at the same
+                        // boundary position (rim wins over halo).
+                        if old_m == voxel_core::material::Material::Obsidian {
+                            None
+                        } else {
+                            Some((1.0, voxel_core::material::Material::Scoria))
+                        }
+                    },
+                    &mut dirty_set, &mut written, &mut changed,
+                );
+            }
+
+            // Persist these changes across save/load.
+            let dirty_chunks: Vec<(i32, i32, i32)> = dirty_set.iter().copied().collect();
+            s.modification_tracker.mark_dirty_many(&dirty_chunks);
+
+            // Remesh affected chunks (full chunk bounds — we touched solid voxels).
+            let dirty_bounds: Vec<_> = dirty_chunks.iter().map(|&k| {
+                (k, 0usize, 0usize, 0usize, cfg.chunk_size, cfg.chunk_size, cfg.chunk_size)
+            }).collect();
+            let meshes = s.remesh_dirty(&dirty_bounds, &cfg, world_scale);
+
+            // Capture density for the fluid TerrainModified events while we
+            // still hold the lock, so the fluid sim's density cache is updated
+            // and stops trying to flow into the new solid voxels.
+            let mut terrain_updates: Vec<((i32,i32,i32), Vec<f32>)> = Vec::new();
+            for &k in &dirty_chunks {
+                if let Some(df) = s.density_fields.get(&k) {
+                    let densities: Vec<f32> = df.samples.iter().map(|s| s.density).collect();
+                    terrain_updates.push((k, densities));
+                }
+            }
+            drop(s);
+
+            // Ship remeshed chunks back to UE through the normal pipeline.
+            for (chunk, mesh) in meshes {
+                let _ = result_tx.send(WorkerResult::ChunkMesh {
+                    chunk,
+                    mesh,
+                    generation: 0,
+                    crystal_data: Vec::new(),
+                    zone_descriptors: Vec::new(),
+                });
+            }
+
+            // Notify fluid sim of new solid voxels so its density cache
+            // matches the world state.
+            for (chunk, densities) in terrain_updates {
+                let _ = fluid_event_tx.send(FluidEvent::TerrainModified {
+                    chunk, densities,
+                });
+            }
+
+            // Seam pass so chunk-boundary quads tween correctly between
+            // the new solid (1.0) and adjacent air/density values.
+            if !dirty_chunks.is_empty() {
+                batched_seam_pass(&dirty_chunks, &cfg, store, result_tx, fluid_event_tx, world_scale);
+            }
+        }
         WorkerRequest::Unload { chunk } => {
             let mut s = store.write().unwrap();
             s.unload(chunk);
@@ -2774,17 +3649,23 @@ fn handle_request(
             let cfg = config.read().unwrap().clone();
             let sleep_config = sc;
             let t_worker_start = Instant::now();
+            crate::panic_log::note(&format!("[SLEEP_TRACE] enter Sleep handler player_chunk=({},{},{})", player_chunk.0, player_chunk.1, player_chunk.2));
 
             // Request fluid snapshot for geological processes
             let (snap_tx, snap_rx) = crossbeam_channel::bounded(1);
+            crate::panic_log::note("[SLEEP_TRACE] sending SnapshotRequest");
             let _ = fluid_event_tx.send(voxel_fluid::FluidEvent::SnapshotRequest { reply_tx: snap_tx });
             let mut fluid_snapshot = snap_rx.recv().unwrap_or_else(|_| voxel_fluid::FluidSnapshot::default());
+            crate::panic_log::note(&format!("[SLEEP_TRACE] got fluid snapshot ({} chunks)", fluid_snapshot.chunks.len()));
 
+            crate::panic_log::note("[SLEEP_TRACE] acquiring store write lock");
             let mut s = store.write().unwrap();
+            crate::panic_log::note("[SLEEP_TRACE] store write lock acquired");
 
             // Use helper to get three simultaneous &mut borrows (borrow checker
             // cannot split borrows through method calls on the same struct).
             let (density_fields, stress_fields, support_fields) = s.sleep_fields_mut();
+            crate::panic_log::note(&format!("[SLEEP_TRACE] entering execute_sleep ({} density chunks)", density_fields.len()));
 
             // Execute the sleep cycle on the mutable store fields
             let sleep_result = voxel_sleep::execute_sleep(
@@ -2797,6 +3678,7 @@ fn handle_request(
                 sleep_count,
                 None, // No progress channel for now
             );
+            crate::panic_log::note(&format!("[SLEEP_TRACE] execute_sleep returned: chunks_changed={} dirty_chunks={} metamorphosed={}", sleep_result.chunks_changed, sleep_result.dirty_chunks.len(), sleep_result.voxels_metamorphosed));
 
             // Drain solidified lava from the real fluid system
             if sleep_result.lava_solidified > 0 {
@@ -2811,11 +3693,10 @@ fn handle_request(
                 (key, 0usize, 0usize, 0usize, cfg.chunk_size, cfg.chunk_size, cfg.chunk_size)
             }).collect();
 
-            // Mark sleep-modified chunks for save persistence
-            {
-                let mut s = store.write().unwrap();
-                s.modification_tracker.mark_dirty_many(&sleep_result.dirty_chunks);
-            }
+            // Mark sleep-modified chunks for save persistence.
+            // (Re-locking `store.write()` here would deadlock — the outer scope
+            // already holds the write guard `s` from before execute_sleep.)
+            s.modification_tracker.mark_dirty_many(&sleep_result.dirty_chunks);
 
             // NOTE: Do NOT call sync_boundaries here. Sleep uses set_voxel_synced()
             // which already keeps boundary overlap voxels consistent. Running
@@ -2894,7 +3775,7 @@ fn handle_request(
             // Regenerate seams for dirty chunks
             let t_seam = Instant::now();
             let seam_count = sleep_result.dirty_chunks.len();
-            batched_seam_pass(&sleep_result.dirty_chunks, &cfg, store, result_tx, world_scale);
+            batched_seam_pass(&sleep_result.dirty_chunks, &cfg, store, result_tx, fluid_event_tx, world_scale);
             let t_seam_elapsed = t_seam.elapsed();
 
             // Build combined profile report with worker timings appended
@@ -2919,9 +3800,12 @@ fn handle_request(
             // Compact manifest (merge multi-phase changes per voxel) but don't filter by block —
             // cinematic mode uses a player-aimed block that differs from Rust's showcase block.
             // Manifest is cached once via set_morph_manifest, so full size (~30MB) is acceptable.
+            crate::panic_log::note("[SLEEP_TRACE] cloning + compacting manifest");
             let mut compact_manifest = sleep_result.manifest.clone();
             compact_manifest.compact();
+            crate::panic_log::note("[SLEEP_TRACE] serializing manifest to JSON");
             let manifest_json = compact_manifest.to_json().unwrap_or_default();
+            crate::panic_log::note(&format!("[SLEEP_TRACE] manifest JSON serialized ({} bytes), sending SleepComplete", manifest_json.len()));
 
             // Send sleep completion stats (intercepted by engine.poll_result)
             let _ = result_tx.send(WorkerResult::SleepComplete {
@@ -3189,10 +4073,38 @@ fn handle_request(
                     }
                 }).collect();
 
-            // Collect results back into sequential structures (seam_data_map is not thread-safe)
+            // Collect results back into sequential structures (seam_data_map is not thread-safe).
+            // Pre-populate with the global store's seam data for out-of-block neighbors so
+            // edge chunks in the morph block can seam against their stored neighbors.
+            // Without this, `generate_chunk_seam_quads` skips every quad that references
+            // a chunk outside the morph block (returns `valid = false` on missing lookup)
+            // — leaving visible seam gaps along the morph-block perimeter, the exact
+            // behaviour the recent brush-side seam fix addressed. Brushes already pull
+            // from `store.chunk_seam_data`; we mirror that here for the morph path.
+            // Mid-morph the out-of-block DC vertices are the post-sleep snapshot (t=1),
+            // so the seam will be slightly inconsistent until t→1 — acceptable trade-off
+            // vs. fully missing quads. At t=1 it matches the dirty-chunks state exactly.
+            let chunks_set: std::collections::HashSet<(i32, i32, i32)> =
+                chunks.iter().copied().collect();
+            let mut seam_data_map: std::collections::HashMap<(i32, i32, i32), ChunkSeamData> = {
+                let s = store.read().unwrap();
+                let mut map = std::collections::HashMap::new();
+                for &c in &chunks {
+                    for dx in -1..=1i32 {
+                        for dy in -1..=1i32 {
+                            for dz in -1..=1i32 {
+                                let n = (c.0 + dx, c.1 + dy, c.2 + dz);
+                                if chunks_set.contains(&n) { continue; }
+                                if let Some(data) = s.chunk_seam_data.get(&n) {
+                                    map.insert(n, data.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                map
+            };
             let mut base_meshes: Vec<Option<voxel_core::mesh::Mesh>> = Vec::with_capacity(chunks.len());
-            let mut seam_data_map: std::collections::HashMap<(i32,i32,i32), ChunkSeamData> =
-                std::collections::HashMap::new();
 
             for (i, result) in mesh_results.into_iter().enumerate() {
                 match result {
@@ -3517,8 +4429,20 @@ fn incremental_seam_pass(
     {
         let s = store.read().unwrap();
         for (target, mesh, new_hash) in hashed {
-            if let Some(&prev) = s.last_sent_mesh_hash.get(&target) {
-                if prev == new_hash { continue; }
+            // Never hash-skip the chunk that owns this seam pass: K's per-chunk
+            // pipeline just sent its base mesh to UE, and that base send is the
+            // LAST thing UE will see for K unless K's own incremental re-sends
+            // combined. A concurrent worker's incremental (firing for target=K
+            // while K is in its 27-neighborhood) can race ahead, send K's
+            // combined first, and record h_combined into last_sent[K] BEFORE
+            // K's own incremental reads it. K's own pass then hash-matches and
+            // skips — and UE's channel order ends up being [W2 combined, W1
+            // base], leaving UE on the seam-less base. Always sending K's own
+            // combined as the final word guarantees UE ends on combined.
+            if target != chunk {
+                if let Some(&prev) = s.last_sent_mesh_hash.get(&target) {
+                    if prev == new_hash { continue; }
+                }
             }
             let crystal_data = match s.crystal_placements.get(&target) {
                 Some(p) if !p.is_empty() => {
@@ -3608,14 +4532,21 @@ fn recompute_crystals_for_chunks(
 
 /// Dirty chunks are guaranteed to have their mesh sent even if they have no seam quads,
 /// since callers rely on this function as the sole sender for mine/flatten results.
+///
+/// Always notifies the fluid thread of density changes for `dirty_keys` via
+/// `FluidEvent::TerrainModified` before the seam pass. Mining had been the
+/// only path doing this manually — every brush, flatten, slab and undo
+/// route now shares the same plumbing here so creative-mode carving lets
+/// adjacent lava actually flow into the new air cells.
 fn batched_seam_pass(
     dirty_keys: &[(i32, i32, i32)],
     cfg: &GenerationConfig,
     store: &Arc<RwLock<ChunkStore>>,
     result_tx: &Sender<WorkerResult>,
+    fluid_event_tx: &Sender<FluidEvent>,
     world_scale: f32,
 ) {
-    batched_seam_pass_inner(dirty_keys, cfg, store, result_tx, world_scale, false);
+    batched_seam_pass_inner(dirty_keys, cfg, store, result_tx, fluid_event_tx, world_scale, false);
 }
 
 fn batched_seam_pass_mine(
@@ -3623,9 +4554,10 @@ fn batched_seam_pass_mine(
     cfg: &GenerationConfig,
     store: &Arc<RwLock<ChunkStore>>,
     result_tx: &Sender<WorkerResult>,
+    fluid_event_tx: &Sender<FluidEvent>,
     world_scale: f32,
 ) {
-    batched_seam_pass_inner(dirty_keys, cfg, store, result_tx, world_scale, true);
+    batched_seam_pass_inner(dirty_keys, cfg, store, result_tx, fluid_event_tx, world_scale, true);
 }
 
 fn batched_seam_pass_inner(
@@ -3633,9 +4565,30 @@ fn batched_seam_pass_inner(
     cfg: &GenerationConfig,
     store: &Arc<RwLock<ChunkStore>>,
     result_tx: &Sender<WorkerResult>,
+    fluid_event_tx: &Sender<FluidEvent>,
     world_scale: f32,
     batch_as_mine: bool,
 ) {
+    // Notify the fluid sim that these chunks' densities changed BEFORE
+    // running the seam pass. This refreshes the fluid thread's density
+    // cache + cell_capacity for each cell, which is what makes
+    // newly-carved cells reachable for fluid flow and what triggers
+    // squeeze-out for cells that just became solid. Idempotent: callers
+    // that already sent TerrainModified explicitly (mining, flatten,
+    // sleep) just write the same densities to the cache twice.
+    if !dirty_keys.is_empty() {
+        let s = store.read().unwrap();
+        for &key in dirty_keys {
+            if let Some(density) = s.density_fields.get(&key) {
+                let densities: Vec<f32> = density.samples.iter().map(|s| s.density).collect();
+                let _ = fluid_event_tx.send(FluidEvent::TerrainModified {
+                    chunk: key,
+                    densities,
+                });
+            }
+        }
+    }
+
     let dirty_set: HashSet<(i32, i32, i32)> = dirty_keys.iter().copied().collect();
 
     let mut candidates: HashSet<(i32, i32, i32)> = HashSet::new();

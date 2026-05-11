@@ -453,6 +453,7 @@ pub fn apply_external_worm_paths(
 // ── Seam stitching ──────────────────────────────────────────────────────────
 
 /// Per-chunk data needed for seam stitching between adjacent chunks.
+#[derive(Clone)]
 pub struct ChunkSeamData {
     pub dc_vertices: Vec<Vec3>,
     pub world_origin: Vec3,
@@ -811,12 +812,295 @@ pub fn sync_region_boundary_densities(
             sample.material = m;
         }
     }
+
+    // ── Gradient-blend pass (systemic seam-cliff fix) ────────────────────
+    // The min-rule above can leave a 1-cell cliff: interior cell at
+    // (gs-1) keeps a hard +1.0 (from a formation/pool/zone/coarse-bypass
+    // write) while the boundary cell (gs) gets sync'd to neighbor air
+    // (~-0.1). DC's QEF then projects every vertex to the same boundary
+    // plane → coplanar triangles → flat-wall artifact ("slate cube"
+    // bug). Per-system fixes (smooth SDF in write_mega_column, etc.)
+    // treat one symptom; this pass attacks the geometric cause for ALL
+    // density writers — formations, pools, zones, springs, surface
+    // formations, and any future writer.
+    //
+    // Heuristic: when the interior cell is strongly positive AND the
+    // synced boundary is negative AND the delta is large, blend the
+    // interior partway toward the boundary. The conditions together
+    // identify "hard write next to natural air" — natural noise rarely
+    // produces strongly-positive cells right next to negative ones,
+    // because noise is smooth.
+    let cliff_interior_min: f32 = 0.5;   // interior must be at least this solid
+    let cliff_boundary_max: f32 = 0.0;   // synced boundary must be air
+    let cliff_delta_min: f32 = 0.7;      // and delta this large
+    let blend_factor: f32 = 0.5;          // pull interior 50% toward boundary
+    let face_offsets: [(i32, i32, i32); 3] = [(1, 0, 0), (0, 1, 0), (0, 0, 1)];
+    let mut grad_updates: Vec<((i32, i32, i32), usize, usize, usize, f32)> = Vec::new();
+
+    for &(cx, cy, cz) in &keys {
+        for &(dx, dy, dz) in &face_offsets {
+            let neighbor = (cx + dx, cy + dy, cz + dz);
+            if !density_fields.contains_key(&neighbor) {
+                continue;
+            }
+            for u in 0..=gs {
+                for v in 0..=gs {
+                    let (a_int_d, a_bnd_d, b_int_d, b_bnd_d, a_int_xyz, b_int_xyz) = if dx == 1 {
+                        let f_a = &density_fields[&(cx, cy, cz)];
+                        let f_b = &density_fields[&neighbor];
+                        (
+                            f_a.get(gs - 1, u, v).density,
+                            f_a.get(gs, u, v).density,
+                            f_b.get(1, u, v).density,
+                            f_b.get(0, u, v).density,
+                            (gs - 1, u, v),
+                            (1, u, v),
+                        )
+                    } else if dy == 1 {
+                        let f_a = &density_fields[&(cx, cy, cz)];
+                        let f_b = &density_fields[&neighbor];
+                        (
+                            f_a.get(u, gs - 1, v).density,
+                            f_a.get(u, gs, v).density,
+                            f_b.get(u, 1, v).density,
+                            f_b.get(u, 0, v).density,
+                            (u, gs - 1, v),
+                            (u, 1, v),
+                        )
+                    } else {
+                        let f_a = &density_fields[&(cx, cy, cz)];
+                        let f_b = &density_fields[&neighbor];
+                        (
+                            f_a.get(u, v, gs - 1).density,
+                            f_a.get(u, v, gs).density,
+                            f_b.get(u, v, 1).density,
+                            f_b.get(u, v, 0).density,
+                            (u, v, gs - 1),
+                            (u, v, 1),
+                        )
+                    };
+
+                    // a-side cliff: a's interior is hard-solid, a's boundary was sync'd to air
+                    if a_int_d > cliff_interior_min
+                        && a_bnd_d < cliff_boundary_max
+                        && a_int_d - a_bnd_d > cliff_delta_min
+                    {
+                        let new_d = a_int_d + (a_bnd_d - a_int_d) * blend_factor;
+                        grad_updates.push(((cx, cy, cz), a_int_xyz.0, a_int_xyz.1, a_int_xyz.2, new_d));
+                    }
+                    // b-side cliff: same check from b's perspective
+                    if b_int_d > cliff_interior_min
+                        && b_bnd_d < cliff_boundary_max
+                        && b_int_d - b_bnd_d > cliff_delta_min
+                    {
+                        let new_d = b_int_d + (b_bnd_d - b_int_d) * blend_factor;
+                        grad_updates.push((neighbor, b_int_xyz.0, b_int_xyz.1, b_int_xyz.2, new_d));
+                    }
+                }
+            }
+        }
+    }
+
+    for (key, x, y, z, d) in grad_updates {
+        if let Some(field) = density_fields.get_mut(&key) {
+            let sample = field.get_mut(x, y, z);
+            sample.density = d;
+            // material left alone — only soften the density gradient.
+        }
+    }
+}
+
+/// Brush entry point: run the cave-carving phases (worms ± lava tubes/rivers)
+/// and optionally the decoration phases (pools + formations) on a list of
+/// existing chunk density fields. Used by the creative-mode "Cavern Stamp"
+/// brush.
+///
+/// Modifies only chunks whose key is in `coords`. Worm planning ranges over
+/// caverns inside those chunks; carving stays inside the brush region.
+///
+/// `decorate`: run pools + formations after carving.
+/// `fluids`:   run lava tubes + rivers (small specialized carves).
+///
+/// Worms carve additively (write negative density), so existing user edits
+/// in the chunks survive — solid → cave where worms pass, cave stays cave.
+/// Decoration phases write material into newly-created surfaces.
+///
+/// The brush seed (`seed`) drives all randomness — same seed + same input
+/// density gives the same caves, so users can re-roll vibes deterministically.
+pub fn carve_caverns_into_existing(
+    coords: &[(i32, i32, i32)],
+    density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
+    config: &GenerationConfig,
+    seed: u64,
+    decorate: bool,
+    fluids: bool,
+) {
+    use std::collections::HashSet;
+    let eb = config.effective_bounds();
+    let chunk_size_f = eb;
+    let coord_set: HashSet<(i32, i32, i32)> = coords.iter().copied().collect();
+
+    // Phase 2: cavern centers from brush chunks only
+    let mut all_cavern_centers: Vec<Vec3> = Vec::new();
+    for &c in coords {
+        if let Some(df) = density_fields.get(&c) {
+            let coord = ChunkCoord::new(c.0, c.1, c.2);
+            let flat = df.densities();
+            all_cavern_centers.extend(worm::connect::find_cavern_centers(
+                &flat,
+                df.size,
+                coord.world_origin_bounds(eb),
+            ));
+        }
+    }
+
+    // Phase 3: plan worms with brush seed
+    let num_chunks = coords.len() as u32;
+    let total_worms = (config.worm.worms_per_region * num_chunks as f32).ceil() as u32;
+    let connections = if all_cavern_centers.len() >= 2 && total_worms > 0 {
+        worm::connect::plan_worm_connections(seed, &all_cavern_centers, total_worms)
+    } else {
+        Vec::new()
+    };
+
+    // Phase 4: generate + carve worm paths (restricted to brush chunks)
+    let max_endpoint_drift = 50.0;
+    for (i, (worm_start, worm_end)) in connections.iter().enumerate() {
+        let worm_seed = seed.wrapping_add(0x1000).wrapping_add(i as u64 * 1000);
+        let segments = worm::path::generate_worm_path(
+            worm_seed,
+            *worm_start,
+            *worm_end,
+            config.worm.step_length,
+            config.worm.max_steps,
+            config.worm.radius_min,
+            config.worm.radius_max,
+        );
+        if segments.is_empty() {
+            continue;
+        }
+        if let Some(last) = segments.last() {
+            if last.position.distance(*worm_end) > max_endpoint_drift {
+                continue;
+            }
+        }
+        let (path_min, path_max) = worm_path_aabb(&segments);
+        let min_cx = (path_min.x / chunk_size_f).floor() as i32;
+        let max_cx = (path_max.x / chunk_size_f).floor() as i32;
+        let min_cy = (path_min.y / chunk_size_f).floor() as i32;
+        let max_cy = (path_max.y / chunk_size_f).floor() as i32;
+        let min_cz = (path_min.z / chunk_size_f).floor() as i32;
+        let max_cz = (path_max.z / chunk_size_f).floor() as i32;
+        for cz in min_cz..=max_cz {
+            for cy in min_cy..=max_cy {
+                for cx in min_cx..=max_cx {
+                    let key = (cx, cy, cz);
+                    if !coord_set.contains(&key) {
+                        continue;
+                    }
+                    if let Some(density) = density_fields.get_mut(&key) {
+                        let coord = ChunkCoord::new(cx, cy, cz);
+                        worm::carve::carve_worm_into_density(
+                            density,
+                            &segments,
+                            coord.world_origin_bounds(eb),
+                            config.worm.falloff_power,
+                        );
+                    }
+                }
+            }
+        }
+        // Junction spheres at start/end (also brush-restricted)
+        let junction_radius = config.worm.radius_max * 1.5;
+        for &jc in &[*worm_start, *worm_end] {
+            let j_min_cx = ((jc.x - junction_radius) / chunk_size_f).floor() as i32;
+            let j_max_cx = ((jc.x + junction_radius) / chunk_size_f).floor() as i32;
+            let j_min_cy = ((jc.y - junction_radius) / chunk_size_f).floor() as i32;
+            let j_max_cy = ((jc.y + junction_radius) / chunk_size_f).floor() as i32;
+            let j_min_cz = ((jc.z - junction_radius) / chunk_size_f).floor() as i32;
+            let j_max_cz = ((jc.z + junction_radius) / chunk_size_f).floor() as i32;
+            for jcz in j_min_cz..=j_max_cz {
+                for jcy in j_min_cy..=j_max_cy {
+                    for jcx in j_min_cx..=j_max_cx {
+                        let key = (jcx, jcy, jcz);
+                        if !coord_set.contains(&key) {
+                            continue;
+                        }
+                        if let Some(density) = density_fields.get_mut(&key) {
+                            let coord = ChunkCoord::new(jcx, jcy, jcz);
+                            worm::carve::carve_junction_sphere(
+                                density,
+                                jc,
+                                junction_radius,
+                                coord.world_origin_bounds(eb),
+                                config.worm.falloff_power,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Phase 4b: lava tubes + rivers (per chunk, optional)
+    if fluids {
+        for &c in coords {
+            let coord = ChunkCoord::new(c.0, c.1, c.2);
+            let c_seed = crate::seed::chunk_seed(seed, coord);
+            let origin = coord.world_origin_bounds(eb);
+            let wo = (origin.x as f64, origin.y as f64, origin.z as f64);
+            if let Some(density) = density_fields.get_mut(&c) {
+                let _ = crate::lava_tubes::carve_lava_tubes(
+                    density,
+                    &config.lava_tubes,
+                    wo,
+                    seed,
+                    c_seed,
+                );
+                let _ = crate::rivers::carve_rivers(
+                    density,
+                    &config.rivers,
+                    &config.water_table,
+                    wo,
+                    seed,
+                    c_seed,
+                );
+            }
+        }
+    }
+
+    // Phase 5 + 6: pools + formations (optional, decoration)
+    if decorate {
+        for &c in coords {
+            let coord = ChunkCoord::new(c.0, c.1, c.2);
+            let c_seed = crate::seed::chunk_seed(seed, coord);
+            if let Some(density) = density_fields.get_mut(&c) {
+                if config.pools.enabled {
+                    let (_pools, _seeds) = crate::pools::place_pools(
+                        density,
+                        &config.pools,
+                        coord.world_origin_bounds(eb),
+                        seed,
+                        c_seed,
+                        c,
+                    );
+                }
+                if config.formations.enabled {
+                    let _formation_seeds = crate::formations::place_formations(
+                        density,
+                        &config.formations,
+                        coord.world_origin_bounds(eb),
+                        seed,
+                        c_seed,
+                        c,
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// For a neighbor offset component, return the boundary coordinate pairs (a, b).
-/// d=+1: chunk A at gs, chunk B at 0 (single pair).
-/// d=-1: chunk A at 0, chunk B at gs (single pair).
-/// d= 0: both iterate together 0..=gs (shared plane).
 fn axis_boundary_pairs(d: i32, gs: usize) -> Vec<(usize, usize)> {
     if d == 1 {
         vec![(gs, 0)]
@@ -827,7 +1111,6 @@ fn axis_boundary_pairs(d: i32, gs: usize) -> Vec<(usize, usize)> {
     }
 }
 
-/// Same logic as average_boundary_voxel in store.rs.
 /// Density uses min (carved side wins); material preserves solid when possible.
 fn avg_boundary(a: &VoxelSample, b: &VoxelSample) -> (f32, Material) {
     let density = a.density.min(b.density);

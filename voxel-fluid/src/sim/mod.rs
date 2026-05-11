@@ -6,7 +6,8 @@ use crate::FluidConfig;
 mod chunk;
 mod utils;
 
-pub use utils::{squeeze_excess_fluid, equalize_horizontal, detect_solidification, regen_sources};
+pub use utils::{squeeze_excess_fluid, equalize_horizontal, detect_solidification, regen_sources,
+    detect_lava_water_quench, try_grow_pillow_voxel, QuenchPlan, CellAddr};
 
 use chunk::{CrossChunkTransfer, tick_chunk};
 

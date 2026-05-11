@@ -186,6 +186,12 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                 // SolidifyRequest is handled engine-internally; skip for now
                 ptr::null_mut()
             }
+            WorkerResult::LavaQuench { .. } => {
+                // LavaQuench is intercepted by engine.poll_result() and
+                // re-dispatched to the worker as WorkerRequest::ApplyLavaQuench.
+                // If it reaches here, the intercept missed — just drop it.
+                ptr::null_mut()
+            }
             WorkerResult::CollapseResult { mut events, meshes } => {
                 // Send each collapse-remeshed chunk as a ChunkMesh result first
                 for (chunk, mesh) in meshes {
@@ -1520,6 +1526,38 @@ pub unsafe extern "C" fn voxel_request_brush_formation(
     engine.request_brush_formation(*request)
 }
 
+/// Creative-mode formation stamp brush — runs the worldgen formation pipeline
+/// (random mix of stalactites/columns/drapery/etc. per the live FormationConfig)
+/// within a sphere. `seed` randomizes the pick.
+/// Returns 1 on success, 0 if queue full.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_request_brush_formation_stamp(
+    engine: *mut c_void,
+    request: *const FfiBrushFormationStampRequest,
+) -> u32 {
+    if engine.is_null() || request.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.request_brush_formation_stamp(*request)
+}
+
+/// Creative-mode cavern stamp brush — chunk-snapped cave generator over a
+/// NxMxK chunk region. Worms carve additively (existing edits survive),
+/// optional pools/formations decorate the new surfaces.
+/// Returns 1 on success, 0 if queue full.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_request_brush_cavern_stamp(
+    engine: *mut c_void,
+    request: *const FfiBrushCavernStampRequest,
+) -> u32 {
+    if engine.is_null() || request.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.request_brush_cavern_stamp(*request)
+}
+
 /// Creative-mode axis-aligned box brush (paint=0/carve=1/fill=2).
 #[no_mangle]
 pub unsafe extern "C" fn voxel_request_brush_box(
@@ -2039,6 +2077,62 @@ pub unsafe extern "C" fn voxel_profiler_free_report(report: *mut c_char) {
     drop(CString::from_raw(report));
 }
 
+/// Build a multi-line plain-text diagnostic dump for a single chunk.
+/// Caller passes UE chunk coords (the same convention used by
+/// voxel_query_stress, voxel_request_generate, etc.) — the FFI converts
+/// to Rust chunk coords internally for HashMap lookup.
+/// Returns a heap-allocated null-terminated UTF-8 string the caller must
+/// free with `voxel_free_chunk_diagnostic`. Returns null if the engine
+/// pointer is null.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_get_chunk_diagnostic(
+    engine: *mut c_void,
+    ue_cx: i32,
+    ue_cy: i32,
+    ue_cz: i32,
+) -> *mut c_char {
+    if engine.is_null() {
+        return ptr::null_mut();
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let rust_chunk = crate::convert::ue_chunk_to_rust(ue_cx, ue_cy, ue_cz);
+    let dump = engine.build_chunk_diagnostic_with_ue(rust_chunk, (ue_cx, ue_cy, ue_cz));
+    match CString::new(dump) {
+        Ok(cs) => cs.into_raw(),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Free a diagnostic string previously returned by `voxel_get_chunk_diagnostic`.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_free_chunk_diagnostic(s: *mut c_char) {
+    if s.is_null() {
+        return;
+    }
+    drop(CString::from_raw(s));
+}
+
+/// Diagnostic: force a single chunk to re-sync its boundaries with all
+/// face-adjacent neighbors and re-mesh whatever changed. Used by the UE
+/// "Force Resync" button on UVoxelChunkDiagnosticComponent.
+/// Caller passes UE chunk coords; FFI converts to Rust chunk coords
+/// internally (Rust store is keyed by the post-transform coord).
+/// Returns 1 if queued, 0 if engine is null or the worker queue is full.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_force_chunk_resync(
+    engine: *mut c_void,
+    ue_cx: i32,
+    ue_cy: i32,
+    ue_cz: i32,
+) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let rust_chunk = crate::convert::ue_chunk_to_rust(ue_cx, ue_cy, ue_cz);
+    engine.request_force_chunk_resync(rust_chunk.0, rust_chunk.1, rust_chunk.2)
+}
+
 /// Lightweight zone scan: generates density fields (noise only, no worms/ores)
 /// for chunks in a radius, then runs zone detection. Writes results into caller-provided buffer.
 /// Returns 0 on success, non-zero on error.
@@ -2338,6 +2432,264 @@ pub unsafe extern "C" fn voxel_load_world_data(
     let engine = &*(engine as *const VoxelEngine);
     let data = std::slice::from_raw_parts(buffer, len as usize);
     if engine.import_save_data(data) { 1 } else { 0 }
+}
+
+/// Export player-placed fluid (lava/water sources, brush-painted pools)
+/// as a binary buffer. Returns a heap-allocated buffer; caller must free
+/// via `voxel_free_save_buffer` (same allocator as world data).
+/// Returns null if engine is null or no fluid to save.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_save_fluid_data(
+    engine: *mut c_void,
+    out_len: *mut u32,
+) -> *mut u8 {
+    if engine.is_null() || out_len.is_null() {
+        return ptr::null_mut();
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let bytes = engine.export_fluid_data();
+    if bytes.is_empty() {
+        *out_len = 0;
+        return ptr::null_mut();
+    }
+    *out_len = bytes.len() as u32;
+    let mut boxed = bytes.into_boxed_slice();
+    let ptr = boxed.as_mut_ptr();
+    std::mem::forget(boxed);
+    ptr
+}
+
+/// Load player-placed fluid state from a binary buffer. Cells are queued
+/// in the fluid thread and applied per-chunk as the chunks stream in.
+/// Returns 1 on success (or empty payload), 0 on parse error.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_load_fluid_data(
+    engine: *mut c_void,
+    buffer: *const u8,
+    len: u32,
+) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    if buffer.is_null() || len == 0 {
+        return 1; // empty payload — nothing to do
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let data = std::slice::from_raw_parts(buffer, len as usize);
+    if engine.import_fluid_data(data) { 1 } else { 0 }
+}
+
+// ── Editor collapse triggers ──────────────────────────────────────────
+
+/// Create a new editor collapse trigger.
+///
+/// * `activation_kind`: 0 = OnFirstMine (any mining inside `volumes[0]`
+///   fires it), 1 = OnPillarLoss (each entry of `volumes` is one pillar).
+/// * `name_ptr`/`name_len`: UTF-8 bytes (not NUL-terminated). Truncated to
+///   1024 chars on the Rust side.
+/// * `volumes`/`volume_count`: ≥1 volumes; first is the primary.
+/// * `loss_condition` (only for kind=1): 0=Any, 1=NPillars, 2=AllPillars.
+/// * `loss_n` (only for kind=1, loss_condition=1): N threshold.
+/// * `loss_threshold` (only for kind=1): pillar "lost" when its current
+///   solid-voxel count is below this fraction × baseline.
+/// * `slab_voxels`/`slab_count`: world voxel coords that fall during the
+///   cinematic.
+/// * `pile_chunks`/`pile_count`: chunk coords where debris settles.
+/// * `fall_distance_uu`: 0 = auto from geometry, otherwise an override.
+///
+/// Returns the new trigger id (≥1), or 0 on validation failure.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_create_trigger(
+    engine: *mut c_void,
+    activation_kind: u8,
+    name_ptr: *const u8,
+    name_len: u32,
+    volumes: *const crate::types::FfiVoxelAabb,
+    volume_count: u32,
+    loss_condition: u8,
+    loss_n: u8,
+    loss_threshold: f32,
+    slab_voxels: *const crate::types::FfiVoxelCoord,
+    slab_count: u32,
+    pile_chunks: *const crate::types::FfiVoxelCoord,
+    pile_count: u32,
+    fall_distance_uu: f32,
+) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+
+    let name = if !name_ptr.is_null() && name_len > 0 {
+        let slice = std::slice::from_raw_parts(name_ptr, name_len as usize);
+        std::str::from_utf8(slice).unwrap_or("").to_string()
+    } else {
+        String::new()
+    };
+    let volumes_slice: &[crate::types::FfiVoxelAabb] = if !volumes.is_null() && volume_count > 0 {
+        std::slice::from_raw_parts(volumes, volume_count as usize)
+    } else {
+        &[]
+    };
+    let slab_slice: &[crate::types::FfiVoxelCoord] = if !slab_voxels.is_null() && slab_count > 0 {
+        std::slice::from_raw_parts(slab_voxels, slab_count as usize)
+    } else {
+        &[]
+    };
+    let pile_slice: &[crate::types::FfiVoxelCoord] = if !pile_chunks.is_null() && pile_count > 0 {
+        std::slice::from_raw_parts(pile_chunks, pile_count as usize)
+    } else {
+        &[]
+    };
+
+    let volumes_owned: Vec<crate::triggers::VoxelAabb> = volumes_slice
+        .iter()
+        .map(|a| crate::triggers::VoxelAabb {
+            min: (a.min.x, a.min.y, a.min.z),
+            max: (a.max.x, a.max.y, a.max.z),
+        })
+        .collect();
+    let slab_owned: Vec<(i32, i32, i32)> =
+        slab_slice.iter().map(|c| (c.x, c.y, c.z)).collect();
+    let pile_owned: Vec<(i32, i32, i32)> =
+        pile_slice.iter().map(|c| (c.x, c.y, c.z)).collect();
+
+    engine.create_trigger(
+        activation_kind,
+        &name,
+        &volumes_owned,
+        loss_condition,
+        loss_n,
+        loss_threshold,
+        &slab_owned,
+        &pile_owned,
+        fall_distance_uu,
+    )
+}
+
+/// Write all trigger ids into `out_ids` (caller-allocated). Returns the
+/// actual trigger count. If the count exceeds `capacity`, callers should
+/// re-allocate and call again.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_list_trigger_ids(
+    engine: *mut c_void,
+    out_ids: *mut u32,
+    capacity: u32,
+) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let ids = engine.list_trigger_ids();
+    let n = ids.len() as u32;
+    if !out_ids.is_null() && capacity > 0 {
+        let write_n = n.min(capacity) as usize;
+        let dst = std::slice::from_raw_parts_mut(out_ids, write_n);
+        dst.copy_from_slice(&ids[..write_n]);
+    }
+    n
+}
+
+/// Fill `out_info` with the metadata for trigger `id`. Returns 1 on
+/// success, 0 if no trigger has that id.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_get_trigger_info(
+    engine: *mut c_void,
+    id: u32,
+    out_info: *mut crate::types::FfiTriggerInfo,
+) -> u32 {
+    if engine.is_null() || out_info.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    match engine.get_trigger_info(id) {
+        Some(info) => {
+            *out_info = info;
+            1
+        }
+        None => 0,
+    }
+}
+
+/// Remove a trigger by id. Returns 1 if it existed.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_remove_trigger(engine: *mut c_void, id: u32) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    if engine.remove_trigger(id) { 1 } else { 0 }
+}
+
+/// Arm (`armed`=1) or disarm (`armed`=0) a trigger.
+/// On re-arm (false→true), pillar baselines are recaptured against the
+/// current density so the iteration test can repeat.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_set_trigger_armed(
+    engine: *mut c_void,
+    id: u32,
+    armed: u8,
+) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    if engine.set_trigger_armed(id, armed != 0) { 1 } else { 0 }
+}
+
+/// Fire a trigger on the next stress process tick, bypassing
+/// `should_fire` evaluation. Used by the editor "Fire Now" preview
+/// button. The cinematic runs through the normal pipeline.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_fire_trigger_now(engine: *mut c_void, id: u32) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    if engine.fire_trigger_now(id) { 1 } else { 0 }
+}
+
+/// Query the engine for every voxel with density > 0 inside a sphere
+/// of `radius` voxels centered on `(center_x, center_y, center_z)`.
+///
+/// Fills `out_buf` with up to `capacity` coords; returns the TOTAL solid
+/// count (may exceed capacity if the buffer was too small — caller can
+/// re-allocate and retry, though for typical brush radii the (2r+1)^3
+/// upper bound is a safe pre-allocation).
+///
+/// Cells in unloaded chunks are skipped (treated as not-solid). Used by
+/// the Trigger Author "Slab" paint action so its wireframe markers match
+/// the cinematic's eventual slab geometry — air cells get filtered at
+/// stroke time instead of silently disappearing on synth.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_query_solid_sphere(
+    engine: *mut c_void,
+    center_x: i32,
+    center_y: i32,
+    center_z: i32,
+    radius: i32,
+    out_buf: *mut crate::types::FfiVoxelCoord,
+    capacity: u32,
+) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let mut buf: Vec<(i32, i32, i32)> = Vec::new();
+    engine.query_solid_voxels_in_sphere((center_x, center_y, center_z), radius, &mut buf);
+    let total = buf.len() as u32;
+    if !out_buf.is_null() && capacity > 0 {
+        let write = (total.min(capacity)) as usize;
+        let dst = std::slice::from_raw_parts_mut(out_buf, write);
+        for i in 0..write {
+            dst[i] = crate::types::FfiVoxelCoord {
+                x: buf[i].0,
+                y: buf[i].1,
+                z: buf[i].2,
+            };
+        }
+    }
+    total
 }
 
 /// Apply pending save snapshots to already-loaded chunks (for mid-game load).
@@ -3147,12 +3499,12 @@ mod tests {
             sleep_garnet_pocket_count: 2,
             sleep_diopside_pocket_count: 1,
             sleep_aureole_vein_spread: 0.5,
-            sleep_aureole_lava_max_cells: 50,
+            sleep_aureole_lava_max_cells: 10000,
             sleep_aureole_lava_deposit_mult: 1.0,
             sleep_aureole_lava_count_mult: 0.5,
-            sleep_aureole_water_search_radius: 3,
+            sleep_aureole_water_search_radius: 45,
             sleep_aureole_water_max_cells: 30,
-            sleep_aureole_water_deposit_mult: 0.5,
+            sleep_aureole_water_deposit_mult: 1.0,
             // Aureole vein shape
             sleep_aureole_wall_climbing: 1,
             sleep_aureole_weight_up: 3.0,
@@ -3175,7 +3527,7 @@ mod tests {
             sleep_aureole_veins_per_n_cells: 1.0,
             sleep_aureole_garnet_per_n_cells: 0.5,
             sleep_aureole_diopside_per_n_cells: 0.3,
-            sleep_aureole_cells_per_extra: 20,
+            sleep_aureole_cells_per_extra: 90,
 
             // Zone Config (defaults — zones disabled in test)
             zone_enabled: 0,
@@ -3220,6 +3572,19 @@ mod tests {
             zone_frozen_ice_stalactite_chance: 0.3,
             zone_frozen_mega_chance: 0.03,
             blank_canvas: 0,
+            // Basalt aureole (Amphibolite) deposits
+            sleep_amphibolite_pyrite_pocket_count: 2,
+            sleep_amphibolite_garnet_pocket_count: 1,
+            sleep_amphibolite_pyrite_compact_size: 8,
+            sleep_aureole_amphibolite_pyrite_per_n_cells: 0.4,
+            sleep_aureole_amphibolite_garnet_per_n_cells: 0.2,
+            // Hydrothermal water-boost v2
+            sleep_aureole_water_phase1_weight: 1.0,
+            sleep_aureole_water_phase2_weight: 0.25,
+            sleep_aureole_water_network_max_hops: 50,
+            sleep_aureole_water_to_lava_ratio: 1.2,
+            sleep_aureole_water_phase1_max_floor: 50,
+            sleep_aureole_water_count_mult: 1.0,
         }
     }
 

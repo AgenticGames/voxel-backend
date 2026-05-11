@@ -123,9 +123,14 @@ pub fn try_coarse_solid_check(config: &GenerationConfig, world_origin: glam::Vec
                 let cavern_raw = cavern_noise.sample(sample_x + dx, sample_y + dy, sample_z + dz);
                 let cavern_val = cavern_raw * 0.5 + 0.5;
 
-                // If this sample would be air (cavern), chunk is NOT fully solid
-                if cavern_val > threshold - 0.05 {
-                    // Near threshold or above = might have air, not safe to skip
+                // Bigger margin (0.15, was 0.05) — the coarse 8³ grid can miss a
+                // small cavern that the full 33³ grid catches, and the difference
+                // surfaces as a flat planar seam at chunk boundaries (one side
+                // uniform host rock from the bypass, the other carved by the full
+                // pass). 0.15 ≈ 3× the detail-noise amplitude (0.05) so even with
+                // detail + warp combined it's hard to push a coarse-solid sample
+                // back over threshold. Cost: more chunks fall through to full gen.
+                if cavern_val > threshold - 0.15 {
                     return None;
                 }
             }

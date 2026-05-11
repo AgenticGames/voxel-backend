@@ -14,4 +14,7 @@ pub mod slab;
 pub mod pile_preview;
 pub mod profiler;
 pub mod delta;
+pub mod fluid_save;
+pub mod triggers;
 pub mod panic_log;
+pub mod diagnostics;

@@ -29,6 +29,18 @@ fn default_min_zone() -> u32 { 5 }
 fn default_garnet_pocket() -> u32 { 4 }
 fn default_diopside_pocket() -> u32 { 4 }
 fn default_max_aureole_radius() -> f32 { 10.0 }
+fn default_amphibolite_pyrite_pocket_count() -> u32 { 2 }
+fn default_amphibolite_garnet_pocket_count() -> u32 { 1 }
+fn default_amphibolite_pyrite_compact_size() -> u32 { 8 }
+fn default_amphibolite_pyrite_per_n() -> f32 { 0.4 }
+fn default_amphibolite_garnet_per_n() -> f32 { 0.2 }
+// Hydrothermal water-boost v2 defaults
+fn default_water_phase1_weight() -> f32 { 1.0 }
+fn default_water_phase2_weight() -> f32 { 0.25 }
+fn default_water_network_max_hops() -> u32 { 50 }
+fn default_water_to_lava_ratio() -> f32 { 1.2 }
+fn default_water_phase1_max_floor() -> u32 { 50 }
+fn default_water_count_mult() -> f32 { 1.0 }
 
 /// Top-level sleep configuration — 4-phase geological time simulation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -311,6 +323,51 @@ pub struct AureoleConfig {
     pub aureole_diopside_per_n_cells: f32,
     /// N value: how many lava cells per extra vein/pocket (e.g. 10 = 1 extra per 10 cells)
     pub aureole_cells_per_extra: u32,
+    // ── Basalt aureole (Amphibolite) deposit settings ──
+    /// Number of pyrite compact pockets per basalt-hosted (amphibolite) zone
+    #[serde(default = "default_amphibolite_pyrite_pocket_count")]
+    pub amphibolite_pyrite_pocket_count: u32,
+    /// Number of garnet compact pockets per basalt-hosted (amphibolite) zone
+    #[serde(default = "default_amphibolite_garnet_pocket_count")]
+    pub amphibolite_garnet_pocket_count: u32,
+    /// Pyrite compact deposit radius (Compact bias target size) for amphibolite pockets
+    #[serde(default = "default_amphibolite_pyrite_compact_size")]
+    pub amphibolite_pyrite_compact_size: u32,
+    /// Extra pyrite pockets per N lava cells (linear scaling). 0 = disabled.
+    #[serde(default = "default_amphibolite_pyrite_per_n")]
+    pub aureole_amphibolite_pyrite_per_n_cells: f32,
+    /// Extra garnet pockets per N lava cells (linear scaling). 0 = disabled.
+    #[serde(default = "default_amphibolite_garnet_per_n")]
+    pub aureole_amphibolite_garnet_per_n_cells: f32,
+    // ── Hydrothermal water-boost v2 (BFS Phase 1 + connected-network Phase 2) ──
+    /// Weight applied to water cells within `aureole_water_search_radius` of
+    /// lava ("thermally active zone"). Default 1.0 = full weight per cell.
+    #[serde(default = "default_water_phase1_weight")]
+    pub aureole_water_phase1_weight: f32,
+    /// Weight applied to water cells in the connected supply network behind
+    /// Phase 1 — these are the "potential supply" cells reached via BFS
+    /// through face-adjacent water cells. Default 0.25 = 25% per cell.
+    #[serde(default = "default_water_phase2_weight")]
+    pub aureole_water_phase2_weight: f32,
+    /// Max hops the Phase 2 BFS walks through connected water from each
+    /// Phase 1 seed cell. Caps the effective reach of distant reservoirs.
+    #[serde(default = "default_water_network_max_hops")]
+    pub aureole_water_network_max_hops: u32,
+    /// Saturation cap as a fraction of zone lava cells. Default 0.4 =
+    /// need ~40% as many weighted water cells as lava cells to fully
+    /// saturate the boost. Scales the cap with chamber size so puddle-
+    /// scale lava saturates at puddle-scale water, ocean-scale at ocean.
+    #[serde(default = "default_water_to_lava_ratio")]
+    pub aureole_water_to_lava_ratio: f32,
+    /// Hard floor on the saturation cap so micro-lava (tens of cells) still
+    /// has a meaningful minimum water requirement (e.g. 50 cells).
+    #[serde(default = "default_water_phase1_max_floor")]
+    pub aureole_water_phase1_max_floor: u32,
+    /// Multiplier for vein/pocket COUNT (not just size) at saturated water.
+    /// 0.5 = saturated water gives +50% more deposits. Mirrors the existing
+    /// `aureole_water_deposit_mult` which only handles size scaling.
+    #[serde(default = "default_water_count_mult")]
+    pub aureole_water_count_mult: f32,
     // ── Aureole vein shape ──
     /// Use wall-climbing bias for aureole ore veins (0/1)
     pub aureole_wall_climbing: bool,
@@ -392,7 +449,18 @@ impl Default for AureoleConfig {
             aureole_veins_per_n_cells: 1.0,
             aureole_garnet_per_n_cells: 0.5,
             aureole_diopside_per_n_cells: 0.3,
-            aureole_cells_per_extra: 20,
+            aureole_cells_per_extra: 90,
+            amphibolite_pyrite_pocket_count: 2,
+            amphibolite_garnet_pocket_count: 1,
+            amphibolite_pyrite_compact_size: 8,
+            aureole_amphibolite_pyrite_per_n_cells: 0.4,
+            aureole_amphibolite_garnet_per_n_cells: 0.2,
+            aureole_water_phase1_weight: 1.0,
+            aureole_water_phase2_weight: 0.25,
+            aureole_water_network_max_hops: 50,
+            aureole_water_to_lava_ratio: 1.2,
+            aureole_water_phase1_max_floor: 50,
+            aureole_water_count_mult: 1.0,
             aureole_wall_climbing: true,
             aureole_weight_up: 3.0,
             aureole_weight_depth: 2.0,
@@ -401,12 +469,12 @@ impl Default for AureoleConfig {
             aureole_surface_ratio: 0.5,
             aureole_min_connectivity: 1,
             aureole_vein_spread: 0.5,
-            aureole_lava_volume_max_cells: 50,
+            aureole_lava_volume_max_cells: 10000,
             aureole_lava_deposit_mult: 1.0,
             aureole_lava_count_mult: 0.5,
-            aureole_water_search_radius: 3,
+            aureole_water_search_radius: 45,
             aureole_water_max_cells: 30,
-            aureole_water_deposit_mult: 0.5,
+            aureole_water_deposit_mult: 1.0,
         }
     }
 }

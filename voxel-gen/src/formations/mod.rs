@@ -127,6 +127,21 @@ enum Formation {
 ///
 /// Called between worm carving and hermite extraction so formations become
 /// natural parts of the mesh via dual contouring.
+// ── Formation type bitmask ───────────────────────────────────────────────
+// Used by `place_formations_filtered`'s `allowed_types` parameter so the
+// creative-mode Formation Stamp brush can opt in to a subset (e.g. just
+// stalactites + stalagmites + shields, no columns/drapery/etc.).
+pub const FORMATION_STALACTITE:  u32 = 1 << 0;
+pub const FORMATION_STALAGMITE:  u32 = 1 << 1;
+pub const FORMATION_COLUMN:      u32 = 1 << 2;
+pub const FORMATION_MEGA_COLUMN: u32 = 1 << 3;
+pub const FORMATION_FLOWSTONE:   u32 = 1 << 4;
+pub const FORMATION_DRAPERY:     u32 = 1 << 5;
+pub const FORMATION_RIMSTONE:    u32 = 1 << 6;
+pub const FORMATION_SHIELD:      u32 = 1 << 7;
+pub const FORMATION_CAULDRON:    u32 = 1 << 8;
+pub const FORMATION_ALL:         u32 = 0xFFFFFFFF;
+
 pub fn place_formations(
     density: &mut DensityField,
     config: &FormationConfig,
@@ -134,6 +149,24 @@ pub fn place_formations(
     world_seed: u64,
     chunk_seed: u64,
     chunk_coord: (i32, i32, i32),
+) -> Vec<FluidSeed> {
+    place_formations_filtered(density, config, world_origin, world_seed, chunk_seed, chunk_coord, None, FORMATION_ALL)
+}
+
+/// Same as `place_formations`, but with optional spatial + type filters.
+/// `sphere_filter`: only place formations whose anchor surface point is
+/// inside the (world_center, world_radius) sphere. None = no spatial filter.
+/// `allowed_types`: bitmask of FORMATION_* constants — only the listed types
+/// are emitted. Use FORMATION_ALL to match worldgen behavior.
+pub fn place_formations_filtered(
+    density: &mut DensityField,
+    config: &FormationConfig,
+    world_origin: Vec3,
+    world_seed: u64,
+    chunk_seed: u64,
+    chunk_coord: (i32, i32, i32),
+    sphere_filter: Option<(Vec3, f32)>,
+    allowed_types: u32,
 ) -> Vec<FluidSeed> {
     if !config.enabled {
         return Vec::new();
@@ -148,6 +181,27 @@ pub fn place_formations(
 
     // Step A: Detect surfaces
     let surfaces = detect_surfaces(density, size);
+    if surfaces.is_empty() {
+        return fluid_seeds;
+    }
+
+    // Optional spatial filter — only keep surface anchors inside the brush sphere.
+    // Each anchor still places its full formation (stalactite cone, mega-column
+    // bbox, etc.), so writes can extend slightly past the sphere — that's fine
+    // for a "vibe" brush.
+    let surfaces: Vec<SurfacePoint> = if let Some((center, radius)) = sphere_filter {
+        let r2 = radius * radius;
+        surfaces
+            .into_iter()
+            .filter(|sp| {
+                let wp = world_origin
+                    + Vec3::new(sp.x as f32, sp.y as f32, sp.z as f32);
+                wp.distance_squared(center) <= r2
+            })
+            .collect()
+    } else {
+        surfaces
+    };
     if surfaces.is_empty() {
         return fluid_seeds;
     }
@@ -259,6 +313,20 @@ pub fn place_formations(
                 {
                     let base_radius = rng
                         .gen_range(config.mega_column_radius_min..=config.mega_column_radius_max);
+                    // Boundary-inset guard: write_mega_column iterates a bounding
+                    // box of (base_radius + 2) cells around (x, z). If any of
+                    // that bbox would touch the chunk's boundary cell (index
+                    // size-1, which gets clobbered by sync_region_boundary_densities),
+                    // the column produces a flat-wall artifact at the seam.
+                    // Skip placements whose bbox can't fit fully inside the
+                    // interior cells [1 .. size-2].
+                    let r_ceil = (base_radius.ceil() as usize) + 2;
+                    if x < r_ceil + 1 || x + r_ceil + 1 >= size
+                        || z < r_ceil + 1 || z + r_ceil + 1 >= size
+                    {
+                        // too close to a chunk boundary — skip
+                        continue;
+                    }
                     formations.push(Formation::MegaColumn {
                         x,
                         z,
@@ -512,6 +580,25 @@ pub fn place_formations(
             fluid_type: cauldron_fluid,
         });
         used_floor.insert((sp.x, sp.y, sp.z), true);
+    }
+
+    // Type filter: opt-in subset of formation types (used by creative-mode
+    // brushes that want only certain primitives, e.g. stalactites + shields).
+    if allowed_types != FORMATION_ALL {
+        formations.retain(|f| {
+            let bit = match f {
+                Formation::Stalactite  { .. } => FORMATION_STALACTITE,
+                Formation::Stalagmite  { .. } => FORMATION_STALAGMITE,
+                Formation::Column      { .. } => FORMATION_COLUMN,
+                Formation::MegaColumn  { .. } => FORMATION_MEGA_COLUMN,
+                Formation::Flowstone   { .. } => FORMATION_FLOWSTONE,
+                Formation::Drapery     { .. } => FORMATION_DRAPERY,
+                Formation::RimstoneDam { .. } => FORMATION_RIMSTONE,
+                Formation::CaveShield  { .. } => FORMATION_SHIELD,
+                Formation::Cauldron    { .. } => FORMATION_CAULDRON,
+            };
+            (allowed_types & bit) != 0
+        });
     }
 
     // Step F: Write shapes into density field
