@@ -1293,6 +1293,30 @@ pub struct FfiBrushCylinderRequest {
     pub _pad: [u8; 2],
 }
 
+/// Creative "OrePaint" brush — drops wall-exposed ore deposits inside the sphere
+/// with even (Poisson-disk) spacing, weighted ore-type picks, and optional
+/// inward "deep channel" tubes for each cluster. World coords are UE space.
+/// Per-ore weights match `OreWeights` in `brushes.rs`:
+/// `[iron, copper, malachite, tin, gold, diamond, kimberlite, sulfide,
+///   quartz, pyrite, amethyst, crystal, coal]`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiBrushOrePaintRequest {
+    pub world_x: f32,
+    pub world_y: f32,
+    pub world_z: f32,
+    pub radius: f32,         // UE units — overall brush sphere
+    pub cluster_size: f32,   // voxels — radius of each ore knob
+    pub min_spacing: f32,    // voxels — minimum distance between cluster anchors
+    pub channel_prob: f32,   // 0..1 — per-anchor chance to extend a deep channel
+    pub channel_length: f32, // voxels — typical tube length into rock
+    pub channel_radius: f32, // voxels — tube radius
+    pub density: f32,        // 0..1 — fraction of wall candidates to keep as anchors
+    pub seed: u32,
+    pub weights: [u8; 13],   // per-ore frequency weights (see OreWeights ordering)
+    pub _pad: [u8; 3],
+}
+
 /// Creative-mode "PaintStress" brush — additively writes into the per-voxel
 /// painted-stress overlay (`StressField::painted_stress`) inside a sphere.
 /// Does not change density/material, so no remesh is emitted; the new stress
@@ -1775,6 +1799,19 @@ pub enum WorkerRequest {
         frequency: f32,
         strength: f32,
         seed: u32,
+    },
+    /// Creative "OrePaint" brush — wall-exposed ore deposits + optional channels.
+    BrushOrePaint {
+        center_rust: glam::Vec3,
+        radius: f32,           // Rust world units
+        cluster_size: f32,     // voxels
+        min_spacing: f32,      // voxels
+        channel_prob: f32,     // 0..1
+        channel_length: f32,   // voxels
+        channel_radius: f32,   // voxels
+        density: f32,          // 0..1
+        seed: u32,
+        weights: crate::brushes::OreWeights,
     },
     /// Creative "PaintStress" brush — additive sphere over the painted-stress overlay.
     BrushPaintStress {

@@ -1207,6 +1207,37 @@ impl VoxelEngine {
         }
     }
 
+    /// Creative "OrePaint" brush — drops wall-exposed ore deposits + optional
+    /// deep channels inside a sphere. Returns 1 on success, 0 if queue full.
+    pub fn request_brush_ore_paint(&self, request: crate::types::FfiBrushOrePaintRequest) -> u32 {
+        let scale = self.world_scale;
+        let center_rust = crate::convert::from_ue_world_pos(
+            request.world_x, request.world_y, request.world_z, scale,
+        );
+        let radius = request.radius / scale;
+        let w = request.weights;
+        let weights = crate::brushes::OreWeights {
+            iron: w[0], copper: w[1], malachite: w[2], tin: w[3], gold: w[4],
+            diamond: w[5], kimberlite: w[6], sulfide: w[7], quartz: w[8],
+            pyrite: w[9], amethyst: w[10], crystal: w[11], coal: w[12],
+        };
+        match self.mine_tx.try_send(WorkerRequest::BrushOrePaint {
+            center_rust,
+            radius,
+            cluster_size: request.cluster_size,
+            min_spacing: request.min_spacing,
+            channel_prob: request.channel_prob,
+            channel_length: request.channel_length,
+            channel_radius: request.channel_radius,
+            density: request.density,
+            seed: request.seed,
+            weights,
+        }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
     /// Creative "PaintStress" brush — additively paints into the per-voxel
     /// painted-stress overlay inside a sphere.
     /// Returns 1 on success, 0 if queue full.

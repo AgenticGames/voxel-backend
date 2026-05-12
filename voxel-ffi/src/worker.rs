@@ -3227,6 +3227,59 @@ fn handle_request(
             // but keep consistent with other brush handlers for safety.
             batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, fluid_event_tx, world_scale);
         }
+        WorkerRequest::BrushOrePaint {
+            center_rust,
+            radius,
+            cluster_size,
+            min_spacing,
+            channel_prob,
+            channel_length,
+            channel_radius,
+            density,
+            seed,
+            weights,
+        } => {
+            let cfg = config.read().unwrap().clone();
+            let mut s = store.write().unwrap();
+            let outcome = crate::brushes::paint_ore_deposits(
+                &mut s,
+                center_rust,
+                radius,
+                weights,
+                cluster_size,
+                min_spacing,
+                channel_prob,
+                channel_length,
+                channel_radius,
+                density,
+                seed,
+                &cfg,
+                world_scale,
+            );
+            drop(s);
+
+            let dirty_keys: Vec<(i32, i32, i32)> =
+                outcome.meshes.into_iter().map(|(k, _)| k).collect();
+            // Material flipped on solid voxels — recompute crystal placements
+            // exactly like BrushSphere does so quartz/amethyst/crystal-y ores
+            // get their geode visual contribution refreshed.
+            let new_placements: Vec<_> = {
+                let s = store.read().unwrap();
+                outcome.flipped_chunks.iter().filter_map(|&key| {
+                    s.density_fields.get(&key).map(|density_field| {
+                        let coord = voxel_core::chunk::ChunkCoord::new(key.0, key.1, key.2);
+                        (key, voxel_gen::compute_crystals(coord, density_field, &cfg))
+                    })
+                }).collect()
+            };
+            {
+                let mut s = store.write().unwrap();
+                for (key, placements) in new_placements {
+                    s.crystal_placements.insert(key, placements);
+                }
+            }
+            batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, fluid_event_tx, world_scale);
+        }
         WorkerRequest::BrushPaintStress { center_rust, radius, amount, cap, op, falloff } => {
             let cfg = config.read().unwrap().clone();
             let mut s = store.write().unwrap();

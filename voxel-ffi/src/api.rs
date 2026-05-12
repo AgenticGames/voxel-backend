@@ -1512,6 +1512,22 @@ pub unsafe extern "C" fn voxel_request_brush_sphere(
     engine.request_brush_sphere(*request)
 }
 
+/// Creative "OrePaint" brush — drops wall-exposed ore deposits inside the sphere
+/// with Poisson-disk anti-clumping, weighted ore-type picks, and optional inward
+/// "deep channel" tubes. Density is preserved; only `sample.material` is rewritten
+/// where ore lands. Returns 1 on success, 0 if queue full.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_request_brush_ore_paint(
+    engine: *mut c_void,
+    request: *const FfiBrushOrePaintRequest,
+) -> u32 {
+    if engine.is_null() || request.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.request_brush_ore_paint(*request)
+}
+
 /// Creative "PaintStress" brush — additive sphere over the per-voxel painted-stress
 /// overlay. Does NOT change density/material (no remesh emitted).
 /// op: 0=add, 1=subtract, 2=clear. falloff: 0=constant, 1=linear, 2=smoothstep.
