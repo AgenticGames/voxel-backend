@@ -676,15 +676,11 @@ fn handle_event(
             }
         }
         FluidEvent::UpdateFluidConfig { source_grace_ticks } => {
+            // Only affects newly-placed sources (read at PlaceSources / cell
+            // creation, lines ~665 / ~741). cell_cap is derived purely from
+            // corner densities, so nothing here invalidates per-chunk state —
+            // skip the full-grid recompute + dirty sweep the old handler did.
             config.source_grace_ticks = source_grace_ticks;
-            // Recompute capacity with binary classification for all loaded chunks
-            let keys: Vec<_> = chunks.keys().copied().collect();
-            for chunk_key in keys {
-                if let Some(grid) = chunks.get_mut(&chunk_key) {
-                    grid.recompute_capacity();
-                    grid.dirty = true;
-                }
-            }
         }
         FluidEvent::PendingFluidLoad { chunk, cells } => {
             // Stash the cells; they'll be applied on the next DensityUpdate

@@ -48,8 +48,8 @@ pub fn tick_fluid(
             let adj = (fk.0 + dx, fk.1 + dy, fk.2 + dz);
             if !chunks.contains_key(&adj) {
                 if let Some(cache) = chunk_densities.get(&adj) {
-                    let mut grid = ChunkFluidGrid::from_density_cache(cache);
-                    grid.recompute_capacity();
+                    // from_density_cache already fills cell_cap from corners.
+                    let grid = ChunkFluidGrid::from_density_cache(cache);
                     chunks.insert(adj, grid);
                 }
             }
@@ -83,8 +83,8 @@ pub fn tick_fluid(
         // If target chunk has no grid but density exists, create grid on demand
         if !chunks.contains_key(&xfer.dest_key) {
             if let Some(cache) = chunk_densities.get(&xfer.dest_key) {
-                let mut grid = ChunkFluidGrid::from_density_cache(cache);
-                grid.recompute_capacity();
+                // from_density_cache already fills cell_cap from corners.
+                let grid = ChunkFluidGrid::from_density_cache(cache);
                 chunks.insert(xfer.dest_key, grid);
             } else {
                 continue; // no density data, can't create grid
