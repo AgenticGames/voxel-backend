@@ -8,6 +8,7 @@ pub mod springs;
 pub mod lava_tubes;
 pub mod rivers;
 pub mod crystal_placements;
+pub mod mushrooms;
 pub mod hermite_extract;
 pub mod pipeline;
 pub mod chunk_manager;
@@ -21,6 +22,7 @@ use density::DensityField;
 pub use pools::{FluidSeed, PoolDescriptor};
 pub use springs::{SpringDescriptor, SpringType, LavaDescriptor};
 pub use crystal_placements::CrystalPlacement;
+pub use mushrooms::{MushroomKind, MushroomPlacement};
 
 /// Top-level function to generate a single chunk
 pub fn generate_chunk(coord: ChunkCoord, config: &GenerationConfig) -> Chunk {
@@ -153,6 +155,31 @@ pub fn compute_crystals(
     crystal_placements::compute_crystal_placements(
         density,
         &config.crystals,
+        world_origin,
+        config.seed,
+        c_seed,
+    )
+}
+
+/// Compute mushroom placements for a chunk after density generation.
+/// Pure read-only scan — does NOT modify the density field. Mirrors
+/// `compute_crystals` so the FFI worker plumbs both alongside each mesh.
+pub fn compute_mushrooms(
+    coord: ChunkCoord,
+    density: &voxel_core::density::DensityField,
+    config: &GenerationConfig,
+) -> Vec<MushroomPlacement> {
+    // Blank-canvas worlds skip decoration entirely — same contract as the
+    // density pipeline, just enforced here too so the FFI can call this
+    // unconditionally without re-checking the flag.
+    if config.blank_canvas {
+        return Vec::new();
+    }
+    let world_origin = coord.world_origin_sized(config.chunk_size);
+    let c_seed = seed::chunk_seed(config.seed, coord);
+    mushrooms::compute_mushroom_placements(
+        density,
+        &config.mushrooms,
         world_origin,
         config.seed,
         c_seed,

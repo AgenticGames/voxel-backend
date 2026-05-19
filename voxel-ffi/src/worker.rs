@@ -229,6 +229,21 @@ fn retrieve_crystal_data(
     }
 }
 
+fn retrieve_mushroom_data(
+    store: &Arc<RwLock<ChunkStore>>,
+    key: (i32, i32, i32),
+    voxel_scale: f32,
+    world_scale: f32,
+) -> Vec<crate::types::FfiMushroomInstance> {
+    let s = store.read().unwrap();
+    match s.mushroom_placements.get(&key) {
+        Some(placements) if !placements.is_empty() => {
+            crate::convert::convert_mushrooms_to_ue(placements, voxel_scale, world_scale)
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// Worker thread main loop. Each worker pulls from shared channels.
 pub fn worker_loop(
     shutdown: Arc<AtomicBool>,
@@ -1021,6 +1036,7 @@ fn try_process_stress_queue(
             // Crystal recompute can fire NOW — UE will pick up fresh placements
             // when each chunk mesh arrives in its scheduled batch.
             recompute_crystals_for_chunks(store, &cfg, &dirty_keys);
+            prune_destroyed_mushrooms_for_chunks(store, &dirty_keys);
 
             // ── Per-event cinematic-aligned chunk-mesh scheduling. ──
             //
@@ -1141,6 +1157,7 @@ fn try_process_stress_queue(
                         // recompute too — otherwise crystals stay floating
                         // where the slab used to be.
                         recompute_crystals_for_chunks(&store_c, &cfg_c, &keys);
+                        prune_destroyed_mushrooms_for_chunks(&store_c, &keys);
 
                         // Force fresh send by clearing the last-sent-hash so
                         // the seam pass doesn't skip thinking nothing changed.
@@ -1326,6 +1343,7 @@ fn try_process_stress_queue(
 
                         // ── Real commit: crystals + remesh + seam ──
                         recompute_crystals_for_chunks(&store_c, &cfg_c, &pile_chunks);
+                        prune_destroyed_mushrooms_for_chunks(&store_c, &pile_chunks);
                         log_line("crystals recomputed".to_string());
 
                         // ★ CRITICAL: re-DC the chunks so `base_meshes` cache
@@ -1394,6 +1412,10 @@ fn handle_request(
     regions_in_flight: &Arc<DashMap<(i32, i32, i32), Arc<Mutex<()>>>>,
 ) {
     match req {
+        // ComputePath is handled exclusively by the dedicated path-worker
+        // (see `path_worker_loop`). If it ever lands here it means routing
+        // confusion — silently drop rather than panic.
+        WorkerRequest::ComputePath { .. } => {}
         WorkerRequest::PriorityGenerate { chunk, generation } |
         WorkerRequest::Generate { chunk, generation } => {
             let chunk_start = Instant::now();
@@ -2262,6 +2284,25 @@ fn handle_request(
                 }
             };
 
+            // Compute mushroom placements and store them (mirrors crystal flow).
+            let mushroom_data = {
+                let placements_opt = {
+                    let s = store.read().unwrap();
+                    s.density_fields.get(&chunk).map(|density| {
+                        let coord = voxel_core::chunk::ChunkCoord::new(chunk.0, chunk.1, chunk.2);
+                        voxel_gen::compute_mushrooms(coord, density, &cfg)
+                    })
+                };
+                if let Some(placements) = placements_opt {
+                    let ue_mushrooms = crate::convert::convert_mushrooms_to_ue(&placements, cfg.voxel_scale(), world_scale);
+                    let mut sw = store.write().unwrap();
+                    sw.mushroom_placements.insert(chunk, placements);
+                    ue_mushrooms
+                } else {
+                    Vec::new()
+                }
+            };
+
             // Gate 1: replace mesh with hardcoded test cube
             #[cfg(feature = "diag-gate-1")]
             let mesh = crate::convert::diagnostic_test_cube();
@@ -2352,6 +2393,7 @@ fn handle_request(
                 mesh: converted,
                 generation,
                 crystal_data,
+                mushroom_data,
                 zone_descriptors: std::mem::take(&mut region_zone_descriptors),
             });
             let t_send_block = if profiling { t_send_start.elapsed() } else { Duration::ZERO };
@@ -2547,6 +2589,7 @@ fn handle_request(
             drop(s);
 
             recompute_crystals_for_chunks(store, &cfg, &dirty_keys);
+            prune_destroyed_mushrooms_for_chunks(store, &dirty_keys);
             batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, fluid_event_tx, world_scale);
         }
         WorkerRequest::FlattenBatch { tiles } => {
@@ -2557,6 +2600,7 @@ fn handle_request(
             let dirty_keys: Vec<_> = meshes.into_iter().map(|(k, _)| k).collect();
             drop(s);
             recompute_crystals_for_chunks(store, &cfg, &dirty_keys);
+            prune_destroyed_mushrooms_for_chunks(store, &dirty_keys);
             batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, fluid_event_tx, world_scale);
         }
         WorkerRequest::BuildingFlattenBatch { buildings } => {
@@ -2587,6 +2631,7 @@ fn handle_request(
             drop(s);
             // Single seam pass for all flattens combined
             recompute_crystals_for_chunks(store, &cfg, &all_dirty);
+            prune_destroyed_mushrooms_for_chunks(store, &all_dirty);
             batched_seam_pass_mine(&all_dirty, &cfg, store, result_tx, fluid_event_tx, world_scale);
         }
         WorkerRequest::BuildingFlatten { base_x, base_y, base_z, base_y_float, host_material, footprint_voxels, clearance_voxels } => {
@@ -2613,6 +2658,7 @@ fn handle_request(
             drop(s);
 
             recompute_crystals_for_chunks(store, &cfg, &dirty_keys);
+            prune_destroyed_mushrooms_for_chunks(store, &dirty_keys);
             batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, fluid_event_tx, world_scale);
         }
         WorkerRequest::Mine { request } => {
@@ -2689,6 +2735,10 @@ fn handle_request(
                 let stress_radius = radius as i32 + 22;
                 s.queue_stress_dirty(stress_center, stress_radius);
             }
+
+            // Mushroom destruction: drop any whose anchor voxel was mined.
+            // Uses dirty_keys (all chunks whose density actually changed in this op).
+            prune_destroyed_mushrooms_for_chunks(store, &dirty_keys);
 
             // Send mined material counts (outside the store lock)
             let _ = result_tx.send(WorkerResult::MinedMaterials { mined });
@@ -2950,6 +3000,48 @@ fn handle_request(
             }
             batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, fluid_event_tx, world_scale);
         }
+        WorkerRequest::BrushPlaceMushroom { center_rust, kind, search_radius, scale, yaw } => {
+            let cfg = config.read().unwrap().clone();
+            let mut s = store.write().unwrap();
+            let placed_chunk = crate::brushes::place_mushroom_at_world(
+                &mut s, center_rust, kind, search_radius, scale, yaw, &cfg,
+            );
+            drop(s);
+
+            // No density change — but UE needs the new mushroom_data. Bypass
+            // the hash-skip in `batched_seam_pass_inner` by clearing the
+            // last-sent hash for that chunk, then trigger a seam pass on it.
+            // The seam pass will re-emit the same combined mesh + the new
+            // mushroom_data, and UE's ApplyMushroomData hash-skip lets the
+            // crystal+mesh apply paths short-circuit.
+            if let Some(chunk_key) = placed_chunk {
+                {
+                    let mut s = store.write().unwrap();
+                    s.last_sent_mesh_hash.remove(&chunk_key);
+                }
+                let dirty = [chunk_key];
+                batched_seam_pass_mine(&dirty, &cfg, store, result_tx, fluid_event_tx, world_scale);
+            }
+        }
+        WorkerRequest::BrushPlaceMushroomSphere { center_rust, radius, density, kind, seed } => {
+            let cfg = config.read().unwrap().clone();
+            let mut s = store.write().unwrap();
+            let affected = crate::brushes::place_mushrooms_brush_sphere(
+                &mut s, center_rust, kind, radius, density, seed, &cfg,
+            );
+            drop(s);
+
+            if !affected.is_empty() {
+                {
+                    let mut s = store.write().unwrap();
+                    for key in &affected {
+                        s.last_sent_mesh_hash.remove(key);
+                    }
+                }
+                let dirty: Vec<(i32, i32, i32)> = affected.into_iter().collect();
+                batched_seam_pass_mine(&dirty, &cfg, store, result_tx, fluid_event_tx, world_scale);
+            }
+        }
         WorkerRequest::BrushFormation { center_rust, formation_type, material, height, radius } => {
             let cfg = config.read().unwrap().clone();
             let mat = voxel_core::material::Material::from_u8(material);
@@ -3088,6 +3180,7 @@ fn handle_request(
                     mesh: converted,
                     generation: 0,
                     crystal_data: Vec::new(),
+                    mushroom_data: Vec::new(),
                     zone_descriptors: Vec::new(),
                 });
 
@@ -3639,6 +3732,7 @@ fn handle_request(
                     mesh,
                     generation: 0,
                     crystal_data: Vec::new(),
+                    mushroom_data: Vec::new(),
                     zone_descriptors: Vec::new(),
                 });
             }
@@ -3809,11 +3903,13 @@ fn handle_request(
                 eprintln!("[SLEEP_REMESH]   Rust({},{},{}) → UE({},{},{})  verts={}",
                     chunk.0, chunk.1, chunk.2, ue.0, ue.1, ue.2, vert_count);
                 let crystal_data = retrieve_crystal_data(store, chunk, cfg.voxel_scale(), world_scale);
+                let mushroom_data = retrieve_mushroom_data(store, chunk, cfg.voxel_scale(), world_scale);
                 let _ = result_tx.send(WorkerResult::ChunkMesh {
                     chunk,
                     mesh,
                     generation: 0, // Sleep remesh
                     crystal_data,
+                    mushroom_data,
                     zone_descriptors: Vec::new(),
                 });
             }
@@ -3961,11 +4057,13 @@ fn handle_request(
                 eprintln!("[AUREOLE_REMESH]   Rust({},{},{}) → UE({},{},{})  verts={}",
                     chunk.0, chunk.1, chunk.2, ue.0, ue.1, ue.2, vert_count);
                 let crystal_data = retrieve_crystal_data(store, chunk, cfg.voxel_scale(), world_scale);
+                let mushroom_data = retrieve_mushroom_data(store, chunk, cfg.voxel_scale(), world_scale);
                 let _ = result_tx.send(WorkerResult::ChunkMesh {
                     chunk,
                     mesh,
                     generation: 0,
                     crystal_data,
+                    mushroom_data,
                     zone_descriptors: Vec::new(),
                 });
             }
@@ -4363,11 +4461,13 @@ fn handle_request(
 
                 for (mkey, mesh) in meshes {
                     let crystal_data = retrieve_crystal_data(store, mkey, cfg.voxel_scale(), world_scale);
+                    let mushroom_data = retrieve_mushroom_data(store, mkey, cfg.voxel_scale(), world_scale);
                     let _ = result_tx.send(WorkerResult::ChunkMesh {
                         chunk: mkey,
                         mesh,
                         generation: 0,
                         crystal_data,
+                        mushroom_data,
                         zone_descriptors: Vec::new(),
                     });
                 }
@@ -4489,7 +4589,7 @@ fn incremental_seam_pass(
     // Fuse hash-filter + crystal-data fetch into ONE read lock (was 2 acquisitions).
     // Also takes crystal data by-value into the tuple, avoiding a later .cloned()
     // per target in the send loop.
-    let mut kept: Vec<((i32, i32, i32), voxel_core::mesh::Mesh, u64, Vec<FfiCrystalPlacement>)> =
+    let mut kept: Vec<((i32, i32, i32), voxel_core::mesh::Mesh, u64, Vec<FfiCrystalPlacement>, Vec<crate::types::FfiMushroomInstance>)> =
         Vec::with_capacity(hashed.len());
     {
         let s = store.read().unwrap();
@@ -4515,13 +4615,19 @@ fn incremental_seam_pass(
                 }
                 _ => Vec::new(),
             };
-            kept.push((target, mesh, new_hash, crystal_data));
+            let mushroom_data = match s.mushroom_placements.get(&target) {
+                Some(p) if !p.is_empty() => {
+                    crate::convert::convert_mushrooms_to_ue(p, cfg.voxel_scale(), world_scale)
+                }
+                _ => Vec::new(),
+            };
+            kept.push((target, mesh, new_hash, crystal_data, mushroom_data));
         }
     }
 
     // Convert and send outside the lock (non-blocking sends)
     let mut to_record: Vec<((i32, i32, i32), u64)> = Vec::with_capacity(kept.len());
-    for (target, combined, new_hash, crystal_data) in kept {
+    for (target, combined, new_hash, crystal_data, mushroom_data) in kept {
         let t2 = Instant::now();
         let mut converted = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
         crate::convert::bucket_mesh_by_material(&mut converted);
@@ -4536,6 +4642,7 @@ fn incremental_seam_pass(
             mesh: converted,
             generation: 0,
             crystal_data,
+            mushroom_data,
             zone_descriptors: Vec::new(),
         });
         to_record.push((target, new_hash));
@@ -4592,6 +4699,55 @@ fn recompute_crystals_for_chunks(
     let mut s = store.write().unwrap();
     for (key, placements) in new_placements {
         s.crystal_placements.insert(key, placements);
+    }
+}
+
+/// Mushroom destruction hookup. For each chunk whose density changed, drop
+/// any mushroom placement whose anchor voxel is no longer solid. This is
+/// what makes mushrooms destructible — when the player mines the voxel a
+/// mushroom is growing from, the instance disappears on the next remesh.
+///
+/// Unlike crystals, mushrooms are NOT re-detected against the new surfaces.
+/// Once placed at worldgen, they only ever disappear (they're not a
+/// "what's currently visible" overlay; they're physical objects that lived
+/// at a specific anchor).
+fn prune_destroyed_mushrooms_for_chunks(
+    store: &Arc<RwLock<ChunkStore>>,
+    chunks: &[(i32, i32, i32)],
+) {
+    if chunks.is_empty() { return; }
+    let pruned: Vec<((i32, i32, i32), Vec<voxel_gen::MushroomPlacement>)> = {
+        let s = store.read().unwrap();
+        chunks.iter().filter_map(|&key| {
+            let placements = s.mushroom_placements.get(&key)?;
+            if placements.is_empty() {
+                return None;
+            }
+            let density = s.density_fields.get(&key)?;
+            let size = density.size;
+            let kept: Vec<voxel_gen::MushroomPlacement> = placements.iter()
+                .filter(|p| {
+                    let lx = p.anchor_lx as usize;
+                    let ly = p.anchor_ly as usize;
+                    let lz = p.anchor_lz as usize;
+                    if lx >= size || ly >= size || lz >= size {
+                        return false;
+                    }
+                    density.get(lx, ly, lz).material.is_solid()
+                })
+                .cloned()
+                .collect();
+            if kept.len() == placements.len() {
+                None  // Nothing changed — skip the write lock
+            } else {
+                Some((key, kept))
+            }
+        }).collect()
+    };
+    if pruned.is_empty() { return; }
+    let mut s = store.write().unwrap();
+    for (key, kept) in pruned {
+        s.mushroom_placements.insert(key, kept);
     }
 }
 
@@ -4653,6 +4809,12 @@ fn batched_seam_pass_inner(
             }
         }
     }
+
+    // Mushroom destruction. Every density-mutating path (mining, brushes,
+    // flatten, etc.) funnels through this function, so pruning here means
+    // we don't need per-call-site hooks. Idempotent — pruning a chunk
+    // whose anchors are all still solid is a no-op.
+    prune_destroyed_mushrooms_for_chunks(store, dirty_keys);
 
     let dirty_set: HashSet<(i32, i32, i32)> = dirty_keys.iter().copied().collect();
 
@@ -4734,7 +4896,7 @@ fn batched_seam_pass_inner(
     // empty chunk" (drop, no UE actor needed) from "chunk that just became
     // empty after a carve" (must send so UE clears the old mesh + collision —
     // otherwise a fully-carved chunk leaves a ghost actor visible until reload).
-    let mut kept: Vec<((i32, i32, i32), voxel_core::mesh::Mesh, u64, Vec<FfiCrystalPlacement>, bool)> =
+    let mut kept: Vec<((i32, i32, i32), voxel_core::mesh::Mesh, u64, Vec<FfiCrystalPlacement>, Vec<crate::types::FfiMushroomInstance>, bool)> =
         Vec::with_capacity(hashed.len());
     {
         let s = store.read().unwrap();
@@ -4752,13 +4914,19 @@ fn batched_seam_pass_inner(
                 }
                 _ => Vec::new(),
             };
-            kept.push((target, mesh, new_hash, crystal_data, was_previously_sent));
+            let mushroom_data = match s.mushroom_placements.get(&target) {
+                Some(p) if !p.is_empty() => {
+                    crate::convert::convert_mushrooms_to_ue(p, cfg.voxel_scale(), world_scale)
+                }
+                _ => Vec::new(),
+            };
+            kept.push((target, mesh, new_hash, crystal_data, mushroom_data, was_previously_sent));
         }
     }
     // Record new hashes (brief write lock)
     if !kept.is_empty() {
         let mut s = store.write().unwrap();
-        for (target, _mesh, new_hash, _crystals, _was_prev) in &kept {
+        for (target, _mesh, new_hash, _crystals, _mushrooms, _was_prev) in &kept {
             s.last_sent_mesh_hash.insert(*target, *new_hash);
         }
     }
@@ -4766,26 +4934,120 @@ fn batched_seam_pass_inner(
     if batch_as_mine {
         // Send all mine mesh updates as one atomic result — no pop-in
         let mut batch = Vec::new();
-        for (target, combined, _hash, crystal_data, was_previously_sent) in kept {
+        for (target, combined, _hash, crystal_data, mushroom_data, was_previously_sent) in kept {
             let mut converted = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
             crate::convert::bucket_mesh_by_material(&mut converted);
             // Only drop empties for chunks that were never sent — for chunks
             // UE already has, an empty mesh is a clear command, not a no-op.
             if converted.indices.is_empty() && !was_previously_sent { continue; }
-            batch.push((target, converted, crystal_data));
+            batch.push((target, converted, crystal_data, mushroom_data));
         }
         if !batch.is_empty() {
             let _ = result_tx.send(WorkerResult::MineBatchMesh { meshes: batch });
         }
     } else {
-        for (target, combined, _hash, crystal_data, was_previously_sent) in kept {
+        for (target, combined, _hash, crystal_data, mushroom_data, was_previously_sent) in kept {
             let mut converted = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
             crate::convert::bucket_mesh_by_material(&mut converted);
             if converted.indices.is_empty() && !was_previously_sent { continue; }
             let _ = result_tx.send(WorkerResult::ChunkMesh {
-                chunk: target, mesh: converted, generation: 0, crystal_data,
+                chunk: target, mesh: converted, generation: 0, crystal_data, mushroom_data,
                 zone_descriptors: Vec::new(),
             });
         }
     }
+}
+
+// ─── Path-worker loop ────────────────────────────────────────────────
+//
+// Dedicated thread for AI path queries. Reads from `path_rx` (which is fed by
+// the FFI `voxel_path_request` call → engine `path_tx`). Each request runs
+// A* against the live ChunkStore and emits a `PathComputed` result through
+// the shared `result_tx` — intercepted in engine.rs `poll_result` and stashed
+// into `path_results` keyed by request_id.
+
+/// Cell factor for the path planner — one pathing cell covers a 2×2×2 voxel
+/// block. See `pathing.rs::ChunkStoreGrid`.
+const PATH_CELL_FACTOR: i32 = 2;
+
+pub fn path_worker_loop(
+    shutdown: Arc<AtomicBool>,
+    path_rx: Receiver<WorkerRequest>,
+    result_tx: Sender<WorkerResult>,
+    store: Arc<RwLock<ChunkStore>>,
+    config: Arc<RwLock<GenerationConfig>>,
+    world_scale: f32,
+) {
+    while !shutdown.load(Ordering::Relaxed) {
+        // Block (with timeout) on the path channel — separate from the main
+        // mine/generate workers so neither gets head-of-line blocked.
+        match path_rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(WorkerRequest::ComputePath { request }) => {
+                handle_path_request(request, &result_tx, &store, &config, world_scale);
+            }
+            // path_rx should only ever carry ComputePath; ignore anything else.
+            Ok(_other) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+}
+
+fn handle_path_request(
+    request: crate::pathing::PathRequestInternal,
+    result_tx: &Sender<WorkerResult>,
+    store: &Arc<RwLock<ChunkStore>>,
+    config: &Arc<RwLock<GenerationConfig>>,
+    world_scale: f32,
+) {
+    let request_id = request.request_id;
+
+    // Block on read lock — fine, we're on a dedicated worker thread.
+    let chunk_size = {
+        let cfg = match config.read() {
+            Ok(c) => c,
+            Err(_) => {
+                let _ = result_tx.send(WorkerResult::PathComputed {
+                    request_id,
+                    status: voxel_path::PathStatus::NoPath as u8,
+                    nodes_ue: Vec::new(),
+                });
+                return;
+            }
+        };
+        cfg.chunk_size
+    };
+
+    let store_guard = match store.read() {
+        Ok(s) => s,
+        Err(_) => {
+            let _ = result_tx.send(WorkerResult::PathComputed {
+                request_id,
+                status: voxel_path::PathStatus::NoPath as u8,
+                nodes_ue: Vec::new(),
+            });
+            return;
+        }
+    };
+
+    let grid = crate::pathing::ChunkStoreGrid {
+        store: &store_guard,
+        chunk_size,
+        cell_factor: PATH_CELL_FACTOR,
+    };
+
+    let (path_req, _mode) = crate::pathing::to_path_request(&request, PATH_CELL_FACTOR);
+    let outcome = voxel_path::compute_path(&grid, path_req);
+
+    // Drop the store guard before doing the UE conversion — keeps the read
+    // lock window as short as possible.
+    drop(store_guard);
+
+    let nodes_ue = crate::pathing::nodes_to_ue(&outcome.nodes, PATH_CELL_FACTOR, world_scale);
+
+    let _ = result_tx.send(WorkerResult::PathComputed {
+        request_id,
+        status: outcome.status as u8,
+        nodes_ue,
+    });
 }

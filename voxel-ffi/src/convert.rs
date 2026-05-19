@@ -169,6 +169,32 @@ pub fn bucket_mesh_by_material(mesh: &mut ConvertedMesh) {
     mesh.submeshes = submeshes;
 }
 
+/// Convert mushroom placements from Rust Y-up to UE Z-up coordinates.
+/// Same swap-and-negate rule as crystals.
+pub fn convert_mushrooms_to_ue(
+    placements: &[voxel_gen::MushroomPlacement],
+    voxel_scale: f32,
+    world_scale: f32,
+) -> Vec<crate::types::FfiMushroomInstance> {
+    let combined_scale = voxel_scale * world_scale;
+    placements.iter().map(|p| {
+        crate::types::FfiMushroomInstance {
+            x: p.x * combined_scale,
+            y: -p.z * combined_scale,
+            z: p.y * combined_scale,
+            normal_x: p.normal_x,
+            normal_y: -p.normal_z,
+            normal_z: p.normal_y,
+            scale: p.scale,
+            yaw: p.yaw,
+            kind: p.kind as u8,
+            anchor_lx: p.anchor_lx,
+            anchor_ly: p.anchor_ly,
+            anchor_lz: p.anchor_lz,
+        }
+    }).collect()
+}
+
 /// Convert crystal placements from Rust Y-up to UE Z-up coordinates.
 /// Position transform: (x, y, z) -> (x * scale, -z * scale, y * scale)
 /// Normal transform: (nx, ny, nz) -> (nx, -nz, ny)

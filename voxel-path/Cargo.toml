@@ -1,0 +1,8 @@
+[package]
+name = "voxel-path"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+glam.workspace = true
+voxel-core = { path = "../voxel-core" }

@@ -21,4 +21,5 @@ voxel-gen = { path = "../voxel-gen" }
 voxel-noise = { path = "../voxel-noise" }
 voxel-fluid = { path = "../voxel-fluid" }
 voxel-sleep = { path = "../voxel-sleep" }
+voxel-path = { path = "../voxel-path" }
 serde_json.workspace = true

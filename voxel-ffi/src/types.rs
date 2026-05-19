@@ -164,6 +164,37 @@ pub struct FfiCrystalData {
     pub hash: u64,
 }
 
+/// One placed mushroom instance in chunk-relative voxel coordinates
+/// (Rust Y-up). UE applies the world-scale + coord swap on the consumer
+/// side. `kind` is `MushroomKind as u8` — see voxel-gen `MushroomKind`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiMushroomInstance {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub normal_x: f32,
+    pub normal_y: f32,
+    pub normal_z: f32,
+    pub scale: f32,
+    pub yaw: f32,
+    pub kind: u8,
+    pub anchor_lx: u8,
+    pub anchor_ly: u8,
+    pub anchor_lz: u8,
+}
+
+/// Mushroom placement data for a chunk. Pointer owned by Rust, freed via
+/// `voxel_free_result`. Mirrors `FfiCrystalData` layout (with the same
+/// hash-skip optimization for HISM rebuild cost).
+#[repr(C)]
+pub struct FfiMushroomData {
+    pub instances: *mut FfiMushroomInstance,
+    pub count: u32,
+    pub _padding: u32,
+    pub hash: u64,
+}
+
 /// Zone descriptor for UE consumption — one per detected zone in a region.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -262,6 +293,7 @@ pub struct FfiResult {
     pub fluid_mesh: FfiFluidMeshData,
     pub crystal_data: FfiCrystalData,
     pub zone_data: FfiZoneData,
+    pub mushroom_data: FfiMushroomData,
     pub slab_fall: FfiSlabFallData,
 }
 
@@ -1151,6 +1183,37 @@ pub struct FfiEngineConfig {
     pub sleep_aureole_water_to_lava_ratio: f32,
     pub sleep_aureole_water_phase1_max_floor: u32,
     pub sleep_aureole_water_count_mult: f32,
+    // ── Mushroom Decoration (16 fields) ──
+    // Appended at end (FFI sync rule: never insert into middle).
+    pub mushroom_enabled: u8,
+    pub _mushroom_pad: [u8; 3],
+    pub mushroom_global_density: f32,
+    pub mushroom_cluster_frequency: f64,
+    pub mushroom_cluster_threshold: f32,
+    pub mushroom_min_spacing_voxels: f32,
+    pub mushroom_ghost_tower_routing_share: f32,
+    // Per-kind: enabled, spawn_chance, scale_min, scale_max (4 each × 4 kinds = 16 — but
+    // packed into the same layout as KindConfig to keep parity with engine.rs mapping).
+    pub mushroom_turkey_tail_enabled: u8,
+    pub _mushroom_pad_tt: [u8; 3],
+    pub mushroom_turkey_tail_spawn_chance: f32,
+    pub mushroom_turkey_tail_scale_min: f32,
+    pub mushroom_turkey_tail_scale_max: f32,
+    pub mushroom_foxfire_enabled: u8,
+    pub _mushroom_pad_fx: [u8; 3],
+    pub mushroom_foxfire_spawn_chance: f32,
+    pub mushroom_foxfire_scale_min: f32,
+    pub mushroom_foxfire_scale_max: f32,
+    pub mushroom_green_pepe_enabled: u8,
+    pub _mushroom_pad_gp: [u8; 3],
+    pub mushroom_green_pepe_spawn_chance: f32,
+    pub mushroom_green_pepe_scale_min: f32,
+    pub mushroom_green_pepe_scale_max: f32,
+    pub mushroom_ghost_tower_enabled: u8,
+    pub _mushroom_pad_gt: [u8; 3],
+    pub mushroom_ghost_tower_spawn_chance: f32,
+    pub mushroom_ghost_tower_scale_min: f32,
+    pub mushroom_ghost_tower_scale_max: f32,
 }
 
 // FfiZoneDescriptor is defined near the top of this file, alongside FfiZoneData.
@@ -1226,6 +1289,44 @@ pub struct FfiBrushFormationRequest {
     pub _pad: [u8; 2],
     pub height: f32,    // UE units
     pub radius: f32,    // UE units
+}
+
+/// Place a single mushroom instance at a UE world position. Does NOT touch
+/// density — the brush picks the nearest solid voxel within `search_radius`
+/// (UE units) as the anchor, infers the surface face from its air-neighbor
+/// pattern, and inserts a `MushroomPlacement` into the chunk's store.
+/// `kind` is the `MushroomKind` enum value (0=TurkeyTail, 1=Foxfire,
+/// 2=GreenPepe, 3=GhostTower). `scale` is the instance scale; pass 0.0 to
+/// use the kind's configured `scale_min..scale_max` random range.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiBrushPlaceMushroomRequest {
+    pub world_x: f32,
+    pub world_y: f32,
+    pub world_z: f32,
+    pub kind: u8,
+    pub _pad: [u8; 3],
+    pub search_radius: f32,  // UE units — radius to scan for an anchor voxel
+    pub scale: f32,          // 0.0 = randomize per kind config
+    pub yaw_radians: f32,    // 0.0 = randomize
+}
+
+/// Sphere-area mushroom brush — scatters multiple mushrooms within a radius.
+/// `radius` is in UE units; `density` is 0..1 Bernoulli per viable surface
+/// voxel. `kind` constrains placement to that species' preferred face
+/// (TurkeyTail→walls, Foxfire→ceilings, GreenPepe/GhostTower→floors). `seed`
+/// randomizes the pattern.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiBrushPlaceMushroomSphereRequest {
+    pub world_x: f32,
+    pub world_y: f32,
+    pub world_z: f32,
+    pub radius: f32,
+    pub density: f32,
+    pub kind: u8,
+    pub _pad: [u8; 3],
+    pub seed: u64,
 }
 
 /// Formation Stamp brush — runs the full worldgen formation pipeline
@@ -1615,6 +1716,34 @@ pub struct FfiMorphResult {
     pub meshes: *mut FfiMeshData,  // heap array, length = chunk_count
 }
 
+/// One surface-facing ore voxel returned by `voxel_query_ore_voxels`.
+/// Position is in UE world space; material_index is the raw `Material as u8`.
+/// Layout: 12 bytes for x/y/z + 1 byte material + 3 bytes tail padding = 16 bytes.
+/// UE side must mirror with `float X, Y, Z; uint8 MaterialIndex; uint8 _pad[3];`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiOreVoxel {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub material_index: u8,
+    pub _pad: [u8; 3],
+}
+
+/// Result list for `voxel_query_ore_voxels`. Caller MUST free via
+/// `voxel_free_ore_voxel_list`. `voxels` is null and `count` is 0 when empty.
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct FfiOreVoxelList {
+    pub voxels: *mut FfiOreVoxel,
+    pub count: u32,
+}
+
+// SAFETY: pointer is exclusively owned by the result and only dereferenced
+// on the FFI boundary by the UE caller. Not shared across threads.
+unsafe impl Send for FfiOreVoxelList {}
+unsafe impl Sync for FfiOreVoxelList {}
+
 // ── Internal (non-FFI) types ──
 
 /// Converted mesh data in UE coordinate space, ready to be handed out via FFI.
@@ -1842,6 +1971,24 @@ pub enum WorkerRequest {
         op: u8,         // 0=fill, 1=clear, 2=carve+fill
         max_flow_dist: u8,
     },
+    /// Place a single mushroom at the cursor position (creative brush).
+    BrushPlaceMushroom {
+        center_rust: glam::Vec3,
+        kind: u8,
+        search_radius: f32, // Rust voxel units
+        scale: f32,         // 0 = randomize
+        yaw: f32,           // 0 = randomize
+    },
+    /// Sphere-area mushroom brush — scatters N mushrooms of one kind within
+    /// a radius via Bernoulli sampling against surface voxels of the kind's
+    /// preferred face.
+    BrushPlaceMushroomSphere {
+        center_rust: glam::Vec3,
+        radius: f32,    // Rust voxel units
+        density: f32,   // 0..1
+        kind: u8,
+        seed: u64,
+    },
     /// River (capsule chain) fluid brush.
     BrushFluidRiver {
         points: Vec<glam::Vec3>,
@@ -1852,6 +1999,12 @@ pub enum WorkerRequest {
         max_flow_dist: u8,
     },
     // (removed BrushFluidStream — replaced by bounded sources via max_flow_dist on FluidCell)
+    /// Pathfinding request — runs A* against the live ChunkStore on a path
+    /// worker thread, sends back `WorkerResult::PathComputed`. The internal
+    /// request is pre-converted to Rust voxel coordinates by the FFI entry.
+    ComputePath {
+        request: crate::pathing::PathRequestInternal,
+    },
 }
 
 /// Results sent back from worker threads.
@@ -1861,6 +2014,7 @@ pub enum WorkerResult {
         mesh: ConvertedMesh,
         generation: u64,
         crystal_data: Vec<FfiCrystalPlacement>,
+        mushroom_data: Vec<FfiMushroomInstance>,
         zone_descriptors: Vec<FfiZoneDescriptor>,
     },
     Error {
@@ -1872,7 +2026,7 @@ pub enum WorkerResult {
     },
     /// All mine mesh updates in one atomic result — prevents pop-in
     MineBatchMesh {
-        meshes: Vec<((i32, i32, i32), ConvertedMesh, Vec<FfiCrystalPlacement>)>,
+        meshes: Vec<((i32, i32, i32), ConvertedMesh, Vec<FfiCrystalPlacement>, Vec<FfiMushroomInstance>)>,
     },
     FluidMesh {
         chunk: (i32, i32, i32),
@@ -1959,6 +2113,14 @@ pub enum WorkerResult {
     PilePreviewTier {
         mesh: ConvertedMesh,
         fall_data: FfiSlabFallData,
+    },
+    /// A* result for a path request — stashed into the engine's
+    /// `path_results` map keyed by `request_id` and never touched by mesh
+    /// consumers (intercepted in `poll_result`).
+    PathComputed {
+        request_id: u32,
+        status: u8,
+        nodes_ue: Vec<crate::pathing::PathNodeUE>,
     },
 }
 

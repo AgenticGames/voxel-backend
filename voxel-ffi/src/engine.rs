@@ -1,5 +1,5 @@
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 
@@ -16,10 +16,18 @@ use voxel_gen::config::{
 };
 
 use crate::convert::ue_chunk_to_rust;
+use crate::pathing::{
+    build_request_from_ue, FfiPathNode, FfiPathRequest, FfiPathResult, PathResultStore,
+    StashedPathResult,
+};
 use crate::profiler::StreamingProfiler;
 use crate::store::ChunkStore;
 use crate::types::*;
-use crate::worker::worker_loop;
+use crate::worker::{path_worker_loop, worker_loop};
+
+/// TTL (seconds) for stashed path results UE never collected. Prunes once per
+/// poll to bound memory growth from dead agents.
+const PATH_RESULT_TTL_SECS: u64 = 10;
 
 /// Compute terrace size in voxels from world scale, targeting ~80 UU snap steps (2 voxels).
 pub(crate) fn terrace_size_for_scale(scale: f32) -> i32 {
@@ -98,6 +106,16 @@ pub struct VoxelEngine {
     // Worker threads
     workers: Vec<JoinHandle<()>>,
 
+    // ─── Pathfinding ─────────────────────────────────────────
+    /// Dedicated channel for path requests so heavy `BrushCavernStamp` /
+    /// `Sleep` / etc. on `mine_tx` don't head-of-line block AI path queries.
+    path_tx: Sender<WorkerRequest>,
+    /// Stash of completed path results, keyed by request_id. Drained by
+    /// `voxel_path_poll` and TTL-pruned in `poll_result`.
+    path_results: Arc<Mutex<PathResultStore>>,
+    /// Server-side monotonic request id allocator so callers don't have to.
+    next_path_request_id: Arc<AtomicU32>,
+
     // Scale
     world_scale: f32,
 }
@@ -141,6 +159,7 @@ impl VoxelEngine {
 
         let (generate_tx, generate_rx) = bounded::<WorkerRequest>(256);
         let (mine_tx, mine_rx) = bounded::<WorkerRequest>(16);
+        let (path_tx, path_rx) = bounded::<WorkerRequest>(256);
         let (result_tx, result_rx) = bounded::<WorkerResult>(2048);
 
         // Fluid event channel
@@ -270,6 +289,68 @@ impl VoxelEngine {
             workers.push(handle);
         }
 
+        // ─── Path worker — one dedicated thread reads from path_rx, runs A*,
+        // sends `PathComputed` via the shared result_tx (intercepted in
+        // `poll_result`). Same catch_unwind respawn pattern as the main pool.
+        {
+            let shutdown = Arc::clone(&shutdown);
+            let path_rx = path_rx.clone();
+            let result_tx = result_tx.clone();
+            let store = Arc::clone(&store);
+            let config_arc = Arc::clone(&config);
+            let world_scale_path = world_scale;
+            let builder = thread::Builder::new().name("voxel-path-worker".to_string());
+            let handle = builder
+                .spawn(move || {
+                    const MAX_RESPAWNS: u32 = 16;
+                    let mut respawn = 0u32;
+                    crate::panic_log::worker_started();
+                    loop {
+                        let outcome = {
+                            let shutdown = Arc::clone(&shutdown);
+                            let path_rx = path_rx.clone();
+                            let result_tx = result_tx.clone();
+                            let store = Arc::clone(&store);
+                            let config_arc = Arc::clone(&config_arc);
+                            std::panic::catch_unwind(AssertUnwindSafe(move || {
+                                path_worker_loop(
+                                    shutdown,
+                                    path_rx,
+                                    result_tx,
+                                    store,
+                                    config_arc,
+                                    world_scale_path,
+                                );
+                            }))
+                        };
+                        if shutdown.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        match outcome {
+                            Ok(()) => break,
+                            Err(payload) => {
+                                respawn += 1;
+                                let msg = crate::panic_log::payload_string(&*payload);
+                                crate::panic_log::note(&format!(
+                                    "path-worker caught panic (respawn {}/{}): {}",
+                                    respawn, MAX_RESPAWNS, msg
+                                ));
+                                if respawn >= MAX_RESPAWNS {
+                                    crate::panic_log::note(
+                                        "path-worker GIVING UP after respawn limit",
+                                    );
+                                    break;
+                                }
+                                std::thread::sleep(std::time::Duration::from_millis(100));
+                            }
+                        }
+                    }
+                    crate::panic_log::worker_exited();
+                })
+                .expect("failed to spawn voxel path worker thread");
+            workers.push(handle);
+        }
+
         VoxelEngine {
             generate_tx,
             mine_tx,
@@ -290,6 +371,9 @@ impl VoxelEngine {
             force_spawn_complete: Arc::new(Mutex::new(None)),
             profiler,
             workers,
+            path_tx,
+            path_results: Arc::new(Mutex::new(PathResultStore::default())),
+            next_path_request_id: Arc::new(AtomicU32::new(1)),
             world_scale,
         }
     }
@@ -457,8 +541,105 @@ impl VoxelEngine {
                 }
                 None
             }
+            Ok(WorkerResult::PathComputed { request_id, status, nodes_ue }) => {
+                // Stash for `voxel_path_poll`; UE polls per-request_id rather
+                // than from the mesh result pipeline. TTL-prune happens here.
+                if let Ok(mut store) = self.path_results.lock() {
+                    use voxel_path::PathStatus;
+                    let status_enum = match status {
+                        0 => PathStatus::Success,
+                        1 => PathStatus::NoPath,
+                        2 => PathStatus::MaxNodesReached,
+                        3 => PathStatus::PartiallyUnloaded,
+                        4 => PathStatus::InvalidEndpoint,
+                        _ => PathStatus::NoPath,
+                    };
+                    store.stash(StashedPathResult {
+                        request_id,
+                        status: status_enum,
+                        nodes_ue,
+                        stash_time: std::time::Instant::now(),
+                    });
+                    store.prune(PATH_RESULT_TTL_SECS);
+                }
+                None
+            }
             Ok(other) => Some(other),
             Err(_) => None,
+        }
+    }
+
+    // ─── Pathfinding public API ─────────────────────────────────
+
+    /// Submit a path request. Returns the request id (>= 1) on success;
+    /// returns 0 if the path channel is full or the request was malformed.
+    /// The returned id is later passed to `poll_path` to fetch the result.
+    pub fn request_path(&self, request: FfiPathRequest) -> u32 {
+        let request_id = self.next_path_request_id.fetch_add(1, Ordering::Relaxed);
+        let internal = build_request_from_ue(
+            request_id,
+            request.from_ue_x, request.from_ue_y, request.from_ue_z,
+            request.to_ue_x, request.to_ue_y, request.to_ue_z,
+            request.agent_radius_ue,
+            request.movement_mode,
+            request.max_nodes,
+            self.world_scale,
+        );
+        match self.path_tx.try_send(WorkerRequest::ComputePath { request: internal }) {
+            Ok(()) => request_id,
+            Err(_) => 0,
+        }
+    }
+
+    /// Poll for a completed path result.
+    /// Returns 0 = pending (request id known, A* not finished),
+    ///         1 = result populated (caller must voxel_path_free),
+    ///         2 = unknown id (never submitted, or already polled, or expired).
+    /// On status 1, `out` is filled with a heap-allocated FfiPathResult — caller
+    /// owns the memory and MUST call `voxel_path_free` to release it.
+    pub fn poll_path(&self, request_id: u32) -> Option<FfiPathResult> {
+        let mut store = self.path_results.lock().ok()?;
+        let result = store.take(request_id)?;
+
+        // Heap-allocate the node array; UE takes ownership.
+        let node_count = result.nodes_ue.len() as u32;
+        let nodes_ptr: *mut FfiPathNode = if node_count == 0 {
+            std::ptr::null_mut()
+        } else {
+            let mut boxed: Box<[FfiPathNode]> = result
+                .nodes_ue
+                .iter()
+                .map(|n| FfiPathNode {
+                    x: n.x, y: n.y, z: n.z,
+                    nx: n.nx, ny: n.ny, nz: n.nz,
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice();
+            let ptr = boxed.as_mut_ptr();
+            std::mem::forget(boxed); // ownership transferred to caller
+            ptr
+        };
+
+        Some(FfiPathResult {
+            request_id: result.request_id,
+            status: result.status as u8,
+            _pad: [0; 3],
+            nodes: nodes_ptr,
+            node_count,
+            _pad2: 0,
+        })
+    }
+
+    /// Release the node array of an FfiPathResult previously returned by
+    /// `poll_path`. Idempotent on null pointer.
+    pub fn free_path_nodes(&self, nodes: *mut FfiPathNode, count: u32) {
+        if nodes.is_null() || count == 0 {
+            return;
+        }
+        unsafe {
+            // Reconstitute the Box<[FfiPathNode]> we leaked in poll_path.
+            let slice = std::slice::from_raw_parts_mut(nodes, count as usize);
+            let _boxed: Box<[FfiPathNode]> = Box::from_raw(slice);
         }
     }
 
@@ -687,6 +868,54 @@ impl VoxelEngine {
             -best.z * world_scale,
             best.y * world_scale,
         ))
+    }
+
+    /// Find surface-facing ore voxels near the player.
+    /// All position inputs/outputs are UE world coords; `ue_radius` is in UE units.
+    /// Returns up to `max_results` (UE-space) voxel centers sorted by distance,
+    /// each with its raw `Material as u8`.
+    /// `material_filter` of `0xFF` means "any ore" (`Material::is_ore()`).
+    pub fn find_ore_voxels(
+        &self,
+        ue_x: f32,
+        ue_y: f32,
+        ue_z: f32,
+        ue_radius: f32,
+        material_filter: u8,
+        max_results: usize,
+        world_scale: f32,
+    ) -> Vec<(f32, f32, f32, u8)> {
+        use crate::convert::from_ue_world_pos;
+
+        let cfg = match self.config.read() {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+        let chunk_size = cfg.chunk_size;
+        let eb = cfg.effective_bounds();
+        drop(cfg);
+
+        let rust_pos = from_ue_world_pos(ue_x, ue_y, ue_z, world_scale);
+        // UE distance / world_scale → voxel-unit distance.
+        let voxel_radius = ue_radius / world_scale;
+
+        let store = match self.store.try_read() {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
+        let hits = store.find_ore_voxels(
+            rust_pos,
+            voxel_radius,
+            material_filter,
+            max_results,
+            chunk_size,
+            eb,
+        );
+
+        hits.into_iter()
+            .map(|(p, m)| (p.x * world_scale, -p.z * world_scale, p.y * world_scale, m))
+            .collect()
     }
 
     /// Find a wall-adjacent air cell near a target, excluding a radius around an exclusion point.
@@ -1493,6 +1722,50 @@ impl VoxelEngine {
         }
     }
 
+    /// Creative-mode mushroom-placer brush. Places one mushroom instance at
+    /// the cursor anchor; does not modify density.
+    pub fn request_brush_place_mushroom(&self, request: FfiBrushPlaceMushroomRequest) -> u32 {
+        let scale = self.world_scale;
+        let center_rust = crate::convert::from_ue_world_pos(
+            request.world_x, request.world_y, request.world_z, scale,
+        );
+        let search_radius = (request.search_radius / scale).max(0.5);
+        match self.mine_tx.try_send(WorkerRequest::BrushPlaceMushroom {
+            center_rust,
+            kind: request.kind,
+            search_radius,
+            scale: request.scale,
+            yaw: request.yaw_radians,
+        }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
+    /// Sphere-area mushroom brush — scatters mushrooms of `kind` within a
+    /// radius using Bernoulli sampling. `request.radius` is UE units;
+    /// `request.density` is the per-candidate accept probability.
+    pub fn request_brush_place_mushroom_sphere(
+        &self,
+        request: crate::types::FfiBrushPlaceMushroomSphereRequest,
+    ) -> u32 {
+        let scale = self.world_scale;
+        let center_rust = crate::convert::from_ue_world_pos(
+            request.world_x, request.world_y, request.world_z, scale,
+        );
+        let radius_voxels = (request.radius / scale).max(0.5);
+        match self.mine_tx.try_send(WorkerRequest::BrushPlaceMushroomSphere {
+            center_rust,
+            radius: radius_voxels,
+            density: request.density.clamp(0.0, 1.0),
+            kind: request.kind,
+            seed: request.seed,
+        }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
     /// Diagnostic: force a single chunk to re-sync its boundaries with all
     /// face-adjacent neighbors and remesh anything modified. Use when seam
     /// mismatches accumulate (visible as flat walls or mesh holes) and
@@ -2153,6 +2426,7 @@ fn ffi_config_to_generation(c: &FfiEngineConfig) -> GenerationConfig {
         hydrothermal: ffi_to_hydrothermal_config(c),
         rivers: ffi_to_river_config(c),
         artesian: ffi_to_artesian_config(c),
+        mushrooms: ffi_to_mushroom_config(c),
         octree_max_depth: 4,
         region_size: if c.region_size == 0 { 3 } else { c.region_size as i32 },
         bounds_size: c.bounds_size,
@@ -2689,6 +2963,58 @@ fn ffi_to_zone_config(c: &FfiEngineConfig) -> voxel_gen::config::ZoneConfig {
         frozen_waterfall_count: if c.zone_frozen_waterfall_count > 0 { c.zone_frozen_waterfall_count } else { 2 },
         frozen_ice_stalactite_chance: if c.zone_frozen_ice_stalactite_chance > 0.0 { c.zone_frozen_ice_stalactite_chance } else { 0.3 },
         frozen_mega_chance: if c.zone_frozen_mega_chance > 0.0 { c.zone_frozen_mega_chance } else { 0.03 },
+    }
+}
+
+fn ffi_to_mushroom_config(c: &FfiEngineConfig) -> voxel_gen::config::MushroomConfig {
+    use voxel_gen::config::{KindConfig, MushroomConfig};
+    // For each per-kind block, use fallbacks if the FFI gave zeros — that
+    // matches the rest of the helpers and keeps an uninitialized UE config
+    // from producing zero-density everywhere.
+    let mk_kind = |enabled: u8, chance: f32, smin: f32, smax: f32, default: KindConfig| -> KindConfig {
+        KindConfig {
+            enabled: enabled != 0,
+            spawn_chance: if chance > 0.0 { chance } else { default.spawn_chance },
+            scale_min: if smin > 0.0 { smin } else { default.scale_min },
+            scale_max: if smax > 0.0 { smax } else { default.scale_max },
+        }
+    };
+    let d = MushroomConfig::default();
+    MushroomConfig {
+        enabled: c.mushroom_enabled != 0,
+        global_density: if c.mushroom_global_density > 0.0 { c.mushroom_global_density } else { d.global_density },
+        cluster_frequency: if c.mushroom_cluster_frequency > 0.0 { c.mushroom_cluster_frequency } else { d.cluster_frequency },
+        cluster_threshold: if c.mushroom_cluster_threshold != 0.0 { c.mushroom_cluster_threshold } else { d.cluster_threshold },
+        min_spacing_voxels: if c.mushroom_min_spacing_voxels > 0.0 { c.mushroom_min_spacing_voxels } else { d.min_spacing_voxels },
+        ghost_tower_routing_share: if c.mushroom_ghost_tower_routing_share > 0.0 { c.mushroom_ghost_tower_routing_share } else { d.ghost_tower_routing_share },
+        turkey_tail: mk_kind(
+            c.mushroom_turkey_tail_enabled,
+            c.mushroom_turkey_tail_spawn_chance,
+            c.mushroom_turkey_tail_scale_min,
+            c.mushroom_turkey_tail_scale_max,
+            d.turkey_tail.clone(),
+        ),
+        foxfire: mk_kind(
+            c.mushroom_foxfire_enabled,
+            c.mushroom_foxfire_spawn_chance,
+            c.mushroom_foxfire_scale_min,
+            c.mushroom_foxfire_scale_max,
+            d.foxfire.clone(),
+        ),
+        green_pepe: mk_kind(
+            c.mushroom_green_pepe_enabled,
+            c.mushroom_green_pepe_spawn_chance,
+            c.mushroom_green_pepe_scale_min,
+            c.mushroom_green_pepe_scale_max,
+            d.green_pepe.clone(),
+        ),
+        ghost_tower: mk_kind(
+            c.mushroom_ghost_tower_enabled,
+            c.mushroom_ghost_tower_spawn_chance,
+            c.mushroom_ghost_tower_scale_min,
+            c.mushroom_ghost_tower_scale_max,
+            d.ghost_tower.clone(),
+        ),
     }
 }
 

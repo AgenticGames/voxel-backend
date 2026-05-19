@@ -110,18 +110,19 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                 mesh,
                 generation,
                 crystal_data,
+                mushroom_data,
                 zone_descriptors,
             } => {
-                let result = convert_mesh_to_ffi_result(chunk, mesh, generation, crystal_data, zone_descriptors);
+                let result = convert_mesh_to_ffi_result(chunk, mesh, generation, crystal_data, mushroom_data, zone_descriptors);
                 Box::into_raw(Box::new(result))
             }
             WorkerResult::MineBatchMesh { meshes } => {
                 // Convert batch to individual results — send first one now, rest get re-queued
-                let mut iter = meshes.into_iter();
+                let iter = meshes.into_iter();
                 // Re-queue remaining for next polls
-                for (chunk, mesh, crystal_data) in iter {
+                for (chunk, mesh, crystal_data, mushroom_data) in iter {
                     engine.requeue_result(WorkerResult::ChunkMesh {
-                        chunk, mesh, generation: 0, crystal_data, zone_descriptors: Vec::new(),
+                        chunk, mesh, generation: 0, crystal_data, mushroom_data, zone_descriptors: Vec::new(),
                     });
                 }
                 // Signal UE to drain all results this frame
@@ -134,6 +135,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     fluid_mesh: empty_fluid_mesh_data(),
                     crystal_data: empty_crystal_data(),
                     zone_data: empty_zone_data(),
+                    mushroom_data: empty_mushroom_data(),
                     slab_fall: FfiSlabFallData::default(),
                 };
                 Box::into_raw(Box::new(result))
@@ -148,6 +150,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     fluid_mesh: empty_fluid_mesh_data(),
                     crystal_data: empty_crystal_data(),
                     zone_data: empty_zone_data(),
+                    mushroom_data: empty_mushroom_data(),
                     slab_fall: FfiSlabFallData::default(),
                 };
                 Box::into_raw(Box::new(result))
@@ -163,6 +166,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     fluid_mesh: converted_fluid_mesh_to_ffi(mesh),
                     crystal_data: empty_crystal_data(),
                     zone_data: empty_zone_data(),
+                    mushroom_data: empty_mushroom_data(),
                     slab_fall: FfiSlabFallData::default(),
                 };
                 Box::into_raw(Box::new(result))
@@ -178,6 +182,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     fluid_mesh: empty_fluid_mesh_data(),
                     crystal_data: empty_crystal_data(),
                     zone_data: empty_zone_data(),
+                    mushroom_data: empty_mushroom_data(),
                     slab_fall: FfiSlabFallData::default(),
                 };
                 Box::into_raw(Box::new(result))
@@ -195,7 +200,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
             WorkerResult::CollapseResult { mut events, meshes } => {
                 // Send each collapse-remeshed chunk as a ChunkMesh result first
                 for (chunk, mesh) in meshes {
-                    let r = convert_mesh_to_ffi_result(chunk, mesh, 0, Vec::new(), Vec::new());
+                    let r = convert_mesh_to_ffi_result(chunk, mesh, 0, Vec::new(), Vec::new(), Vec::new());
                     let _ = Box::into_raw(Box::new(r));
                 }
 
@@ -231,6 +236,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     fluid_mesh: empty_fluid_mesh_data(),
                     crystal_data: empty_crystal_data(),
                     zone_data: empty_zone_data(),
+                    mushroom_data: empty_mushroom_data(),
                     slab_fall: FfiSlabFallData::default(),
                 };
                 Box::into_raw(Box::new(result))
@@ -238,7 +244,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
             WorkerResult::SupportResult { success, meshes } => {
                 // Send each remeshed chunk as a ChunkMesh
                 for (chunk, mesh) in meshes {
-                    let r = convert_mesh_to_ffi_result(chunk, mesh, 0, Vec::new(), Vec::new());
+                    let r = convert_mesh_to_ffi_result(chunk, mesh, 0, Vec::new(), Vec::new(), Vec::new());
                     let _ = Box::into_raw(Box::new(r));
                 }
                 // Return as a mine result with success indicator
@@ -251,6 +257,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     fluid_mesh: empty_fluid_mesh_data(),
                     crystal_data: empty_crystal_data(),
                     zone_data: empty_zone_data(),
+                    mushroom_data: empty_mushroom_data(),
                     slab_fall: FfiSlabFallData::default(),
                 };
                 Box::into_raw(Box::new(result))
@@ -304,6 +311,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     fluid_mesh: empty_fluid_mesh_data(),
                     crystal_data: empty_crystal_data(),
                     zone_data: empty_zone_data(),
+                    mushroom_data: empty_mushroom_data(),
                     slab_fall: FfiSlabFallData::default(),
                 };
                 Box::into_raw(Box::new(result))
@@ -330,6 +338,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     fluid_mesh: empty_fluid_mesh_data(),
                     crystal_data: empty_crystal_data(),
                     zone_data: empty_zone_data(),
+                    mushroom_data: empty_mushroom_data(),
                     slab_fall: fall_data,
                 };
                 Box::into_raw(Box::new(result))
@@ -361,10 +370,15 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     fluid_mesh: empty_fluid_mesh_data(),
                     crystal_data: empty_crystal_data(),
                     zone_data: empty_zone_data(),
+                    mushroom_data: empty_mushroom_data(),
                     slab_fall: fall,
                 };
                 Box::into_raw(Box::new(result))
             }
+            // PathComputed is intercepted inside engine.poll_result() and
+            // stashed into path_results — it never reaches this match in
+            // practice. Listed here only for exhaustiveness.
+            WorkerResult::PathComputed { .. } => ptr::null_mut(),
             WorkerResult::PilePreviewTier { mesh, fall_data } => {
                 // One tier of the pre-commit pile preview. fall_data carries
                 // tier_index in pile_tier_index, spawn_x/y/z is the pile
@@ -382,6 +396,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     fluid_mesh: empty_fluid_mesh_data(),
                     crystal_data: empty_crystal_data(),
                     zone_data: empty_zone_data(),
+                    mushroom_data: empty_mushroom_data(),
                     slab_fall: fall_data,
                 };
                 Box::into_raw(Box::new(result))
@@ -502,6 +517,16 @@ pub unsafe extern "C" fn voxel_free_result(result: *mut FfiResult) {
             zones.descriptors,
             zones.count as usize,
             zones.count as usize,
+        ));
+    }
+
+    // Free mushroom data if present
+    let mush = &result.mushroom_data;
+    if mush.count > 0 && !mush.instances.is_null() {
+        drop(Vec::from_raw_parts(
+            mush.instances,
+            mush.count as usize,
+            mush.count as usize,
         ));
     }
 
@@ -641,6 +666,79 @@ pub unsafe extern "C" fn voxel_find_wall_near(
             1
         }
         None => 0,
+    }
+}
+
+/// Query surface-facing ore voxels near a player position.
+///
+/// `material_filter` of `0xFF` returns any ore (`Material::is_ore`); any other
+/// value matches a specific `Material as u8`. `radius_ue` is in UE units.
+///
+/// Returns a heap-allocated list. Caller MUST call `voxel_free_ore_voxel_list`
+/// on the result regardless of `count` (empty results are still well-formed).
+#[no_mangle]
+pub unsafe extern "C" fn voxel_query_ore_voxels(
+    engine: *mut c_void,
+    player_x: f32,
+    player_y: f32,
+    player_z: f32,
+    radius_ue: f32,
+    material_filter: u8,
+    max_results: u32,
+    world_scale: f32,
+) -> FfiOreVoxelList {
+    let empty = FfiOreVoxelList {
+        voxels: ptr::null_mut(),
+        count: 0,
+    };
+
+    if engine.is_null() {
+        return empty;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+
+    let hits = engine.find_ore_voxels(
+        player_x,
+        player_y,
+        player_z,
+        radius_ue,
+        material_filter,
+        max_results as usize,
+        world_scale,
+    );
+
+    if hits.is_empty() {
+        return empty;
+    }
+
+    let mut buf: Vec<FfiOreVoxel> = hits
+        .into_iter()
+        .map(|(x, y, z, m)| FfiOreVoxel {
+            x,
+            y,
+            z,
+            material_index: m,
+            _pad: [0; 3],
+        })
+        .collect();
+
+    let count = buf.len() as u32;
+    let ptr = buf.as_mut_ptr();
+    std::mem::forget(buf);
+
+    FfiOreVoxelList { voxels: ptr, count }
+}
+
+/// Free ore voxel list returned by `voxel_query_ore_voxels`.
+/// Safe to call with an empty/null list.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_free_ore_voxel_list(list: FfiOreVoxelList) {
+    if !list.voxels.is_null() && list.count > 0 {
+        drop(Vec::from_raw_parts(
+            list.voxels,
+            list.count as usize,
+            list.count as usize,
+        ));
     }
 }
 
@@ -1579,6 +1677,35 @@ pub unsafe extern "C" fn voxel_request_brush_formation(
     engine.request_brush_formation(*request)
 }
 
+/// Creative-mode mushroom placer. Places one mushroom at the cursor anchor.
+/// Returns 1 on success, 0 if queue full or invalid input.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_request_brush_place_mushroom(
+    engine: *mut c_void,
+    request: *const FfiBrushPlaceMushroomRequest,
+) -> u32 {
+    if engine.is_null() || request.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.request_brush_place_mushroom(*request)
+}
+
+/// Creative-mode mushroom sphere brush — scatters multiple mushrooms of one
+/// kind within a radius, Bernoulli-sampled against viable surface voxels.
+/// Returns 1 on success, 0 if queue full or invalid input.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_request_brush_place_mushroom_sphere(
+    engine: *mut c_void,
+    request: *const crate::types::FfiBrushPlaceMushroomSphereRequest,
+) -> u32 {
+    if engine.is_null() || request.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.request_brush_place_mushroom_sphere(*request)
+}
+
 /// Creative-mode formation stamp brush — runs the worldgen formation pipeline
 /// (random mix of stalactites/columns/drapery/etc. per the live FormationConfig)
 /// within a sphere. `seed` randomizes the pick.
@@ -2242,6 +2369,7 @@ fn convert_mesh_to_ffi_result(
     mesh: ConvertedMesh,
     generation: u64,
     crystal_data: Vec<FfiCrystalPlacement>,
+    mushroom_data: Vec<FfiMushroomInstance>,
     zone_descriptors: Vec<FfiZoneDescriptor>,
 ) -> FfiResult {
     // Convert Rust chunk coords back to UE space for the caller
@@ -2259,6 +2387,7 @@ fn convert_mesh_to_ffi_result(
         fluid_mesh: empty_fluid_mesh_data(),
         crystal_data: convert_crystal_vec_to_ffi(crystal_data),
         zone_data: convert_zone_vec_to_ffi(zone_descriptors),
+        mushroom_data: convert_mushroom_vec_to_ffi(mushroom_data),
         slab_fall: FfiSlabFallData::default(),
     }
 }
@@ -2315,6 +2444,49 @@ fn convert_crystal_vec_to_ffi(data: Vec<FfiCrystalPlacement>) -> FfiCrystalData 
 fn empty_crystal_data() -> FfiCrystalData {
     FfiCrystalData {
         placements: std::ptr::null_mut(),
+        count: 0,
+        _padding: 0,
+        hash: 0,
+    }
+}
+
+fn compute_mushroom_hash(instances: &[FfiMushroomInstance]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    let prime: u64 = 0x100000001b3;
+    let mut mix = |x: u64, h: &mut u64| {
+        *h ^= x;
+        *h = h.wrapping_mul(prime);
+    };
+    mix(instances.len() as u64, &mut h);
+    for p in instances {
+        mix(p.x.to_bits() as u64, &mut h);
+        mix(p.y.to_bits() as u64, &mut h);
+        mix(p.z.to_bits() as u64, &mut h);
+        mix(p.normal_x.to_bits() as u64, &mut h);
+        mix(p.normal_y.to_bits() as u64, &mut h);
+        mix(p.normal_z.to_bits() as u64, &mut h);
+        mix(p.scale.to_bits() as u64, &mut h);
+        mix(p.yaw.to_bits() as u64, &mut h);
+        mix(p.kind as u64, &mut h);
+    }
+    if h == 0 { 1 } else { h }
+}
+
+fn convert_mushroom_vec_to_ffi(data: Vec<FfiMushroomInstance>) -> FfiMushroomData {
+    if data.is_empty() {
+        return empty_mushroom_data();
+    }
+    let hash = compute_mushroom_hash(&data);
+    let count = data.len() as u32;
+    let mut boxed = data.into_boxed_slice();
+    let ptr = boxed.as_mut_ptr();
+    std::mem::forget(boxed);
+    FfiMushroomData { instances: ptr, count, _padding: 0, hash }
+}
+
+fn empty_mushroom_data() -> FfiMushroomData {
+    FfiMushroomData {
+        instances: std::ptr::null_mut(),
         count: 0,
         _padding: 0,
         hash: 0,
@@ -2788,6 +2960,73 @@ pub unsafe extern "C" fn voxel_has_world_modifications(engine: *mut c_void) -> u
     }
     let engine = &*(engine as *const VoxelEngine);
     if engine.has_world_modifications() { 1 } else { 0 }
+}
+
+// ─── Pathfinding FFI ─────────────────────────────────────────────
+//
+// Async pattern: caller submits a request via `voxel_path_request` and gets
+// back a `request_id` (or 0 on failure). Path runs on a dedicated worker
+// thread; caller polls `voxel_path_poll` with that id each frame. On a
+// returned status of 1, the `FfiPathResult` is filled — caller MUST then call
+// `voxel_path_free` to release the heap-allocated node array.
+
+/// Submit a path request to the path-worker thread.
+/// Returns: request id (>= 1) on success, 0 if the path channel is full or
+/// any pointer is null.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_path_request(
+    engine: *mut c_void,
+    request: *const crate::pathing::FfiPathRequest,
+) -> u32 {
+    if engine.is_null() || request.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let req = *request;
+    engine.request_path(req)
+}
+
+/// Poll for a completed path result by request id.
+/// Returns:
+///   0 — request pending (still computing) OR result already collected
+///   1 — result populated into `*out`; caller MUST call voxel_path_free
+///   2 — unknown id (never submitted, or expired by TTL)
+///
+/// `out` must point to a caller-allocated FfiPathResult struct.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_path_poll(
+    engine: *mut c_void,
+    request_id: u32,
+    out: *mut crate::pathing::FfiPathResult,
+) -> u32 {
+    if engine.is_null() || out.is_null() || request_id == 0 {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    match engine.poll_path(request_id) {
+        Some(result) => {
+            *out = result;
+            1
+        }
+        None => 0,
+    }
+}
+
+/// Release the heap-allocated node array of an FfiPathResult previously
+/// returned by `voxel_path_poll`. Idempotent on null / zero-count.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_path_free(
+    engine: *mut c_void,
+    result: *mut crate::pathing::FfiPathResult,
+) {
+    if engine.is_null() || result.is_null() {
+        return;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let r = &mut *result;
+    engine.free_path_nodes(r.nodes, r.node_count);
+    r.nodes = std::ptr::null_mut();
+    r.node_count = 0;
 }
 
 #[cfg(test)]
@@ -3638,6 +3877,34 @@ mod tests {
             sleep_aureole_water_to_lava_ratio: 1.2,
             sleep_aureole_water_phase1_max_floor: 50,
             sleep_aureole_water_count_mult: 1.0,
+            // Mushroom decoration
+            mushroom_enabled: 1,
+            _mushroom_pad: [0; 3],
+            mushroom_global_density: 0.04,
+            mushroom_cluster_frequency: 0.05,
+            mushroom_cluster_threshold: -0.15,
+            mushroom_min_spacing_voxels: 1.5,
+            mushroom_ghost_tower_routing_share: 0.06,
+            mushroom_turkey_tail_enabled: 1,
+            _mushroom_pad_tt: [0; 3],
+            mushroom_turkey_tail_spawn_chance: 0.35,
+            mushroom_turkey_tail_scale_min: 0.6,
+            mushroom_turkey_tail_scale_max: 1.1,
+            mushroom_foxfire_enabled: 1,
+            _mushroom_pad_fx: [0; 3],
+            mushroom_foxfire_spawn_chance: 0.25,
+            mushroom_foxfire_scale_min: 0.5,
+            mushroom_foxfire_scale_max: 1.0,
+            mushroom_green_pepe_enabled: 1,
+            _mushroom_pad_gp: [0; 3],
+            mushroom_green_pepe_spawn_chance: 0.4,
+            mushroom_green_pepe_scale_min: 0.7,
+            mushroom_green_pepe_scale_max: 1.2,
+            mushroom_ghost_tower_enabled: 1,
+            _mushroom_pad_gt: [0; 3],
+            mushroom_ghost_tower_spawn_chance: 0.5,
+            mushroom_ghost_tower_scale_min: 1.5,
+            mushroom_ghost_tower_scale_max: 3.0,
         }
     }
 
@@ -3783,7 +4050,8 @@ mod tests {
 
             let stats = voxel_get_stats(engine);
             assert_eq!(stats.chunks_loaded, 0);
-            assert_eq!(stats.worker_threads_active, 2);
+            // 2 generate/mine workers + 1 dedicated path-worker = 3
+            assert_eq!(stats.worker_threads_active, 3);
 
             voxel_destroy_engine(engine);
         }

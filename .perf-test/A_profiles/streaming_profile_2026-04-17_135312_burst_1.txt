@@ -1,0 +1,295 @@
+================================================================
+  STREAMING PROFILER REPORT  -  Session #2
+================================================================
+  Wall time:    0.218s
+  Workers:      8
+
+── Request Summary ──────────────────────────────────────────
+  Requested:    1
+  Completed:    1
+  Stale skip:   0
+  Errors:       0
+  Slow path:    0
+  Fast path:    1
+
+── Per-Phase Timing (ms) ───────────────────────────────────
+  Phase                     Min      Avg      Max      Total
+  -------------------- -------- -------- -------- ----------
+  region_density           0.00     0.00     0.00        0.0
+  hermite                  0.00     0.00     0.00        0.0
+  dc_solve                 2.11     2.11     2.11        2.1
+  mesh_gen                 1.17     1.17     1.17        1.2
+  mesh_smooth              0.00     0.00     0.00        0.0
+  seam_pass                4.92     4.92     4.92        4.9
+  coord_transform          0.55     0.55     0.55        0.6
+  store_read_wait          0.00     0.00     0.00        0.0
+  store_write_wait         0.00     0.00     0.00        0.0
+  TOTAL                   11.02    11.02    11.02       11.0
+
+── Seam Pass Breakdown (ms) ────────────────────────────────
+  Phase                     Min      Avg      Max      Total
+  -------------------- -------- -------- -------- ----------
+  quad_gen                 0.30     0.30     0.30        0.3
+  mesh_retrieve            0.46     0.46     0.46        0.5
+  convert                  4.05     4.05     4.05        4.1
+  Candidates:   tried=1  sent=1  (hit rate: 100.0%)
+
+── Worm Generation Breakdown (ms, slow-path only) ─────────
+  Phase                     Min      Avg      Max      Total
+  -------------------- -------- -------- -------- ----------
+  base_density                -        -        -          -
+  cavern_centers              -        -        -          -
+  worm_planning               -        -        -          -
+  worm_carving                -        -        -          -
+  pools                       -        -        -          -
+  formations                  -        -        -          -
+  forward_sharing             -        -        -          -
+  backward_carve              -        -        -          -
+  backward_remesh             -        -        -          -
+
+── Stress/Collapse Breakdown (ms) ──────────────────────────
+  Phase                     Min      Avg      Max      Total
+  -------------------- -------- -------- -------- ----------
+  stress_update            0.00     0.00     0.00        0.0
+  collapse_detect          0.00     0.00     0.00        0.0
+  collapse_remesh          0.00     0.00     0.00        0.0
+
+── Send Block (ms) ─────────────────────────────────────────
+  Min:    0.00  Avg:  0.00  Max:  0.00  Total: 0.0
+
+── Coarse Pre-Pass ─────────────────────────────────────────
+  Skipped:  0  Full gen: 1  (skip rate: 0.0%)
+
+── Lock Contention (ms) ────────────────────────────────────
+  Store read wait:   avg=0.00  max=0.00  total=0.0
+  Store write wait:  avg=0.00  max=0.00  total=0.0
+
+── Queue Depth ─────────────────────────────────────────────
+  Gen queue:    min=0  avg=0.0  max=0
+  Result queue: min=0  avg=0.0  max=0
+
+── Worker Utilization ──────────────────────────────────────
+  Worker     Chunks   Work(ms)   Idle(ms)   Seam(ms)   Send(ms)    Stale    Util%
+  -------- -------- ---------- ---------- ---------- ---------- -------- --------
+  0               0        0.0      201.4        0.0        0.0        0     0.0
+  1               0        0.0      254.4        0.0        0.0        0     0.0
+  2               0        0.0      254.4        0.0        0.0        0     0.0
+  3               0        0.0      254.4        0.0        0.0        0     0.0
+  4               0        0.0      201.4        0.0        0.0        0     0.0
+  5               1       11.0      202.7        4.9        0.0        0     5.2
+  6               0        0.0      201.4        0.0        0.0        0     0.0
+  7               0        0.0      201.4        0.0        0.0        0     0.0
+
+── Mesh Complexity ─────────────────────────────────────────
+  Vertices:   min=3855  avg=3855  max=3855
+  Triangles:  min=7202  avg=7202  max=7202
+  Sections:   min=3  avg=3  max=3
+  Total mesh: 178.5 KB
+
+── Top 10 Slowest Chunks ───────────────────────────────────
+  Coord              Time(ms)   Path    Verts     Tris
+  ------------------ -------- ------ -------- --------
+  (   2,   0,   0)    11.02   fast     3855     7202
+
+── Per-Chunk Detail (non-empty, UE coords) ─────────────────
+  UE Coord = Rust (x, -z, y).  Submeshes: mat:V/I
+  UE Coord          Verts   Tris Secs   Bytes  Path Submeshes
+  ---------------- ------ ------ ---- ------- ----- ------------------------------
+  (   2,   0,   0)   3855   7202    3  182799  fast [5:3467/20109, 8:94/267, 19:294/1230]
+  Total non-empty: 1
+
+── Generation Config ───────────────────────────────────────
+  seed=12348
+  chunk_size=30
+  workers=8
+  world_scale=40.0
+  region_size=6
+  cavern_freq=0.0055
+  cavern_thresh=0.65
+  detail_octaves=8
+  detail_persistence=0.50
+  warp_amplitude=2.0
+  worms_per_region=0.0
+  worm_radius_min=5.5
+  worm_radius_max=7.5
+  worm_step_length=1.1
+  worm_max_steps=350
+  worm_falloff_power=2.0
+  ore_domain_warp_strength=5.00
+  ore_warp_frequency=0.0100
+  ore_edge_falloff=0.0800
+  ore_detail_weight=0.20
+  mesh_smooth_iterations=0
+  mesh_smooth_strength=0.40
+  mesh_boundary_smooth=0.30
+  mesh_recalc_normals=0
+
+── Request-to-Result Latency (ms) ──────────────────────────
+  (no data)
+
+================================================================
+
+
+== WALL TIME BUDGET (session total 218.0ms) =======
+  UE main thread in ProcessResults:     28.2 ms   13.0%
+  ├─ ApplyMeshData (executed):          11.1 ms    5.1%
+  │   ├─ HashCompute (all applies):      0.9 ms    0.4%
+  │   ├─ ClearMesh:                      2.3 ms    1.0%
+  │   ├─ VertexCopy (Rust→TArray):       0.7 ms    0.3%
+  │   ├─ CreateMeshSection (slow):       7.2 ms    3.3%  (50 calls)
+  │   ├─ UpdateMeshSection (fast):       0.0 ms    0.0%  (0 calls)
+  │   ├─ SetMaterial:                    0.0 ms    0.0%
+  │   ├─ OverlayCache:                   0.0 ms    0.0%
+  │   └─ Glowstone lights:               0.0 ms    0.0%
+  ├─ Hash-skip path (early return):      0.0 ms    0.0%
+  ├─ Other per-chunk work:              14.7 ms    6.7%
+  │   ├─ ApplyCrystalData:               2.3 ms    1.0%
+  │   ├─ CrystalHISM init:               0.9 ms    0.4%
+  │   ├─ StressOverlay refresh:          0.0 ms    0.0%
+  │   ├─ GridOverlay refresh:            0.0 ms    0.0%
+  │   ├─ Zone register:                  0.0 ms    0.0%
+  │   ├─ ChunkMeshCache.Add:             0.0 ms    0.0%
+  │   ├─ Compression (MP):               8.6 ms    3.9%
+  │   ├─ ApplyFluidMeshData:             0.6 ms    0.3%
+  │   ├─ ApplyFluidVisibility:           0.0 ms    0.0%
+  │   ├─ Fluid cache compress:           2.3 ms    1.0%
+  │   ├─ Nav flush:                      0.0 ms    0.0%
+  │   └─ Collision enable:               0.0 ms    0.0%
+  └─ Unaccounted (poll + misc):          1.5 ms    0.7%
+  UE engine overhead (rest of tick):   207.2 ms   95.1%
+  Rust work / main-thread idle:          0.0 ms    0.0%
+===================================================
+
+=== UE STREAMING PROFILE (Session #2, tag='burst_1') ===
+Wall time (UE):  218.0ms
+Frame span:      15 frames (first result @ 1, last @ 11)
+Mesh throughput: 5041.8 KB/s raw  |  21.1% compression ratio
+
+-- Result Type Histogram --------------------
+  ChunkMesh:   16
+  MineResult:  0
+  FluidMesh:   63
+  Collapse:    0
+  StressWarn:  0
+  Error:       0
+  Other:       0
+  ----
+  Total:       79 (5.3 results/frame avg)
+
+-- Chunk Processing --------------------
+  Chunks spawned (new actors): 1
+  Chunks updated (seam/mesh):  10
+  Mesh bytes received (raw):   1.1 MB
+  Mesh bytes compressed:       0.2 MB (21.1% of raw)
+
+-- Main Thread Budget (ms) -------------
+  Total ProcessResults:   28.2ms across 15 frames
+  Avg/frame:              1.883ms
+  Max single frame:       13.140ms
+  P50/P95/P99 frame:      0.06 / 13.14 / 13.14
+  Stall frames:           4 (26.7%)
+
+-- Budget Caps Hit (per-tick) ---------
+  MaxResultsPerTick cap:   0 frames (limit=64)
+  MaxSubmeshCallsPerTick:  2 frames
+  MaxNewMeshesPerTick cap: 0 frames
+  TimeBudget cap (30.0ms): 0 frames
+
+-- Per-Chunk UE Cost (ms) --------------
+  SpawnActor avg:        0.383ms (1 calls)
+  ApplyMesh avg:         1.115ms (10 calls)
+    - new-chunk apply:   1.553ms (1 calls)
+    - update apply:      1.066ms (9 calls)
+  Collision enable avg:  0.000ms (0 calls)
+
+-- FFI PollResult ----------------------
+  Total time:     0.3ms (91 calls)
+  Avg/call:       0.0031ms   Max: 0.030ms
+  P50/P95/P99:    0.000 / 0.014 / 0.030
+
+-- Nav Update Flushes ------------------
+  Total time:     0.0ms across 1 flushes
+  Components flushed: 1
+  Avg/flush:      0.045ms   Max: 0.045ms
+
+-- Mesh Compression (multiplayer) ------
+  Total time:     8.6ms across 2 compresses
+  Avg/compress:   4.284ms
+
+-- UE Streaming Config -----------------
+  LoadRadius:           2
+  UnloadRadius:         4
+  ForwardLoadChunks:    0
+  ForwardLoadAngle:     55.0
+  MaxResultsPerTick:    64
+  MaxNewMeshesPerTick:  4
+  ProcessResultsBudget: 30.0ms
+
+-- Frame Time Breakdown (ms) -----------
+                      Min      Avg      Max      P50      P95      P99
+  DeltaTime:       10.36    15.70    23.54    15.42    23.54    23.54
+  Tick():           0.00     0.00     0.00     0.00     0.00     0.00
+  UpdateStream:     0.01     0.01     0.04     0.01     0.04     0.04
+  ProcessRes:       0.00     1.88    13.14     0.06    13.14    13.14
+  EngineOvhd:      10.36    15.70    23.54    15.42    23.54    23.54
+
+-- Frame Spikes (>100ms DeltaTime) -----
+  Total spikes: 0 / 15 frames (0.0%)
+
+-- Pipeline Timeline -------------------
+  Session start:         +0ms
+  First result polled:   +14ms
+  InitialGen drained:    (not reached)
+  FindCavern complete:   (not reached)
+  Async teleport done:   (not reached)
+  First frame spike:     (not reached)
+  Pending drained to 0:  +26ms
+  Last result polled:    +173ms
+  Session end:           +218ms
+
+-- Hash-Skip Savings (Round 2) ---------
+  Applies attempted:          11
+  Applies executed:           10
+  Applies skipped (hash hit): 1  (9.1% skip rate)
+  Hash-check time total:      0.0 ms  (0.0156 ms/skip)
+
+-- ApplyMeshData Phase Breakdown --------
+  Phase                       Total(ms)  Avg(ms)  %ApplyTotal
+  HashCompute                      0.9    0.080    7.9%  (all applies incl. skipped)
+  ClearMesh                        2.3    0.227   20.4%
+  VertexCopy (Rust→TArray)         0.7    0.070    6.3%
+  CreateMeshSection (slow)         7.2    0.719   64.5%  (50 calls, 0.14 ms/call)
+  UpdateMeshSection (fast)         0.0    0.000    0.0%  (0 calls, 0.00 ms/call, 0.0% of sections)
+  SetMaterial                      0.0    0.003    0.3%
+  OverlayCache rebuild             0.0    0.000    0.0%  (0 builds of 10 applies)
+  SpawnGlowstoneLights             0.0    0.001    0.1%
+  -------
+  ApplyMesh total                 11.1    1.115
+
+-- Per-Apply Duration Histogram ---------
+  <1 ms       4  ██████████████████████████
+  1-5 ms      6  ████████████████████████████████████████
+  5-10 ms     0  
+  10-20 ms    0  
+  20-50 ms    0  
+  50-100ms    0  
+  >100 ms     0  
+
+-- Per-Chunk Post-Processing ------------
+  CrystalHISM init:          0.9 ms  (1 inits)
+  ApplyCrystalData:          2.3 ms
+  Stress overlay refresh:    0.0 ms  (0 refreshes)
+  Grid overlay refresh:      0.0 ms  (0 refreshes)
+  Zone register:             0.0 ms
+  ChunkMeshCache.Add:        0.0 ms
+  Compression (MP):          8.6 ms  (2 compresses, avg 4.284ms)
+
+-- Fluid Mesh Path ----------------------
+  Fluid applies:              5
+  ApplyFluidMeshData total:   0.6 ms  (avg 0.119 ms)
+  ApplyFluidVisibility total: 0.0 ms
+  Fluid cache compress total: 2.3 ms
+
+-- Results/Frame Time-Series -----------
+  (max=23, step=1 frames/char)
+  [ ::█ ......    ]

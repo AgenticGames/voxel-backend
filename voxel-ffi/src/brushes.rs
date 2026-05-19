@@ -618,46 +618,125 @@ pub fn paint_ore_deposits(
     // ── Phase 3: write ore voxels (clusters + optional channels) ──
     //
     // Collect dirty rects keyed by chunk and grow per-chunk bounds as we
-    // write. Cluster + channel writes look up the destination chunk via
-    // div_euclid so multi-chunk spans (channels especially) work correctly.
+    // write. `paint_ore_sphere_voxels` iterates chunks in the brush AABB
+    // and does ONE `get_mut` per chunk (same pattern as `paint_material_sphere`
+    // and `carve_sphere`), rather than one HashMap lookup per written voxel.
+    // For typical settings (cluster_size ≈ 2, channel_radius ≈ 1) this cuts
+    // HashMap lookups by ~95% in this phase, since a single small sphere
+    // usually lives entirely within one chunk.
     let chunk_size_i = config.chunk_size as i32;
     let mut per_chunk_dirty: std::collections::HashMap<
         (i32, i32, i32),
         (usize, usize, usize, usize, usize, usize),
     > = std::collections::HashMap::new();
 
-    // Convert world-voxel coords → (chunk_key, local_xyz) and stamp `target` if solid.
-    fn write_ore_at_world(
+    // Stamp `target` on every solid voxel inside a sphere of integer-voxel
+    // radius `r_int` around (`cwx`, `cwy`, `cwz`), where `r2` is `r_int^2`
+    // (computed once by the caller). Iterates chunks in the AABB; one
+    // `get_mut` per chunk; only writes voxels strictly inside the sphere
+    // and only when the existing material is solid and not already `target`.
+    fn paint_ore_sphere_voxels(
         store: &mut ChunkStore,
-        wx: i32, wy: i32, wz: i32,
+        cwx: i32, cwy: i32, cwz: i32,
+        r_int: i32,
+        r2: f32,
         target: Material,
         chunk_size_i: i32,
         per_chunk_dirty: &mut std::collections::HashMap<
             (i32, i32, i32),
             (usize, usize, usize, usize, usize, usize),
         >,
-    ) -> bool {
-        let key = (
-            wx.div_euclid(chunk_size_i),
-            wy.div_euclid(chunk_size_i),
-            wz.div_euclid(chunk_size_i),
+    ) {
+        let lo_wx = cwx - r_int;
+        let lo_wy = cwy - r_int;
+        let lo_wz = cwz - r_int;
+        let hi_wx = cwx + r_int;
+        let hi_wy = cwy + r_int;
+        let hi_wz = cwz + r_int;
+        let cklo = (
+            lo_wx.div_euclid(chunk_size_i),
+            lo_wy.div_euclid(chunk_size_i),
+            lo_wz.div_euclid(chunk_size_i),
         );
-        let Some(df) = store.density_fields.get_mut(&key) else { return false };
-        let lx = wx.rem_euclid(chunk_size_i) as usize;
-        let ly = wy.rem_euclid(chunk_size_i) as usize;
-        let lz = wz.rem_euclid(chunk_size_i) as usize;
-        if lx >= df.size || ly >= df.size || lz >= df.size {
-            return false;
+        let ckhi = (
+            hi_wx.div_euclid(chunk_size_i),
+            hi_wy.div_euclid(chunk_size_i),
+            hi_wz.div_euclid(chunk_size_i),
+        );
+        for ckz in cklo.2..=ckhi.2 {
+            for cky in cklo.1..=ckhi.1 {
+                for ckx in cklo.0..=ckhi.0 {
+                    let key = (ckx, cky, ckz);
+                    let Some(df) = store.density_fields.get_mut(&key) else { continue };
+                    let base_wx = ckx * chunk_size_i;
+                    let base_wy = cky * chunk_size_i;
+                    let base_wz = ckz * chunk_size_i;
+                    let sz_i = df.size as i32;
+                    let lo_lx = (lo_wx - base_wx).max(0);
+                    let lo_ly = (lo_wy - base_wy).max(0);
+                    let lo_lz = (lo_wz - base_wz).max(0);
+                    let hi_lx = (hi_wx - base_wx).min(sz_i - 1);
+                    let hi_ly = (hi_wy - base_wy).min(sz_i - 1);
+                    let hi_lz = (hi_wz - base_wz).min(sz_i - 1);
+                    if hi_lx < lo_lx || hi_ly < lo_ly || hi_lz < lo_lz {
+                        continue;
+                    }
+                    let mut wrote_any = false;
+                    let mut mn_x = usize::MAX;
+                    let mut mn_y = usize::MAX;
+                    let mut mn_z = usize::MAX;
+                    let mut mx_x = 0usize;
+                    let mut mx_y = 0usize;
+                    let mut mx_z = 0usize;
+                    for lz in lo_lz..=hi_lz {
+                        let dz = (base_wz + lz) - cwz;
+                        let dz2 = (dz * dz) as f32;
+                        for ly in lo_ly..=hi_ly {
+                            let dy = (base_wy + ly) - cwy;
+                            let dyz2 = dz2 + (dy * dy) as f32;
+                            for lx in lo_lx..=hi_lx {
+                                let dx = (base_wx + lx) - cwx;
+                                let d2 = dyz2 + (dx * dx) as f32;
+                                if d2 > r2 {
+                                    continue;
+                                }
+                                let s = df.get_mut(lx as usize, ly as usize, lz as usize);
+                                if !s.material.is_solid() || s.material == target {
+                                    continue;
+                                }
+                                s.material = target;
+                                let ulx = lx as usize;
+                                let uly = ly as usize;
+                                let ulz = lz as usize;
+                                if !wrote_any {
+                                    mn_x = ulx; mn_y = uly; mn_z = ulz;
+                                    mx_x = ulx; mx_y = uly; mx_z = ulz;
+                                    wrote_any = true;
+                                } else {
+                                    if ulx < mn_x { mn_x = ulx; }
+                                    if uly < mn_y { mn_y = uly; }
+                                    if ulz < mn_z { mn_z = ulz; }
+                                    if ulx > mx_x { mx_x = ulx; }
+                                    if uly > mx_y { mx_y = uly; }
+                                    if ulz > mx_z { mx_z = ulz; }
+                                }
+                            }
+                        }
+                    }
+                    if wrote_any {
+                        let e = per_chunk_dirty
+                            .entry(key)
+                            .or_insert((mn_x, mn_y, mn_z, mx_x, mx_y, mx_z));
+                        if mn_x < e.0 { e.0 = mn_x; }
+                        if mn_y < e.1 { e.1 = mn_y; }
+                        if mn_z < e.2 { e.2 = mn_z; }
+                        if mx_x > e.3 { e.3 = mx_x; }
+                        if mx_y > e.4 { e.4 = mx_y; }
+                        if mx_z > e.5 { e.5 = mx_z; }
+                    }
+                }
+            }
         }
-        let s = df.get_mut(lx, ly, lz);
-        if !s.material.is_solid() || s.material == target {
-            return false;
-        }
-        s.material = target;
-        let e = per_chunk_dirty.entry(key).or_insert((lx, ly, lz, lx, ly, lz));
-        e.0 = e.0.min(lx); e.1 = e.1.min(ly); e.2 = e.2.min(lz);
-        e.3 = e.3.max(lx); e.4 = e.4.max(ly); e.5 = e.5.max(lz);
-        true
     }
 
     // Pick a weighted ore type using the same xorshift state.
@@ -676,29 +755,21 @@ pub fn paint_ore_deposits(
     let cluster_r2 = cluster_size * cluster_size;
     let channel_r2 = channel_radius * channel_radius;
 
+    let cs_int = cluster_size.ceil() as i32;
+    let chan_rr = channel_radius.ceil() as i32;
     for anchor in &accepted {
         let ore = pick_ore(&mut rng_state);
 
         // ── Cluster: sphere of radius `cluster_size` around the anchor ──
-        let cs_int = cluster_size.ceil() as i32;
         let anchor_wx = anchor.chunk.0 * chunk_size_i + anchor.lx as i32;
         let anchor_wy = anchor.chunk.1 * chunk_size_i + anchor.ly as i32;
         let anchor_wz = anchor.chunk.2 * chunk_size_i + anchor.lz as i32;
-        for dz in -cs_int..=cs_int {
-            for dy in -cs_int..=cs_int {
-                for dx in -cs_int..=cs_int {
-                    let d2 = (dx * dx + dy * dy + dz * dz) as f32;
-                    if d2 > cluster_r2 {
-                        continue;
-                    }
-                    let _ = write_ore_at_world(
-                        store,
-                        anchor_wx + dx, anchor_wy + dy, anchor_wz + dz,
-                        ore, chunk_size_i, &mut per_chunk_dirty,
-                    );
-                }
-            }
-        }
+        paint_ore_sphere_voxels(
+            store,
+            anchor_wx, anchor_wy, anchor_wz,
+            cs_int, cluster_r2, ore,
+            chunk_size_i, &mut per_chunk_dirty,
+        );
 
         // ── Channel: optional inward tube ──
         //
@@ -750,22 +821,12 @@ pub fn paint_ore_deposits(
                     break;
                 }
 
-                let rr = channel_radius.ceil() as i32;
-                for tz in -rr..=rr {
-                    for ty in -rr..=rr {
-                        for tx in -rr..=rr {
-                            let d2 = (tx * tx + ty * ty + tz * tz) as f32;
-                            if d2 > channel_r2 {
-                                continue;
-                            }
-                            let _ = write_ore_at_world(
-                                store,
-                                cx + tx, cy + ty, cz + tz,
-                                ore, chunk_size_i, &mut per_chunk_dirty,
-                            );
-                        }
-                    }
-                }
+                paint_ore_sphere_voxels(
+                    store,
+                    cx, cy, cz,
+                    chan_rr, channel_r2, ore,
+                    chunk_size_i, &mut per_chunk_dirty,
+                );
 
                 head += anchor.inward;
             }
@@ -2420,6 +2481,340 @@ pub fn noise_brush(
     }
 
     finalize_brush(store, dirty_chunks, config, world_scale)
+}
+
+/// Place a single mushroom instance at `center_rust` (Rust voxel space).
+///
+/// Picks the nearest solid voxel within `search_radius` voxels as the anchor,
+/// infers floor/wall/ceiling face from its air-neighbor pattern, generates a
+/// `MushroomPlacement` in the chunk that owns that anchor, and inserts it
+/// into `store.mushroom_placements`. Does NOT modify density.
+///
+/// Returns the (chunk_key) of the chunk that got a new placement so the
+/// caller can trigger a remesh-and-resend (which carries the new
+/// `mushroom_data` to UE). Returns `None` if no anchor was found.
+pub fn place_mushroom_at_world(
+    store: &mut ChunkStore,
+    center_rust: Vec3,
+    kind: u8,
+    search_radius: f32,
+    scale_override: f32,
+    yaw_override: f32,
+    config: &GenerationConfig,
+) -> Option<(i32, i32, i32)> {
+    // Resolve the kind first — bail on invalid input rather than placing garbage.
+    let mushroom_kind = voxel_gen::MushroomKind::from_u8(kind)?;
+
+    let eb = config.effective_bounds();
+    let radius_voxels = (search_radius.max(1.0) / 1.0).ceil() as i32;
+
+    // Scan a small AABB around `center_rust` for solid voxels and pick the
+    // closest one. This handles the case where the player clicks slightly
+    // off-surface (small offset in any direction).
+    let cx0 = (center_rust.x - radius_voxels as f32).floor() as i32;
+    let cy0 = (center_rust.y - radius_voxels as f32).floor() as i32;
+    let cz0 = (center_rust.z - radius_voxels as f32).floor() as i32;
+    let cx1 = (center_rust.x + radius_voxels as f32).ceil() as i32;
+    let cy1 = (center_rust.y + radius_voxels as f32).ceil() as i32;
+    let cz1 = (center_rust.z + radius_voxels as f32).ceil() as i32;
+
+    let chunk_size = config.chunk_size as i32;
+    let to_chunk = |w: i32| -> (i32, i32) {
+        (w.div_euclid(chunk_size), w.rem_euclid(chunk_size))
+    };
+
+    // Search for the closest solid-voxel anchor.
+    let mut best: Option<((i32, i32, i32), (usize, usize, usize), f32)> = None;
+    for wx in cx0..=cx1 {
+        for wy in cy0..=cy1 {
+            for wz in cz0..=cz1 {
+                let (chunk_cx, lx) = to_chunk(wx);
+                let (chunk_cy, ly) = to_chunk(wy);
+                let (chunk_cz, lz) = to_chunk(wz);
+                let key = (chunk_cx, chunk_cy, chunk_cz);
+                let density = match store.density_fields.get(&key) {
+                    Some(d) => d,
+                    None => continue,
+                };
+                if lx as usize >= density.size || ly as usize >= density.size || lz as usize >= density.size {
+                    continue;
+                }
+                let sample = density.get(lx as usize, ly as usize, lz as usize);
+                if !sample.material.is_solid() {
+                    continue;
+                }
+                let dx = wx as f32 + 0.5 - center_rust.x;
+                let dy = wy as f32 + 0.5 - center_rust.y;
+                let dz = wz as f32 + 0.5 - center_rust.z;
+                let d2 = dx * dx + dy * dy + dz * dz;
+                if best.as_ref().is_none_or(|(_, _, bd)| d2 < *bd) {
+                    best = Some((key, (lx as usize, ly as usize, lz as usize), d2));
+                }
+            }
+        }
+    }
+
+    let (key, (lx, ly, lz), _d2) = best?;
+    let density = store.density_fields.get(&key)?;
+    let size = density.size;
+
+    // Infer surface face from air-neighbor pattern around the anchor.
+    let air_above = ly + 1 < size && !density.get(lx, ly + 1, lz).material.is_solid();
+    let air_below = ly > 0 && !density.get(lx, ly - 1, lz).material.is_solid();
+    let air_xn = lx > 0 && !density.get(lx - 1, ly, lz).material.is_solid();
+    let air_xp = lx + 1 < size && !density.get(lx + 1, ly, lz).material.is_solid();
+    let air_zn = lz > 0 && !density.get(lx, ly, lz - 1).material.is_solid();
+    let air_zp = lz + 1 < size && !density.get(lx, ly, lz + 1).material.is_solid();
+
+    // Floor face wins over wall (matches `compute_mushroom_placements` priority).
+    let (nx, ny, nz) = if air_above {
+        (0.0f32, 1.0f32, 0.0f32)
+    } else if air_below {
+        (0.0, -1.0, 0.0)
+    } else if air_xn || air_xp || air_zn || air_zp {
+        let mut nx = 0.0f32;
+        let mut nz = 0.0f32;
+        if air_xn { nx -= 1.0; }
+        if air_xp { nx += 1.0; }
+        if air_zn { nz -= 1.0; }
+        if air_zp { nz += 1.0; }
+        let len = (nx * nx + nz * nz).sqrt();
+        if len > 0.0 { (nx / len, 0.0, nz / len) } else { (1.0, 0.0, 0.0) }
+    } else {
+        // Anchor has no exposed face — buried voxel. Default to up.
+        (0.0, 1.0, 0.0)
+    };
+
+    // Scale + yaw — use kind config if caller passed 0.0. Determinism via a
+    // tiny xorshift seeded from anchor + chunk coords (no rand crate dep).
+    let kind_cfg = config.mushrooms.kind(mushroom_kind);
+    let mut seed: u64 = (key.0 as u64).wrapping_mul(0x9E3779B97F4A7C15)
+        ^ (key.1 as u64).wrapping_mul(0xBF58476D1CE4E5B9)
+        ^ (key.2 as u64).wrapping_mul(0x94D049BB133111EB)
+        ^ (((lx as u64) << 32) | ((ly as u64) << 16) | (lz as u64));
+    let mut next_unit = || -> f32 {
+        // xorshift64 step
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        // Convert top 24 bits to [0, 1)
+        ((seed >> 40) as f32) / ((1u32 << 24) as f32)
+    };
+    let scale = if scale_override > 0.0 {
+        scale_override
+    } else {
+        kind_cfg.scale_min + (kind_cfg.scale_max - kind_cfg.scale_min) * next_unit()
+    };
+    let yaw = if yaw_override > 0.0 { yaw_override } else { next_unit() * std::f32::consts::TAU };
+
+    // Build the placement. Position is the anchor cell center pushed half a
+    // voxel along the normal so the mesh base sits on the surface, same as
+    // worldgen.
+    let chunk_origin = Vec3::new(
+        key.0 as f32 * eb,
+        key.1 as f32 * eb,
+        key.2 as f32 * eb,
+    );
+    let _ = chunk_origin; // chunk_origin not needed because positions are chunk-relative
+
+    let placement = voxel_gen::MushroomPlacement {
+        x: lx as f32 + 0.5 + nx * 0.5,
+        y: ly as f32 + 0.5 + ny * 0.5,
+        z: lz as f32 + 0.5 + nz * 0.5,
+        normal_x: nx,
+        normal_y: ny,
+        normal_z: nz,
+        scale,
+        yaw,
+        kind: mushroom_kind,
+        anchor_lx: lx.min(u8::MAX as usize) as u8,
+        anchor_ly: ly.min(u8::MAX as usize) as u8,
+        anchor_lz: lz.min(u8::MAX as usize) as u8,
+    };
+
+    store.mushroom_placements.entry(key).or_default().push(placement);
+    Some(key)
+}
+
+/// Sphere-area mushroom brush. Scans every solid voxel in the sphere whose
+/// preferred-face neighbor is air (kind→face: TurkeyTail→wall, Foxfire→ceiling,
+/// GreenPepe/GhostTower→floor), rolls a Bernoulli with `density` per candidate,
+/// applies min-spacing, and inserts one `MushroomPlacement` per accepted point.
+///
+/// `radius_voxels` is in voxel units (UE callers convert from UE units before
+/// passing). `density` is the per-candidate accept probability in [0, 1].
+/// `seed` randomizes the placement so repeated brush clicks on the same spot
+/// produce different patterns. Returns the set of chunk keys that received at
+/// least one new placement so the caller can trigger seam-pass remeshes.
+pub fn place_mushrooms_brush_sphere(
+    store: &mut ChunkStore,
+    center_rust: Vec3,
+    kind: u8,
+    radius_voxels: f32,
+    density: f32,
+    seed: u64,
+    config: &GenerationConfig,
+) -> std::collections::HashSet<(i32, i32, i32)> {
+    let mut affected = std::collections::HashSet::new();
+    let mushroom_kind = match voxel_gen::MushroomKind::from_u8(kind) {
+        Some(k) => k,
+        None => return affected,
+    };
+    if density <= 0.0 || radius_voxels <= 0.0 {
+        return affected;
+    }
+
+    let radius = radius_voxels.max(0.5);
+    let radius2 = radius * radius;
+    let cx0 = (center_rust.x - radius).floor() as i32;
+    let cy0 = (center_rust.y - radius).floor() as i32;
+    let cz0 = (center_rust.z - radius).floor() as i32;
+    let cx1 = (center_rust.x + radius).ceil() as i32;
+    let cy1 = (center_rust.y + radius).ceil() as i32;
+    let cz1 = (center_rust.z + radius).ceil() as i32;
+
+    let chunk_size = config.chunk_size as i32;
+    let to_chunk = |w: i32| -> (i32, i32) {
+        (w.div_euclid(chunk_size), w.rem_euclid(chunk_size))
+    };
+
+    // xorshift64 seeded from request seed + center for determinism per click.
+    let mut rng_state: u64 = seed
+        .wrapping_mul(0x9E3779B97F4A7C15)
+        ^ ((center_rust.x * 1000.0) as i64 as u64)
+        ^ (((center_rust.y * 1000.0) as i64 as u64).wrapping_mul(0xBF58476D1CE4E5B9))
+        ^ (((center_rust.z * 1000.0) as i64 as u64).wrapping_mul(0x94D049BB133111EB));
+    if rng_state == 0 { rng_state = 0xC0FFEE_DEAD_BEEF; }
+    let mut next_unit = || -> f32 {
+        rng_state ^= rng_state << 13;
+        rng_state ^= rng_state >> 7;
+        rng_state ^= rng_state << 17;
+        ((rng_state >> 40) as f32) / ((1u32 << 24) as f32)
+    };
+
+    let kind_cfg = config.mushrooms.kind(mushroom_kind);
+    let min_spacing = config.mushrooms.min_spacing_voxels.max(0.5);
+    let min_spacing2 = min_spacing * min_spacing;
+    // World-space placed positions for cross-chunk min-spacing check.
+    let mut placed_world: Vec<(f32, f32, f32)> = Vec::new();
+
+    for wx in cx0..=cx1 {
+        for wy in cy0..=cy1 {
+            for wz in cz0..=cz1 {
+                let cx = wx as f32 + 0.5 - center_rust.x;
+                let cy = wy as f32 + 0.5 - center_rust.y;
+                let cz = wz as f32 + 0.5 - center_rust.z;
+                if cx * cx + cy * cy + cz * cz > radius2 { continue; }
+
+                let (cck_x, lx_i) = to_chunk(wx);
+                let (cck_y, ly_i) = to_chunk(wy);
+                let (cck_z, lz_i) = to_chunk(wz);
+                let key = (cck_x, cck_y, cck_z);
+
+                let density_field = match store.density_fields.get(&key) {
+                    Some(d) => d,
+                    None => continue,
+                };
+                let size = density_field.size;
+                let (lx, ly, lz) = (lx_i as usize, ly_i as usize, lz_i as usize);
+                if lx >= size || ly >= size || lz >= size { continue; }
+                if !density_field.get(lx, ly, lz).material.is_solid() { continue; }
+
+                let air_above = ly + 1 < size && !density_field.get(lx, ly + 1, lz).material.is_solid();
+                let air_below = ly > 0 && !density_field.get(lx, ly - 1, lz).material.is_solid();
+                let air_xn = lx > 0 && !density_field.get(lx - 1, ly, lz).material.is_solid();
+                let air_xp = lx + 1 < size && !density_field.get(lx + 1, ly, lz).material.is_solid();
+                let air_zn = lz > 0 && !density_field.get(lx, ly, lz - 1).material.is_solid();
+                let air_zp = lz + 1 < size && !density_field.get(lx, ly, lz + 1).material.is_solid();
+
+                let (nx, ny, nz): (f32, f32, f32) = match mushroom_kind {
+                    voxel_gen::MushroomKind::TurkeyTail => {
+                        if !(air_xn || air_xp || air_zn || air_zp) { continue; }
+                        let mut nnx = 0.0f32;
+                        let mut nnz = 0.0f32;
+                        if air_xn { nnx -= 1.0; }
+                        if air_xp { nnx += 1.0; }
+                        if air_zn { nnz -= 1.0; }
+                        if air_zp { nnz += 1.0; }
+                        let len = (nnx * nnx + nnz * nnz).sqrt();
+                        if len <= 0.0 { continue; }
+                        (nnx / len, 0.0, nnz / len)
+                    }
+                    voxel_gen::MushroomKind::Foxfire => {
+                        if !air_below { continue; }
+                        (0.0, -1.0, 0.0)
+                    }
+                    voxel_gen::MushroomKind::GreenPepe
+                    | voxel_gen::MushroomKind::GhostTower => {
+                        if !air_above { continue; }
+                        (0.0, 1.0, 0.0)
+                    }
+                };
+
+                if next_unit() >= density { continue; }
+
+                // Sub-voxel jitter on the surface tangent plane (max ±0.4 voxels)
+                let ja = (next_unit() - 0.5) * 0.8;
+                let jb = (next_unit() - 0.5) * 0.8;
+                let (jx, jy, jz) = if ny.abs() > 0.5 {
+                    (ja, 0.0, jb) // floor/ceiling — jitter in XZ
+                } else if nx.abs() > nz.abs() {
+                    (0.0, ja, jb) // wall facing X — jitter in YZ
+                } else {
+                    (jb, ja, 0.0) // wall facing Z — jitter in XY
+                };
+
+                let world_px = wx as f32 + 0.5 + jx + nx * 0.5;
+                let world_py = wy as f32 + 0.5 + jy + ny * 0.5;
+                let world_pz = wz as f32 + 0.5 + jz + nz * 0.5;
+
+                let mut conflict = false;
+                for &(qx, qy, qz) in &placed_world {
+                    let ddx = qx - world_px;
+                    let ddy = qy - world_py;
+                    let ddz = qz - world_pz;
+                    if ddx * ddx + ddy * ddy + ddz * ddz < min_spacing2 {
+                        conflict = true;
+                        break;
+                    }
+                }
+                if conflict { continue; }
+                placed_world.push((world_px, world_py, world_pz));
+
+                let scale = kind_cfg.scale_min
+                    + (kind_cfg.scale_max - kind_cfg.scale_min) * next_unit();
+                let yaw = next_unit() * std::f32::consts::TAU;
+
+                // Convert world voxel position back to chunk-local for storage
+                let chunk_origin_x = key.0 * chunk_size;
+                let chunk_origin_y = key.1 * chunk_size;
+                let chunk_origin_z = key.2 * chunk_size;
+                let local_x = world_px - chunk_origin_x as f32;
+                let local_y = world_py - chunk_origin_y as f32;
+                let local_z = world_pz - chunk_origin_z as f32;
+
+                store.mushroom_placements.entry(key).or_default().push(
+                    voxel_gen::MushroomPlacement {
+                        x: local_x,
+                        y: local_y,
+                        z: local_z,
+                        normal_x: nx,
+                        normal_y: ny,
+                        normal_z: nz,
+                        scale,
+                        yaw,
+                        kind: mushroom_kind,
+                        anchor_lx: lx.min(u8::MAX as usize) as u8,
+                        anchor_ly: ly.min(u8::MAX as usize) as u8,
+                        anchor_lz: lz.min(u8::MAX as usize) as u8,
+                    },
+                );
+                affected.insert(key);
+            }
+        }
+    }
+
+    affected
 }
 
 #[cfg(test)]

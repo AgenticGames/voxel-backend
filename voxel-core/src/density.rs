@@ -9,6 +9,10 @@ pub struct DensityField {
     /// True if ANY cell contains Crystal or Amethyst (geode shell materials).
     /// Computed by `compute_metadata()` after generation completes.
     pub has_geode_material: bool,
+    /// True if ANY cell contains an ore material (`Material::is_ore()`).
+    /// Used as a chunk-level early reject by ore-query scans.
+    /// Computed by `compute_metadata()` after generation completes.
+    pub has_ore_material: bool,
     /// Count of non-solid (air) cells in the inner chunk grid (0..chunk_size)^3.
     /// Computed by `compute_metadata()` after generation completes.
     pub air_cell_count: u32,
@@ -20,6 +24,7 @@ impl DensityField {
             samples: vec![VoxelSample::default(); size * size * size],
             size,
             has_geode_material: false,
+            has_ore_material: false,
             air_cell_count: 0,
         }
     }
@@ -45,12 +50,13 @@ impl DensityField {
         self.samples.iter().map(|s| s.density).collect()
     }
 
-    /// Compute cached metadata (has_geode_material, air_cell_count).
+    /// Compute cached metadata (has_geode_material, has_ore_material, air_cell_count).
     /// Must be called after all density modifications (noise, worms, pools, formations).
     /// Scans the inner chunk grid (0..chunk_size)^3 in a single pass.
     pub fn compute_metadata(&mut self) {
         let chunk_size = self.size - 1; // inner grid = size - 1
         let mut has_geode = false;
+        let mut has_ore = false;
         let mut air_count = 0u32;
         for z in 0..chunk_size {
             for y in 0..chunk_size {
@@ -59,6 +65,9 @@ impl DensityField {
                     if sample.material.is_geode_shell() {
                         has_geode = true;
                     }
+                    if sample.material.is_ore() {
+                        has_ore = true;
+                    }
                     if !sample.material.is_solid() {
                         air_count += 1;
                     }
@@ -66,6 +75,7 @@ impl DensityField {
             }
         }
         self.has_geode_material = has_geode;
+        self.has_ore_material = has_ore;
         self.air_cell_count = air_count;
     }
 
@@ -158,9 +168,12 @@ mod tests {
         field.compute_metadata();
         assert_eq!(field.air_cell_count, 0); // all solid
         assert!(!field.has_geode_material);
+        assert!(!field.has_ore_material);
 
         // Set one cell to Crystal (geode shell)
         field.get_mut(1, 1, 1).material = Material::Crystal;
+        // Set one cell to Tin (ore)
+        field.get_mut(3, 1, 1).material = Material::Tin;
         // Set one cell to air
         field.get_mut(2, 2, 2).density = -1.0;
         field.get_mut(2, 2, 2).material = Material::Air;
@@ -168,6 +181,7 @@ mod tests {
         field.compute_metadata();
         assert_eq!(field.air_cell_count, 1);
         assert!(field.has_geode_material);
+        assert!(field.has_ore_material);
 
         // Make all inner cells air
         for z in 0..4 {
@@ -182,6 +196,7 @@ mod tests {
         field.compute_metadata();
         assert_eq!(field.air_cell_count, 64);
         assert!(!field.has_geode_material);
+        assert!(!field.has_ore_material);
     }
 
     #[test]

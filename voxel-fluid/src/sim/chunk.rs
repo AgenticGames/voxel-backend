@@ -182,6 +182,14 @@ pub(super) fn tick_chunk(
     let cell_cap = &grid.cell_cap;
     let mut changed = false;
     let mut cross_transfers: Vec<CrossChunkTransfer> = Vec::new();
+    // Reused across all cells in this chunk-tick. Slope flow gathers ≤4
+    // candidate neighbors per cell, sorts them, then drains. Hoisting the
+    // Vec (and `.clear()`-ing between cells) drops one heap alloc per
+    // slope-active cell — same style as the cells/weights/drain scratch
+    // reuse already done on `ChunkFluidGrid`.
+    let mut slope_candidates:
+        Vec<(f32, f32, usize, bool, (i32, i32, i32), usize, usize, usize)> =
+        Vec::with_capacity(4);
 
     // Pre-compute column fluid weight for pressure equalization.
     // fluid_weight[idx] = total fluid in this cell plus all cells above in the same column.
@@ -330,8 +338,10 @@ pub(super) fn tick_chunk(
                         ];
 
                         // Gather candidates: (channel_score, available_space, target_index_or_cross_chunk_info)
-                        // Channel score: prefer cells that already have water (self-reinforcing streams)
-                        let mut candidates: Vec<(f32, f32, usize, bool, (i32, i32, i32), usize, usize, usize)> = Vec::new();
+                        // Channel score: prefer cells that already have water (self-reinforcing streams).
+                        // Reuses `slope_candidates` (hoisted to the fn top) so we don't re-allocate per cell.
+                        slope_candidates.clear();
+                        let candidates = &mut slope_candidates;
 
                         for (dx, dy, dz) in slope_offsets {
                             let nx = x as i32 + dx;
@@ -423,7 +433,7 @@ pub(super) fn tick_chunk(
                         let bounded_blocked = bounded_blocks_transfer(cell.hops_from_source, cell.max_flow_dist);
                         let new_hops = cell.hops_from_source.saturating_add(1);
                         let level_cap = bounded_level_cap(new_hops, cell.max_flow_dist);
-                        for (_score, dst_space, ni, is_cross, dest_key, dest_x, dest_y, dest_z) in candidates {
+                        for &(_score, dst_space, ni, is_cross, dest_key, dest_x, dest_y, dest_z) in candidates.iter() {
                             if bounded_blocked { break; }
                             if new_cells[idx].level < MIN_LEVEL && !is_source && !has_grace {
                                 break;

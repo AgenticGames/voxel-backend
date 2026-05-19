@@ -328,6 +328,8 @@ pub struct GenerationConfig {
     pub mine: MineConfig,
     pub crystals: CrystalConfig,
     pub zones: ZoneConfig,
+    /// Procedural mushroom decoration (see `voxel-gen/src/mushrooms.rs`).
+    pub mushrooms: MushroomConfig,
     pub octree_max_depth: u32,
     /// Region size in chunks per axis for global worm planning (default 3).
     pub region_size: i32,
@@ -413,6 +415,7 @@ impl Default for GenerationConfig {
             mine: MineConfig::default(),
             crystals: CrystalConfig::default(),
             zones: ZoneConfig::default(),
+            mushrooms: MushroomConfig::default(),
             octree_max_depth: 4,
             region_size: 3,
             bounds_size: 0.0,
@@ -1312,6 +1315,126 @@ impl Default for ZoneConfig {
             frozen_ice_stalactite_chance: 0.3,
 
             frozen_mega_chance: 0.03,
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Mushroom decoration config
+//
+// Procedural mushroom placement on cave floor / wall / ceiling surfaces.
+// See `voxel-gen/src/mushrooms.rs` for the placement pass and
+// `MushroomKind` for the species list. Three of the four kinds are emissive
+// on the UE side; only GhostTower triggers a runtime PointLight.
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Per-kind tuning shared by all four mushroom species.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KindConfig {
+    /// Master toggle for this species
+    pub enabled: bool,
+    /// Per-surface spawn probability AFTER global_density + cluster gates.
+    /// Range 0..=1.
+    pub spawn_chance: f32,
+    /// Minimum instance scale (1.0 = base mesh size)
+    pub scale_min: f32,
+    /// Maximum instance scale
+    pub scale_max: f32,
+}
+
+impl Default for KindConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            spawn_chance: 0.1,
+            scale_min: 0.7,
+            scale_max: 1.3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MushroomConfig {
+    /// Master switch for all mushroom generation
+    pub enabled: bool,
+    /// Global density multiplier — each surface point passes this gate
+    /// with probability `global_density` (0..=1). Sparse default ~0.04
+    /// produces ~1 mushroom per ~25 viable surface voxels.
+    pub global_density: f32,
+    /// World-coherent noise frequency for cluster patches. Lower = larger
+    /// patches; higher = noisier spread.
+    pub cluster_frequency: f64,
+    /// Cluster-noise threshold (sampled noise must exceed this). Range
+    /// -1..=1 — set negative to accept everywhere.
+    pub cluster_threshold: f32,
+    /// Minimum voxel-space distance between any two placed instances.
+    /// Anti-stacking. 1.5 is a good "no two in the same voxel" floor.
+    pub min_spacing_voxels: f32,
+    /// Routing share for GhostTower hero spawns on floor surfaces (0..=1).
+    /// Routing happens BEFORE per-kind spawn_chance, so the actual rate
+    /// is `floor_share * ghost_tower.spawn_chance`. Default 0.06 → ~6%
+    /// of floor surfaces consider GhostTower; final rate depends on the
+    /// hero kind's own spawn_chance.
+    pub ghost_tower_routing_share: f32,
+
+    /// Wall-mounted bracket fungus (non-glowing). Common.
+    pub turkey_tail: KindConfig,
+    /// Ceiling-hanging clusters with dim emissive. Common.
+    pub foxfire: KindConfig,
+    /// Small floor clusters with medium emissive. Uncommon.
+    pub green_pepe: KindConfig,
+    /// Floor pillar mushroom — hero kind that triggers a UE PointLight
+    /// per instance. Rare.
+    pub ghost_tower: KindConfig,
+}
+
+impl Default for MushroomConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            // Sparse default — ~1 cluster per 25-50 viable surface voxels.
+            global_density: 0.04,
+            cluster_frequency: 0.05,
+            cluster_threshold: -0.15,
+            min_spacing_voxels: 1.5,
+            ghost_tower_routing_share: 0.06,
+            turkey_tail: KindConfig {
+                enabled: true,
+                spawn_chance: 0.35,
+                scale_min: 0.6,
+                scale_max: 1.1,
+            },
+            foxfire: KindConfig {
+                enabled: true,
+                spawn_chance: 0.25,
+                scale_min: 0.5,
+                scale_max: 1.0,
+            },
+            green_pepe: KindConfig {
+                enabled: true,
+                spawn_chance: 0.4,
+                scale_min: 0.7,
+                scale_max: 1.2,
+            },
+            ghost_tower: KindConfig {
+                enabled: true,
+                spawn_chance: 0.5,
+                scale_min: 1.5,
+                scale_max: 3.0,
+            },
+        }
+    }
+}
+
+impl MushroomConfig {
+    /// Look up the per-kind config for a given species.
+    pub fn kind(&self, k: crate::mushrooms::MushroomKind) -> &KindConfig {
+        use crate::mushrooms::MushroomKind::*;
+        match k {
+            TurkeyTail => &self.turkey_tail,
+            Foxfire => &self.foxfire,
+            GreenPepe => &self.green_pepe,
+            GhostTower => &self.ghost_tower,
         }
     }
 }

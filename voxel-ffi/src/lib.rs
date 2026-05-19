@@ -18,3 +18,4 @@ pub mod fluid_save;
 pub mod triggers;
 pub mod panic_log;
 pub mod diagnostics;
+pub mod pathing;

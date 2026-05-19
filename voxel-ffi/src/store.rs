@@ -49,6 +49,10 @@ pub struct ChunkStore {
     pub region_worm_paths: HashMap<(i32, i32, i32), Vec<Vec<WormSegment>>>,
     /// Per-chunk crystal placement data (computed during generation).
     pub crystal_placements: HashMap<(i32, i32, i32), Vec<voxel_gen::CrystalPlacement>>,
+    /// Per-chunk mushroom placement data (computed once during generation,
+    /// then re-emitted on every remesh so cosmetic mushrooms persist
+    /// across mining/sleep updates).
+    pub mushroom_placements: HashMap<(i32, i32, i32), Vec<voxel_gen::MushroomPlacement>>,
     /// Region size for computing region keys (needed by unload).
     pub region_size: i32,
     /// Localized stress recalculation events (queued by mining).
@@ -102,6 +106,7 @@ impl ChunkStore {
             terraced_columns: HashMap::new(),
             region_worm_paths: HashMap::new(),
             crystal_placements: HashMap::new(),
+            mushroom_placements: HashMap::new(),
             region_size,
             stress_dirty_events: Vec::new(),
             stress_dirty_time: None,
@@ -568,6 +573,140 @@ impl ChunkStore {
             })
             .reduce_with(|a, b| if a.0 > b.0 { a } else { b })
             .map(|(_, pos)| pos)
+    }
+
+    /// Find surface-facing ore voxels near the player, sorted by distance.
+    ///
+    /// All inputs/outputs are in Rust (voxel) space. The caller is responsible
+    /// for converting between UE world space and voxel space.
+    ///
+    /// - `radius` is in voxel units.
+    /// - `material_filter` of `0xFF` means "any ore" (`Material::is_ore()`).
+    ///   Any other value is treated as a specific `Material as u8` to match.
+    /// - "Surface" means at least one of the 6 face-neighbors is non-solid.
+    /// - Returns up to `max_results` voxel centers sorted by squared distance.
+    ///
+    /// Parallelized with rayon; skips chunks via `has_ore_material` early reject
+    /// and a chunk-center broad-phase distance check.
+    pub fn find_ore_voxels(
+        &self,
+        player_pos: Vec3,
+        radius: f32,
+        material_filter: u8,
+        max_results: usize,
+        chunk_size: usize,
+        effective_bounds: f32,
+    ) -> Vec<(Vec3, u8)> {
+        if max_results == 0 || radius <= 0.0 || chunk_size < 2 {
+            return Vec::new();
+        }
+
+        let cs = effective_bounds;
+        let voxel_scale = cs / chunk_size as f32;
+        let radius_sq = radius * radius;
+
+        // Broad-phase: skip chunks whose center is farther than radius + half-diagonal.
+        let half_diag = cs * 0.5 * 3.0_f32.sqrt();
+        let broad_dist = radius + half_diag;
+        let broad_dist_sq = broad_dist * broad_dist;
+
+        let chunks: Vec<_> = self.density_fields.iter().collect();
+
+        let mut all: Vec<(Vec3, u8, f32)> = chunks
+            .par_iter()
+            .flat_map_iter(|(&(cx, cy, cz), density)| {
+                let mut local: Vec<(Vec3, u8, f32)> = Vec::new();
+
+                // Chunk-level early reject — no ore material anywhere in chunk.
+                if !density.has_ore_material {
+                    return local.into_iter();
+                }
+
+                let origin = Vec3::new(cx as f32 * cs, cy as f32 * cs, cz as f32 * cs);
+                let chunk_center = origin + Vec3::splat(cs * 0.5);
+                if (chunk_center - player_pos).length_squared() > broad_dist_sq {
+                    return local.into_iter();
+                }
+
+                // Inner grid scan, leaving a 1-voxel border so 6-neighbor lookups
+                // stay in-bounds. Ores on the absolute chunk boundary are missed;
+                // acceptable for v1 — the player can move a step to surface them.
+                let end = chunk_size; // exclusive — neighbor x+1 < density.size
+                for z in 1..end {
+                    for y in 1..end {
+                        for x in 1..end {
+                            let sample = density.get(x, y, z);
+                            let mat = sample.material;
+                            if !mat.is_solid() {
+                                continue;
+                            }
+
+                            // Material filter.
+                            if material_filter == 0xFF {
+                                if !mat.is_ore() {
+                                    continue;
+                                }
+                            } else if (mat as u8) != material_filter {
+                                continue;
+                            }
+
+                            // Per-face air check — feeds both the surface filter
+                            // AND the exposed-centroid calc below.
+                            let n_xp = !density.get(x + 1, y, z).material.is_solid();
+                            let n_xn = !density.get(x - 1, y, z).material.is_solid();
+                            let n_yp = !density.get(x, y + 1, z).material.is_solid();
+                            let n_yn = !density.get(x, y - 1, z).material.is_solid();
+                            let n_zp = !density.get(x, y, z + 1).material.is_solid();
+                            let n_zn = !density.get(x, y, z - 1).material.is_solid();
+
+                            let mut sum_dir = Vec3::ZERO;
+                            let mut n_exposed = 0u32;
+                            if n_xp { sum_dir.x += 1.0; n_exposed += 1; }
+                            if n_xn { sum_dir.x -= 1.0; n_exposed += 1; }
+                            if n_yp { sum_dir.y += 1.0; n_exposed += 1; }
+                            if n_yn { sum_dir.y -= 1.0; n_exposed += 1; }
+                            if n_zp { sum_dir.z += 1.0; n_exposed += 1; }
+                            if n_zn { sum_dir.z -= 1.0; n_exposed += 1; }
+                            if n_exposed == 0 {
+                                continue; // fully buried — not visible
+                            }
+
+                            // Geometric voxel center in chunk-local space.
+                            let cx_local = (x as f32 + 0.5) * voxel_scale;
+                            let cy_local = (y as f32 + 0.5) * voxel_scale;
+                            let cz_local = (z as f32 + 0.5) * voxel_scale;
+
+                            // Visible centroid: shift from the voxel's geometric
+                            // center toward the average of its exposed-face normals
+                            // by half a voxel. For one-face-exposed voxels the
+                            // marker hugs that face; for corner voxels it lands on
+                            // the visible corner; for fully-exposed voxels the
+                            // shift is zero. Without this, a vein with most of its
+                            // mass behind the wall plants the bracket inside the
+                            // rock and reads as "buggy".
+                            let half_scale = 0.5 * voxel_scale;
+                            let avg = sum_dir / n_exposed as f32;
+                            let world_pos = origin
+                                + Vec3::new(cx_local, cy_local, cz_local)
+                                + avg * half_scale;
+
+                            let dist_sq = (world_pos - player_pos).length_squared();
+                            if dist_sq > radius_sq {
+                                continue;
+                            }
+
+                            local.push((world_pos, mat as u8, dist_sq));
+                        }
+                    }
+                }
+
+                local.into_iter()
+            })
+            .collect();
+
+        all.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+        all.truncate(max_results);
+        all.into_iter().map(|(p, m, _)| (p, m)).collect()
     }
 
     /// Check whether a bounding box of air voxels exists at a world position,
@@ -2002,5 +2141,108 @@ mod tests {
 
         let (_, m) = average_boundary_voxel(&a, &b);
         assert_eq!(m, Material::Air, "air+air should remain air");
+    }
+
+    /// Place one ore voxel at a known position with an air neighbor (surface).
+    fn place_surface_ore(
+        field: &mut DensityField,
+        ore: Material,
+        x: usize,
+        y: usize,
+        z: usize,
+        air_side: (i32, i32, i32),
+    ) {
+        let s = field.get_mut(x, y, z);
+        s.density = 1.0;
+        s.material = ore;
+        let nx = (x as i32 + air_side.0) as usize;
+        let ny = (y as i32 + air_side.1) as usize;
+        let nz = (z as i32 + air_side.2) as usize;
+        let n = field.get_mut(nx, ny, nz);
+        n.density = -1.0;
+        n.material = Material::Air;
+    }
+
+    #[test]
+    fn test_find_ore_voxels_filter_surface_sort_truncate() {
+        let chunk_size = 4usize;
+        let size = chunk_size + 1; // grid = 5
+        let eb = chunk_size as f32; // voxel_scale = 1.0
+
+        let mut store = ChunkStore::new(8);
+
+        // Chunk A at (0,0,0):
+        //   - Tin at (1,1,1) with air neighbor at (1,2,1)  -> SURFACE, world ~ (1.5,1.5,1.5)
+        //   - Iron at (3,2,2) with air neighbor at (2,2,2) -> SURFACE, world ~ (3.5,2.5,2.5)
+        //   - Tin BURIED at (2,1,1) — neighbors are all solid     -> SHOULD BE EXCLUDED
+        let mut a = make_solid_field(size);
+        place_surface_ore(&mut a, Material::Tin, 1, 1, 1, (0, 1, 0));
+        place_surface_ore(&mut a, Material::Iron, 3, 2, 2, (-1, 0, 0));
+        a.get_mut(2, 1, 1).material = Material::Tin; // buried, no air neighbor
+        a.compute_metadata();
+        assert!(a.has_ore_material, "chunk metadata must flag ores");
+        store.density_fields.insert((0, 0, 0), a);
+
+        // Chunk B at (1,0,0): one far Tin voxel.
+        // World pos for (x=2,y=2,z=2) here = (1*4 + 2.5, 2.5, 2.5) = (6.5, 2.5, 2.5).
+        let mut b = make_solid_field(size);
+        place_surface_ore(&mut b, Material::Tin, 2, 2, 2, (0, -1, 0));
+        b.compute_metadata();
+        store.density_fields.insert((1, 0, 0), b);
+
+        // Chunk C at (0,1,0): all-solid Limestone, NO ore. Must be skipped by metadata gate.
+        let mut c = make_solid_field(size);
+        c.compute_metadata();
+        assert!(!c.has_ore_material);
+        store.density_fields.insert((0, 1, 0), c);
+
+        // Player near chunk A origin.
+        let player = Vec3::new(0.5, 1.0, 1.0);
+
+        // ── Test 1: filter on Tin specifically — should return 2 Tin voxels, near first.
+        let tin_only = store.find_ore_voxels(
+            player,
+            100.0,
+            Material::Tin as u8,
+            16,
+            chunk_size,
+            eb,
+        );
+        assert_eq!(tin_only.len(), 2, "should find both Tin surface voxels and skip the buried one");
+        for (_, m) in &tin_only {
+            assert_eq!(*m, Material::Tin as u8);
+        }
+        // First result should be the closer Tin (chunk A).
+        let d0 = (tin_only[0].0 - player).length();
+        let d1 = (tin_only[1].0 - player).length();
+        assert!(d0 <= d1, "results must be sorted by distance");
+        assert!(d0 < 2.0, "near tin should be within ~2 units of player, got {d0}");
+
+        // ── Test 2: any-ore filter (0xFF) — should return Tin x2 + Iron x1.
+        let any_ore = store.find_ore_voxels(
+            player,
+            100.0,
+            0xFF,
+            16,
+            chunk_size,
+            eb,
+        );
+        assert_eq!(any_ore.len(), 3, "any-ore should return all 3 surface ore voxels");
+        let mut materials: Vec<u8> = any_ore.iter().map(|(_, m)| *m).collect();
+        materials.sort();
+        assert_eq!(materials, vec![Material::Iron as u8, Material::Tin as u8, Material::Tin as u8]);
+
+        // ── Test 3: max_results truncation.
+        let capped = store.find_ore_voxels(player, 100.0, 0xFF, 1, chunk_size, eb);
+        assert_eq!(capped.len(), 1);
+
+        // ── Test 4: radius excludes far voxels.
+        // The chunk-B Tin is at world (6.5,2.5,2.5), distance from player ~6.3.
+        let near_only = store.find_ore_voxels(player, 3.0, Material::Tin as u8, 16, chunk_size, eb);
+        assert_eq!(near_only.len(), 1, "radius=3 should exclude far Tin in chunk B");
+
+        // ── Test 5: zero max_results returns empty quickly.
+        let empty = store.find_ore_voxels(player, 100.0, 0xFF, 0, chunk_size, eb);
+        assert!(empty.is_empty());
     }
 }

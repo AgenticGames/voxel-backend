@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "voxel-viewer",
+      "runtimeExecutable": "C:/Users/Shazbot/.cargo/bin/cargo.exe",
+      "runtimeArgs": ["run", "-p", "voxel-viewer", "--release"],
+      "port": 8080
+    }
+  ]
+}

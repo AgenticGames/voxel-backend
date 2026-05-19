@@ -1,0 +1,74 @@
+================================================================================================
+  A vs B COMPARISON
+  A: C:/Users/Shazbot/voxel-backend/.perf-test/A_today  (31 files)
+  B: C:/Users/Shazbot/voxel-backend/.perf-test/B_profiles  (8 files)
+================================================================================================
+
+--- tag='b_mine_test'    A:n=0  B:n=1 ---
+  Metric                                   A avg      B avg      delta     pct
+
+--- tag='b_sprint_1'    A:n=0  B:n=1 ---
+  Metric                                   A avg      B avg      delta     pct
+
+--- tag='burst'    A:n=28  B:n=2 ---
+  Metric                                   A avg      B avg      delta     pct
+  Wall time (s)                             4.96       0.24      -4.71  -95.1% [better]
+  Seam pass total (ms)                    160.90      29.15    -131.75  -81.9% [better]
+  Seam pass avg (ms)                        1.09       1.21      +0.13  +11.7% [worse]
+  Seam pass max (ms)                       43.70       5.30     -38.40  -87.9% [better]
+  Seam retrieve total                     104.90       5.25     -99.65  -95.0% [better]
+  Seam convert total                       24.20       5.25     -18.95  -78.3% [better]
+  Seam sent % (lower=skip win)            100.00     100.00      +0.00   +0.0%
+  Store write wait avg                      0.50       0.00      -0.50 -100.0% [better]
+  Store write wait max                    110.59       0.00    -110.59 -100.0% [better]
+  Store read wait avg                       0.76       0.13      -0.63  -82.9% [better]
+  Store read wait max                      77.26       0.73     -76.53  -99.1% [better]
+  Req-to-Result avg (ms)                  277.55       1.25    -276.29  -99.5% [better]
+  Req-to-Result P95 (ms)                  643.38       1.25    -642.12  -99.8% [better]
+  Req-to-Result max (ms)                 1025.04       1.25   -1023.78  -99.9% [better]
+  UE ProcessResults (ms)                  286.52      39.85    -246.67  -86.1% [better]
+  ProcRes max frame (ms)                   19.69       8.20     -11.49  -58.3% [better]
+  Stall frames %                           44.75      37.10      -7.65  -17.1% [better]
+
+--- tag='burst_mine'    A:n=1  B:n=0 ---
+  Metric                                   A avg      B avg      delta     pct
+
+--- tag='burst_sprint'    A:n=1  B:n=3 ---
+  Metric                                   A avg      B avg      delta     pct
+  Wall time (s)                             0.35       0.66      +0.31  +88.9% [worse]
+  Seam pass total (ms)                     41.10       2.97     -38.13  -92.8% [better]
+  Seam pass avg (ms)                        1.71       0.24      -1.47  -86.0% [better]
+  Seam pass max (ms)                        5.01       0.83      -4.18  -83.5% [better]
+  Seam retrieve total                       3.00       0.63      -2.37  -78.9% [better]
+  Seam convert total                       30.10       0.80     -29.30  -97.3% [better]
+  Seam sent % (lower=skip win)            100.00     100.00      +0.00   +0.0%
+  Store write wait avg                      0.00       0.00      +0.00   +0.0%
+  Store write wait max                      0.00       0.00      +0.00   +0.0%
+  Store read wait avg                       0.21       0.51      +0.30 +144.4% [worse]
+  Store read wait max                       1.19      12.13     +10.94 +919.0% [worse]
+  Req-to-Result avg (ms)                    4.28      14.96     +10.68 +249.5% [worse]
+  Req-to-Result P95 (ms)                    4.28      39.36     +35.08 +819.6% [worse]
+  Req-to-Result max (ms)                    4.28      39.36     +35.08 +819.6% [worse]
+  UE ProcessResults (ms)                   86.20      13.97     -72.23  -83.8% [better]
+  ProcRes max frame (ms)                    9.46       2.85      -6.61  -69.8% [better]
+  Stall frames %                           10.50      46.23     +35.73 +340.3% [worse]
+
+--- tag='initial_load'    A:n=1  B:n=1 ---
+  Metric                                   A avg      B avg      delta     pct
+  Wall time (s)                             8.72       7.24      -1.48  -17.0% [better]
+  Seam pass total (ms)                   1353.10    1524.30    +171.20  +12.7% [worse]
+  Seam pass avg (ms)                       10.25      11.55      +1.30  +12.7% [worse]
+  Seam pass max (ms)                      194.48     426.98    +232.50 +119.5% [worse]
+  Seam retrieve total                     211.30     143.90     -67.40  -31.9% [better]
+  Seam convert total                      444.80     129.30    -315.50  -70.9% [better]
+  Seam sent % (lower=skip win)            100.00     100.00      +0.00   +0.0%
+  Store write wait avg                      1.17       1.33      +0.16  +13.7% [worse]
+  Store write wait max                     89.42     103.64     +14.22  +15.9% [worse]
+  Store read wait avg                       0.57       0.77      +0.20  +35.1% [worse]
+  Store read wait max                      37.28      45.08      +7.80  +20.9% [worse]
+  Req-to-Result avg (ms)                 3467.14    4498.81   +1031.67  +29.8% [worse]
+  Req-to-Result P95 (ms)                 4595.71    4968.10    +372.39   +8.1% [worse]
+  Req-to-Result max (ms)                 5344.89    5487.00    +142.11   +2.7%
+  UE ProcessResults (ms)                 1033.20     526.60    -506.60  -49.0% [better]
+  ProcRes max frame (ms)                   16.49      18.89      +2.40  +14.5% [worse]
+  Stall frames %                           38.20      69.70     +31.50  +82.5% [worse]
