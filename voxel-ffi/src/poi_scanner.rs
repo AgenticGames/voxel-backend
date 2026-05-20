@@ -24,8 +24,6 @@
 //! UE pulls the cached top-K via `voxel_request_list_top_pois` and pins
 //! the chunks during the montage POI rotation.
 
-use std::sync::{Arc, Mutex};
-
 use voxel_fluid::FluidSnapshot;
 
 use crate::crystal_anchors::CrystalAnchorManager;
@@ -44,6 +42,93 @@ pub const FLUID_MIN_LEVEL: f32 = 0.10;
 pub const MIN_LAVA_VOTES: usize = 16;
 pub const MIN_WATER_VOTES: usize = 24;
 pub const MIN_STRESS_VOTES: usize = 32;
+
+/// Per-kind score weighting. Reused by both the synchronous scanner and the
+/// background tracker — single source of truth, no drift if tuned.
+#[derive(Debug, Clone, Copy)]
+pub struct ChunkScoreBreakdown {
+    pub lava: f32,
+    pub water: f32,
+    pub stress: f32,
+}
+
+impl ChunkScoreBreakdown {
+    pub fn best(self) -> (PoiKind, f32) {
+        if self.lava >= self.water && self.lava >= self.stress {
+            (PoiKind::Lava, self.lava)
+        } else if self.water >= self.stress {
+            (PoiKind::Water, self.water)
+        } else {
+            (PoiKind::Stress, self.stress)
+        }
+    }
+}
+
+/// Score from already-counted vote totals. Single source of truth for the
+/// "votes → kind scores" mapping (vote thresholds + weight multipliers).
+/// Both [`score_chunk`] (sync scanner) and the background tracker call this
+/// so the formula can't drift.
+pub fn score_from_votes(lava: usize, water: usize, stress: usize) -> ChunkScoreBreakdown {
+    let lava_score = if lava >= MIN_LAVA_VOTES {
+        lava as f32 * SCORE_PER_LAVA_VOXEL
+    } else {
+        0.0
+    };
+    let water_score = if water >= MIN_WATER_VOTES {
+        water as f32 * SCORE_PER_WATER_VOXEL
+    } else {
+        0.0
+    };
+    let stress_score = if stress >= MIN_STRESS_VOTES {
+        stress as f32 * SCORE_PER_STRESS_VOXEL
+    } else {
+        0.0
+    };
+    ChunkScoreBreakdown {
+        lava: lava_score,
+        water: water_score,
+        stress: stress_score,
+    }
+}
+
+/// Count high-stress voxels in a StressField. Extracted so the background
+/// tracker can call this under a batched read lock without re-importing
+/// the threshold constant.
+pub fn count_high_stress_voxels(sf: &voxel_core::stress::StressField) -> usize {
+    sf.stress
+        .iter()
+        .filter(|&&v| v > STRESS_HIGH_THRESHOLD)
+        .count()
+}
+
+/// Count lava + water voxels in a chunk's fluid cells. Extracted for the
+/// same reason as [`count_high_stress_voxels`].
+pub fn count_fluid_voxels(cells: &[voxel_fluid::cell::FluidCell]) -> (usize, usize) {
+    let (mut lava, mut water) = (0usize, 0usize);
+    for c in cells {
+        if c.level < FLUID_MIN_LEVEL {
+            continue;
+        }
+        if c.fluid_type.is_lava() {
+            lava += 1;
+        } else if c.fluid_type.is_water() {
+            water += 1;
+        }
+    }
+    (lava, water)
+}
+
+/// Score a single chunk given its raw fluid cells (Some if loaded in the
+/// snapshot, None if not present) and its stress field (Some if loaded,
+/// None if unloaded mid-scan).
+pub fn score_chunk(
+    fluid_cells: Option<&[voxel_fluid::cell::FluidCell]>,
+    stress_field: Option<&voxel_core::stress::StressField>,
+) -> ChunkScoreBreakdown {
+    let (lava, water) = fluid_cells.map(count_fluid_voxels).unwrap_or((0, 0));
+    let stress = stress_field.map(count_high_stress_voxels).unwrap_or(0);
+    score_from_votes(lava, water, stress)
+}
 
 /// Bridge baseline score — "moderate" per user direction. Outscored by big
 /// geological events but solid enough that a quiet sleep still showcases
@@ -81,21 +166,6 @@ pub struct Poi {
     pub extent_radius_voxels: f32,
 }
 
-/// Cached top-K result. Held on the engine; the sleep handler refills it.
-#[derive(Default)]
-pub struct PoiCache {
-    pub pois: Vec<Poi>,
-    /// Bumped every time the cache is refilled — UE can use this to skip
-    /// stale results.
-    pub generation: u64,
-}
-
-pub type SharedPoiCache = Arc<Mutex<PoiCache>>;
-
-pub fn new_cache() -> SharedPoiCache {
-    Arc::new(Mutex::new(PoiCache::default()))
-}
-
 /// Score and rank candidates from all sources (fluid, stress, ore, bridges)
 /// into a single pool; keep top-K. Caller invokes once per sleep cycle.
 ///
@@ -115,61 +185,29 @@ pub fn scan_top_pois(
 
     let mut candidates: Vec<Poi> = Vec::new();
 
-    // ─── Fluid passes (water / lava) ─────────────────────────────────
-    for (chunk_coord, cells) in &fluid_snap.chunks {
-        let mut lava = 0usize;
-        let mut water = 0usize;
-        for cell in cells {
-            if cell.level < FLUID_MIN_LEVEL {
-                continue;
-            }
-            if cell.fluid_type.is_lava() {
-                lava += 1;
-            } else if cell.fluid_type.is_water() {
-                water += 1;
-            }
-        }
-        let center = chunk_center_world(*chunk_coord, cs_f);
-        // Per-chunk POIs sit within a single chunk → orbit radius = half-chunk
-        let chunk_half = cs_f * 0.5;
-        if lava >= MIN_LAVA_VOTES {
-            candidates.push(Poi {
-                kind: PoiKind::Lava,
-                score: lava as f32 * SCORE_PER_LAVA_VOXEL,
-                chunk_coord: *chunk_coord,
-                center_world_rust: center,
-                extent_radius_voxels: chunk_half,
-            });
-        }
-        if water >= MIN_WATER_VOTES {
-            candidates.push(Poi {
-                kind: PoiKind::Water,
-                score: water as f32 * SCORE_PER_WATER_VOXEL,
-                chunk_coord: *chunk_coord,
-                center_world_rust: center,
-                extent_radius_voxels: chunk_half,
-            });
-        }
-    }
+    // ─── Per-chunk pass via the shared scorer ────────────────────────
+    // Union of fluid + stress chunk coords so we score every chunk that has
+    // *any* signal (chunk without stress field can still have fluid cells).
+    let mut all_coords: std::collections::HashSet<(i32, i32, i32)> =
+        std::collections::HashSet::new();
+    all_coords.extend(fluid_snap.chunks.keys().copied());
+    all_coords.extend(store.stress_fields.keys().copied());
 
-    // ─── Stress pass ─────────────────────────────────────────────────
-    for (chunk_coord, sf) in &store.stress_fields {
-        let mut high = 0usize;
-        for &s in &sf.stress {
-            if s > STRESS_HIGH_THRESHOLD {
-                high += 1;
-            }
+    for chunk_coord in all_coords {
+        let fluid_cells = fluid_snap.chunks.get(&chunk_coord).map(|v| v.as_slice());
+        let stress_field = store.stress_fields.get(&chunk_coord);
+        let breakdown = score_chunk(fluid_cells, stress_field);
+        let (best_kind, best_score) = breakdown.best();
+        if best_score <= 0.0 {
+            continue;
         }
-        if high >= MIN_STRESS_VOTES {
-            let center = chunk_center_world(*chunk_coord, cs_f);
-            candidates.push(Poi {
-                kind: PoiKind::Stress,
-                score: high as f32 * SCORE_PER_STRESS_VOXEL,
-                chunk_coord: *chunk_coord,
-                center_world_rust: center,
-                extent_radius_voxels: cs_f * 0.5,
-            });
-        }
+        candidates.push(Poi {
+            kind: best_kind,
+            score: best_score,
+            chunk_coord,
+            center_world_rust: chunk_center_world(chunk_coord, cs_f),
+            extent_radius_voxels: cs_f * 0.5,
+        });
     }
 
     // ─── Bridge pass ─────────────────────────────────────────────────

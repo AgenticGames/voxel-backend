@@ -31,8 +31,7 @@ use voxel_fluid::{FluidEvent, FluidSnapshot};
 use voxel_gen::config::GenerationConfig;
 
 use crate::poi_scanner::{
-    PoiKind, FLUID_MIN_LEVEL, MIN_LAVA_VOTES, MIN_STRESS_VOTES, MIN_WATER_VOTES,
-    SCORE_PER_LAVA_VOXEL, SCORE_PER_STRESS_VOXEL, SCORE_PER_WATER_VOXEL, STRESS_HIGH_THRESHOLD,
+    count_fluid_voxels, count_high_stress_voxels, score_from_votes, PoiKind,
 };
 use crate::store::ChunkStore;
 
@@ -50,11 +49,24 @@ const TTL_SECS: u64 = 30 * 60;
 /// Run the TTL prune every N ticks (≈20s at default tick rate). Cheap, but
 /// not worth doing every tick.
 const PRUNE_EVERY_N_TICKS: u64 = 10;
-/// Below this raw score, don't register the chunk at all — filters noise.
+/// Score must reach this to ADD a fresh entry or REFRESH an existing one
+/// at full strength. Filters noise.
 const MIN_REGISTRABLE_SCORE: f32 = 30.0;
+/// Score must fall below this for an entry to be EVICTED. Together with
+/// the register threshold above this gives a hysteresis band (30→15)
+/// that prevents thrashing for chunks oscillating around the threshold.
+const MIN_KEEP_SCORE: f32 = 15.0;
+/// When a chunk's current-tick score drops below MIN_REGISTRABLE but it
+/// has an existing entry, decay the stored score by this factor each tick
+/// instead of overwriting (smooth fade-out, not insta-evict).
+const SCORE_DECAY_PER_TICK: f32 = 0.6;
+/// Fluid snapshots cost a Clone of the entire fluid state on the fluid
+/// thread. Refresh every N ticks instead of every tick — fluid is slow
+/// enough that staleness of 6s is fine, and this cuts pressure 3×.
+const FLUID_SNAPSHOT_EVERY_N_TICKS: u64 = 3;
 /// Max time the tracker is willing to wait for the fluid thread to reply
-/// with a snapshot. If fluid is overwhelmed, we skip fluid scoring this
-/// tick (stress scoring still happens).
+/// with a snapshot. If fluid is overwhelmed, we reuse the stale cached
+/// snapshot (stress scoring still happens against fresh data).
 const FLUID_SNAPSHOT_TIMEOUT_MS: u64 = 200;
 
 // ─── Data ──────────────────────────────────────────────────────────────
@@ -106,15 +118,33 @@ pub fn new_tracker() -> SharedPoiTracker {
 
 /// Tracker thread main. Spawned once from [`crate::engine::VoxelEngine::new`]
 /// and runs until `shutdown` is set.
+///
+/// Per-tick flow:
+///   1. Snapshot all loaded chunk keys (one brief read lock).
+///   2. Optionally refresh fluid snapshot (every N ticks).
+///   3. Read stress fields for the budget under ONE batched read lock — the
+///      whole pass holds the lock <~2ms, then releases for scoring & writes.
+///   4. Score each chunk via `score_chunk` (shared with [`poi_scanner`]).
+///   5. Apply hysteresis: high score → insert/refresh, low score → decay or
+///      keep the existing entry until it falls below the keep threshold.
+///   6. Every N ticks, TTL-prune entries last touched >30min ago.
+///
+/// Chunk-unload race: a chunk may be unloaded between the key snapshot
+/// (step 1) and the batched stress read (step 3). `stress_fields.get`
+/// returns None for unloaded chunks; we treat as zero stress (no false
+/// signal — fluid scoring still runs from the snapshot). The existing
+/// score entry stays put and decays over subsequent ticks via hysteresis.
 pub fn poi_tracker_loop(
     shutdown: Arc<AtomicBool>,
     store: Arc<RwLock<ChunkStore>>,
     fluid_event_tx: Sender<FluidEvent>,
-    config: Arc<RwLock<GenerationConfig>>,
+    _config: Arc<RwLock<GenerationConfig>>,
     tracker: SharedPoiTracker,
 ) {
     let mut cursor: usize = 0;
     let tick_dur = Duration::from_millis(TICK_DURATION_MS);
+    // Cached fluid snapshot — refreshed every FLUID_SNAPSHOT_EVERY_N_TICKS.
+    let mut cached_fluid_snap: FluidSnapshot = FluidSnapshot::default();
     crate::panic_log::worker_started();
 
     loop {
@@ -144,12 +174,25 @@ pub fn poi_tracker_loop(
             continue;
         }
 
-        // ── Step 2: fresh fluid snapshot (cap wait so we never starve) ──
-        let (snap_tx, snap_rx) = bounded::<FluidSnapshot>(1);
-        let _ = fluid_event_tx.send(FluidEvent::SnapshotRequest { reply_tx: snap_tx });
-        let fluid_snap = snap_rx
-            .recv_timeout(Duration::from_millis(FLUID_SNAPSHOT_TIMEOUT_MS))
-            .unwrap_or_default();
+        // ── Step 2: refresh fluid snapshot every N ticks ──
+        // Fluid state changes on the order of seconds in normal play; a
+        // 6-second-stale snapshot is fine and triples the time between
+        // expensive fluid-state clones on the fluid thread.
+        if tick % FLUID_SNAPSHOT_EVERY_N_TICKS == 0 {
+            let (snap_tx, snap_rx) = bounded::<FluidSnapshot>(1);
+            if fluid_event_tx
+                .send(FluidEvent::SnapshotRequest { reply_tx: snap_tx })
+                .is_ok()
+            {
+                if let Ok(snap) =
+                    snap_rx.recv_timeout(Duration::from_millis(FLUID_SNAPSHOT_TIMEOUT_MS))
+                {
+                    cached_fluid_snap = snap;
+                }
+                // Timeout → keep the previous cached snapshot (better than
+                // an empty default, which would force-evict all fluid POIs).
+            }
+        }
 
         // ── Step 3: pick the budget of chunks for this tick ──
         let budget = SCAN_BUDGET_PER_TICK.min(chunk_keys.len());
@@ -159,86 +202,46 @@ pub fn poi_tracker_loop(
             cursor = cursor.wrapping_add(1);
         }
 
-        let _chunk_size = config.read().map(|c| c.chunk_size).unwrap_or(16);
         let now_secs = tracker.elapsed_secs();
 
-        // ── Step 4: score each chunk in the budget ──
-        // For stress, take a fresh short read lock per chunk. Holding the
-        // lock for the entire budget would let a sleep-handler write starve
-        // briefly. One lock per chunk = max ~16 short reads, each O(chunk).
-        for chunk_coord in &budget_chunks {
-            let stress_count = {
-                match store.read() {
-                    Ok(s) => s
-                        .stress_fields
-                        .get(chunk_coord)
-                        .map(|sf| {
-                            sf.stress
-                                .iter()
-                                .filter(|&&v| v > STRESS_HIGH_THRESHOLD)
-                                .count()
-                        })
-                        .unwrap_or(0),
-                    Err(_) => 0,
-                }
-            };
+        // ── Step 4: batched stress read under one lock ──
+        // Holding the lock for the whole budget (~16 chunks × stress-count =
+        // ~1ms total) is fine — RwLock is read-shared so other readers don't
+        // block. The sleep handler's write would wait briefly, but its work
+        // takes seconds so 1-2ms is rounding error.
+        let stress_votes: Vec<usize> = match store.read() {
+            Ok(s) => budget_chunks
+                .iter()
+                .map(|coord| {
+                    s.stress_fields
+                        .get(coord)
+                        .map(count_high_stress_voxels)
+                        .unwrap_or(0)
+                })
+                .collect(),
+            Err(_) => vec![0; budget_chunks.len()],
+        };
 
-            // Fluid: from cached snapshot, no lock needed
-            let (lava_count, water_count) = match fluid_snap.chunks.get(chunk_coord) {
-                Some(cells) => {
-                    let mut lava = 0usize;
-                    let mut water = 0usize;
-                    for c in cells {
-                        if c.level < FLUID_MIN_LEVEL {
-                            continue;
-                        }
-                        if c.fluid_type.is_lava() {
-                            lava += 1;
-                        } else if c.fluid_type.is_water() {
-                            water += 1;
-                        }
-                    }
-                    (lava, water)
-                }
-                None => (0, 0),
-            };
+        // ── Step 5: score each chunk + apply hysteresis ──
+        for (idx, chunk_coord) in budget_chunks.iter().enumerate() {
+            let (lava_votes, water_votes) = cached_fluid_snap
+                .chunks
+                .get(chunk_coord)
+                .map(|cells| count_fluid_voxels(cells))
+                .unwrap_or((0, 0));
+            let breakdown = score_from_votes(lava_votes, water_votes, stress_votes[idx]);
+            let (best_kind, best_score) = breakdown.best();
 
-            let lava_score = if lava_count >= MIN_LAVA_VOTES {
-                lava_count as f32 * SCORE_PER_LAVA_VOXEL
-            } else {
-                0.0
-            };
-            let water_score = if water_count >= MIN_WATER_VOTES {
-                water_count as f32 * SCORE_PER_WATER_VOXEL
-            } else {
-                0.0
-            };
-            let stress_score = if stress_count >= MIN_STRESS_VOTES {
-                stress_count as f32 * SCORE_PER_STRESS_VOXEL
-            } else {
-                0.0
-            };
-
-            let (best_kind, best_score) = pick_best(lava_score, water_score, stress_score);
-
-            if best_score >= MIN_REGISTRABLE_SCORE {
-                tracker.scores.insert(
-                    *chunk_coord,
-                    ChunkPoiScore {
-                        best_kind,
-                        best_score,
-                        last_scored_secs: now_secs,
-                    },
-                );
-            } else {
-                // Score dropped below threshold (e.g. fluid drained, stress
-                // relieved) — actively evict so the FFI top-K doesn't keep
-                // returning a chunk that's no longer interesting.
-                tracker.scores.remove(chunk_coord);
-            }
+            apply_hysteresis(
+                &tracker.scores,
+                *chunk_coord,
+                best_kind,
+                best_score,
+                now_secs,
+            );
         }
 
-        // ── Step 5: TTL prune ──
+        // ── Step 6: TTL prune ──
         if tick % PRUNE_EVERY_N_TICKS == 0 {
             tracker
                 .scores
@@ -248,15 +251,48 @@ pub fn poi_tracker_loop(
     crate::panic_log::worker_exited();
 }
 
-fn pick_best(lava: f32, water: f32, stress: f32) -> (PoiKind, f32) {
-    if lava >= water && lava >= stress {
-        (PoiKind::Lava, lava)
-    } else if water >= stress {
-        (PoiKind::Water, water)
-    } else {
-        (PoiKind::Stress, stress)
+/// Score-update logic with hysteresis:
+///   - new ≥ MIN_REGISTRABLE → insert/refresh entry at full strength
+///   - new < MIN_REGISTRABLE + existing entry → decay existing by SCORE_DECAY
+///   - decayed score < MIN_KEEP → evict
+///   - no existing entry + low new score → no-op
+///
+/// Result: a chunk that hits a high score once persists for several ticks
+/// after the signal drops, fading out gracefully. Prevents the thrashing
+/// where a chunk oscillates around the threshold and gets inserted/evicted
+/// every tick.
+fn apply_hysteresis(
+    scores: &DashMap<(i32, i32, i32), ChunkPoiScore>,
+    coord: (i32, i32, i32),
+    new_kind: PoiKind,
+    new_score: f32,
+    now_secs: u64,
+) {
+    if new_score >= MIN_REGISTRABLE_SCORE {
+        scores.insert(
+            coord,
+            ChunkPoiScore {
+                best_kind: new_kind,
+                best_score: new_score,
+                last_scored_secs: now_secs,
+            },
+        );
+        return;
+    }
+
+    // New signal is weak. If there's an existing entry, decay it; else nothing.
+    if let Some(mut existing) = scores.get_mut(&coord) {
+        let decayed = existing.best_score * SCORE_DECAY_PER_TICK;
+        if decayed < MIN_KEEP_SCORE {
+            drop(existing); // release the entry guard before remove
+            scores.remove(&coord);
+        } else {
+            existing.best_score = decayed;
+            existing.last_scored_secs = now_secs;
+        }
     }
 }
+
 
 // ─── Query API ─────────────────────────────────────────────────────────
 
@@ -342,12 +378,41 @@ mod tests {
     }
 
     #[test]
-    fn pick_best_picks_correctly() {
-        assert_eq!(pick_best(100.0, 50.0, 10.0).0, PoiKind::Lava);
-        assert_eq!(pick_best(0.0, 80.0, 30.0).0, PoiKind::Water);
-        assert_eq!(pick_best(0.0, 0.0, 60.0).0, PoiKind::Stress);
-        // All-zero ties default to Lava (first branch). Filtered out by
-        // MIN_REGISTRABLE_SCORE anyway, so the tie-break is academic.
-        assert_eq!(pick_best(0.0, 0.0, 0.0).0, PoiKind::Lava);
+    fn hysteresis_inserts_above_register_threshold() {
+        let scores: DashMap<(i32, i32, i32), ChunkPoiScore> = DashMap::new();
+        apply_hysteresis(&scores, (0, 0, 0), PoiKind::Lava, 100.0, 0);
+        assert_eq!(scores.len(), 1);
+        assert!((scores.get(&(0, 0, 0)).unwrap().best_score - 100.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn hysteresis_decays_below_threshold_keeps_above_keep() {
+        let scores: DashMap<(i32, i32, i32), ChunkPoiScore> = DashMap::new();
+        // Seed with high score
+        apply_hysteresis(&scores, (0, 0, 0), PoiKind::Lava, 100.0, 0);
+        // Subsequent tick reports low signal → decay (100 × 0.6 = 60)
+        apply_hysteresis(&scores, (0, 0, 0), PoiKind::Lava, 0.0, 1);
+        let after = scores.get(&(0, 0, 0)).unwrap().best_score;
+        assert!((after - 60.0).abs() < 1e-3, "expected 60, got {}", after);
+    }
+
+    #[test]
+    fn hysteresis_evicts_after_enough_decay() {
+        let scores: DashMap<(i32, i32, i32), ChunkPoiScore> = DashMap::new();
+        // Seed at just-above-keep so one decay step drops below MIN_KEEP_SCORE
+        apply_hysteresis(&scores, (0, 0, 0), PoiKind::Lava, 30.0, 0);
+        // 30 × 0.6 = 18, still ≥ 15 → keep
+        apply_hysteresis(&scores, (0, 0, 0), PoiKind::Lava, 0.0, 1);
+        assert!(scores.contains_key(&(0, 0, 0)));
+        // 18 × 0.6 = 10.8, < 15 → evict
+        apply_hysteresis(&scores, (0, 0, 0), PoiKind::Lava, 0.0, 2);
+        assert!(!scores.contains_key(&(0, 0, 0)));
+    }
+
+    #[test]
+    fn hysteresis_no_op_when_low_and_no_existing() {
+        let scores: DashMap<(i32, i32, i32), ChunkPoiScore> = DashMap::new();
+        apply_hysteresis(&scores, (0, 0, 0), PoiKind::Lava, 5.0, 0);
+        assert!(scores.is_empty());
     }
 }
