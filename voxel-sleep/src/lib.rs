@@ -26,7 +26,7 @@ use crate::phases::deeptime::apply_deeptime;
 
 pub use systems::collapse::CollapseTimings;
 pub use config::SleepConfig;
-pub use manifest::ChangeManifest;
+pub use manifest::{ChangeManifest, ChunkDelta};
 
 /// Progress report during sleep processing.
 #[derive(Debug, Clone)]

@@ -4165,19 +4165,47 @@ fn handle_request(
                     Some(d) => {
                         let mut df = d.clone();
                         if let Some(delta) = manifest.chunk_deltas.get(&key) {
-                            for change in &delta.voxel_changes {
-                                let sample = df.get_mut(change.lx, change.ly, change.lz);
-                                let old_d = change.old_density;
-                                let new_d = change.new_density;
-                                // Per-voxel spreading: voxels near heat source (spread=0)
-                                // transform first, farthest (spread=1) start at t=0.6
-                                let delay_factor = 0.6_f32;
-                                let voxel_delay = change.spread_distance * delay_factor;
-                                let voxel_t = ((t - voxel_delay) / (1.0 - voxel_delay)).clamp(0.0, 1.0);
-                                sample.density = old_d + (new_d - old_d) * voxel_t;
-                                let old_mat = voxel_core::material::Material::from_u8(change.old_material);
-                                let new_mat = voxel_core::material::Material::from_u8(change.new_material);
-                                sample.material = if voxel_t >= 0.5 { new_mat } else { old_mat };
+                            if delta.voxel_changes.is_empty() && delta.synthesize_growth {
+                                // Synthesized "rise from air" animation — used by
+                                // POI plays for chunks that weren't sleep-affected.
+                                // No recorded per-voxel diff, so we animate every
+                                // solid voxel from -1.0 density up to its current
+                                // state. Y-axis gradient gives a "rising from
+                                // below" feel: lower voxels appear first.
+                                let size = df.size;
+                                let y_norm_denom = (size as f32 - 1.0).max(1.0);
+                                for z in 0..size {
+                                    for y in 0..size {
+                                        let y_norm = y as f32 / y_norm_denom;
+                                        // Stretch t by 1.5 so the wave fully covers
+                                        // the chunk by t=1.0 even with the y-bias.
+                                        let voxel_t = ((t * 1.5) - y_norm * 0.5)
+                                            .clamp(0.0, 1.0);
+                                        for x in 0..size {
+                                            let sample = df.get_mut(x, y, z);
+                                            let target = sample.density;
+                                            if target > 0.0 {
+                                                // Was air (-1.0), now interpolating up.
+                                                sample.density = -1.0 + (target + 1.0) * voxel_t;
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                for change in &delta.voxel_changes {
+                                    let sample = df.get_mut(change.lx, change.ly, change.lz);
+                                    let old_d = change.old_density;
+                                    let new_d = change.new_density;
+                                    // Per-voxel spreading: voxels near heat source (spread=0)
+                                    // transform first, farthest (spread=1) start at t=0.6
+                                    let delay_factor = 0.6_f32;
+                                    let voxel_delay = change.spread_distance * delay_factor;
+                                    let voxel_t = ((t - voxel_delay) / (1.0 - voxel_delay)).clamp(0.0, 1.0);
+                                    sample.density = old_d + (new_d - old_d) * voxel_t;
+                                    let old_mat = voxel_core::material::Material::from_u8(change.old_material);
+                                    let new_mat = voxel_core::material::Material::from_u8(change.new_material);
+                                    sample.material = if voxel_t >= 0.5 { new_mat } else { old_mat };
+                                }
                             }
                         }
                         density_fields.push(Some(df));

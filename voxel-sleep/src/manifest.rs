@@ -36,6 +36,14 @@ pub struct SupportChange {
 pub struct ChunkDelta {
     pub voxel_changes: Vec<VoxelChange>,
     pub support_changes: Vec<SupportChange>,
+    /// True for chunks injected post-sleep by the montage POI system that
+    /// have no per-voxel diff data — the morph step then runs a procedural
+    /// "rise from air to current state" animation across all solid voxels
+    /// instead of interpolating recorded VoxelChanges. Used for POI plays
+    /// when the POI's chunks weren't affected by execute_sleep (e.g. crystal
+    /// bridges, or a lava chunk that was already there).
+    #[serde(default)]
+    pub synthesize_growth: bool,
 }
 
 /// Custom serde module for HashMap<(i32,i32,i32), ChunkDelta> using string keys.

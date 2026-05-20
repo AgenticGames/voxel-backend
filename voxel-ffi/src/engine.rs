@@ -790,6 +790,35 @@ impl VoxelEngine {
         *self.morph_manifest.lock().unwrap() = None;
     }
 
+    /// Add `synthesize_growth = true` stubs to the cached morph manifest
+    /// for the given UE-space chunk coords. Used by the sleep-montage POI
+    /// plays so every POI chunk animates even if it wasn't sleep-affected.
+    /// Returns the count of new entries added (chunks not already in
+    /// manifest). Returns 0 if no manifest is cached.
+    pub fn augment_morph_synthesize_ue_chunks(&self, ue_chunks: &[FfiChunkCoord]) -> u32 {
+        let mut guard = self.morph_manifest.lock().unwrap();
+        let manifest = match guard.as_mut() {
+            Some(m) => m,
+            None => return 0,
+        };
+        let mut added = 0u32;
+        for c in ue_chunks {
+            let rust_chunk = crate::convert::ue_chunk_to_rust(c.x, c.y, c.z);
+            if !manifest.chunk_deltas.contains_key(&rust_chunk) {
+                manifest.chunk_deltas.insert(
+                    rust_chunk,
+                    voxel_sleep::ChunkDelta {
+                        voxel_changes: Vec::new(),
+                        support_changes: Vec::new(),
+                        synthesize_growth: true,
+                    },
+                );
+                added += 1;
+            }
+        }
+        added
+    }
+
     /// Request a morph step. Uses the cached manifest (set via set_morph_manifest).
     /// Returns 1 on success, 0 if queue full.
     pub fn request_morph_step(

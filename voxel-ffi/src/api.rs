@@ -3164,6 +3164,32 @@ pub unsafe extern "C" fn voxel_request_list_pending_crystal_pairs(
     1
 }
 
+/// Augment the cached morph manifest with "synthesize growth" entries for
+/// the given chunks. Chunks already in the manifest are left alone (their
+/// recorded voxel_changes win). New chunks get a stub ChunkDelta with
+/// `synthesize_growth = true` — the morph step procedurally animates them
+/// rising from air to their current state, no per-voxel data needed.
+///
+/// Called by UE before each POI play so the play's 3×3×3 showcase block
+/// always animates, even for POIs whose chunks weren't sleep-affected
+/// (e.g. crystal bridges, or pre-existing lava chambers).
+///
+/// Returns the number of new entries added (chunks that were not already
+/// in the manifest). Returns 0 if no manifest is cached yet.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_request_augment_morph_synthesize(
+    engine: *mut c_void,
+    chunks_ue: *const FfiChunkCoord,
+    count: u32,
+) -> u32 {
+    if engine.is_null() || chunks_ue.is_null() || count == 0 {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let chunks_slice = std::slice::from_raw_parts(chunks_ue, count as usize);
+    engine.augment_morph_synthesize_ue_chunks(chunks_slice)
+}
+
 /// Fill `out_buf` with up to N top POIs (lava / water / stress / bridges)
 /// from the continuous tracker. Unified ranking across all kinds — bridges
 /// from the anchor manager are merged in at query time and compete on the
