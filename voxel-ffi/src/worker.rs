@@ -260,6 +260,7 @@ pub fn worker_loop(
     worker_id: usize,
     morph_manifest: Arc<Mutex<Option<voxel_sleep::ChangeManifest>>>,
     regions_in_flight: Arc<DashMap<(i32, i32, i32), Arc<Mutex<()>>>>,
+    crystal_anchors: Arc<Mutex<crate::crystal_anchors::CrystalAnchorManager>>,
 ) {
     while !shutdown.load(Ordering::Relaxed) {
         // Priority 1: mine requests (non-blocking)
@@ -267,7 +268,7 @@ pub fn worker_loop(
             handle_request(
                 req, &result_tx, &store, &config, &stress_config, &generation_counters,
                 world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &mine_rx, &morph_manifest,
-                &regions_in_flight,
+                &regions_in_flight, &crystal_anchors,
             );
             continue;
         }
@@ -287,7 +288,7 @@ pub fn worker_loop(
                 handle_request(
                     req, &result_tx, &store, &config, &stress_config, &generation_counters,
                     world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &mine_rx, &morph_manifest,
-                    &regions_in_flight,
+                    &regions_in_flight, &crystal_anchors,
                 );
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
@@ -1410,6 +1411,7 @@ fn handle_request(
     mine_rx: &Receiver<WorkerRequest>,
     morph_manifest: &Arc<Mutex<Option<voxel_sleep::ChangeManifest>>>,
     regions_in_flight: &Arc<DashMap<(i32, i32, i32), Arc<Mutex<()>>>>,
+    crystal_anchors: &Arc<Mutex<crate::crystal_anchors::CrystalAnchorManager>>,
 ) {
     match req {
         // ComputePath is handled exclusively by the dedicated path-worker
@@ -3821,6 +3823,26 @@ fn handle_request(
             let mut s = store.write().unwrap();
             crate::panic_log::note("[SLEEP_TRACE] store write lock acquired");
 
+            // Crystal Growth Bridge — grow any pending pairs BEFORE the
+            // geological-time pass, so the new voxels are part of world state
+            // when the sleep cinematic snapshots chunks.
+            {
+                let mut anchor_mgr = crystal_anchors.lock().unwrap();
+                crate::crystal_anchors::grow_pending_bridges(
+                    &mut anchor_mgr,
+                    &mut s,
+                    &cfg,
+                    world_scale,
+                );
+                if anchor_mgr.anchor_count() > 0 {
+                    crate::panic_log::note(&format!(
+                        "[SLEEP_TRACE] crystal anchors: {} total, {} pairs grown this cycle",
+                        anchor_mgr.anchor_count(),
+                        anchor_mgr.list_grown_pairs().len(),
+                    ));
+                }
+            }
+
             // Use helper to get three simultaneous &mut borrows (borrow checker
             // cannot split borrows through method calls on the same struct).
             let (density_fields, stress_fields, support_fields) = s.sleep_fields_mut();
@@ -3838,6 +3860,12 @@ fn handle_request(
                 None, // No progress channel for now
             );
             crate::panic_log::note(&format!("[SLEEP_TRACE] execute_sleep returned: chunks_changed={} dirty_chunks={} metamorphosed={}", sleep_result.chunks_changed, sleep_result.dirty_chunks.len(), sleep_result.voxels_metamorphosed));
+
+            // POI ranking: NOT done here — the continuous tracker thread
+            // (poi_tracker.rs) maintains a live score map that survives chunk
+            // unload. UE queries top-K via voxel_request_list_top_pois which
+            // sorts the tracker map + merges live bridges from the anchor
+            // manager at query time.
 
             // Drain solidified lava from the real fluid system
             if sleep_result.lava_solidified > 0 {

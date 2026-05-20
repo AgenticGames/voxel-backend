@@ -942,15 +942,37 @@ pub fn fill_sphere(
     if !target.is_solid() {
         return BrushOutcome { meshes: Vec::new(), flipped_chunks: Vec::new() };
     }
-    let eb = config.effective_bounds();
-    let vs = config.voxel_scale();
-    let r2 = radius * radius;
-    let (lo, hi) = chunk_range_for_sphere(center, radius, eb);
-
+    let (lo, hi) = chunk_range_for_sphere(center, radius, config.effective_bounds());
     capture_undo_for_range(store, lo, hi);
 
     let mut dirty_chunks: Vec<((i32, i32, i32), usize, usize, usize, usize, usize, usize)> =
         Vec::new();
+    fill_sphere_into(store, center, radius, target, config, &mut dirty_chunks);
+    finalize_brush(store, dirty_chunks, config, world_scale)
+}
+
+/// Batched variant of [`fill_sphere`] for callers that want to fold many sphere
+/// fills into a single seam-sync + remesh + undo capture. Pushes per-chunk
+/// dirty-range entries into `dirty_chunks` and DOES NOT call `finalize_brush`
+/// or capture undo. The caller is responsible for both.
+///
+/// Crystal Growth Bridge uses this to write 100s of segments under a single
+/// finalize at sleep time.
+pub(crate) fn fill_sphere_into(
+    store: &mut ChunkStore,
+    center: Vec3,
+    radius: f32,
+    target: Material,
+    config: &GenerationConfig,
+    dirty_chunks: &mut Vec<((i32, i32, i32), usize, usize, usize, usize, usize, usize)>,
+) {
+    if !target.is_solid() {
+        return;
+    }
+    let eb = config.effective_bounds();
+    let vs = config.voxel_scale();
+    let r2 = radius * radius;
+    let (lo, hi) = chunk_range_for_sphere(center, radius, eb);
 
     for cz in lo.2..=hi.2 {
         for cy in lo.1..=hi.1 {
@@ -972,15 +994,11 @@ pub fn fill_sphere(
                                 }
                                 let sample = density.get_mut(x, y, z);
                                 let inside = radius - dist2.sqrt();
-                                // Take the max of existing density and the fill SDF —
-                                // existing solid stays solid; air becomes solid.
                                 if inside > sample.density {
                                     sample.density = inside;
                                     sample.material = target;
                                     changed = true;
                                 } else if sample.material.is_solid() && sample.material != target {
-                                    // Overwrite the material on already-solid voxels in range
-                                    // so a fill brush also paints in one operation.
                                     sample.material = target;
                                     changed = true;
                                 }
@@ -1006,8 +1024,37 @@ pub fn fill_sphere(
             }
         }
     }
+}
 
+/// Apply `finalize_brush` to a batch of dirty entries. Public-to-crate so
+/// crystal_anchors can call it from sleep-time bridge growth.
+pub(crate) fn finalize_brush_batch(
+    store: &mut ChunkStore,
+    dirty_chunks: Vec<((i32, i32, i32), usize, usize, usize, usize, usize, usize)>,
+    config: &GenerationConfig,
+    world_scale: f32,
+) -> BrushOutcome {
     finalize_brush(store, dirty_chunks, config, world_scale)
+}
+
+/// Capture an undo snapshot for a chunk AABB. Public-to-crate so crystal_anchors
+/// can take a single snapshot covering the full bridge bounds.
+pub(crate) fn capture_undo_for_range_pub(
+    store: &mut ChunkStore,
+    lo: (i32, i32, i32),
+    hi: (i32, i32, i32),
+) {
+    capture_undo_for_range(store, lo, hi);
+}
+
+/// Helper for computing the chunk-coord range of a sphere — used by Crystal
+/// Growth Bridge to bound the undo snapshot before any segment is written.
+pub(crate) fn chunk_range_for_sphere_pub(
+    center: Vec3,
+    radius: f32,
+    effective_bounds: f32,
+) -> ((i32, i32, i32), (i32, i32, i32)) {
+    chunk_range_for_sphere(center, radius, effective_bounds)
 }
 
 /// Carve (or fill) a tunnel along a polyline of points. Each segment is treated

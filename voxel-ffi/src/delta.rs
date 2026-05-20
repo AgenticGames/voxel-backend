@@ -20,7 +20,8 @@ const MAGIC: [u8; 4] = *b"MXSV";
 ///   1 — chunk snapshots + terraced cells/columns
 ///   2 — adds editor collapse triggers + next_trigger_id (see triggers.rs)
 ///   3 — adds per-chunk painted-stress overlay (creative PaintStress brush)
-const VERSION: u32 = 3;
+///   4 — adds Crystal Anchor pending/grown state as JSON blob
+const VERSION: u32 = 4;
 
 // ── Data structures ────────────────────────────────────────────────────
 
@@ -54,6 +55,9 @@ pub struct WorldSaveData {
     /// Monotonic trigger id counter. Persists so reload doesn't recycle
     /// ids that already exist. v1 reads this as 1.
     pub next_trigger_id: u32,
+    /// Crystal Anchor manager state as JSON (introduced in v4). v1-v3 saves
+    /// load this as an empty string — no anchors restored.
+    pub crystal_anchors_json: String,
 }
 
 /// Tracks which chunks have been modified at runtime so we know what to save.
@@ -295,6 +299,11 @@ impl WorldSaveData {
             w.write_all(bytes)?;
         }
 
+        // v4: Crystal Anchor manager state. UTF-8 JSON, length-prefixed.
+        let anchor_bytes = self.crystal_anchors_json.as_bytes();
+        w.write_all(&(anchor_bytes.len() as u32).to_le_bytes())?;
+        w.write_all(anchor_bytes)?;
+
         Ok(())
     }
 
@@ -313,9 +322,9 @@ impl WorldSaveData {
             return Err(DeltaError::BadMagic);
         }
 
-        // Version. Accept v1 (legacy, no triggers), v2 (triggers), v3 (current — adds painted_stress).
+        // Version. Accept v1..=4 (anchors added in v4).
         let version = read_u32(r)?;
-        if version != 1 && version != 2 && version != VERSION {
+        if version < 1 || version > VERSION {
             return Err(DeltaError::UnsupportedVersion(version));
         }
 
@@ -386,6 +395,7 @@ impl WorldSaveData {
         };
 
         // v3: per-chunk painted-stress overlays. v1/v2 saves end here.
+        let mut crystal_anchors_json = String::new();
         if version >= 3 {
             let painted_count = read_u32(r)? as usize;
             if painted_count > 100_000 {
@@ -409,12 +419,24 @@ impl WorldSaveData {
             }
         }
 
+        // v4: Crystal Anchor JSON blob (added 2026-05-20). v1-v3 saves end here.
+        if version >= 4 {
+            let json_len = read_u32(r)? as usize;
+            if json_len > 4 * 1024 * 1024 {
+                return Err(DeltaError::TruncatedData);
+            }
+            let mut bytes = vec![0u8; json_len];
+            r.read_exact(&mut bytes).map_err(|_| DeltaError::TruncatedData)?;
+            crystal_anchors_json = String::from_utf8(bytes).unwrap_or_default();
+        }
+
         Ok(WorldSaveData {
             chunk_snapshots,
             terraced_cells,
             terraced_columns,
             triggers,
             next_trigger_id,
+            crystal_anchors_json,
         })
     }
 

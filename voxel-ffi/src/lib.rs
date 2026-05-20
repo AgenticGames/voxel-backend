@@ -19,3 +19,6 @@ pub mod triggers;
 pub mod panic_log;
 pub mod diagnostics;
 pub mod pathing;
+pub mod crystal_anchors;
+pub mod poi_scanner;
+pub mod poi_tracker;

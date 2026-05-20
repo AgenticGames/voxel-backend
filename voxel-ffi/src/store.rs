@@ -1610,6 +1610,8 @@ impl ChunkStore {
             terraced_columns,
             triggers: self.triggers.clone(),
             next_trigger_id: self.next_trigger_id,
+            // Engine::export_save_data fills this in — store doesn't own anchors.
+            crystal_anchors_json: String::new(),
         }
     }
 

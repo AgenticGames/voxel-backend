@@ -2163,3 +2163,54 @@ pub struct FfiScanConfig {
     pub thin_wall_max_thickness: u32,
     pub self_intersection_tri_limit: u32,
 }
+
+// ─── Crystal Growth Bridge (Crystal Anchor) FFI structs ─────────────────────
+// All position fields are UE world space (Z-up left-hand, world_scale units).
+// Mirror of `crate::crystal_anchors::PlaceAnchorError` for the FFI layer.
+
+/// Result of voxel_request_place_crystal_anchor. `error_code` mirrors
+/// `crate::crystal_anchors::PlaceAnchorError`:
+///     0 = Ok, 1 = TooFarFromPartner, 2 = CapReached,
+///     3 = NoSolidUnder, 4 = DuplicateTooClose.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiCrystalAnchorResult {
+    pub error_code: u8,
+    pub _padding: [u8; 3],
+    /// Set only when error_code == 0. Otherwise 0.
+    pub anchor_id: u64,
+    pub partner_id: u64,
+    pub pair_token: u64,
+    /// 1 if this throw completed a pair, else 0.
+    pub pair_completed: u8,
+    pub _padding2: [u8; 7],
+}
+
+/// One pending or grown bridge pair (same layout for both query types).
+/// UE-space positions; midpoint is the arch-lifted bridge focal point.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiCrystalBridgePair {
+    pub pair_token: u64,
+    pub anchor_a_id: u64,
+    pub anchor_b_id: u64,
+    pub anchor_a_pos_ue: FfiVec3,
+    pub anchor_b_pos_ue: FfiVec3,
+    pub midpoint_ue: FfiVec3,
+}
+
+/// One Point-of-Interest from the sleep-time scanner. `kind` mirrors
+/// `crate::poi_scanner::PoiKind`: 0=Bridge, 1=Lava, 2=Water, 3=Stress.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiPoi {
+    pub kind: u8,
+    pub _padding: [u8; 3],
+    pub score: f32,
+    pub chunk_coord_ue: FfiChunkCoord,
+    pub center_ue: FfiVec3,
+    /// "Radius of interest" in UE units — half the bridge length for Bridge
+    /// POIs, half-chunk for the per-chunk kinds. The montage camera uses
+    /// this to size its orbit so wide bridges get a wide orbit.
+    pub extent_radius_ue: f32,
+}

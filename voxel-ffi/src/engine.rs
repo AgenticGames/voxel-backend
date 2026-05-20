@@ -116,6 +116,17 @@ pub struct VoxelEngine {
     /// Server-side monotonic request id allocator so callers don't have to.
     next_path_request_id: Arc<AtomicU32>,
 
+    // ─── Crystal Anchors (Crystal Growth Bridge feature) ─────
+    /// Pending and grown crystal-anchor pairs. Mutex is fine: anchor ops
+    /// are rare (player input + once-per-sleep) and never contended.
+    pub crystal_anchors: Arc<Mutex<crate::crystal_anchors::CrystalAnchorManager>>,
+
+    // ─── POI Tracker (background thread, continuous scoring) ─────
+    /// Long-running scored chunk map — updated by the dedicated tracker
+    /// thread every ~2s. UE reads top-K from here at sleep-montage time.
+    /// Survives chunk unload (TTL'd at 30 minutes).
+    pub poi_tracker: crate::poi_tracker::SharedPoiTracker,
+
     // Scale
     world_scale: f32,
 }
@@ -199,6 +210,14 @@ impl VoxelEngine {
         let regions_in_flight: Arc<DashMap<(i32, i32, i32), Arc<Mutex<()>>>> =
             Arc::new(DashMap::new());
 
+        // Crystal Growth Bridge — shared manager; sleep handler in worker_loop
+        // grows pending pairs during the geological-time pass.
+        let crystal_anchors: Arc<Mutex<crate::crystal_anchors::CrystalAnchorManager>> =
+            Arc::new(Mutex::new(crate::crystal_anchors::CrystalAnchorManager::default()));
+
+        // POI tracker — long-running background scorer.
+        let poi_tracker = crate::poi_tracker::new_tracker();
+
         let mut workers = Vec::with_capacity(num_workers);
         for worker_id in 0..num_workers {
             let shutdown = Arc::clone(&shutdown);
@@ -213,6 +232,7 @@ impl VoxelEngine {
             let prof = Arc::clone(&profiler);
             let morph_man = Arc::clone(&morph_manifest);
             let rif = Arc::clone(&regions_in_flight);
+            let anchors = Arc::clone(&crystal_anchors);
 
             let builder = thread::Builder::new().name(format!("voxel-worker-{}", worker_id));
             let handle = builder
@@ -240,6 +260,7 @@ impl VoxelEngine {
                             let prof = Arc::clone(&prof);
                             let morph_man = Arc::clone(&morph_man);
                             let rif = Arc::clone(&rif);
+                            let anchors = Arc::clone(&anchors);
                             std::panic::catch_unwind(AssertUnwindSafe(move || {
                                 worker_loop(
                                     shutdown,
@@ -256,6 +277,7 @@ impl VoxelEngine {
                                     worker_id,
                                     morph_man,
                                     rif,
+                                    anchors,
                                 );
                             }))
                         };
@@ -351,6 +373,63 @@ impl VoxelEngine {
             workers.push(handle);
         }
 
+        // ─── POI Tracker — background thread, scores chunks for the
+        // sleep-montage POI rotation. Same catch_unwind respawn pattern.
+        {
+            let shutdown_t = Arc::clone(&shutdown);
+            let store_t = Arc::clone(&store);
+            let fluid_tx_t = fluid_event_tx.clone();
+            let config_t = Arc::clone(&config);
+            let tracker_t = Arc::clone(&poi_tracker);
+            let builder = thread::Builder::new().name("voxel-poi-tracker".to_string());
+            let handle = builder
+                .spawn(move || {
+                    const MAX_RESPAWNS: u32 = 8;
+                    let mut respawn = 0u32;
+                    loop {
+                        let outcome = {
+                            let shutdown_t = Arc::clone(&shutdown_t);
+                            let store_t = Arc::clone(&store_t);
+                            let fluid_tx_t = fluid_tx_t.clone();
+                            let config_t = Arc::clone(&config_t);
+                            let tracker_t = Arc::clone(&tracker_t);
+                            std::panic::catch_unwind(AssertUnwindSafe(move || {
+                                crate::poi_tracker::poi_tracker_loop(
+                                    shutdown_t,
+                                    store_t,
+                                    fluid_tx_t,
+                                    config_t,
+                                    tracker_t,
+                                );
+                            }))
+                        };
+                        if shutdown_t.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        match outcome {
+                            Ok(()) => break,
+                            Err(payload) => {
+                                respawn += 1;
+                                let msg = crate::panic_log::payload_string(&*payload);
+                                crate::panic_log::note(&format!(
+                                    "poi-tracker caught panic (respawn {}/{}): {}",
+                                    respawn, MAX_RESPAWNS, msg
+                                ));
+                                if respawn >= MAX_RESPAWNS {
+                                    crate::panic_log::note(
+                                        "poi-tracker GIVING UP — degraded mode (no continuous POI scoring)",
+                                    );
+                                    break;
+                                }
+                                std::thread::sleep(std::time::Duration::from_millis(500));
+                            }
+                        }
+                    }
+                })
+                .expect("failed to spawn voxel POI tracker thread");
+            workers.push(handle);
+        }
+
         VoxelEngine {
             generate_tx,
             mine_tx,
@@ -374,6 +453,8 @@ impl VoxelEngine {
             path_tx,
             path_results: Arc::new(Mutex::new(PathResultStore::default())),
             next_path_request_id: Arc::new(AtomicU32::new(1)),
+            crystal_anchors,
+            poi_tracker,
             world_scale,
         }
     }
@@ -1988,7 +2069,9 @@ impl VoxelEngine {
     /// Returns the serialized bytes (caller manages the memory).
     pub fn export_save_data(&self) -> Vec<u8> {
         let store = self.store.read().unwrap();
-        let data = store.collect_save_data();
+        let mut data = store.collect_save_data();
+        // Crystal Growth Bridge state lives outside the store; merge it in.
+        data.crystal_anchors_json = self.crystal_anchors.lock().unwrap().to_json_string();
         data.serialize()
     }
 
@@ -1999,8 +2082,14 @@ impl VoxelEngine {
     pub fn import_save_data(&self, bytes: &[u8]) -> bool {
         match crate::delta::WorldSaveData::deserialize(bytes) {
             Ok(data) => {
-                let mut store = self.store.write().unwrap();
-                store.load_save_data(data);
+                let anchor_json = data.crystal_anchors_json.clone();
+                {
+                    let mut store = self.store.write().unwrap();
+                    store.load_save_data(data);
+                }
+                // Restore Crystal Anchor manager state from the JSON blob.
+                let restored = crate::crystal_anchors::CrystalAnchorManager::from_json_string(&anchor_json);
+                *self.crystal_anchors.lock().unwrap() = restored;
                 true
             }
             Err(e) => {
