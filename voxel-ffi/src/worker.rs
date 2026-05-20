@@ -4170,24 +4170,61 @@ fn handle_request(
                                 // POI plays for chunks that weren't sleep-affected.
                                 // No recorded per-voxel diff, so we animate every
                                 // solid voxel from -1.0 density up to its current
-                                // state. Y-axis gradient gives a "rising from
-                                // below" feel: lower voxels appear first.
+                                // state.
+                                //
+                                // Spread mode:
+                                //   - growth_sources non-empty → per-voxel spread =
+                                //     min-distance to any source / max_dist. Bridges
+                                //     pass 2 anchors so growth radiates inward; other
+                                //     POIs pass 1 chunk-center source for a radial
+                                //     reveal.
+                                //   - growth_sources empty → fall back to y-axis
+                                //     gradient ("rising from below").
                                 let size = df.size;
                                 let y_norm_denom = (size as f32 - 1.0).max(1.0);
+                                let cs = cfg.chunk_size as f32;
+                                let chunk_origin_x = key.0 as f32 * cs;
+                                let chunk_origin_y = key.1 as f32 * cs;
+                                let chunk_origin_z = key.2 as f32 * cs;
+                                let use_sources = !delta.growth_sources.is_empty();
+                                let inv_max_dist = if delta.growth_source_max_dist > 0.0 {
+                                    1.0 / delta.growth_source_max_dist
+                                } else {
+                                    0.0
+                                };
+
                                 for z in 0..size {
                                     for y in 0..size {
-                                        let y_norm = y as f32 / y_norm_denom;
-                                        // Stretch t by 1.5 so the wave fully covers
-                                        // the chunk by t=1.0 even with the y-bias.
-                                        let voxel_t = ((t * 1.5) - y_norm * 0.5)
-                                            .clamp(0.0, 1.0);
                                         for x in 0..size {
                                             let sample = df.get_mut(x, y, z);
                                             let target = sample.density;
-                                            if target > 0.0 {
-                                                // Was air (-1.0), now interpolating up.
-                                                sample.density = -1.0 + (target + 1.0) * voxel_t;
+                                            if target <= 0.0 {
+                                                continue;
                                             }
+                                            let spread = if use_sources {
+                                                let wx = chunk_origin_x + x as f32;
+                                                let wy = chunk_origin_y + y as f32;
+                                                let wz = chunk_origin_z + z as f32;
+                                                let mut best = f32::MAX;
+                                                for s in &delta.growth_sources {
+                                                    let dx = wx - s.0;
+                                                    let dy = wy - s.1;
+                                                    let dz = wz - s.2;
+                                                    let d2 = dx * dx + dy * dy + dz * dz;
+                                                    if d2 < best {
+                                                        best = d2;
+                                                    }
+                                                }
+                                                (best.sqrt() * inv_max_dist).clamp(0.0, 1.0)
+                                            } else {
+                                                y as f32 / y_norm_denom
+                                            };
+                                            // Stretch t by 1.5 so the wave fully
+                                            // covers all voxels by t=1.0 even with
+                                            // the spread bias.
+                                            let voxel_t = ((t * 1.5) - spread * 0.5)
+                                                .clamp(0.0, 1.0);
+                                            sample.density = -1.0 + (target + 1.0) * voxel_t;
                                         }
                                     }
                                 }

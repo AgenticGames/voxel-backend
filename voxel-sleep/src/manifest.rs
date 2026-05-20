@@ -44,6 +44,22 @@ pub struct ChunkDelta {
     /// bridges, or a lava chunk that was already there).
     #[serde(default)]
     pub synthesize_growth: bool,
+    /// Growth "sources" in WORLD voxel coordinates (Rust Y-up). When non-empty
+    /// and `synthesize_growth = true`, the morph step computes each voxel's
+    /// reveal timing from its min-distance to any source (normalized by
+    /// `growth_source_max_dist`). Bridges get 2 sources (anchor A + anchor B)
+    /// so the bridge animates growing inward from each end; other POIs get 1
+    /// source (chunk center) for a radial reveal.
+    /// When empty, the synthesize path falls back to a y-axis gradient
+    /// ("rise from below").
+    #[serde(default)]
+    pub growth_sources: Vec<(f32, f32, f32)>,
+    /// Distance (in world voxels) at which the spread normalization saturates
+    /// to 1.0. Smaller → tighter, faster reveal; larger → slower, more
+    /// gradual. Bridge plays use half the bridge length so anchors animate
+    /// at t≈0 and midpoint at t≈1.
+    #[serde(default)]
+    pub growth_source_max_dist: f32,
 }
 
 /// Custom serde module for HashMap<(i32,i32,i32), ChunkDelta> using string keys.

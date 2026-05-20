@@ -3167,12 +3167,17 @@ pub unsafe extern "C" fn voxel_request_list_pending_crystal_pairs(
 /// Augment the cached morph manifest with "synthesize growth" entries for
 /// the given chunks. Chunks already in the manifest are left alone (their
 /// recorded voxel_changes win). New chunks get a stub ChunkDelta with
-/// `synthesize_growth = true` — the morph step procedurally animates them
-/// rising from air to their current state, no per-voxel data needed.
+/// `synthesize_growth = true` plus the supplied growth sources — the morph
+/// step procedurally animates them rising from air to their current state.
+///
+/// `sources_ue` (UE world coords) parameterize the reveal: each voxel's
+/// spread = min-distance-to-any-source / max_dist, normalized [0,1].
+/// Pass 2 sources (anchor A + anchor B) for bridges, 1 source (chunk
+/// center) for radial reveal of other POIs, or 0 for y-axis fallback.
 ///
 /// Called by UE before each POI play so the play's 3×3×3 showcase block
-/// always animates, even for POIs whose chunks weren't sleep-affected
-/// (e.g. crystal bridges, or pre-existing lava chambers).
+/// always animates with a pretty reveal pattern, even for POIs whose chunks
+/// weren't sleep-affected (crystal bridges, pre-existing lava chambers).
 ///
 /// Returns the number of new entries added (chunks that were not already
 /// in the manifest). Returns 0 if no manifest is cached yet.
@@ -3180,14 +3185,22 @@ pub unsafe extern "C" fn voxel_request_list_pending_crystal_pairs(
 pub unsafe extern "C" fn voxel_request_augment_morph_synthesize(
     engine: *mut c_void,
     chunks_ue: *const FfiChunkCoord,
-    count: u32,
+    chunk_count: u32,
+    sources_ue: *const FfiVec3,
+    source_count: u32,
+    max_dist_ue: f32,
 ) -> u32 {
-    if engine.is_null() || chunks_ue.is_null() || count == 0 {
+    if engine.is_null() || chunks_ue.is_null() || chunk_count == 0 {
         return 0;
     }
     let engine = &*(engine as *const VoxelEngine);
-    let chunks_slice = std::slice::from_raw_parts(chunks_ue, count as usize);
-    engine.augment_morph_synthesize_ue_chunks(chunks_slice)
+    let chunks_slice = std::slice::from_raw_parts(chunks_ue, chunk_count as usize);
+    let sources_slice: &[FfiVec3] = if !sources_ue.is_null() && source_count > 0 {
+        std::slice::from_raw_parts(sources_ue, source_count as usize)
+    } else {
+        &[]
+    };
+    engine.augment_morph_synthesize_ue_chunks(chunks_slice, sources_slice, max_dist_ue)
 }
 
 /// Fill `out_buf` with up to N top POIs (lava / water / stress / bridges)
