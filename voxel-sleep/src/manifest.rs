@@ -109,6 +109,83 @@ pub struct ChangeManifest {
     pub sleep_count: u32,
 }
 
+/// Stable-sort + in-place run-length coalesce for `compact()`. Keeps
+/// first.old_* + last.new_* per (lx,ly,lz) run, preserving the first
+/// entry's spread_distance (aureole-driven reveal order).
+fn compact_voxel_changes(changes: &mut Vec<VoxelChange>) {
+    let n = changes.len();
+    if n <= 1 {
+        return;
+    }
+    changes.sort_by_key(|c| (c.lx, c.ly, c.lz));
+    let mut write = 0usize;
+    let mut read = 0usize;
+    while read < n {
+        let start = read;
+        let key = (changes[start].lx, changes[start].ly, changes[start].lz);
+        let mut end = start + 1;
+        while end < n {
+            let c = &changes[end];
+            if (c.lx, c.ly, c.lz) != key {
+                break;
+            }
+            end += 1;
+        }
+        let first = changes[start].clone();
+        let last_new_material = changes[end - 1].new_material;
+        let last_new_density = changes[end - 1].new_density;
+        changes[write] = VoxelChange {
+            lx: first.lx,
+            ly: first.ly,
+            lz: first.lz,
+            old_material: first.old_material,
+            old_density: first.old_density,
+            new_material: last_new_material,
+            new_density: last_new_density,
+            spread_distance: first.spread_distance,
+        };
+        write += 1;
+        read = end;
+    }
+    changes.truncate(write);
+}
+
+/// Stable-sort + in-place run-length coalesce for support changes
+/// (mirrors `compact_voxel_changes`).
+fn compact_support_changes(changes: &mut Vec<SupportChange>) {
+    let n = changes.len();
+    if n <= 1 {
+        return;
+    }
+    changes.sort_by_key(|c| (c.lx, c.ly, c.lz));
+    let mut write = 0usize;
+    let mut read = 0usize;
+    while read < n {
+        let start = read;
+        let key = (changes[start].lx, changes[start].ly, changes[start].lz);
+        let mut end = start + 1;
+        while end < n {
+            let c = &changes[end];
+            if (c.lx, c.ly, c.lz) != key {
+                break;
+            }
+            end += 1;
+        }
+        let first = changes[start].clone();
+        let last_new_support = changes[end - 1].new_support;
+        changes[write] = SupportChange {
+            lx: first.lx,
+            ly: first.ly,
+            lz: first.lz,
+            old_support: first.old_support,
+            new_support: last_new_support,
+        };
+        write += 1;
+        read = end;
+    }
+    changes.truncate(write);
+}
+
 impl ChangeManifest {
     pub fn new() -> Self {
         Self::default()
@@ -194,62 +271,18 @@ impl ChangeManifest {
     /// Keeps the FIRST change's old_material/old_density (true pre-sleep state)
     /// and the LAST change's new_material/new_density (final post-sleep state).
     /// spread_distance is taken from the first change (aureole-driven spread order).
+    ///
+    /// Implementation: stable sort by (lx, ly, lz) + in-place run-length
+    /// coalesce. The previous version built TWO `HashMap<(usize,usize,usize),
+    /// usize>` per chunk (first_idx + last_idx) plus a Vec of sorted keys plus
+    /// a fresh output Vec — ~3N HashMap ops + 2K lookups + a separate keys.sort.
+    /// A deep sleep modifying ~500 chunks with thousands of changes each made
+    /// that visible in profile traces. Sort + linear scan does the same work
+    /// in one allocation pass, with no hashing, and is much more cache-friendly.
     pub fn compact(&mut self) {
         for delta in self.chunk_deltas.values_mut() {
-            // For voxel changes: merge first.old + last.new per (lx, ly, lz)
-            let mut first_idx: HashMap<(usize, usize, usize), usize> = HashMap::new();
-            let mut last_idx: HashMap<(usize, usize, usize), usize> = HashMap::new();
-            for (i, change) in delta.voxel_changes.iter().enumerate() {
-                let key = (change.lx, change.ly, change.lz);
-                first_idx.entry(key).or_insert(i);
-                last_idx.insert(key, i);
-            }
-            let mut keys: Vec<(usize, usize, usize)> = first_idx.keys().copied().collect();
-            keys.sort();
-            let mut compacted = Vec::with_capacity(keys.len());
-            for key in keys {
-                let fi = first_idx[&key];
-                let li = last_idx[&key];
-                let first = &delta.voxel_changes[fi];
-                let last = &delta.voxel_changes[li];
-                compacted.push(VoxelChange {
-                    lx: first.lx,
-                    ly: first.ly,
-                    lz: first.lz,
-                    old_material: first.old_material,
-                    old_density: first.old_density,
-                    new_material: last.new_material,
-                    new_density: last.new_density,
-                    spread_distance: first.spread_distance,
-                });
-            }
-            delta.voxel_changes = compacted;
-
-            // Same for support changes: keep first.old + last.new
-            let mut first_s: HashMap<(usize, usize, usize), usize> = HashMap::new();
-            let mut last_s: HashMap<(usize, usize, usize), usize> = HashMap::new();
-            for (i, change) in delta.support_changes.iter().enumerate() {
-                let key = (change.lx, change.ly, change.lz);
-                first_s.entry(key).or_insert(i);
-                last_s.insert(key, i);
-            }
-            let mut keys_s: Vec<(usize, usize, usize)> = first_s.keys().copied().collect();
-            keys_s.sort();
-            let mut compacted_s = Vec::with_capacity(keys_s.len());
-            for key in keys_s {
-                let fi = first_s[&key];
-                let li = last_s[&key];
-                let first = &delta.support_changes[fi];
-                let last = &delta.support_changes[li];
-                compacted_s.push(SupportChange {
-                    lx: first.lx,
-                    ly: first.ly,
-                    lz: first.lz,
-                    old_support: first.old_support,
-                    new_support: last.new_support,
-                });
-            }
-            delta.support_changes = compacted_s;
+            compact_voxel_changes(&mut delta.voxel_changes);
+            compact_support_changes(&mut delta.support_changes);
         }
     }
 
