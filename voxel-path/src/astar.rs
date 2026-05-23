@@ -2,7 +2,11 @@
 //!
 //! Implementation notes:
 //!  - Open set: `BinaryHeap` keyed by f-score (negated for min-heap behavior).
-//!  - Closed/g/came_from: `HashMap<IVec3, ...>`.
+//!  - g/came_from: `HashMap<IVec3, ...>`. No separate closed set — the open
+//!    heap carries each entry's g-score; on pop, a stale entry (one whose
+//!    g_score exceeds the best g_score we've recorded for that cell) is
+//!    skipped. Equivalent to a lazy closed set, costs one fewer HashMap probe
+//!    per neighbor expansion than the eager-closed-set form.
 //!  - 26-connected neighborhood (all face/edge/corner offsets except `(0,0,0)`).
 //!  - Heuristic and step cost both euclidean — admissible, optimal paths.
 //!  - Diagonal corner-clip guard: a move along a corner diagonal requires the
@@ -108,20 +112,29 @@ pub fn compute_path<G: CellGrid>(grid: &G, request: PathRequest) -> PathOutcome 
     let mut open: BinaryHeap<OpenEntry> = BinaryHeap::new();
     let mut g_score: HashMap<IVec3, f32> = HashMap::new();
     let mut came_from: HashMap<IVec3, IVec3> = HashMap::new();
-    let mut closed: HashMap<IVec3, ()> = HashMap::new();
     let mut touched_unloaded = false;
     let mut nodes_expanded: u32 = 0;
 
     g_score.insert(request.from, 0.0);
     open.push(OpenEntry {
         cell: request.from,
+        g_score: 0.0,
         f_score: heuristic(request.from, request.to),
     });
 
-    let neighbor_offsets = compute_neighborhood_offsets();
-
     while let Some(top) = open.pop() {
         let current = top.cell;
+
+        // Lazy closed-set: skip stale heap entries whose g_score is no longer
+        // the best we've found for this cell. With a consistent (admissible +
+        // monotonic) heuristic — euclidean on a grid IS consistent — the first
+        // non-stale pop of any cell is its optimal-cost expansion. This pairs
+        // with the `tentative_g < existing_g` neighbor update below.
+        if let Some(&best_g) = g_score.get(&current) {
+            if top.g_score > best_g {
+                continue;
+            }
+        }
 
         if current == request.to {
             // Reconstruct path
@@ -146,9 +159,6 @@ pub fn compute_path<G: CellGrid>(grid: &G, request: PathRequest) -> PathOutcome 
             return PathOutcome { status, nodes };
         }
 
-        if closed.insert(current, ()).is_some() {
-            continue;
-        }
         nodes_expanded += 1;
         if nodes_expanded >= request.max_nodes {
             return PathOutcome {
@@ -157,39 +167,49 @@ pub fn compute_path<G: CellGrid>(grid: &G, request: PathRequest) -> PathOutcome 
             };
         }
 
-        let current_g = *g_score.get(&current).unwrap_or(&f32::INFINITY);
+        // g_score for `current` is `top.g_score` — guaranteed valid by the
+        // stale-entry guard above. No HashMap lookup needed.
+        let current_g = top.g_score;
         let current_normal = if request.mode.is_surface() {
             grid.surface_normal_at(current)
         } else {
             Vec3::ZERO
         };
 
-        for &offset in neighbor_offsets.iter() {
+        for &offset in NEIGHBOR_OFFSETS.iter() {
             let neighbor = IVec3::new(
                 current.x + offset.x,
                 current.y + offset.y,
                 current.z + offset.z,
             );
 
-            // Skip closed
-            if closed.contains_key(&neighbor) {
-                continue;
-            }
-            // Mode traversability
-            if !can_traverse(grid, neighbor, request.mode) {
-                if !grid.is_loaded(neighbor) {
-                    touched_unloaded = true;
+            // Single HashMap probe handles both the "is this already in the
+            // search frontier?" check AND fetches existing_g for the relaxation
+            // test. When existing_g is Some(_), we also KNOW the cell is
+            // traversable (it wouldn't have been inserted otherwise), so we
+            // can skip the `can_traverse` grid probe — which on the live
+            // ChunkStoreGrid is the most expensive op in this loop (DashMap
+            // lookup + density grid sample per call).
+            let existing_g = g_score.get(&neighbor).copied();
+
+            if existing_g.is_none() {
+                // Untouched neighbor — must verify traversability now.
+                if !can_traverse(grid, neighbor, request.mode) {
+                    if !grid.is_loaded(neighbor) {
+                        touched_unloaded = true;
+                    }
+                    continue;
                 }
-                continue;
             }
-            // Diagonal corner-clip guard — for diagonal steps the two
-            // face-shared cells along the diagonal must also be air.
+            // Diagonal corner-clip guard is per-step (depends on `current` and
+            // `offset`, not just on `neighbor`), so it must run on every
+            // expansion regardless of whether the neighbor was seen before.
             if !corner_clip_clear(grid, current, offset, request.mode) {
                 continue;
             }
 
-            let step_len = (offset.x.pow(2) + offset.y.pow(2) + offset.z.pow(2)) as f32;
-            let step_len = step_len.sqrt(); // 1.0, √2, √3 for face/edge/corner moves
+            let step_len_sq = (offset.x.pow(2) + offset.y.pow(2) + offset.z.pow(2)) as f32;
+            let step_len = step_len_sq.sqrt(); // 1.0, √2, √3 for face/edge/corner moves
 
             // Surface-mode normal-discontinuity penalty: prefer smooth
             // transitions. k=0.5 chosen empirically — strong enough to bias
@@ -208,13 +228,13 @@ pub fn compute_path<G: CellGrid>(grid: &G, request: PathRequest) -> PathOutcome 
             };
 
             let tentative_g = current_g + step_len + extra;
-            let existing_g = *g_score.get(&neighbor).unwrap_or(&f32::INFINITY);
-            if tentative_g < existing_g {
+            if tentative_g < existing_g.unwrap_or(f32::INFINITY) {
                 came_from.insert(neighbor, current);
                 g_score.insert(neighbor, tentative_g);
                 let f = tentative_g + heuristic(neighbor, request.to);
                 open.push(OpenEntry {
                     cell: neighbor,
+                    g_score: tentative_g,
                     f_score: f,
                 });
             }
@@ -230,9 +250,15 @@ pub fn compute_path<G: CellGrid>(grid: &G, request: PathRequest) -> PathOutcome 
 // ─── Internals ───────────────────────────────────────────────────
 
 /// Min-heap entry — implements Ord with f_score reversed (BinaryHeap is max-heap).
+/// Carries the g_score the entry was pushed with, so:
+///  1. On pop, we can detect stale entries (`g_score > g_score_map[cell]`)
+///     without a second HashMap probe.
+///  2. The expansion step reads `current_g` directly off the entry instead of
+///     looking it up in `g_score` again.
 #[derive(Debug, Clone, Copy)]
 struct OpenEntry {
     cell: IVec3,
+    g_score: f32,
     f_score: f32,
 }
 
@@ -280,22 +306,18 @@ fn maybe_normal<G: CellGrid>(grid: &G, cell: IVec3, mode: MovementMode) -> Vec3 
 }
 
 /// 26-connected neighborhood (all integer offsets in [-1,1]^3 except origin).
-fn compute_neighborhood_offsets() -> [IVec3; 26] {
-    let mut offsets = [IVec3::ZERO; 26];
-    let mut idx = 0;
-    for dx in -1..=1 {
-        for dy in -1..=1 {
-            for dz in -1..=1 {
-                if dx == 0 && dy == 0 && dz == 0 {
-                    continue;
-                }
-                offsets[idx] = IVec3::new(dx, dy, dz);
-                idx += 1;
-            }
-        }
-    }
-    offsets
-}
+/// `const` so it lives in the binary's data section — no per-call construction.
+static NEIGHBOR_OFFSETS: [IVec3; 26] = [
+    IVec3::new(-1, -1, -1), IVec3::new(-1, -1, 0), IVec3::new(-1, -1, 1),
+    IVec3::new(-1,  0, -1), IVec3::new(-1,  0, 0), IVec3::new(-1,  0, 1),
+    IVec3::new(-1,  1, -1), IVec3::new(-1,  1, 0), IVec3::new(-1,  1, 1),
+    IVec3::new( 0, -1, -1), IVec3::new( 0, -1, 0), IVec3::new( 0, -1, 1),
+    IVec3::new( 0,  0, -1),                         IVec3::new( 0,  0, 1),
+    IVec3::new( 0,  1, -1), IVec3::new( 0,  1, 0), IVec3::new( 0,  1, 1),
+    IVec3::new( 1, -1, -1), IVec3::new( 1, -1, 0), IVec3::new( 1, -1, 1),
+    IVec3::new( 1,  0, -1), IVec3::new( 1,  0, 0), IVec3::new( 1,  0, 1),
+    IVec3::new( 1,  1, -1), IVec3::new( 1,  1, 0), IVec3::new( 1,  1, 1),
+];
 
 /// Diagonal corner-clip guard.
 ///
