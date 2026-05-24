@@ -63,6 +63,12 @@ pub struct ChunkStore {
     pub modification_tracker: ModificationTracker,
     /// Density snapshots preserved from unloaded modified chunks (for save).
     pub preserved_snapshots: BTreeMap<(i32, i32, i32), ChunkSnapshot>,
+    /// Mushroom placements preserved from unloaded chunks. Captured on
+    /// `unload()` whenever the chunk had any mushrooms; restored by
+    /// `apply_pending_snapshot()` when the chunk streams back in. Lives
+    /// alongside `preserved_snapshots` rather than inside it so a chunk can
+    /// be mushroom-edited without forcing a density snapshot.
+    pub preserved_mushrooms: BTreeMap<(i32, i32, i32), Vec<voxel_gen::MushroomPlacement>>,
     /// Pending snapshots loaded from a save file — applied as chunks are generated.
     pub pending_snapshots: Option<WorldSaveData>,
     /// Round 7: content hash of the last ChunkMesh we sent over FFI per chunk.
@@ -112,6 +118,7 @@ impl ChunkStore {
             stress_dirty_time: None,
             modification_tracker: ModificationTracker::new(),
             preserved_snapshots: BTreeMap::new(),
+            preserved_mushrooms: BTreeMap::new(),
             pending_snapshots: None,
             last_sent_mesh_hash: HashMap::new(),
             undo_stack: std::collections::VecDeque::new(),
@@ -208,6 +215,16 @@ impl ChunkStore {
             }
             self.modification_tracker.remove(&key);
         }
+        // Preserve mushrooms whenever the chunk has any — independent of the
+        // dirty-tracker because painting mushrooms doesn't mutate density. A
+        // chunk can be "clean" w.r.t. density but still have painted mushrooms
+        // that MUST survive unload→reload.
+        if let Some(placements) = self.mushroom_placements.get(&key) {
+            if !placements.is_empty() {
+                self.preserved_mushrooms.insert(key, placements.clone());
+            }
+        }
+        self.mushroom_placements.remove(&key);
         self.density_fields.remove(&key);
         self.hermite_data.remove(&key);
         self.chunk_seam_data.remove(&key);
@@ -1604,6 +1621,36 @@ impl ChunkStore {
         let terraced_columns: BTreeMap<(i32, i32), i32> =
             self.terraced_columns.iter().map(|(&k, &v)| (k, v)).collect();
 
+        // Mushroom gather — same 3-tier carry-forward model as density.
+        // Tier 1: previous save file's entries (carry forward for chunks
+        // not visited this session).
+        // Tier 2: preserved_mushrooms (chunks unloaded this session).
+        // Tier 3: currently-loaded chunks that have placements — captured
+        // straight from `mushroom_placements`. Painted-and-still-loaded
+        // chunks land here. We don't gate on `dirty_chunks` because
+        // mushroom edits don't touch the density dirty tracker.
+        let mut mushroom_placements: BTreeMap<(i32, i32, i32), Vec<voxel_gen::MushroomPlacement>> =
+            match &self.pending_snapshots {
+                Some(data) => data.mushroom_placements.clone(),
+                None => BTreeMap::new(),
+            };
+        for (k, m) in &self.preserved_mushrooms {
+            mushroom_placements.insert(*k, m.clone());
+        }
+        // Tier 3: only capture from currently-loaded chunks that the player
+        // touched this session. Iterating ALL of mushroom_placements would
+        // include every worldgen-only chunk, bloating saves to MB. The
+        // mushroom brushes call modification_tracker.mark_dirty(key) on
+        // every affected chunk, so this set is the authoritative
+        // "player-edited" list.
+        for key in &self.modification_tracker.dirty_chunks {
+            if let Some(m) = self.mushroom_placements.get(key) {
+                // Empty Vec is meaningful here ("had mushrooms, erased them all")
+                // — keep it so the worker's regen-skip gate fires on reload.
+                mushroom_placements.insert(*key, m.clone());
+            }
+        }
+
         WorldSaveData {
             chunk_snapshots: snapshots,
             terraced_cells,
@@ -1612,6 +1659,7 @@ impl ChunkStore {
             next_trigger_id: self.next_trigger_id,
             // Engine::export_save_data fills this in — store doesn't own anchors.
             crystal_anchors_json: String::new(),
+            mushroom_placements,
         }
     }
 
@@ -1659,32 +1707,56 @@ impl ChunkStore {
                     .as_ref()
                     .and_then(|d| d.chunk_snapshots.get(&key).cloned())
             });
+
+        // Mushrooms have their own preservation path — independent of the
+        // density snapshot because painting mushrooms doesn't dirty density.
+        // Restore from session-preserved first, then save-file pending.
+        let mushrooms = self
+            .preserved_mushrooms
+            .get(&key)
+            .cloned()
+            .or_else(|| {
+                self.pending_snapshots
+                    .as_ref()
+                    .and_then(|d| d.mushroom_placements.get(&key).cloned())
+            });
+
+        let mut applied = false;
         if let Some(snap) = snap {
             if let Some(df) = self.density_fields.get_mut(&key) {
                 if snap.apply_to(df) {
-                    // Also restore the painted-stress overlay, if any. The
-                    // stress_field is created lazily in `insert()` so it
-                    // exists by the time we get here.
                     if let Some(sf) = self.stress_fields.get_mut(&key) {
                         snap.apply_painted_stress_to(sf);
                     }
-                    // Successfully restored — drop the preserved entry so memory
-                    // doesn't grow unbounded across re-stream cycles. Save-file
-                    // pending_snapshots stays put: a future re-stream might still
-                    // legitimately need to re-apply (e.g. region regen from disk).
                     self.preserved_snapshots.remove(&key);
                     self.modification_tracker.mark_dirty(key);
-                    return true;
+                    applied = true;
                 }
             }
         }
-        false
+
+        if let Some(placements) = mushrooms {
+            // Restore mushrooms even when there's no density snapshot — a
+            // chunk can have only mushroom edits. Insert wholesale so the
+            // chunk-gen path's `compute_mushrooms` step sees the entry and
+            // skips regeneration (see worker.rs gate).
+            self.mushroom_placements.insert(key, placements);
+            self.preserved_mushrooms.remove(&key);
+            applied = true;
+        }
+
+        applied
     }
 
     /// Returns true if there are any world modifications to save.
     pub fn has_modifications(&self) -> bool {
+        // Mushroom-only edits ride along: the brush marks chunks dirty in
+        // modification_tracker so the dirty-chunks branch covers them.
+        // preserved_mushrooms covers the "painted then walked away" case
+        // even if density was never edited in those chunks.
         self.modification_tracker.has_modifications()
             || !self.preserved_snapshots.is_empty()
+            || !self.preserved_mushrooms.is_empty()
             || !self.terraced_cells.is_empty()
     }
 

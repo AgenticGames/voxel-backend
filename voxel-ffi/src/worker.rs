@@ -2287,18 +2287,28 @@ fn handle_request(
             };
 
             // Compute mushroom placements and store them (mirrors crystal flow).
+            // Skip regeneration when the store already has an entry for this
+            // chunk — that means `apply_pending_snapshot` restored saved or
+            // session-preserved placements, and worldgen would clobber them.
             let mushroom_data = {
-                let placements_opt = {
+                let (placements_opt, from_save) = {
                     let s = store.read().unwrap();
-                    s.density_fields.get(&chunk).map(|density| {
-                        let coord = voxel_core::chunk::ChunkCoord::new(chunk.0, chunk.1, chunk.2);
-                        voxel_gen::compute_mushrooms(coord, density, &cfg)
-                    })
+                    if let Some(saved) = s.mushroom_placements.get(&chunk) {
+                        (Some(saved.clone()), true)
+                    } else {
+                        let p = s.density_fields.get(&chunk).map(|density| {
+                            let coord = voxel_core::chunk::ChunkCoord::new(chunk.0, chunk.1, chunk.2);
+                            voxel_gen::compute_mushrooms(coord, density, &cfg)
+                        });
+                        (p, false)
+                    }
                 };
                 if let Some(placements) = placements_opt {
                     let ue_mushrooms = crate::convert::convert_mushrooms_to_ue(&placements, cfg.voxel_scale(), world_scale);
-                    let mut sw = store.write().unwrap();
-                    sw.mushroom_placements.insert(chunk, placements);
+                    if !from_save {
+                        let mut sw = store.write().unwrap();
+                        sw.mushroom_placements.insert(chunk, placements);
+                    }
                     ue_mushrooms
                 } else {
                     Vec::new()
@@ -3020,16 +3030,17 @@ fn handle_request(
                 {
                     let mut s = store.write().unwrap();
                     s.last_sent_mesh_hash.remove(&chunk_key);
+                    s.modification_tracker.mark_dirty(chunk_key);
                 }
                 let dirty = [chunk_key];
                 batched_seam_pass_mine(&dirty, &cfg, store, result_tx, fluid_event_tx, world_scale);
             }
         }
-        WorkerRequest::BrushPlaceMushroomSphere { center_rust, radius, density, kind, seed } => {
+        WorkerRequest::BrushPlaceMushroomSphere { center_rust, radius, density, clustering, kind, seed } => {
             let cfg = config.read().unwrap().clone();
             let mut s = store.write().unwrap();
             let affected = crate::brushes::place_mushrooms_brush_sphere(
-                &mut s, center_rust, kind, radius, density, seed, &cfg,
+                &mut s, center_rust, kind, radius, density, clustering, seed, &cfg,
             );
             drop(s);
 
@@ -3039,6 +3050,32 @@ fn handle_request(
                     for key in &affected {
                         s.last_sent_mesh_hash.remove(key);
                     }
+                    // Mark dirty so collect_save_data picks up the new
+                    // mushroom_placements for these chunks (mushroom edits
+                    // don't otherwise touch the density dirty tracker).
+                    let dirty_vec: Vec<(i32, i32, i32)> = affected.iter().copied().collect();
+                    s.modification_tracker.mark_dirty_many(&dirty_vec);
+                }
+                let dirty: Vec<(i32, i32, i32)> = affected.into_iter().collect();
+                batched_seam_pass_mine(&dirty, &cfg, store, result_tx, fluid_event_tx, world_scale);
+            }
+        }
+        WorkerRequest::BrushEraseMushroomSphere { center_rust, radius, kind_filter } => {
+            let cfg = config.read().unwrap().clone();
+            let mut s = store.write().unwrap();
+            let affected = crate::brushes::erase_mushrooms_brush_sphere(
+                &mut s, center_rust, kind_filter, radius, &cfg,
+            );
+            drop(s);
+
+            if !affected.is_empty() {
+                {
+                    let mut s = store.write().unwrap();
+                    for key in &affected {
+                        s.last_sent_mesh_hash.remove(key);
+                    }
+                    let dirty_vec: Vec<(i32, i32, i32)> = affected.iter().copied().collect();
+                    s.modification_tracker.mark_dirty_many(&dirty_vec);
                 }
                 let dirty: Vec<(i32, i32, i32)> = affected.into_iter().collect();
                 batched_seam_pass_mine(&dirty, &cfg, store, result_tx, fluid_event_tx, world_scale);
@@ -5059,9 +5096,8 @@ fn batched_seam_pass_inner(
 // the shared `result_tx` — intercepted in engine.rs `poll_result` and stashed
 // into `path_results` keyed by request_id.
 
-/// Cell factor for the path planner — one pathing cell covers a 2×2×2 voxel
-/// block. See `pathing.rs::ChunkStoreGrid`.
-const PATH_CELL_FACTOR: i32 = 2;
+/// Cell factor re-export — see `crate::pathing::PATH_CELL_FACTOR`.
+use crate::pathing::PATH_CELL_FACTOR;
 
 pub fn path_worker_loop(
     shutdown: Arc<AtomicBool>,
@@ -5069,6 +5105,7 @@ pub fn path_worker_loop(
     result_tx: Sender<WorkerResult>,
     store: Arc<RwLock<ChunkStore>>,
     config: Arc<RwLock<GenerationConfig>>,
+    occupied_cells: Arc<RwLock<std::collections::HashSet<(i32, i32, i32)>>>,
     world_scale: f32,
 ) {
     while !shutdown.load(Ordering::Relaxed) {
@@ -5076,7 +5113,7 @@ pub fn path_worker_loop(
         // mine/generate workers so neither gets head-of-line blocked.
         match path_rx.recv_timeout(Duration::from_millis(50)) {
             Ok(WorkerRequest::ComputePath { request }) => {
-                handle_path_request(request, &result_tx, &store, &config, world_scale);
+                handle_path_request(request, &result_tx, &store, &config, &occupied_cells, world_scale);
             }
             // path_rx should only ever carry ComputePath; ignore anything else.
             Ok(_other) => {}
@@ -5091,6 +5128,7 @@ fn handle_path_request(
     result_tx: &Sender<WorkerResult>,
     store: &Arc<RwLock<ChunkStore>>,
     config: &Arc<RwLock<GenerationConfig>>,
+    occupied_cells: &Arc<RwLock<std::collections::HashSet<(i32, i32, i32)>>>,
     world_scale: f32,
 ) {
     let request_id = request.request_id;
@@ -5123,14 +5161,37 @@ fn handle_path_request(
         }
     };
 
+    // Snapshot the occupancy set for this request. Hold the lock across A*
+    // (cheap read lock; multiple path workers can read concurrently). The
+    // alternative — cloning the set to drop the lock — would marshal up to
+    // 50 (i32,i32,i32) tuples per request which is more expensive than the
+    // tiny contention from a held read lock.
+    let occupied_guard = occupied_cells.read().ok();
+    let occupied_ref = occupied_guard.as_deref();
+
+    // Compute the requester's pathing cell so the grid can self-exclude.
+    // Same math as `to_path_request` below but inline so we don't run it
+    // twice.
+    let cf = PATH_CELL_FACTOR as f32;
+    let requester_cell = glam::IVec3::new(
+        (request.from_voxel.x / cf).floor() as i32,
+        (request.from_voxel.y / cf).floor() as i32,
+        (request.from_voxel.z / cf).floor() as i32,
+    );
+
     let grid = crate::pathing::ChunkStoreGrid {
         store: &store_guard,
         chunk_size,
         cell_factor: PATH_CELL_FACTOR,
+        occupied_cells: occupied_ref,
+        requester_cell: Some(requester_cell),
     };
 
     let (path_req, _mode) = crate::pathing::to_path_request(&request, PATH_CELL_FACTOR);
     let outcome = voxel_path::compute_path(&grid, path_req);
+
+    // Drop the occupancy guard alongside the store guard below.
+    drop(occupied_guard);
 
     // Drop the store guard before doing the UE conversion — keeps the read
     // lock window as short as possible.

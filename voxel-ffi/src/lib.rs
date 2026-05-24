@@ -22,3 +22,4 @@ pub mod pathing;
 pub mod crystal_anchors;
 pub mod poi_scanner;
 pub mod poi_tracker;
+pub mod surface_probe;

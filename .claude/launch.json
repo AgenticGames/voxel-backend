@@ -6,6 +6,12 @@
       "runtimeExecutable": "C:/Users/Shazbot/.cargo/bin/cargo.exe",
       "runtimeArgs": ["run", "-p", "voxel-viewer", "--release"],
       "port": 8080
+    },
+    {
+      "name": "reticle-design",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "http.server", "8765", "--directory", ".claude/preview/reticle"],
+      "port": 8765
     }
   ]
 }

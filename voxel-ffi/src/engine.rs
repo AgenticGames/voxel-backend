@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -116,6 +117,17 @@ pub struct VoxelEngine {
     /// Server-side monotonic request id allocator so callers don't have to.
     next_path_request_id: Arc<AtomicU32>,
 
+    /// Cross-species avoidance layer. Pathing-cell coordinates currently
+    /// occupied by AI agents (spiders, wasps, creatures). Path workers read
+    /// this when constructing ChunkStoreGrid; cells in the set are treated
+    /// as obstacles by A* — so spiders/wasps route AROUND each other instead
+    /// of phasing through. UE pushes a fresh snapshot ~10Hz from
+    /// `UVoxelWorldSubsystem::Tick` via `voxel_path_set_obstacle_cells`.
+    /// The requester's own cell is excluded at grid-construction time so the
+    /// agent can start its search from inside the (temporarily marked-occupied)
+    /// cell it currently stands in.
+    pub occupied_cells: Arc<RwLock<HashSet<(i32, i32, i32)>>>,
+
     // ─── Crystal Anchors (Crystal Growth Bridge feature) ─────
     /// Pending and grown crystal-anchor pairs. Mutex is fine: anchor ops
     /// are rare (player input + once-per-sleep) and never contended.
@@ -218,6 +230,11 @@ impl VoxelEngine {
         // POI tracker — long-running background scorer.
         let poi_tracker = crate::poi_tracker::new_tracker();
 
+        // Cross-species avoidance — shared occupancy set the path workers
+        // read at grid-construction time. UE pushes fresh snapshots ~10Hz.
+        let occupied_cells: Arc<RwLock<HashSet<(i32, i32, i32)>>> =
+            Arc::new(RwLock::new(HashSet::new()));
+
         let mut workers = Vec::with_capacity(num_workers);
         for worker_id in 0..num_workers {
             let shutdown = Arc::clone(&shutdown);
@@ -311,17 +328,26 @@ impl VoxelEngine {
             workers.push(handle);
         }
 
-        // ─── Path worker — one dedicated thread reads from path_rx, runs A*,
-        // sends `PathComputed` via the shared result_tx (intercepted in
-        // `poll_result`). Same catch_unwind respawn pattern as the main pool.
-        {
+        // ─── Path workers — multiple dedicated threads share `path_rx` (crossbeam
+        // receivers are clonable; each spawned thread holds its own handle and
+        // races to receive each request). A* is pure (no shared mutable state),
+        // and the path workers take only short read locks on the ChunkStore so
+        // contention stays light. With NUM_PATH_WORKERS=3 we comfortably handle
+        // demo-density bursts (~50 enemies all requesting at wave start) where
+        // a single-threaded worker showed visible tail-latency at ~1-3s for the
+        // last few requests. Each worker uses the same catch_unwind respawn
+        // pattern as the main pool.
+        const NUM_PATH_WORKERS: u32 = 3;
+        for path_worker_id in 0..NUM_PATH_WORKERS {
             let shutdown = Arc::clone(&shutdown);
             let path_rx = path_rx.clone();
             let result_tx = result_tx.clone();
             let store = Arc::clone(&store);
             let config_arc = Arc::clone(&config);
+            let occupied_arc = Arc::clone(&occupied_cells);
             let world_scale_path = world_scale;
-            let builder = thread::Builder::new().name("voxel-path-worker".to_string());
+            let builder = thread::Builder::new()
+                .name(format!("voxel-path-worker-{}", path_worker_id));
             let handle = builder
                 .spawn(move || {
                     const MAX_RESPAWNS: u32 = 16;
@@ -334,6 +360,7 @@ impl VoxelEngine {
                             let result_tx = result_tx.clone();
                             let store = Arc::clone(&store);
                             let config_arc = Arc::clone(&config_arc);
+                            let occupied_arc = Arc::clone(&occupied_arc);
                             std::panic::catch_unwind(AssertUnwindSafe(move || {
                                 path_worker_loop(
                                     shutdown,
@@ -341,6 +368,7 @@ impl VoxelEngine {
                                     result_tx,
                                     store,
                                     config_arc,
+                                    occupied_arc,
                                     world_scale_path,
                                 );
                             }))
@@ -354,13 +382,14 @@ impl VoxelEngine {
                                 respawn += 1;
                                 let msg = crate::panic_log::payload_string(&*payload);
                                 crate::panic_log::note(&format!(
-                                    "path-worker caught panic (respawn {}/{}): {}",
-                                    respawn, MAX_RESPAWNS, msg
+                                    "path-worker-{} caught panic (respawn {}/{}): {}",
+                                    path_worker_id, respawn, MAX_RESPAWNS, msg
                                 ));
                                 if respawn >= MAX_RESPAWNS {
-                                    crate::panic_log::note(
-                                        "path-worker GIVING UP after respawn limit",
-                                    );
+                                    crate::panic_log::note(&format!(
+                                        "path-worker-{} GIVING UP after respawn limit",
+                                        path_worker_id
+                                    ));
                                     break;
                                 }
                                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -453,6 +482,7 @@ impl VoxelEngine {
             path_tx,
             path_results: Arc::new(Mutex::new(PathResultStore::default())),
             next_path_request_id: Arc::new(AtomicU32::new(1)),
+            occupied_cells: Arc::clone(&occupied_cells),
             crystal_anchors,
             poi_tracker,
             world_scale,
@@ -1270,6 +1300,83 @@ impl VoxelEngine {
             .unwrap_or(0.0)
     }
 
+    /// Probe the density field at a UE world point. Used by spider-nest /
+    /// wasp-hive placement validators — see [`crate::surface_probe`].
+    ///
+    /// Returns the probe result with normal + clearance translated back to
+    /// UE world space. `normal_hint_ue` is the caller's surface-normal hint
+    /// (used only as a fallback when the local gradient is flat); pass
+    /// `(0, 0, 1)` (UE up) if no hint is available.
+    pub fn query_surface(
+        &self,
+        ue_x: f32, ue_y: f32, ue_z: f32,
+        hint_ue_x: f32, hint_ue_y: f32, hint_ue_z: f32,
+    ) -> Option<crate::surface_probe::ProbeResult> {
+        use crate::convert::{from_ue_world_pos, from_ue_normal};
+        use crate::surface_probe::probe_surface;
+
+        let chunk_size = self.chunk_size();
+        let world_scale = self.get_world_scale();
+
+        let rust_pos = from_ue_world_pos(ue_x, ue_y, ue_z, world_scale);
+        let normal_hint_rust = from_ue_normal(hint_ue_x, hint_ue_y, hint_ue_z);
+
+        let store = self.store.try_read().ok()?;
+        Some(probe_surface(&store, rust_pos, chunk_size, normal_hint_rust))
+    }
+
+    /// Synchronous "is a path possible from A to B" check. Runs A* under a
+    /// read lock on the live ChunkStore and returns the path status without
+    /// the async request/poll dance. Intended for placement validation
+    /// (wasp hive flight-path check) where the caller is OK paying a brief
+    /// blocking cost — placement is off the hot path (~1 query per cluster
+    /// spawn). For AI agents, use the async `voxel_path_request` flow.
+    ///
+    /// Returns the `PathStatus` raw u8 (matches `voxel_path::PathStatus`):
+    /// 0 = Success, 1 = NoPath, 2 = MaxNodesReached, 3 = PartiallyUnloaded,
+    /// 4 = InvalidEndpoint. None when the store lock couldn't be acquired.
+    pub fn query_path_exists(
+        &self,
+        from_ue_x: f32, from_ue_y: f32, from_ue_z: f32,
+        to_ue_x: f32, to_ue_y: f32, to_ue_z: f32,
+        agent_radius_ue: f32,
+        movement_mode: u8,
+        max_nodes: u32,
+    ) -> Option<u8> {
+        let chunk_size = self.chunk_size();
+        let world_scale = self.get_world_scale();
+
+        let internal = crate::pathing::build_request_from_ue(
+            0, // request_id unused for sync queries
+            from_ue_x, from_ue_y, from_ue_z,
+            to_ue_x, to_ue_y, to_ue_z,
+            agent_radius_ue,
+            movement_mode,
+            if max_nodes == 0 { 10_000 } else { max_nodes },
+            world_scale,
+        );
+
+        let store = self.store.try_read().ok()?;
+        // Sync query — skip the cross-species occupancy layer. This path is
+        // only used by `voxel_query_path_exists` which is a boolean reachability
+        // check, not actual AI routing; including dynamic obstacles would make
+        // the answer flicker as agents move and bear no relation to whether
+        // the static geometry permits a route.
+        let grid = crate::pathing::ChunkStoreGrid {
+            store: &store,
+            chunk_size,
+            cell_factor: crate::pathing::PATH_CELL_FACTOR,
+            occupied_cells: None,
+            requester_cell: None,
+        };
+        let (path_req, _mode) = crate::pathing::to_path_request(&internal, crate::pathing::PATH_CELL_FACTOR);
+        // smooth = false — we only care whether a path exists; we don't
+        // need the post-processed waypoint list.
+        let path_req = voxel_path::PathRequest { smooth: false, ..path_req };
+        let outcome = voxel_path::compute_path(&grid, path_req);
+        Some(outcome.status as u8)
+    }
+
     /// Queue a support placement request.
     pub fn request_place_support(&self, world_x: i32, world_y: i32, world_z: i32, support_type: u8) -> u32 {
         match self.mine_tx.try_send(WorkerRequest::PlaceSupport {
@@ -1878,9 +1985,9 @@ impl VoxelEngine {
         }
     }
 
-    /// Sphere-area mushroom brush — scatters mushrooms of `kind` within a
-    /// radius using Bernoulli sampling. `request.radius` is UE units;
-    /// `request.density` is the per-candidate accept probability.
+    /// Sphere-area mushroom brush — paints OR erases depending on `request.op`.
+    /// `request.radius` is UE units; `request.density` is per-candidate accept
+    /// probability; `request.clustering` shapes the local distribution.
     pub fn request_brush_place_mushroom_sphere(
         &self,
         request: crate::types::FfiBrushPlaceMushroomSphereRequest,
@@ -1890,13 +1997,23 @@ impl VoxelEngine {
             request.world_x, request.world_y, request.world_z, scale,
         );
         let radius_voxels = (request.radius / scale).max(0.5);
-        match self.mine_tx.try_send(WorkerRequest::BrushPlaceMushroomSphere {
-            center_rust,
-            radius: radius_voxels,
-            density: request.density.clamp(0.0, 1.0),
-            kind: request.kind,
-            seed: request.seed,
-        }) {
+        let msg = if request.op == 1 {
+            WorkerRequest::BrushEraseMushroomSphere {
+                center_rust,
+                radius: radius_voxels,
+                kind_filter: request.kind,
+            }
+        } else {
+            WorkerRequest::BrushPlaceMushroomSphere {
+                center_rust,
+                radius: radius_voxels,
+                density: request.density.clamp(0.0, 1.0),
+                clustering: request.clustering.clamp(0.0, 1.0),
+                kind: request.kind,
+                seed: request.seed,
+            }
+        };
+        match self.mine_tx.try_send(msg) {
             Ok(()) => 1,
             Err(_) => 0,
         }

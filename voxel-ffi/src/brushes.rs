@@ -25,6 +25,10 @@ use crate::types::ConvertedMesh;
 /// so the operation can be reversed exactly via `apply_to`.
 pub struct UndoStroke {
     pub snapshots: Vec<((i32, i32, i32), ChunkSnapshot)>,
+    /// Pre-state mushroom placements per chunk (for mushroom brushes that
+    /// don't modify density). Empty when the stroke only touched density.
+    /// On undo, each chunk's `mushroom_placements` entry is replaced wholesale.
+    pub mushroom_snapshots: Vec<((i32, i32, i32), Vec<voxel_gen::MushroomPlacement>)>,
 }
 
 /// Capture pre-state snapshots for any density-loaded chunks in `[lo..=hi]`,
@@ -54,7 +58,26 @@ fn capture_undo_for_range(
     if snapshots.is_empty() {
         return;
     }
-    store.undo_stack.push_back(UndoStroke { snapshots });
+    store.undo_stack.push_back(UndoStroke { snapshots, mushroom_snapshots: Vec::new() });
+    while store.undo_stack.len() > store.undo_max_depth {
+        store.undo_stack.pop_front();
+    }
+}
+
+/// Capture pre-state mushroom placements for the given chunks and push a
+/// mushroom-only undo stroke. Used by the mushroom paint/erase brushes which
+/// don't modify density.
+fn capture_mushroom_undo(store: &mut ChunkStore, keys: &[(i32, i32, i32)]) {
+    if keys.is_empty() { return; }
+    let mut snaps = Vec::with_capacity(keys.len());
+    for &k in keys {
+        let prior = store.mushroom_placements.get(&k).cloned().unwrap_or_default();
+        snaps.push((k, prior));
+    }
+    store.undo_stack.push_back(UndoStroke {
+        snapshots: Vec::new(),
+        mushroom_snapshots: snaps,
+    });
     while store.undo_stack.len() > store.undo_max_depth {
         store.undo_stack.pop_front();
     }
@@ -1978,11 +2001,11 @@ pub fn apply_undo(
     world_scale: f32,
 ) -> Option<BrushOutcome> {
     let stroke = store.undo_stack.pop_back()?;
-    if stroke.snapshots.is_empty() {
+    if stroke.snapshots.is_empty() && stroke.mushroom_snapshots.is_empty() {
         return None;
     }
     let mut dirty_chunks: Vec<((i32, i32, i32), usize, usize, usize, usize, usize, usize)> =
-        Vec::with_capacity(stroke.snapshots.len());
+        Vec::with_capacity(stroke.snapshots.len() + stroke.mushroom_snapshots.len());
 
     for (key, snapshot) in &stroke.snapshots {
         if let Some(density) = store.density_fields.get_mut(key) {
@@ -1996,6 +2019,27 @@ pub fn apply_undo(
         // overlay back to empty, which is the pre-state if it was empty before).
         if let Some(sf) = store.stress_fields.get_mut(key) {
             snapshot.apply_painted_stress_to(sf);
+        }
+    }
+
+    // Restore mushroom placements (mushroom-paint/erase brush undo). The
+    // density restore loop above handles dirty-rect entries for density
+    // changes; mushroom-only strokes need their chunks added too so the
+    // remesh path re-emits mushroom_data to UE.
+    for (key, prior) in &stroke.mushroom_snapshots {
+        if prior.is_empty() {
+            store.mushroom_placements.remove(key);
+        } else {
+            store.mushroom_placements.insert(*key, prior.clone());
+        }
+        // Force a re-emit by clearing the last-sent mesh hash; the seam
+        // pass will rebuild + ship new mushroom_data.
+        store.last_sent_mesh_hash.remove(key);
+        if !dirty_chunks.iter().any(|(k, ..)| k == key) {
+            if let Some(density) = store.density_fields.get(key) {
+                let s_max = density.size - 1;
+                dirty_chunks.push((*key, 0, 0, 0, s_max, s_max, s_max));
+            }
         }
     }
 
@@ -2699,6 +2743,7 @@ pub fn place_mushrooms_brush_sphere(
     kind: u8,
     radius_voxels: f32,
     density: f32,
+    clustering: f32,
     seed: u64,
     config: &GenerationConfig,
 ) -> std::collections::HashSet<(i32, i32, i32)> {
@@ -2710,6 +2755,43 @@ pub fn place_mushrooms_brush_sphere(
     if density <= 0.0 || radius_voxels <= 0.0 {
         return affected;
     }
+
+    // Pre-scan affected chunks for undo snapshot. Capture every chunk the
+    // sphere overlaps that has loaded density data, so undo can restore
+    // even when no mushrooms actually got placed in some of them.
+    let undo_keys: Vec<(i32, i32, i32)> = {
+        let chunk_size = config.chunk_size as i32;
+        let cx0 = ((center_rust.x - radius_voxels).floor() as i32).div_euclid(chunk_size);
+        let cy0 = ((center_rust.y - radius_voxels).floor() as i32).div_euclid(chunk_size);
+        let cz0 = ((center_rust.z - radius_voxels).floor() as i32).div_euclid(chunk_size);
+        let cx1 = ((center_rust.x + radius_voxels).ceil() as i32).div_euclid(chunk_size);
+        let cy1 = ((center_rust.y + radius_voxels).ceil() as i32).div_euclid(chunk_size);
+        let cz1 = ((center_rust.z + radius_voxels).ceil() as i32).div_euclid(chunk_size);
+        let mut keys = Vec::new();
+        for cz in cz0..=cz1 { for cy in cy0..=cy1 { for cx in cx0..=cx1 {
+            if store.density_fields.contains_key(&(cx, cy, cz)) {
+                keys.push((cx, cy, cz));
+            }
+        }}}
+        keys
+    };
+    capture_mushroom_undo(store, &undo_keys);
+
+    // Clustering: sample a local Simplex noise and gate Bernoulli by it.
+    // clustering=0 → uniform (gate=1 everywhere). clustering=1 → tight pockets.
+    // Frequency rises with clustering (smaller patches), threshold rises with
+    // clustering (more rejection outside patches). Compensate density inside
+    // accepted regions so total count stays roughly comparable to clustering=0.
+    let clustering = clustering.clamp(0.0, 1.0);
+    let noise_freq = 0.04 + clustering as f64 * 0.18;   // 0.04..0.22 per voxel
+    let noise_thresh = -1.0 + clustering * 1.5;          // -1.0..0.5
+    let scatter = voxel_noise::simplex::Simplex3D::new(seed);
+    use voxel_noise::NoiseSource;
+    // Approximate fraction of space passing the threshold for a uniform-ish
+    // noise distribution. Used to amplify density so the total count
+    // doesn't collapse as clustering rises.
+    let pass_frac = ((1.0 - noise_thresh) * 0.5).clamp(0.05, 1.0);
+    let density_eff = if clustering > 0.0 { (density / pass_frac).min(1.0) } else { density };
 
     let radius = radius_voxels.max(0.5);
     let radius2 = radius * radius;
@@ -2798,7 +2880,20 @@ pub fn place_mushrooms_brush_sphere(
                     }
                 };
 
-                if next_unit() >= density { continue; }
+                // Clustering noise gate. clustering=0 → gate=1 (always pass).
+                let gate = if clustering > 0.0 {
+                    let n = scatter.sample(
+                        (wx as f64 + 0.5) * noise_freq,
+                        (wy as f64 + 0.5) * noise_freq,
+                        (wz as f64 + 0.5) * noise_freq,
+                    ) as f32;
+                    if n < noise_thresh { continue; }
+                    // Smooth ramp from threshold to 1.0 so cluster edges feather.
+                    ((n - noise_thresh) / (1.0 - noise_thresh)).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+                if next_unit() >= density_eff * gate { continue; }
 
                 // Sub-voxel jitter on the surface tangent plane (max ±0.4 voxels)
                 let ja = (next_unit() - 0.5) * 0.8;
@@ -2860,6 +2955,71 @@ pub fn place_mushrooms_brush_sphere(
             }
         }
     }
+
+    affected
+}
+
+/// Erase mushrooms within a sphere. If `kind == 255`, removes every kind
+/// inside the sphere; otherwise filters to the specified kind only. Captures
+/// an undo snapshot before mutation. Returns the set of chunks where at
+/// least one placement was removed.
+pub fn erase_mushrooms_brush_sphere(
+    store: &mut ChunkStore,
+    center_rust: Vec3,
+    kind_filter: u8, // 255 = any kind
+    radius_voxels: f32,
+    config: &GenerationConfig,
+) -> std::collections::HashSet<(i32, i32, i32)> {
+    let mut affected = std::collections::HashSet::new();
+    if radius_voxels <= 0.0 {
+        return affected;
+    }
+    let radius2 = radius_voxels * radius_voxels;
+
+    let chunk_size = config.chunk_size as i32;
+    let cx0 = ((center_rust.x - radius_voxels).floor() as i32).div_euclid(chunk_size);
+    let cy0 = ((center_rust.y - radius_voxels).floor() as i32).div_euclid(chunk_size);
+    let cz0 = ((center_rust.z - radius_voxels).floor() as i32).div_euclid(chunk_size);
+    let cx1 = ((center_rust.x + radius_voxels).ceil() as i32).div_euclid(chunk_size);
+    let cy1 = ((center_rust.y + radius_voxels).ceil() as i32).div_euclid(chunk_size);
+    let cz1 = ((center_rust.z + radius_voxels).ceil() as i32).div_euclid(chunk_size);
+
+    // Snapshot every overlapping chunk that has loaded density (so undo
+    // can put back even chunks where nothing got removed — keeps undo idempotent).
+    let mut undo_keys: Vec<(i32, i32, i32)> = Vec::new();
+    for cz in cz0..=cz1 { for cy in cy0..=cy1 { for cx in cx0..=cx1 {
+        if store.density_fields.contains_key(&(cx, cy, cz)) {
+            undo_keys.push((cx, cy, cz));
+        }
+    }}}
+    capture_mushroom_undo(store, &undo_keys);
+
+    for cz in cz0..=cz1 { for cy in cy0..=cy1 { for cx in cx0..=cx1 {
+        let key = (cx, cy, cz);
+        let Some(list) = store.mushroom_placements.get_mut(&key) else { continue };
+        let chunk_origin_x = (cx * chunk_size) as f32;
+        let chunk_origin_y = (cy * chunk_size) as f32;
+        let chunk_origin_z = (cz * chunk_size) as f32;
+        let before = list.len();
+        list.retain(|p| {
+            // Convert placement back to world voxel space for the sphere check.
+            let wx = chunk_origin_x + p.x;
+            let wy = chunk_origin_y + p.y;
+            let wz = chunk_origin_z + p.z;
+            let dx = wx - center_rust.x;
+            let dy = wy - center_rust.y;
+            let dz = wz - center_rust.z;
+            let in_sphere = dx * dx + dy * dy + dz * dz <= radius2;
+            let kind_match = kind_filter == 255 || (p.kind as u8) == kind_filter;
+            !(in_sphere && kind_match) // keep if NOT erased
+        });
+        if list.len() != before {
+            affected.insert(key);
+            if list.is_empty() {
+                store.mushroom_placements.remove(&key);
+            }
+        }
+    }}}
 
     affected
 }

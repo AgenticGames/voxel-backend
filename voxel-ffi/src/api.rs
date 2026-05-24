@@ -905,6 +905,108 @@ pub unsafe extern "C" fn voxel_query_stress_at(
     )
 }
 
+/// Voxel-aware surface probe at a UE world point. Used by spider-nest /
+/// wasp-hive placement validators to confirm a candidate is anchored to a
+/// real surface of the right kind with enough cavity room.
+///
+/// `hint_*` is the caller's surface-normal hint in UE space (e.g. the
+/// hit normal of an Unreal line trace); pass `(0, 0, 1)` if no hint is
+/// available. The hint is used only as a fallback when the local density
+/// gradient is flat (open air or solid interior).
+///
+/// Returns 1 on success (out_probe written), 0 if the engine pointer is
+/// null, the out pointer is null, or the store lock couldn't be acquired.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_query_surface(
+    engine: *mut c_void,
+    world_x: f32, world_y: f32, world_z: f32,
+    hint_x: f32, hint_y: f32, hint_z: f32,
+    out_probe: *mut FfiSurfaceProbe,
+) -> u32 {
+    if engine.is_null() || out_probe.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let probe = match engine.query_surface(world_x, world_y, world_z, hint_x, hint_y, hint_z) {
+        Some(p) => p,
+        None => return 0,
+    };
+    let world_scale = engine.get_world_scale();
+
+    // Translate the Rust-space normal back to UE space using the same
+    // swap-and-negate as `convert::convert_crystals_to_ue` (Rust nx,ny,nz
+    // -> UE nx, -nz, ny).
+    let normal_ue_x = probe.normal.x;
+    let normal_ue_y = -probe.normal.z;
+    let normal_ue_z = probe.normal.y;
+
+    // Per-axis clearance is in voxel units along Rust axes (+X,-X,+Y,-Y,+Z,-Z).
+    // UE axis mapping for clearance directions:
+    //   UE +X  ⇔ Rust +X  → clearance_rust[0]
+    //   UE -X  ⇔ Rust -X  → clearance_rust[1]
+    //   UE +Y  ⇔ Rust -Z  → clearance_rust[5]
+    //   UE -Y  ⇔ Rust +Z  → clearance_rust[4]
+    //   UE +Z  ⇔ Rust +Y  → clearance_rust[2]
+    //   UE -Z  ⇔ Rust -Y  → clearance_rust[3]
+    let cr = &probe.clearance_rust;
+    let clearance_ue = [
+        cr[0] * world_scale, // +X
+        cr[1] * world_scale, // -X
+        cr[5] * world_scale, // +Y
+        cr[4] * world_scale, // -Y
+        cr[2] * world_scale, // +Z
+        cr[3] * world_scale, // -Z
+    ];
+
+    *out_probe = FfiSurfaceProbe {
+        kind: probe.kind as u8,
+        _padding: [0; 3],
+        normal_x: normal_ue_x,
+        normal_y: normal_ue_y,
+        normal_z: normal_ue_z,
+        cavity_radius: probe.cavity_radius * world_scale,
+        clearance_ue,
+    };
+    1
+}
+
+/// Synchronous "is a path possible from A to B" check. Used by the wasp
+/// hive placement validator to confirm a hive can actually deploy wasps
+/// to nearby cavity-center POIs. Runs A* under a brief store read lock
+/// (~5-50 ms typical for 10_000-node budget); acceptable here because
+/// placement validation is off the hot path (~once per cluster spawn).
+///
+/// `movement_mode`: 0 = Flying, 1 = Walking, 2 = Surface.
+/// `max_nodes`: 0 = use default (10_000).
+///
+/// Returns the raw `voxel_path::PathStatus` u8:
+///   0 = Success, 1 = NoPath, 2 = MaxNodesReached,
+///   3 = PartiallyUnloaded, 4 = InvalidEndpoint.
+/// Returns 1 (NoPath) on engine-pointer null or store lock contention.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_query_path_exists(
+    engine: *mut c_void,
+    from_x: f32, from_y: f32, from_z: f32,
+    to_x: f32, to_y: f32, to_z: f32,
+    agent_radius_ue: f32,
+    movement_mode: u8,
+    max_nodes: u32,
+) -> u8 {
+    if engine.is_null() {
+        return 1; // NoPath
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine
+        .query_path_exists(
+            from_x, from_y, from_z,
+            to_x, to_y, to_z,
+            agent_radius_ue,
+            movement_mode,
+            max_nodes,
+        )
+        .unwrap_or(1)
+}
+
 /// Place a support structure at a UE world position.
 /// support_type: 1=SlateStrut, 2=GraniteStrut, 3=LimestoneStrut, 4=CopperStrut,
 ///               5=IronStrut, 6=SteelStrut, 7=CrystalStrut.
@@ -3027,6 +3129,56 @@ pub unsafe extern "C" fn voxel_path_free(
     engine.free_path_nodes(r.nodes, r.node_count);
     r.nodes = std::ptr::null_mut();
     r.node_count = 0;
+}
+
+/// Cross-species avoidance: replace the engine's obstacle-cell snapshot.
+///
+/// `cells` is a packed array of `(ue_x, ue_y, ue_z)` floats — one f32 triple
+/// per agent position, `count` triples total (so the buffer is `count * 3`
+/// f32s long). UE-space positions are converted to Rust pathing-cell coords
+/// internally and stored in the engine's `occupied_cells` set. Subsequent
+/// path requests treat those cells as obstacles (with self-exclusion at the
+/// requester's own cell).
+///
+/// Call once per tick from UE (or whatever cadence makes sense — staleness
+/// just means agents occasionally route through where a peer was a few frames
+/// ago). Idempotent on null engine / zero count (clears the set).
+#[no_mangle]
+pub unsafe extern "C" fn voxel_path_set_obstacle_cells(
+    engine: *mut c_void,
+    cells: *const f32,
+    count: u32,
+) {
+    if engine.is_null() {
+        return;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+
+    let mut new_set: std::collections::HashSet<(i32, i32, i32)> = std::collections::HashSet::with_capacity(count as usize);
+    if !cells.is_null() && count > 0 {
+        let cf = crate::pathing::PATH_CELL_FACTOR as f32;
+        let world_scale = engine.get_world_scale();
+        let slice = std::slice::from_raw_parts(cells, (count * 3) as usize);
+        for i in 0..count as usize {
+            let ue_x = slice[i * 3];
+            let ue_y = slice[i * 3 + 1];
+            let ue_z = slice[i * 3 + 2];
+            // UE → voxel → cell.
+            let voxel = crate::convert::from_ue_world_pos(ue_x, ue_y, ue_z, world_scale);
+            let cell = (
+                (voxel.x / cf).floor() as i32,
+                (voxel.y / cf).floor() as i32,
+                (voxel.z / cf).floor() as i32,
+            );
+            new_set.insert(cell);
+        }
+    }
+
+    // Replace the whole set under a write lock. Write lock window is brief
+    // — only the assignment itself, no allocation while held.
+    if let Ok(mut guard) = engine.occupied_cells.write() {
+        *guard = new_set;
+    }
 }
 
 // ─── Crystal Growth Bridge (Crystal Anchor) FFI ─────────────────────────────

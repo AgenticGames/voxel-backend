@@ -31,7 +31,8 @@ use voxel_fluid::{FluidEvent, FluidSnapshot};
 use voxel_gen::config::GenerationConfig;
 
 use crate::poi_scanner::{
-    count_fluid_voxels, count_high_stress_voxels, score_from_votes, PoiKind,
+    count_fluid_voxels, count_high_stress_voxels, count_topology_votes_cross_chunk,
+    score_from_votes, PoiKind, TopologyVotes,
 };
 use crate::store::ChunkStore;
 
@@ -78,6 +79,12 @@ pub struct ChunkPoiScore {
     pub best_score: f32,
     /// Seconds since tracker start (`tracker.elapsed_secs()`).
     pub last_scored_secs: u64,
+    /// Local voxel-coord offset *inside* the chunk where the dominant
+    /// kind's feature centroid sits. Read via
+    /// `TopologyVotes::centroid_for` for topology kinds; for fluid /
+    /// stress / bridge kinds this defaults to chunk-center (the signal
+    /// is diffuse, so anchoring to the center is the right choice).
+    pub feature_offset_in_chunk: glam::IVec3,
 }
 
 pub struct PoiTracker {
@@ -204,22 +211,45 @@ pub fn poi_tracker_loop(
 
         let now_secs = tracker.elapsed_secs();
 
-        // ── Step 4: batched stress read under one lock ──
-        // Holding the lock for the whole budget (~16 chunks × stress-count =
-        // ~1ms total) is fine — RwLock is read-shared so other readers don't
-        // block. The sleep handler's write would wait briefly, but its work
-        // takes seconds so 1-2ms is rounding error.
-        let stress_votes: Vec<usize> = match store.read() {
+        // ── Step 4: batched stress + topology read under one lock ──
+        // Holding the lock for the whole budget (~16 chunks) is fine — RwLock
+        // is read-shared so other readers don't block. The sleep handler's
+        // write would wait briefly, but its work takes seconds so a few ms is
+        // rounding error. Topology vote counting walks the density field
+        // (~size^3 voxels per chunk) so it's heavier than stress; budget is
+        // still well under a single tick.
+        //
+        // Pair-up: (stress_count, topology_votes). TopologyVotes carries
+        // both counts AND voxel-position sums so we can derive a feature
+        // centroid per kind after the score pass below.
+        // Chunk size needed both for the cross-chunk topology scan and the
+        // centroid-from-local-offset math below. Read once per tick.
+        let chunk_size = match _config.read() {
+            Ok(cfg) => cfg.chunk_size,
+            Err(_) => 16,
+        };
+
+        let scan_votes: Vec<(usize, TopologyVotes)> = match store.read() {
             Ok(s) => budget_chunks
                 .iter()
                 .map(|coord| {
-                    s.stress_fields
+                    let stress = s
+                        .stress_fields
                         .get(coord)
                         .map(count_high_stress_voxels)
-                        .unwrap_or(0)
+                        .unwrap_or(0);
+                    // Cross-chunk variant resolves neighbor reads through
+                    // the ChunkStore so the outer voxel layers contribute
+                    // to chokepoint / niche detection.
+                    let topo = if s.density_fields.contains_key(coord) {
+                        count_topology_votes_cross_chunk(&s, *coord, chunk_size)
+                    } else {
+                        TopologyVotes::default()
+                    };
+                    (stress, topo)
                 })
                 .collect(),
-            Err(_) => vec![0; budget_chunks.len()],
+            Err(_) => vec![(0, TopologyVotes::default()); budget_chunks.len()],
         };
 
         // ── Step 5: score each chunk + apply hysteresis ──
@@ -229,8 +259,13 @@ pub fn poi_tracker_loop(
                 .get(chunk_coord)
                 .map(|cells| count_fluid_voxels(cells))
                 .unwrap_or((0, 0));
-            let breakdown = score_from_votes(lava_votes, water_votes, stress_votes[idx]);
+            let (stress_votes, topo) = scan_votes[idx];
+            let breakdown = score_from_votes(
+                lava_votes, water_votes, stress_votes,
+                topo.dome_count, topo.choke_count, topo.niche_count,
+            );
             let (best_kind, best_score) = breakdown.best();
+            let feature_offset = topo.centroid_for(best_kind, chunk_size);
 
             apply_hysteresis(
                 &tracker.scores,
@@ -238,6 +273,7 @@ pub fn poi_tracker_loop(
                 best_kind,
                 best_score,
                 now_secs,
+                feature_offset,
             );
         }
 
@@ -267,6 +303,7 @@ fn apply_hysteresis(
     new_kind: PoiKind,
     new_score: f32,
     now_secs: u64,
+    feature_offset: glam::IVec3,
 ) {
     if new_score >= MIN_REGISTRABLE_SCORE {
         scores.insert(
@@ -275,6 +312,7 @@ fn apply_hysteresis(
                 best_kind: new_kind,
                 best_score: new_score,
                 last_scored_secs: now_secs,
+                feature_offset_in_chunk: feature_offset,
             },
         );
         return;
@@ -289,6 +327,8 @@ fn apply_hysteresis(
         } else {
             existing.best_score = decayed;
             existing.last_scored_secs = now_secs;
+            // Don't touch feature_offset on decay — preserve the centroid
+            // captured at peak score.
         }
     }
 }
@@ -316,16 +356,31 @@ pub fn read_top_k(tracker: &PoiTracker, k: usize, chunk_size: usize) -> Vec<crat
     entries.truncate(k);
     entries
         .into_iter()
-        .map(|(coord, sc)| crate::poi_scanner::Poi {
-            kind: sc.best_kind,
-            score: sc.best_score,
-            chunk_coord: coord,
-            center_world_rust: glam::Vec3::new(
-                coord.0 as f32 * cs_f + cs_f * 0.5,
-                coord.1 as f32 * cs_f + cs_f * 0.5,
-                coord.2 as f32 * cs_f + cs_f * 0.5,
-            ),
-            extent_radius_voxels: cs_f * 0.5,
+        .map(|(coord, sc)| {
+            // Topology kinds report the centroid of their qualifying voxels
+            // (captured at score time); fluid / stress / bridge kinds fall
+            // back to chunk-center because the signal is chunk-wide.
+            let center = match sc.best_kind {
+                PoiKind::CeilingDome | PoiKind::Chokepoint | PoiKind::WallNiche => {
+                    glam::Vec3::new(
+                        coord.0 as f32 * cs_f + sc.feature_offset_in_chunk.x as f32 + 0.5,
+                        coord.1 as f32 * cs_f + sc.feature_offset_in_chunk.y as f32 + 0.5,
+                        coord.2 as f32 * cs_f + sc.feature_offset_in_chunk.z as f32 + 0.5,
+                    )
+                }
+                _ => glam::Vec3::new(
+                    coord.0 as f32 * cs_f + cs_f * 0.5,
+                    coord.1 as f32 * cs_f + cs_f * 0.5,
+                    coord.2 as f32 * cs_f + cs_f * 0.5,
+                ),
+            };
+            crate::poi_scanner::Poi {
+                kind: sc.best_kind,
+                score: sc.best_score,
+                chunk_coord: coord,
+                center_world_rust: center,
+                extent_radius_voxels: cs_f * 0.5,
+            }
         })
         .collect()
 }
@@ -351,6 +406,7 @@ mod tests {
                 best_kind: PoiKind::Lava,
                 best_score: 200.0,
                 last_scored_secs: 0,
+                feature_offset_in_chunk: glam::IVec3::splat(8),
             },
         );
         t.scores.insert(
@@ -359,6 +415,7 @@ mod tests {
                 best_kind: PoiKind::Stress,
                 best_score: 100.0,
                 last_scored_secs: 0,
+                feature_offset_in_chunk: glam::IVec3::splat(8),
             },
         );
         t.scores.insert(
@@ -367,6 +424,7 @@ mod tests {
                 best_kind: PoiKind::Water,
                 best_score: 50.0,
                 last_scored_secs: 0,
+                feature_offset_in_chunk: glam::IVec3::splat(8),
             },
         );
 
@@ -380,7 +438,7 @@ mod tests {
     #[test]
     fn hysteresis_inserts_above_register_threshold() {
         let scores: DashMap<(i32, i32, i32), ChunkPoiScore> = DashMap::new();
-        apply_hysteresis(&scores, (0, 0, 0), PoiKind::Lava, 100.0, 0);
+        apply_hysteresis(&scores, (0, 0, 0), PoiKind::Lava, 100.0, 0, glam::IVec3::ZERO);
         assert_eq!(scores.len(), 1);
         assert!((scores.get(&(0, 0, 0)).unwrap().best_score - 100.0).abs() < 1e-3);
     }
@@ -389,9 +447,9 @@ mod tests {
     fn hysteresis_decays_below_threshold_keeps_above_keep() {
         let scores: DashMap<(i32, i32, i32), ChunkPoiScore> = DashMap::new();
         // Seed with high score
-        apply_hysteresis(&scores, (0, 0, 0), PoiKind::Lava, 100.0, 0);
+        apply_hysteresis(&scores, (0, 0, 0), PoiKind::Lava, 100.0, 0, glam::IVec3::ZERO);
         // Subsequent tick reports low signal → decay (100 × 0.6 = 60)
-        apply_hysteresis(&scores, (0, 0, 0), PoiKind::Lava, 0.0, 1);
+        apply_hysteresis(&scores, (0, 0, 0), PoiKind::Lava, 0.0, 1, glam::IVec3::ZERO);
         let after = scores.get(&(0, 0, 0)).unwrap().best_score;
         assert!((after - 60.0).abs() < 1e-3, "expected 60, got {}", after);
     }
@@ -400,19 +458,19 @@ mod tests {
     fn hysteresis_evicts_after_enough_decay() {
         let scores: DashMap<(i32, i32, i32), ChunkPoiScore> = DashMap::new();
         // Seed at just-above-keep so one decay step drops below MIN_KEEP_SCORE
-        apply_hysteresis(&scores, (0, 0, 0), PoiKind::Lava, 30.0, 0);
+        apply_hysteresis(&scores, (0, 0, 0), PoiKind::Lava, 30.0, 0, glam::IVec3::ZERO);
         // 30 × 0.6 = 18, still ≥ 15 → keep
-        apply_hysteresis(&scores, (0, 0, 0), PoiKind::Lava, 0.0, 1);
+        apply_hysteresis(&scores, (0, 0, 0), PoiKind::Lava, 0.0, 1, glam::IVec3::ZERO);
         assert!(scores.contains_key(&(0, 0, 0)));
         // 18 × 0.6 = 10.8, < 15 → evict
-        apply_hysteresis(&scores, (0, 0, 0), PoiKind::Lava, 0.0, 2);
+        apply_hysteresis(&scores, (0, 0, 0), PoiKind::Lava, 0.0, 2, glam::IVec3::ZERO);
         assert!(!scores.contains_key(&(0, 0, 0)));
     }
 
     #[test]
     fn hysteresis_no_op_when_low_and_no_existing() {
         let scores: DashMap<(i32, i32, i32), ChunkPoiScore> = DashMap::new();
-        apply_hysteresis(&scores, (0, 0, 0), PoiKind::Lava, 5.0, 0);
+        apply_hysteresis(&scores, (0, 0, 0), PoiKind::Lava, 5.0, 0, glam::IVec3::ZERO);
         assert!(scores.is_empty());
     }
 }

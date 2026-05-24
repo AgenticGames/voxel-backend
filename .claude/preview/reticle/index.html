@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Reticle design preview — leap + anchor</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #0d0c08; color: #ddd; font: 14px system-ui; }
+  h1 { font-size: 14px; letter-spacing: 0.16em; opacity: 0.55; text-transform: uppercase;
+       margin: 22px 0 4px; font-family: ui-monospace, monospace; }
+  h2 { font-size: 11px; letter-spacing: 0.08em; opacity: 0.4; margin: 2px 0 14px;
+       font-family: ui-monospace, monospace; }
+
+  .page { display: flex; flex-direction: column; align-items: center; padding: 22px 16px 30px; }
+  .row {
+    display: flex; gap: 18px; flex-wrap: wrap; justify-content: center; align-items: stretch;
+    margin-bottom: 8px;
+  }
+  .card {
+    position: relative;
+    width: 280px; height: 280px;
+    border: 1px solid #2a261a; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+  }
+  .card.leap-bg   { background: radial-gradient(ellipse at center, #4a3520 0%, #1a1410 65%, #0a0805 100%); }
+  .card.anchor-bg { background: radial-gradient(ellipse at center, #1c3447 0%, #0c1a25 65%, #050a10 100%); }
+  .card .tag {
+    position: absolute; top: 10px; left: 12px;
+    font-family: ui-monospace, monospace; font-size: 10px;
+    letter-spacing: 0.10em; opacity: 0.55;
+  }
+
+  .reticle { width: 220px; height: 220px; }
+  .tilted  { transform: perspective(500px) rotateX(60deg); }
+
+  /* leap reticle SVG ---------------------------------------- */
+  .leap-svg .feather    { fill: none; stroke-width: 22; stroke-opacity: 0.20; filter: blur(7px); }
+  .leap-svg .ring-outer { fill: none; stroke-width: 2.5; stroke-opacity: 0.92; }
+  .leap-svg .ring-inner { fill: none; stroke-width: 1.5; stroke-opacity: 0.62; }
+  .leap-svg .pulse-fill { fill-opacity: 0.14; }
+  .leap-svg .sweep      { fill: none; stroke-width: 5; stroke-opacity: 0.92; stroke-linecap: round; }
+  .leap-svg .ticks      { stroke-width: 5; stroke-linecap: round; stroke-opacity: 0.92; }
+  .leap-svg .bracket    { fill: none; stroke-width: 3; stroke-linecap: round; stroke-opacity: 0.85; }
+  .leap-svg .cross      { stroke-width: 2.5; stroke-linecap: round; stroke-opacity: 0.95; }
+
+  .spin-cw  { transform-origin: 50% 50%; animation: spin-cw 6s linear infinite; }
+  .spin-ccw { transform-origin: 50% 50%; animation: spin-ccw 14s linear infinite; }
+  .pulse    { transform-origin: 50% 50%; animation: pulse 1.7s ease-in-out infinite; }
+  .breathe  { transform-origin: 50% 50%; animation: breathe 2.4s ease-in-out infinite; }
+  @keyframes spin-cw  { to { transform: rotate(360deg); } }
+  @keyframes spin-ccw { to { transform: rotate(-360deg); } }
+  @keyframes pulse    { 0%,100% { transform: scale(0.97); opacity: 0.85; }
+                        50%     { transform: scale(1.03); opacity: 1.0; } }
+  @keyframes breathe  { 0%,100% { opacity: 0.55; } 50% { opacity: 1.0; } }
+
+  /* anchor reticle SVG ------------------------------------- */
+  .anchor-svg .feather    { fill: none; stroke-width: 24; stroke-opacity: 0.22; filter: blur(8px); }
+  .anchor-svg .hex-outer  { fill: none; stroke-width: 2.5; stroke-opacity: 0.92; stroke-linejoin: round; }
+  .anchor-svg .hex-inner  { fill: none; stroke-width: 1.5; stroke-opacity: 0.55; stroke-linejoin: round; }
+  .anchor-svg .facets     { fill: none; stroke-width: 1; stroke-opacity: 0.45; }
+  .anchor-svg .core       { fill-opacity: 0.18; }
+  .anchor-svg .glints     { stroke-width: 3; stroke-linecap: round; stroke-opacity: 0.80; }
+  .anchor-svg .star       { stroke-width: 1.3; stroke-opacity: 0.55; }
+  .anchor-svg .core-stroke{ fill: none; stroke-width: 1.8; }
+
+  /* state palettes */
+  .valid    { --c: #3df09a; }
+  .steep    { --c: #ffd84a; }
+  .invalid  { --c: #ff5040; }
+  .crystal  { --c: #62d8ff; }
+  .crystal-bad { --c: #ff5040; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <h1>M_LeapReticle — three states</h1>
+  <h2>Translucent ground-projected disc · valid (green) / steep-but-leapable (yellow) / invalid (red)</h2>
+  <div class="row">
+    <!-- VALID -->
+    <div class="card leap-bg">
+      <span class="tag">VALID  ⌃X aim landed</span>
+      <svg class="reticle leap-svg valid" viewBox="-100 -100 200 200" xmlns="http://www.w3.org/2000/svg">
+        <circle class="feather" r="78" stroke="var(--c)"/>
+        <g class="pulse">
+          <circle class="pulse-fill" r="68" fill="var(--c)"/>
+          <circle class="ring-outer" r="68" stroke="var(--c)"/>
+        </g>
+        <!-- rotating sweep arc (radar style) -->
+        <g class="spin-cw">
+          <path class="sweep" d="M 0 -56 A 56 56 0 0 1 39.6 -39.6" stroke="var(--c)"/>
+        </g>
+        <circle class="ring-inner" r="44" stroke="var(--c)"/>
+        <!-- cardinal ticks (outer) -->
+        <g class="breathe">
+          <line class="ticks" x1="0"   y1="-80" x2="0"   y2="-72" stroke="var(--c)"/>
+          <line class="ticks" x1="0"   y1="80"  x2="0"   y2="72"  stroke="var(--c)"/>
+          <line class="ticks" x1="-80" y1="0"   x2="-72" y2="0"   stroke="var(--c)"/>
+          <line class="ticks" x1="80"  y1="0"   x2="72"  y2="0"   stroke="var(--c)"/>
+        </g>
+        <!-- corner brackets near inner ring -->
+        <g class="spin-ccw">
+          <path class="bracket" d="M -40 -28 L -32 -28 L -32 -36" stroke="var(--c)"/>
+          <path class="bracket" d="M  40 -28 L  32 -28 L  32 -36" stroke="var(--c)"/>
+          <path class="bracket" d="M -40  28 L -32  28 L -32  36" stroke="var(--c)"/>
+          <path class="bracket" d="M  40  28 L  32  28 L  32  36" stroke="var(--c)"/>
+        </g>
+        <!-- center crosshair -->
+        <line class="cross" x1="-14" y1="0" x2="-4" y2="0" stroke="var(--c)"/>
+        <line class="cross" x1="14"  y1="0" x2="4"  y2="0" stroke="var(--c)"/>
+        <line class="cross" x1="0" y1="-14" x2="0" y2="-4" stroke="var(--c)"/>
+        <line class="cross" x1="0" y1="14"  x2="0" y2="4"  stroke="var(--c)"/>
+        <circle r="3" fill="var(--c)"/>
+      </svg>
+    </div>
+
+    <!-- STEEP -->
+    <div class="card leap-bg">
+      <span class="tag">STEEP  iffy slope, still leapable</span>
+      <svg class="reticle leap-svg steep" viewBox="-100 -100 200 200" xmlns="http://www.w3.org/2000/svg">
+        <circle class="feather" r="78" stroke="var(--c)"/>
+        <g class="pulse">
+          <circle class="pulse-fill" r="68" fill="var(--c)"/>
+          <circle class="ring-outer" r="68" stroke="var(--c)"/>
+        </g>
+        <g class="spin-cw"><path class="sweep" d="M 0 -56 A 56 56 0 0 1 39.6 -39.6" stroke="var(--c)"/></g>
+        <circle class="ring-inner" r="44" stroke="var(--c)"/>
+        <g class="breathe">
+          <line class="ticks" x1="0"   y1="-80" x2="0"   y2="-72" stroke="var(--c)"/>
+          <line class="ticks" x1="0"   y1="80"  x2="0"   y2="72"  stroke="var(--c)"/>
+          <line class="ticks" x1="-80" y1="0"   x2="-72" y2="0"   stroke="var(--c)"/>
+          <line class="ticks" x1="80"  y1="0"   x2="72"  y2="0"   stroke="var(--c)"/>
+        </g>
+        <g class="spin-ccw">
+          <path class="bracket" d="M -40 -28 L -32 -28 L -32 -36" stroke="var(--c)"/>
+          <path class="bracket" d="M  40 -28 L  32 -28 L  32 -36" stroke="var(--c)"/>
+          <path class="bracket" d="M -40  28 L -32  28 L -32  36" stroke="var(--c)"/>
+          <path class="bracket" d="M  40  28 L  32  28 L  32  36" stroke="var(--c)"/>
+        </g>
+        <line class="cross" x1="-14" y1="0" x2="-4" y2="0" stroke="var(--c)"/>
+        <line class="cross" x1="14"  y1="0" x2="4"  y2="0" stroke="var(--c)"/>
+        <line class="cross" x1="0" y1="-14" x2="0" y2="-4" stroke="var(--c)"/>
+        <line class="cross" x1="0" y1="14"  x2="0" y2="4"  stroke="var(--c)"/>
+        <circle r="3" fill="var(--c)"/>
+      </svg>
+    </div>
+
+    <!-- INVALID -->
+    <div class="card leap-bg">
+      <span class="tag">INVALID  no surface / out of range</span>
+      <svg class="reticle leap-svg invalid" viewBox="-100 -100 200 200" xmlns="http://www.w3.org/2000/svg">
+        <circle class="feather" r="78" stroke="var(--c)"/>
+        <circle class="ring-outer" r="68" stroke="var(--c)"/>
+        <circle class="ring-inner" r="44" stroke="var(--c)" stroke-dasharray="4 6"/>
+        <!-- diagonal slash through center to read 'rejected' -->
+        <line class="cross" x1="-22" y1="-22" x2="22" y2="22" stroke="var(--c)" stroke-width="3"/>
+        <line class="cross" x1="-22" y1="22" x2="22" y2="-22" stroke="var(--c)" stroke-width="3"/>
+      </svg>
+    </div>
+
+    <!-- TILTED PERSPECTIVE — valid -->
+    <div class="card leap-bg">
+      <span class="tag">PROJECTED  on ground</span>
+      <svg class="reticle leap-svg valid tilted" viewBox="-100 -100 200 200" xmlns="http://www.w3.org/2000/svg">
+        <circle class="feather" r="78" stroke="var(--c)"/>
+        <g class="pulse">
+          <circle class="pulse-fill" r="68" fill="var(--c)"/>
+          <circle class="ring-outer" r="68" stroke="var(--c)"/>
+        </g>
+        <g class="spin-cw"><path class="sweep" d="M 0 -56 A 56 56 0 0 1 39.6 -39.6" stroke="var(--c)"/></g>
+        <circle class="ring-inner" r="44" stroke="var(--c)"/>
+        <g class="breathe">
+          <line class="ticks" x1="0"   y1="-80" x2="0"   y2="-72" stroke="var(--c)"/>
+          <line class="ticks" x1="0"   y1="80"  x2="0"   y2="72"  stroke="var(--c)"/>
+          <line class="ticks" x1="-80" y1="0"   x2="-72" y2="0"   stroke="var(--c)"/>
+          <line class="ticks" x1="80"  y1="0"   x2="72"  y2="0"   stroke="var(--c)"/>
+        </g>
+        <circle r="3" fill="var(--c)"/>
+      </svg>
+    </div>
+  </div>
+
+  <h1>M_AnchorReticle — two states</h1>
+  <h2>Crystalline hexagonal projection · on voxel terrain (cyan) / off-terrain (red)</h2>
+  <div class="row">
+    <!-- CRYSTAL (valid) -->
+    <div class="card anchor-bg">
+      <span class="tag">CRYSTAL  on voxel terrain</span>
+      <svg class="reticle anchor-svg crystal" viewBox="-100 -100 200 200" xmlns="http://www.w3.org/2000/svg">
+        <circle class="feather" r="80" stroke="var(--c)"/>
+        <g class="pulse">
+          <polygon class="hex-outer"
+            points="0,-72  62.35,-36  62.35,36  0,72  -62.35,36  -62.35,-36"
+            stroke="var(--c)"/>
+          <polygon class="core"
+            points="0,-72  62.35,-36  62.35,36  0,72  -62.35,36  -62.35,-36"
+            fill="var(--c)"/>
+        </g>
+        <polygon class="hex-inner"
+          points="0,-44  38.10,-22  38.10,22  0,44  -38.10,22  -38.10,-22"
+          stroke="var(--c)"/>
+        <!-- six radial facets -->
+        <g class="facets">
+          <line x1="0"      y1="-72" x2="0" y2="0" stroke="var(--c)"/>
+          <line x1="62.35"  y1="-36" x2="0" y2="0" stroke="var(--c)"/>
+          <line x1="62.35"  y1="36"  x2="0" y2="0" stroke="var(--c)"/>
+          <line x1="0"      y1="72"  x2="0" y2="0" stroke="var(--c)"/>
+          <line x1="-62.35" y1="36"  x2="0" y2="0" stroke="var(--c)"/>
+          <line x1="-62.35" y1="-36" x2="0" y2="0" stroke="var(--c)"/>
+        </g>
+        <!-- 12-point starburst in center, rotating -->
+        <g class="spin-ccw star">
+          <line x1="0" y1="-22" x2="0"  y2="-12" stroke="var(--c)"/>
+          <line x1="11" y1="-19" x2="6" y2="-10.4" stroke="var(--c)"/>
+          <line x1="19" y1="-11" x2="10.4" y2="-6" stroke="var(--c)"/>
+          <line x1="22" y1="0" x2="12" y2="0" stroke="var(--c)"/>
+          <line x1="19" y1="11" x2="10.4" y2="6" stroke="var(--c)"/>
+          <line x1="11" y1="19" x2="6" y2="10.4" stroke="var(--c)"/>
+          <line x1="0" y1="22" x2="0" y2="12" stroke="var(--c)"/>
+          <line x1="-11" y1="19" x2="-6" y2="10.4" stroke="var(--c)"/>
+          <line x1="-19" y1="11" x2="-10.4" y2="6" stroke="var(--c)"/>
+          <line x1="-22" y1="0" x2="-12" y2="0" stroke="var(--c)"/>
+          <line x1="-19" y1="-11" x2="-10.4" y2="-6" stroke="var(--c)"/>
+          <line x1="-11" y1="-19" x2="-6" y2="-10.4" stroke="var(--c)"/>
+        </g>
+        <!-- rotating glints just outside the hex -->
+        <g class="spin-cw">
+          <line class="glints" x1="0"      y1="-90" x2="0"     y2="-82" stroke="var(--c)"/>
+          <line class="glints" x1="77.94"  y1="-45" x2="71.01" y2="-41" stroke="var(--c)"/>
+          <line class="glints" x1="77.94"  y1="45"  x2="71.01" y2="41"  stroke="var(--c)"/>
+          <line class="glints" x1="0"      y1="90"  x2="0"     y2="82"  stroke="var(--c)"/>
+          <line class="glints" x1="-77.94" y1="45"  x2="-71.01" y2="41" stroke="var(--c)"/>
+          <line class="glints" x1="-77.94" y1="-45" x2="-71.01" y2="-41" stroke="var(--c)"/>
+        </g>
+        <!-- center -->
+        <circle class="core-stroke" r="9" stroke="var(--c)"/>
+        <circle r="3" fill="var(--c)"/>
+      </svg>
+    </div>
+
+    <!-- INVALID (off-terrain) -->
+    <div class="card anchor-bg">
+      <span class="tag">INVALID  off-terrain</span>
+      <svg class="reticle anchor-svg crystal-bad" viewBox="-100 -100 200 200" xmlns="http://www.w3.org/2000/svg">
+        <circle class="feather" r="80" stroke="var(--c)"/>
+        <polygon class="hex-outer"
+          points="0,-72  62.35,-36  62.35,36  0,72  -62.35,36  -62.35,-36"
+          stroke="var(--c)" stroke-dasharray="4 6"/>
+        <polygon class="hex-inner"
+          points="0,-44  38.10,-22  38.10,22  0,44  -38.10,22  -38.10,-22"
+          stroke="var(--c)" stroke-dasharray="4 6"/>
+        <!-- diagonal slash -->
+        <line x1="-30" y1="-30" x2="30" y2="30" stroke="var(--c)" stroke-width="3" stroke-linecap="round"/>
+        <line x1="-30" y1="30" x2="30" y2="-30" stroke="var(--c)" stroke-width="3" stroke-linecap="round"/>
+      </svg>
+    </div>
+
+    <!-- PROJECTED -->
+    <div class="card anchor-bg">
+      <span class="tag">PROJECTED  on terrain</span>
+      <svg class="reticle anchor-svg crystal tilted" viewBox="-100 -100 200 200" xmlns="http://www.w3.org/2000/svg">
+        <circle class="feather" r="80" stroke="var(--c)"/>
+        <g class="pulse">
+          <polygon class="hex-outer"
+            points="0,-72  62.35,-36  62.35,36  0,72  -62.35,36  -62.35,-36"
+            stroke="var(--c)"/>
+          <polygon class="core"
+            points="0,-72  62.35,-36  62.35,36  0,72  -62.35,36  -62.35,-36"
+            fill="var(--c)"/>
+        </g>
+        <polygon class="hex-inner"
+          points="0,-44  38.10,-22  38.10,22  0,44  -38.10,22  -38.10,-22"
+          stroke="var(--c)"/>
+        <circle r="3" fill="var(--c)"/>
+      </svg>
+    </div>
+  </div>
+</div>
+</body>
+</html>

@@ -21,7 +21,7 @@ const MAGIC: [u8; 4] = *b"MXSV";
 ///   2 — adds editor collapse triggers + next_trigger_id (see triggers.rs)
 ///   3 — adds per-chunk painted-stress overlay (creative PaintStress brush)
 ///   4 — adds Crystal Anchor pending/grown state as JSON blob
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 
 // ── Data structures ────────────────────────────────────────────────────
 
@@ -58,6 +58,11 @@ pub struct WorldSaveData {
     /// Crystal Anchor manager state as JSON (introduced in v4). v1-v3 saves
     /// load this as an empty string — no anchors restored.
     pub crystal_anchors_json: String,
+    /// Hand-painted + worldgen mushroom placements per chunk (v5+). On load,
+    /// these replace the chunk's worldgen mushroom output entirely so painted
+    /// /erased state persists across save→quit→reload. v1-v4 saves load this
+    /// as an empty map.
+    pub mushroom_placements: BTreeMap<(i32, i32, i32), Vec<voxel_gen::MushroomPlacement>>,
 }
 
 /// Tracks which chunks have been modified at runtime so we know what to save.
@@ -304,6 +309,43 @@ impl WorldSaveData {
         w.write_all(&(anchor_bytes.len() as u32).to_le_bytes())?;
         w.write_all(anchor_bytes)?;
 
+        // v5: Mushroom placements — sparse per-chunk list. Each placement is
+        // 36 bytes (8 f32 + 4 u8). Only chunks with at least one placement
+        // get a record; worlds that never touched mushrooms pay 4 bytes
+        // (the count u32).
+        //
+        // Format:
+        //   [4] chunk_count u32
+        //   per chunk:
+        //     [4] cx i32, [4] cy i32, [4] cz i32
+        //     [4] placement_count u32
+        //     per placement (36 bytes):
+        //       [4] x f32, [4] y f32, [4] z f32
+        //       [4] nx f32, [4] ny f32, [4] nz f32
+        //       [4] scale f32, [4] yaw f32
+        //       [1] kind u8, [1] anchor_lx u8, [1] anchor_ly u8, [1] anchor_lz u8
+        w.write_all(&(self.mushroom_placements.len() as u32).to_le_bytes())?;
+        for (&(cx, cy, cz), placements) in &self.mushroom_placements {
+            w.write_all(&cx.to_le_bytes())?;
+            w.write_all(&cy.to_le_bytes())?;
+            w.write_all(&cz.to_le_bytes())?;
+            w.write_all(&(placements.len() as u32).to_le_bytes())?;
+            for p in placements {
+                w.write_all(&p.x.to_le_bytes())?;
+                w.write_all(&p.y.to_le_bytes())?;
+                w.write_all(&p.z.to_le_bytes())?;
+                w.write_all(&p.normal_x.to_le_bytes())?;
+                w.write_all(&p.normal_y.to_le_bytes())?;
+                w.write_all(&p.normal_z.to_le_bytes())?;
+                w.write_all(&p.scale.to_le_bytes())?;
+                w.write_all(&p.yaw.to_le_bytes())?;
+                w.write_all(&[p.kind as u8])?;
+                w.write_all(&[p.anchor_lx])?;
+                w.write_all(&[p.anchor_ly])?;
+                w.write_all(&[p.anchor_lz])?;
+            }
+        }
+
         Ok(())
     }
 
@@ -430,6 +472,57 @@ impl WorldSaveData {
             crystal_anchors_json = String::from_utf8(bytes).unwrap_or_default();
         }
 
+        // v5: Per-chunk mushroom placements. v1-v4 saves end here; mushrooms
+        // default to empty so worldgen will regenerate them on load.
+        let mut mushroom_placements: BTreeMap<(i32, i32, i32), Vec<voxel_gen::MushroomPlacement>> =
+            BTreeMap::new();
+        if version >= 5 {
+            let chunk_count = read_u32(r)? as usize;
+            if chunk_count > 100_000 {
+                return Err(DeltaError::TooManyChunks(chunk_count));
+            }
+            for _ in 0..chunk_count {
+                let cx = read_i32(r)?;
+                let cy = read_i32(r)?;
+                let cz = read_i32(r)?;
+                let placement_count = read_u32(r)? as usize;
+                if placement_count > 100_000 {
+                    return Err(DeltaError::TruncatedData);
+                }
+                let mut placements = Vec::with_capacity(placement_count);
+                for _ in 0..placement_count {
+                    let mut buf = [0u8; 4];
+                    let read_f32 = |r: &mut R| -> Result<f32, DeltaError> {
+                        let mut b = [0u8; 4];
+                        r.read_exact(&mut b).map_err(|_| DeltaError::TruncatedData)?;
+                        Ok(f32::from_le_bytes(b))
+                    };
+                    let x = read_f32(r)?;
+                    let y = read_f32(r)?;
+                    let z = read_f32(r)?;
+                    let nx = read_f32(r)?;
+                    let ny = read_f32(r)?;
+                    let nz = read_f32(r)?;
+                    let scale = read_f32(r)?;
+                    let yaw = read_f32(r)?;
+                    let mut kbuf = [0u8; 1];
+                    r.read_exact(&mut kbuf).map_err(|_| DeltaError::TruncatedData)?;
+                    let kind = voxel_gen::MushroomKind::from_u8(kbuf[0])
+                        .ok_or(DeltaError::TruncatedData)?;
+                    r.read_exact(&mut buf[..3]).map_err(|_| DeltaError::TruncatedData)?;
+                    placements.push(voxel_gen::MushroomPlacement {
+                        x, y, z,
+                        normal_x: nx, normal_y: ny, normal_z: nz,
+                        scale, yaw, kind,
+                        anchor_lx: buf[0], anchor_ly: buf[1], anchor_lz: buf[2],
+                    });
+                }
+                if !placements.is_empty() {
+                    mushroom_placements.insert((cx, cy, cz), placements);
+                }
+            }
+        }
+
         Ok(WorldSaveData {
             chunk_snapshots,
             terraced_cells,
@@ -437,6 +530,7 @@ impl WorldSaveData {
             triggers,
             next_trigger_id,
             crystal_anchors_json,
+            mushroom_placements,
         })
     }
 
@@ -446,6 +540,7 @@ impl WorldSaveData {
             && self.terraced_cells.is_empty()
             && self.terraced_columns.is_empty()
             && self.triggers.is_empty()
+            && self.mushroom_placements.is_empty()
     }
 }
 
@@ -762,6 +857,47 @@ mod tests {
             assert_eq!(orig.density, rest.density, "chunk0 density at {i}");
             assert_eq!(orig.material, rest.material, "chunk0 material at {i}");
         }
+    }
+
+    #[test]
+    fn binary_roundtrip_mushroom_placements() {
+        let mut save = WorldSaveData::default();
+        let p1 = voxel_gen::MushroomPlacement {
+            x: 5.5, y: 12.25, z: -3.75,
+            normal_x: 1.0, normal_y: 0.0, normal_z: 0.0,
+            scale: 0.85,
+            yaw: 1.5708,
+            kind: voxel_gen::MushroomKind::TurkeyTail,
+            anchor_lx: 5, anchor_ly: 12, anchor_lz: 28,
+        };
+        let p2 = voxel_gen::MushroomPlacement {
+            x: 18.0, y: 4.0, z: 22.5,
+            normal_x: 0.0, normal_y: 1.0, normal_z: 0.0,
+            scale: 1.3,
+            yaw: 3.14,
+            kind: voxel_gen::MushroomKind::GhostTower,
+            anchor_lx: 18, anchor_ly: 4, anchor_lz: 22,
+        };
+        save.mushroom_placements.insert((0, 0, 0), vec![p1.clone(), p2.clone()]);
+        save.mushroom_placements.insert((-2, 3, 7), vec![p1.clone()]);
+        assert!(!save.is_empty());
+
+        let bytes = save.serialize();
+        let restored = WorldSaveData::deserialize(&bytes).unwrap();
+
+        assert_eq!(restored.mushroom_placements.len(), 2);
+        let chunk0 = &restored.mushroom_placements[&(0, 0, 0)];
+        assert_eq!(chunk0.len(), 2);
+        assert_eq!(chunk0[0].x, p1.x);
+        assert_eq!(chunk0[0].normal_x, p1.normal_x);
+        assert_eq!(chunk0[0].kind as u8, p1.kind as u8);
+        assert_eq!(chunk0[0].anchor_lx, p1.anchor_lx);
+        assert_eq!(chunk0[1].kind as u8, p2.kind as u8);
+        assert_eq!(chunk0[1].yaw, p2.yaw);
+
+        let chunk1 = &restored.mushroom_placements[&(-2, 3, 7)];
+        assert_eq!(chunk1.len(), 1);
+        assert_eq!(chunk1[0].scale, p1.scale);
     }
 
     #[test]

@@ -1324,8 +1324,10 @@ pub struct FfiBrushPlaceMushroomSphereRequest {
     pub world_z: f32,
     pub radius: f32,
     pub density: f32,
+    pub clustering: f32, // 0..1 — local noise gate strength
     pub kind: u8,
-    pub _pad: [u8; 3],
+    pub op: u8,          // 0=place, 1=erase (kind acts as filter; 255=any)
+    pub _pad: [u8; 2],
     pub seed: u64,
 }
 
@@ -1981,13 +1983,22 @@ pub enum WorkerRequest {
     },
     /// Sphere-area mushroom brush — scatters N mushrooms of one kind within
     /// a radius via Bernoulli sampling against surface voxels of the kind's
-    /// preferred face.
+    /// preferred face. `clustering` (0..1) raises a local Simplex-noise gate
+    /// so high values produce tight family pockets instead of flat scatter.
     BrushPlaceMushroomSphere {
         center_rust: glam::Vec3,
         radius: f32,    // Rust voxel units
         density: f32,   // 0..1
+        clustering: f32, // 0..1
         kind: u8,
         seed: u64,
+    },
+    /// Sphere-area mushroom eraser. `kind_filter == 255` erases any kind;
+    /// otherwise only matching kind is removed.
+    BrushEraseMushroomSphere {
+        center_rust: glam::Vec3,
+        radius: f32,    // Rust voxel units
+        kind_filter: u8,
     },
     /// River (capsule chain) fluid brush.
     BrushFluidRiver {
@@ -2200,7 +2211,8 @@ pub struct FfiCrystalBridgePair {
 }
 
 /// One Point-of-Interest from the sleep-time scanner. `kind` mirrors
-/// `crate::poi_scanner::PoiKind`: 0=Bridge, 1=Lava, 2=Water, 3=Stress.
+/// `crate::poi_scanner::PoiKind`: 0=Bridge, 1=Lava, 2=Water, 3=Stress,
+/// 4=CeilingDome, 5=Chokepoint, 6=WallNiche.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct FfiPoi {
@@ -2213,4 +2225,34 @@ pub struct FfiPoi {
     /// POIs, half-chunk for the per-chunk kinds. The montage camera uses
     /// this to size its orbit so wide bridges get a wide orbit.
     pub extent_radius_ue: f32,
+}
+
+/// Voxel-aware surface probe result. Position-independent classification
+/// of "what's at this world point": surface kind, averaged normal,
+/// largest empty cavity radius around it, and per-axis clearance.
+///
+/// All output fields are in **UE world space**: normal is the UE-space
+/// unit vector, distances are UE units (`world_scale * voxel_units`).
+///
+/// `kind` mirrors `crate::surface_probe::SurfaceKind`:
+///   0 = Solid (inside rock)
+///   1 = AirOpen (no solid within 2 voxels in any direction)
+///   2 = Floor (rock below, near-vertical up-normal)
+///   3 = Wall (rock alongside, near-horizontal normal)
+///   4 = Ceiling (rock above, near-vertical down-normal)
+///   5 = Overhang (slanted between Floor/Wall or Wall/Ceiling)
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiSurfaceProbe {
+    pub kind: u8,
+    pub _padding: [u8; 3],
+    pub normal_x: f32,
+    pub normal_y: f32,
+    pub normal_z: f32,
+    /// Largest empty-sphere radius centered on probe point, in UE units,
+    /// capped at the probe's max sampling reach.
+    pub cavity_radius: f32,
+    /// Distance to nearest solid along UE axes, in UE units, in order
+    /// +X, -X, +Y, -Y, +Z, -Z. Capped at the probe's max sampling reach.
+    pub clearance_ue: [f32; 6],
 }

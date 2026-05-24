@@ -11,20 +11,35 @@
 //! the second signal to flag `PathStatus::PartiallyUnloaded` results.
 
 use glam::{IVec3, Vec3};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use voxel_path::{CellGrid, MovementMode, PathNode, PathStatus};
 
 use crate::convert::from_ue_world_pos;
 use crate::store::ChunkStore;
 
+/// Cell factor for the live ChunkStore-backed path planner — one pathing cell
+/// covers a 2×2×2 voxel block. Public so both the async path worker (in
+/// `worker.rs`) and the synchronous `voxel_query_path_exists` FFI can share
+/// the same scale without drifting.
+pub const PATH_CELL_FACTOR: i32 = 2;
+
 /// CellGrid implementation backed by a live ChunkStore reference.
 ///
 /// Cells are addressed in "pathing-cell" coordinates — multiply by `cell_factor`
 /// to get voxel coordinates.
+///
+/// `occupied_cells` is the optional cross-species avoidance layer: cells in
+/// the set are treated as solid (impassable) by A* — used so spiders/wasps/
+/// creatures route around each other instead of phasing through. The agent's
+/// OWN cell (`requester_cell`) is excluded so it can start its search from
+/// inside its current cell even when the snapshot still says that cell is
+/// occupied (it's about to vacate it as it moves anyway).
 pub struct ChunkStoreGrid<'a> {
     pub store: &'a ChunkStore,
     pub chunk_size: usize,
     pub cell_factor: i32,
+    pub occupied_cells: Option<&'a HashSet<(i32, i32, i32)>>,
+    pub requester_cell: Option<IVec3>,
 }
 
 impl<'a> ChunkStoreGrid<'a> {
@@ -50,12 +65,40 @@ impl<'a> CellGrid for ChunkStoreGrid<'a> {
         self.cell_factor as f32
     }
 
+    // ─── TODO: lava-as-solid for ground modes (audit S8, 2026-05-22) ──
+    // Spiders currently path freely through lava pools because lava lives in
+    // the voxel-fluid grid (separate from density), and the fluid sim owns
+    // its state behind an event-based channel — no Arc<RwLock<>> is shared
+    // with the path workers. To plumb this:
+    //   1. Add a "lava cell mask" shared via Arc<RwLock<HashMap<chunk, BitSet>>>
+    //      in `engine.rs`, populated by the fluid sim when lava cells flip.
+    //   2. Pass the mask into the path-worker spawn alongside `store`.
+    //   3. Extend ChunkStoreGrid with `lava_mask: Option<&'a LavaCellMask>` and
+    //      `agent_can_fly: bool` (derived from MovementMode at grid
+    //      construction in worker.rs::handle_path_request).
+    //   4. Here: `if !self.agent_can_fly && mask.is_lava(cell) { return true; }`
+    // Skipped this batch — non-trivial cross-crate plumbing.
     fn is_solid(&self, cell: IVec3) -> bool {
         let (chunk_key, (lx, ly, lz)) = self.cell_to_chunk_local(cell);
-        match self.store.density_fields.get(&chunk_key) {
+        let static_solid = match self.store.density_fields.get(&chunk_key) {
             Some(field) => field.get(lx, ly, lz).material.is_solid(),
             None => true, // unloaded → impassable barrier
+        };
+        if static_solid {
+            return true;
         }
+
+        // Cross-species avoidance: another AI agent's cell. Exclude the
+        // requester's own cell so A* can search from inside it even when
+        // the snapshot says it's occupied (we are the occupant). Adjacent
+        // occupied cells become walls and A* routes around them naturally.
+        if let Some(occupied) = self.occupied_cells {
+            let is_requester = matches!(self.requester_cell, Some(rc) if rc == cell);
+            if !is_requester && occupied.contains(&(cell.x, cell.y, cell.z)) {
+                return true;
+            }
+        }
+        false
     }
 
     fn is_loaded(&self, cell: IVec3) -> bool {
