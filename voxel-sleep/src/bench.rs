@@ -520,6 +520,7 @@ fn make_ue_gen_config(seed: u64) -> voxel_gen::config::GenerationConfig {
         mine: MineConfig::default(),
         crystals: CrystalConfig::default(),
         zones: ZoneConfig::default(),
+        mushrooms: MushroomConfig::default(),
     }
 }
 

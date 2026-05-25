@@ -1652,6 +1652,12 @@ pub struct FfiStressConfig {
     pub cross_section_min_faces: u32,
     pub surface_y: i32,
     pub depth_pressure_scale: f32,
+    // Cinematic mining pipeline scan buffer. UE-tuneable. See
+    // voxel-core/src/stress.rs StressConfig::mining_stress_scan_buffer for the
+    // semantic note and worker.rs WorkerRequest::Mine for where it's used.
+    // ⚠ Two stress systems coexist: this drives the SlabFall pipeline,
+    // `propagation_radius` above only drives the legacy sleep pipeline.
+    pub mining_stress_scan_buffer: u32,
 }
 
 #[repr(C)]
@@ -1953,6 +1959,11 @@ pub enum WorkerRequest {
         op: u8,
         falloff: u8,
     },
+    /// Creative "Clear all painted stress" — wipes the painted overlay in
+    /// every loaded chunk's StressField. No spatial argument; this is the
+    /// "nuke everything" eraser for when the per-sphere Clear op is too
+    /// fiddly. Atelier exposes a single button.
+    BrushClearAllPaintedStress,
     /// Undo the most recent brush stroke (any creative brush).
     BrushUndo,
     /// Sphere fluid brush.
@@ -2255,4 +2266,49 @@ pub struct FfiSurfaceProbe {
     /// Distance to nearest solid along UE axes, in UE units, in order
     /// +X, -X, +Y, -Y, +Z, -Z. Capped at the probe's max sampling reach.
     pub clearance_ue: [f32; 6],
+}
+
+/// A single voxel cell that has crossed the collapse stress threshold
+/// (effective stress >= 1.0). Used to drive UE-side stress-crack decals
+/// and per-cell warning dust effects on chunks that are primed to collapse.
+///
+/// Position + normal are already in UE world space. `stress` is the
+/// effective stress value (base + painted overlay) — typically 1.0-2.0.
+/// Interior (non-surface-exposed) cells are filtered out by the caller
+/// since they have no visible surface to decorate.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiOverstressedCell {
+    pub world_x: f32,
+    pub world_y: f32,
+    pub world_z: f32,
+    pub normal_x: f32,
+    pub normal_y: f32,
+    pub normal_z: f32,
+    pub stress: f32,
+    /// Surface kind from the existing surface-probe enum: 1=Floor, 2=Ceiling,
+    /// 3=Wall, 4=Thin (matches the classification top-4 bits). Used by UE to
+    /// tweak decal scale + orientation hints per surface type.
+    pub surface_kind: u8,
+    pub _padding: [u8; 3],
+}
+
+/// Heap-allocated list of overstressed cells returned by
+/// `voxel_list_overstressed_in_chunk` and `voxel_list_overstressed_in_region`.
+/// Caller MUST call `voxel_free_overstressed_list` to release.
+///
+/// `valid` distinguishes "store was read OK" from "store lock was contended":
+///   valid=1, count>0  -> N over-stress cells found
+///   valid=1, count=0  -> store read OK, no over-stress cells in this region
+///   valid=0           -> store lock contended after retries; caller should
+///                        SKIP its overlay refresh (preserve existing decals)
+///                        rather than clear to empty. Avoids the "decals
+///                        disappear on paint" race where the brush worker
+///                        held the write lock when UE polled.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FfiOverstressedList {
+    pub cells: *mut FfiOverstressedCell,
+    pub count: u32,
+    pub valid: u32,
 }

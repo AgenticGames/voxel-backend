@@ -970,6 +970,84 @@ pub unsafe extern "C" fn voxel_query_surface(
     1
 }
 
+/// List all surface-exposed cells in a chunk whose effective stress has
+/// crossed the collapse threshold (>= 1.0). UE uses the result to drive
+/// per-chunk stress-crack decals and warning dust puffs at primed cells.
+///
+/// Chunk coords are UE space. Returns a heap-allocated list; caller MUST
+/// call `voxel_free_overstressed_list` on the result.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_list_overstressed_in_chunk(
+    engine: *mut c_void,
+    chunk_x: i32,
+    chunk_y: i32,
+    chunk_z: i32,
+) -> FfiOverstressedList {
+    use crate::convert::ue_chunk_to_rust;
+
+    if engine.is_null() {
+        // Engine null is "permanent" failure, not contention — caller should
+        // treat as a real empty list (clear decals). valid=1 + count=0.
+        return FfiOverstressedList { cells: ptr::null_mut(), count: 0, valid: 1 };
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let key = ue_chunk_to_rust(chunk_x, chunk_y, chunk_z);
+    let (cells, valid) = engine.enumerate_overstressed_in_chunk(key);
+
+    if cells.is_empty() {
+        return FfiOverstressedList { cells: ptr::null_mut(), count: 0, valid: if valid { 1 } else { 0 } };
+    }
+    let mut boxed = cells.into_boxed_slice();
+    let count = boxed.len() as u32;
+    let ptr = boxed.as_mut_ptr();
+    std::mem::forget(boxed);
+    FfiOverstressedList { cells: ptr, count, valid: 1 }
+}
+
+/// List all surface-exposed over-stress cells inside a UE world-space sphere.
+/// Used by the mining post-recalc handler to fire a "you're undermining a
+/// fragile area" dust burst at every primed cell within the mining impact zone.
+///
+/// `center_*` and `radius` are in UE units. Returns a heap-allocated list;
+/// caller MUST call `voxel_free_overstressed_list` on the result.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_list_overstressed_in_sphere(
+    engine: *mut c_void,
+    center_x: f32,
+    center_y: f32,
+    center_z: f32,
+    radius: f32,
+) -> FfiOverstressedList {
+    if engine.is_null() || radius <= 0.0 {
+        // Permanent failure → valid=1, count=0 (real "empty" answer).
+        return FfiOverstressedList { cells: ptr::null_mut(), count: 0, valid: 1 };
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let (cells, valid) = engine.enumerate_overstressed_in_sphere(center_x, center_y, center_z, radius);
+
+    if cells.is_empty() {
+        return FfiOverstressedList { cells: ptr::null_mut(), count: 0, valid: if valid { 1 } else { 0 } };
+    }
+    let mut boxed = cells.into_boxed_slice();
+    let count = boxed.len() as u32;
+    let ptr = boxed.as_mut_ptr();
+    std::mem::forget(boxed);
+    FfiOverstressedList { cells: ptr, count, valid: 1 }
+}
+
+/// Free a list returned by `voxel_list_overstressed_in_chunk` or
+/// `voxel_list_overstressed_in_sphere`.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_free_overstressed_list(list: FfiOverstressedList) {
+    if !list.cells.is_null() && list.count > 0 {
+        drop(Vec::from_raw_parts(
+            list.cells,
+            list.count as usize,
+            list.count as usize,
+        ));
+    }
+}
+
 /// Synchronous "is a path possible from A to B" check. Used by the wasp
 /// hive placement validator to confirm a hive can actually deploy wasps
 /// to nearby cavity-center POIs. Runs A* under a brief store read lock
@@ -1101,6 +1179,7 @@ pub unsafe extern "C" fn voxel_set_stress_config(
         cross_section_min_faces: ffi_cfg.cross_section_min_faces,
         surface_y: ffi_cfg.surface_y,
         depth_pressure_scale: ffi_cfg.depth_pressure_scale,
+        mining_stress_scan_buffer: ffi_cfg.mining_stress_scan_buffer,
     };
 
     engine.update_stress_config(stress_config);
@@ -1742,6 +1821,20 @@ pub unsafe extern "C" fn voxel_request_brush_paint_stress(
     }
     let engine = &*(engine as *const VoxelEngine);
     engine.request_brush_paint_stress(*request)
+}
+
+/// Wipe every loaded chunk's painted-stress overlay back to empty.
+/// "Clear All Painted" eraser button in the Atelier HUD.
+/// Returns 1 on success, 0 if queue full.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_request_brush_clear_all_painted_stress(
+    engine: *mut c_void,
+) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.request_brush_clear_all_painted_stress()
 }
 
 /// Creative-mode tunnel brush: carves (or fills) a capsule along a polyline.

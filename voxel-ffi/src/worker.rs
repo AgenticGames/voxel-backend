@@ -2744,7 +2744,18 @@ fn handle_request(
                     s.crystal_placements.insert(key, placements);
                 }
                 let stress_center = (center.x as i32, center.y as i32, center.z as i32);
-                let stress_radius = radius as i32 + 22;
+                // ⚠ Cinematic mining pipeline. Scan radius = mine radius
+                // (rust voxels) + `mining_stress_scan_buffer` (tuned via UE
+                // Codex). This sphere is what gets stress-recomputed; a
+                // 26-connected BFS then walks through cohesive pre-stressed
+                // rock so the actual slab-detection reach is sphere + that
+                // chain. NOT the legacy `propagation_radius` — that one only
+                // serves the sleep collapse path now.
+                // Note: `cfg` in this scope is the GenerationConfig clone.
+                // The StressConfig lives in a separate Arc<RwLock<…>> —
+                // hold the read lock only long enough to copy the u32 out.
+                let scan_buffer = stress_config.read().unwrap().mining_stress_scan_buffer;
+                let stress_radius = radius as i32 + scan_buffer as i32;
                 s.queue_stress_dirty(stress_center, stress_radius);
             }
 
@@ -3422,6 +3433,30 @@ fn handle_request(
             // pass is needed. The UE side picks up the updated painted overlay
             // on the next `voxel_query_stress` call (and the V-key overlay
             // recalc preview already drives that path).
+            drop(s);
+        }
+        WorkerRequest::BrushClearAllPaintedStress => {
+            let mut s = store.write().unwrap();
+            // Wipe every loaded chunk's painted overlay. Unloaded chunks with
+            // preserved snapshots are NOT cleared — they retain whatever paint
+            // was captured at unload. Hand-flagged in the Atelier UI as
+            // "Clear All Painted" (loaded chunks only); if users need a true
+            // world-wide wipe they'd have to walk near every chunk first.
+            let touched: Vec<(i32, i32, i32)> = s
+                .stress_fields
+                .iter_mut()
+                .filter_map(|(k, sf)| {
+                    if sf.has_painted_layer() {
+                        sf.clear_all_painted();
+                        Some(*k)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if !touched.is_empty() {
+                s.modification_tracker.mark_dirty_many(&touched);
+            }
             drop(s);
         }
         WorkerRequest::BrushUndo => {

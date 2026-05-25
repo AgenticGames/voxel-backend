@@ -423,7 +423,11 @@ pub struct StressConfig {
     pub vertical_support_factor: f32,
     /// Effect radius of support structures.
     pub support_radius: u32,
-    /// BFS recalc radius around changed voxels.
+    /// ⚠ LEGACY: BFS recalc radius for the OLD immediate-collapse pipeline.
+    /// Mining no longer uses this — see `mining_stress_scan_buffer` below for
+    /// the cinematic (`CollapseSlabResult` / `CollapseWarning`) path. Still
+    /// consumed by sleep collapses (`detect_and_execute_collapses` / legacy
+    /// `CollapseResult` emission). Two systems coexist; do not conflate.
     pub propagation_radius: u32,
     /// Maximum voxels per single collapse event.
     pub max_collapse_volume: u32,
@@ -468,6 +472,23 @@ pub struct StressConfig {
     pub surface_y: i32,
     /// Depth scale: depth_factor = 1.0 + depth / depth_scale. Lower = more aggressive.
     pub depth_pressure_scale: f32,
+
+    // ── Cinematic mining pipeline (CollapseWarning + SlabFall path) ──
+    //
+    // The cinematic system (worker.rs `WorkerRequest::Mine`) recomputes
+    // stress in a SPHERE around the mine point with radius
+    // `mine_radius_voxels + mining_stress_scan_buffer`. Then a 26-connected
+    // BFS expands through any solid voxel whose existing stress is already
+    // ≥ `slab_cohesion_threshold` (capped at `max_collapse_volume`). The BFS
+    // can therefore reach voxels OUTSIDE the scan sphere via pre-stressed
+    // cohesive rock chains — that's how a far-away slab can fall from one
+    // mine. NOT the same as `propagation_radius`, which only the legacy
+    // sleep path consults.
+    /// Buffer (in voxels) added to the mine radius for the cinematic stress
+    /// scan sphere. Total scan radius = `mine_radius_voxels + this`. Tuning
+    /// it directly affects how far out from a mine the system can detect
+    /// stress to trigger slab falls.
+    pub mining_stress_scan_buffer: u32,
 }
 
 impl Default for StressConfig {
@@ -500,6 +521,7 @@ impl Default for StressConfig {
             cross_section_min_faces: 2,  // Need 2+ air faces before penalty applies
             surface_y: 200,             // Approximate world surface level
             depth_pressure_scale: 99999.0, // Effectively disabled for now — tune after span gradient is dialed in
+            mining_stress_scan_buffer: 22, // Was hardcoded `+22` in worker.rs; configurable since 2026-05
         }
     }
 }

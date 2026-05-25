@@ -901,6 +901,60 @@ mod tests {
     }
 
     #[test]
+    fn painted_stress_save_load_roundtrip() {
+        // Simulates: paint stress while loaded → unload (snapshot captures it)
+        // → save (collect_save_data tier 2 grabs preserved_snapshots) →
+        // serialize → deserialize → reload chunk → apply_pending_snapshot
+        // restores via apply_painted_stress_to.
+        //
+        // Verifies the durability claim for the "paint then walk 20 chunks
+        // away and save / load and walk back" scenarios.
+        const SIZE: usize = 9;
+        let df = make_test_density(SIZE);
+
+        // Build a stress field with non-zero painted values at known cells.
+        let mut sf = voxel_core::stress::StressField::new(SIZE);
+        let pokes = [
+            (2_usize, 3_usize, 4_usize, 0.45_f32),
+            (5, 5, 5, 0.90),
+            (7, 1, 6, 1.75),
+        ];
+        for &(x, y, z, v) in &pokes {
+            sf.set_painted(x, y, z, v);
+        }
+
+        // Capture into a snapshot (what `unload` does for a dirty chunk),
+        // tuck into a save, serialize to bytes, then go through the
+        // round-trip the save file would do.
+        let snap = ChunkSnapshot::from_chunk(&df, Some(&sf));
+        assert!(snap.painted_stress.is_some(), "snapshot captured painted layer");
+
+        let mut save = WorldSaveData::default();
+        save.chunk_snapshots.insert((0, 0, 0), snap);
+
+        let bytes = save.serialize();
+        let restored_save = WorldSaveData::deserialize(&bytes).unwrap();
+        let restored_snap = &restored_save.chunk_snapshots[&(0, 0, 0)];
+
+        // Apply onto a fresh stress field — this is the path
+        // apply_pending_snapshot uses when the chunk streams back in.
+        let mut restored_sf = voxel_core::stress::StressField::new(SIZE);
+        restored_snap.apply_painted_stress_to(&mut restored_sf);
+
+        for &(x, y, z, v) in &pokes {
+            let got = restored_sf.painted(x, y, z);
+            assert!(
+                (got - v).abs() < 1e-6,
+                "painted value at ({x},{y},{z}) survived round-trip — expected {v}, got {got}"
+            );
+        }
+
+        // Untouched cells stay zero.
+        assert_eq!(restored_sf.painted(0, 0, 0), 0.0);
+        assert_eq!(restored_sf.painted(8, 8, 8), 0.0);
+    }
+
+    #[test]
     fn binary_bad_magic() {
         let mut bytes = WorldSaveData::default().serialize();
         bytes[0] = b'X';

@@ -260,6 +260,12 @@ pub fn paint_stress_sphere(
     let grid_size = chunk_size + 1;
     let mut touched_chunks: Vec<(i32, i32, i32)> = Vec::new();
 
+    // Field-level disjoint borrow so we can read density (Add/Sub gate) and
+    // mutate the stress overlay at the same time. modification_tracker is a
+    // third disjoint field, mutated after these locals drop.
+    let densities = &store.density_fields;
+    let stresses = &mut store.stress_fields;
+
     for cz in lo.2..=hi.2 {
         for cy in lo.1..=hi.1 {
             for cx in lo.0..=hi.0 {
@@ -268,16 +274,13 @@ pub fn paint_stress_sphere(
                 // We only paint stress in chunks that have a density field —
                 // painting into the void is pointless and the stress consumers
                 // index the chunk by the same key.
-                if !store.density_fields.contains_key(&key) {
-                    continue;
-                }
+                let Some(df) = densities.get(&key) else { continue };
 
                 // Lazily initialize the stress field if the chunk has none yet.
                 // ChunkStore::insert already does this on first generate, but
                 // pre-existing saves or unusual streaming orders can leave it
                 // missing — make the brush self-healing.
-                let sf = store
-                    .stress_fields
+                let sf = stresses
                     .entry(key)
                     .or_insert_with(|| voxel_core::stress::StressField::new(grid_size));
 
@@ -295,6 +298,18 @@ pub fn paint_stress_sphere(
                             if d2 > r2 {
                                 continue;
                             }
+
+                            // Stress is a property of rock. Painting into air
+                            // would leave dormant values that later "wake up"
+                            // when debris settles into the cell, causing the
+                            // recollapse loop. Gate Add/Sub on solid; let
+                            // Clear pass through so it can erase any legacy
+                            // air-cell paint from saves predating this gate.
+                            let is_solid = df.get(x, y, z).material.is_solid();
+                            if op != 2 && !is_solid {
+                                continue;
+                            }
+
                             // Weight by falloff.
                             let w = match falloff {
                                 0 => 1.0,
@@ -3398,6 +3413,94 @@ mod tests {
             store.stress_fields.get(&(0, 0, 0)).unwrap().painted(4, 4, 4),
             0.0,
             "clear op zeroed the painted overlay"
+        );
+    }
+
+    #[test]
+    fn paint_stress_skips_air_cells_on_add() {
+        // Brush sphere overlaps both rock and a carved-out air bubble. Add op
+        // should write paint to solid cells but leave air cells at 0 so future
+        // debris settling into those air cells doesn't inherit the overlay
+        // and recollapse forever.
+        let (mut store, config) = make_store_with_solid_chunk(8);
+        // Carve a 1.5-radius air bubble at (4,4,4).
+        let _ = carve_sphere(&mut store, Vec3::new(4.0, 4.0, 4.0), 1.5, &config, 1.0);
+
+        // Paint a 4-radius sphere that easily covers both the bubble and the
+        // surrounding rock.
+        let _ = paint_stress_sphere(
+            &mut store,
+            Vec3::new(4.0, 4.0, 4.0),
+            4.0,
+            /*amount*/ 0.5,
+            /*falloff*/ 0, // constant — same magnitude everywhere
+            /*op*/ 0,      // Add
+            /*cap*/ 2.0,
+            &config,
+            1.0,
+        );
+
+        let df = store.density_fields.get(&(0, 0, 0)).unwrap();
+        let sf = store.stress_fields.get(&(0, 0, 0)).unwrap();
+
+        // Inspect cells along the X-axis through the carved bubble.
+        // Sphere center (4,4,4) is air; cells out near the rim (e.g. x=7) are rock.
+        let center_is_air = !df.get(4, 4, 4).material.is_solid();
+        let rim_is_solid = df.get(7, 4, 4).material.is_solid();
+        assert!(center_is_air, "carve created air at center");
+        assert!(rim_is_solid, "rim still solid");
+
+        assert_eq!(
+            sf.painted(4, 4, 4),
+            0.0,
+            "air cell at sphere center got no paint"
+        );
+        assert!(
+            sf.painted(7, 4, 4) > 0.0,
+            "solid cell got paint (got {})",
+            sf.painted(7, 4, 4)
+        );
+    }
+
+    #[test]
+    fn paint_stress_clear_op_wipes_air_cells_too() {
+        // Even though Add skips air, Clear (op=2) should erase any value at
+        // any cell — including air cells — so legacy saves with painted air
+        // values can be scrubbed by the eraser.
+        let (mut store, config) = make_store_with_solid_chunk(8);
+
+        // Force a painted value into an air cell by writing directly into the
+        // stress field (simulating a legacy save where the old brush wrote air paint).
+        {
+            let _ = carve_sphere(&mut store, Vec3::new(4.0, 4.0, 4.0), 1.5, &config, 1.0);
+            let sf = store
+                .stress_fields
+                .entry((0, 0, 0))
+                .or_insert_with(|| voxel_core::stress::StressField::new(9));
+            sf.set_painted(4, 4, 4, 0.7);
+        }
+        assert_eq!(
+            store.stress_fields.get(&(0, 0, 0)).unwrap().painted(4, 4, 4),
+            0.7,
+            "legacy air-cell paint seeded"
+        );
+
+        // Clear op over the bubble — should zero the air cell.
+        let _ = paint_stress_sphere(
+            &mut store,
+            Vec3::new(4.0, 4.0, 4.0),
+            2.0,
+            0.0,
+            0,
+            /*op=clear*/ 2,
+            2.0,
+            &config,
+            1.0,
+        );
+        assert_eq!(
+            store.stress_fields.get(&(0, 0, 0)).unwrap().painted(4, 4, 4),
+            0.0,
+            "Clear erases air-cell paint"
         );
     }
 

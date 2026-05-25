@@ -68,7 +68,16 @@ impl ChunkScoreBreakdown {
 /// "votes → kind scores" mapping (vote thresholds + weight multipliers).
 /// Both [`score_chunk`] (sync scanner) and the background tracker call this
 /// so the formula can't drift.
-pub fn score_from_votes(lava: usize, water: usize, stress: usize) -> ChunkScoreBreakdown {
+pub fn score_from_votes(
+    lava: usize,
+    water: usize,
+    stress: usize,
+    // STUB (2026-05-25): topology votes are accepted but not yet scored. See
+    // PoiKind comment for context.
+    _dome_count: usize,
+    _choke_count: usize,
+    _niche_count: usize,
+) -> ChunkScoreBreakdown {
     let lava_score = if lava >= MIN_LAVA_VOTES {
         lava as f32 * SCORE_PER_LAVA_VOXEL
     } else {
@@ -127,7 +136,7 @@ pub fn score_chunk(
 ) -> ChunkScoreBreakdown {
     let (lava, water) = fluid_cells.map(count_fluid_voxels).unwrap_or((0, 0));
     let stress = stress_field.map(count_high_stress_voxels).unwrap_or(0);
-    score_from_votes(lava, water, stress)
+    score_from_votes(lava, water, stress, 0, 0, 0)
 }
 
 /// Bridge baseline score — "moderate" per user direction. Outscored by big
@@ -150,6 +159,44 @@ pub enum PoiKind {
     Lava = 1,
     Water = 2,
     Stress = 3,
+    // STUB (2026-05-25): topology kinds are referenced by poi_tracker.rs but
+    // the full topology-vote pipeline (in-flight as of 2026-05-25 review per
+    // PERF_REVIEW_2026-05-25.md) hasn't landed yet. These variants exist so
+    // the crate compiles; scoring never picks them with the current
+    // ChunkScoreBreakdown.best(), so they're inert at runtime. Replace with
+    // real selection logic once the topology probe ships.
+    CeilingDome = 4,
+    Chokepoint = 5,
+    WallNiche = 6,
+}
+
+/// STUB (2026-05-25): topology-vote totals — see PoiKind comment. Real impl
+/// will replace this with per-kind voxel counts + centroid tracking.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TopologyVotes {
+    pub dome_count: usize,
+    pub choke_count: usize,
+    pub niche_count: usize,
+    pub centroid: glam::IVec3,
+}
+
+impl TopologyVotes {
+    /// Centroid offset (in chunk-local voxel coords) for a given topology
+    /// kind. Stub returns the cached centroid regardless of kind.
+    pub fn centroid_for(&self, _kind: PoiKind, _chunk_size: usize) -> glam::IVec3 {
+        self.centroid
+    }
+}
+
+/// STUB (2026-05-25): cross-chunk topology counter. Real impl scans
+/// neighboring chunks to identify domes / chokepoints / niches. Returns
+/// zeros so the topology kinds never win the scoring race.
+pub fn count_topology_votes_cross_chunk(
+    _store: &ChunkStore,
+    _coord: (i32, i32, i32),
+    _chunk_size: usize,
+) -> TopologyVotes {
+    TopologyVotes::default()
 }
 
 #[derive(Debug, Clone, Copy)]

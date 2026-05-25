@@ -26,6 +26,22 @@ use crate::store::ChunkStore;
 use crate::types::*;
 use crate::worker::{path_worker_loop, worker_loop};
 
+/// Stress threshold above which a cell counts as "imminently collapsing" for
+/// the warning-FX system (cracks + ambient dust + mining-impact dust burst).
+///
+/// **Not the same as the collapse-pass threshold.** The collapse pass at
+/// `voxel-core::stress::detect_and_execute_collapses_v2` starts at `eff >= 1.0`
+/// — the bare overstress threshold. But many cells in the 1.0-1.3 band sit
+/// there forever without dropping (edge-of-slab, insufficient region coherence,
+/// median landing offset <= 0).
+///
+/// The V-overlay's color map (`StressToColor` in VoxelChunkActor.cpp) goes
+/// red at 1.0 and pure white at 1.5. Players read "white" as "this is going
+/// down" and "red" as "stressed but stable." So warning FX fire at the higher
+/// "white-bright" threshold, not the bare collapse-pass threshold — keeps the
+/// promise that anywhere with visible cracks/dust is genuinely a collapse risk.
+pub const COLLAPSE_IMMINENT_STRESS: f32 = 1.5;
+
 /// TTL (seconds) for stashed path results UE never collected. Prunes once per
 /// poll to bound memory growth from dead agents.
 const PATH_RESULT_TTL_SECS: u64 = 10;
@@ -1241,7 +1257,14 @@ impl VoxelEngine {
 
     /// Query the stress field for a chunk. Returns a cloned StressField if loaded.
     pub fn query_stress(&self, chunk: (i32, i32, i32)) -> Option<StressField> {
-        let store = self.store.try_read().ok()?;
+        // Blocking read on purpose: the PaintStress overlay refresh path on
+        // the UE side polls this immediately after dispatching a paint, and
+        // a try_read race against the worker's write lock would silently
+        // return valid=0 — making the V-overlay stop auto-updating after
+        // any collapse cascade (the worker holds write for hundreds of ms
+        // during cascade + post-cascade mesh updates). Blocking briefly
+        // here is the right tradeoff vs. silently dropping refreshes.
+        let store = self.store.read().ok()?;
         store.stress_fields.get(&chunk).cloned()
     }
 
@@ -1323,6 +1346,245 @@ impl VoxelEngine {
 
         let store = self.store.try_read().ok()?;
         Some(probe_surface(&store, rust_pos, chunk_size, normal_hint_rust))
+    }
+
+    /// Enumerate cells in a single chunk whose effective stress is high enough
+    /// to be in the "imminent collapse" band — past the bare 1.0 threshold and
+    /// well into the saturated-white range of the stress overlay. Returns one
+    /// entry per surface-exposed over-stress cell with its UE-world center,
+    /// surface normal, and stress value — ready for UE to drop a crack decal
+    /// at and fire warning dust.
+    ///
+    /// **Why higher than the collapse pass's 1.0**: the V-overlay maps stress
+    /// 1.0 → pure red, 1.5 → pure white, with a red→white lerp in between
+    /// (see `StressToColor` in VoxelChunkActor.cpp). The collapse pass starts
+    /// considering cells at 1.0, but cells in the 1.0-1.3 range are often
+    /// edge-of-region — they sit forever without dropping because their slab
+    /// isn't coherent enough or the region's median landing offset is <= 0.
+    /// Players reasonably read "red but not white" as "stressed but stable"
+    /// and find dust there confusing. Filtering at [`COLLAPSE_IMMINENT_STRESS`]
+    /// (1.5) aligns warning FX with the visual "pure white" core where slabs
+    /// actually form.
+    ///
+    /// Interior (fully-enclosed) cells are skipped: they have no visible
+    /// surface to decorate.
+    ///
+    /// `chunk_rust` is the Rust chunk coord (caller converts from UE).
+    ///
+    /// Returns `(cells, valid)`. `valid=false` means the store lock was
+    /// contended even after retry — the caller MUST NOT treat the empty Vec
+    /// as "no cells here" since it might just be a transient race with the
+    /// brush worker. UE uses this to preserve existing decals instead of
+    /// wiping them on every paint click that happens to race with a worker.
+    pub fn enumerate_overstressed_in_chunk(
+        &self,
+        chunk_rust: (i32, i32, i32),
+    ) -> (Vec<crate::types::FfiOverstressedCell>, bool) {
+        use crate::surface_probe::probe_surface;
+        use glam::Vec3;
+        use voxel_core::stress::{unpack_surface, SURFACE_INTERIOR};
+
+        let chunk_size = self.chunk_size();
+        let world_scale = self.get_world_scale();
+
+        // Try-read with short retry. The brush worker holds the write lock
+        // for ~10ms during a paint update. Without retry, UE refreshes
+        // immediately after the FFI call land before the worker releases,
+        // try_read fails, we return empty, and UE wipes all the decals
+        // ("1 in 4 clicks the decals disappear" bug). 5 retries x 2ms
+        // = up to 10ms blocking on the game thread, acceptable for an
+        // event-driven refresh (not per-frame).
+        let store = {
+            let mut got = None;
+            for _ in 0..5 {
+                if let Ok(s) = self.store.try_read() { got = Some(s); break; }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            match got {
+                Some(s) => s,
+                None => return (Vec::new(), false),  // contended -> caller preserves
+            }
+        };
+        let sf = match store.stress_fields.get(&chunk_rust) {
+            Some(sf) => sf,
+            None => return (Vec::new(), true),  // store OK, just no field for this chunk
+        };
+
+        let cs = chunk_size as i32;
+        let (cx, cy, cz) = chunk_rust;
+        let mut out = Vec::new();
+
+        for lz in 0..chunk_size {
+            for ly in 0..chunk_size {
+                for lx in 0..chunk_size {
+                    let eff = sf.effective(lx, ly, lz);
+                    if eff < COLLAPSE_IMMINENT_STRESS {
+                        continue;
+                    }
+                    let surface_kind = unpack_surface(sf.get_class(lx, ly, lz));
+                    if surface_kind == SURFACE_INTERIOR {
+                        continue;
+                    }
+
+                    let rust_x = cx * cs + lx as i32;
+                    let rust_y = cy * cs + ly as i32;
+                    let rust_z = cz * cs + lz as i32;
+                    let rust_center = Vec3::new(
+                        rust_x as f32 + 0.5,
+                        rust_y as f32 + 0.5,
+                        rust_z as f32 + 0.5,
+                    );
+
+                    let probe = probe_surface(&store, rust_center, chunk_size, Vec3::Y);
+
+                    let ue_x = rust_center.x * world_scale;
+                    let ue_y = -rust_center.z * world_scale;
+                    let ue_z = rust_center.y * world_scale;
+
+                    let nx_ue = probe.normal.x;
+                    let ny_ue = -probe.normal.z;
+                    let nz_ue = probe.normal.y;
+
+                    out.push(crate::types::FfiOverstressedCell {
+                        world_x: ue_x,
+                        world_y: ue_y,
+                        world_z: ue_z,
+                        normal_x: nx_ue,
+                        normal_y: ny_ue,
+                        normal_z: nz_ue,
+                        stress: eff,
+                        surface_kind,
+                        _padding: [0; 3],
+                    });
+                }
+            }
+        }
+        (out, true)
+    }
+
+    /// Enumerate over-stress cells inside a UE world-space sphere. Used by
+    /// the mining post-recalc handler to fire a "you're undermining a fragile
+    /// area" dust burst at every primed cell within the mining impact zone.
+    ///
+    /// `center_ue` + `radius_ue` are in UE units (centimeters). The result
+    /// includes every surface-exposed over-stress cell whose center is within
+    /// `radius_ue` of the impact point.
+    ///
+    /// Returns `(cells, valid)` — `valid=false` signals store-lock contention;
+    /// see `enumerate_overstressed_in_chunk` for the same semantics.
+    pub fn enumerate_overstressed_in_sphere(
+        &self,
+        center_ue_x: f32,
+        center_ue_y: f32,
+        center_ue_z: f32,
+        radius_ue: f32,
+    ) -> (Vec<crate::types::FfiOverstressedCell>, bool) {
+        use crate::convert::from_ue_world_pos;
+        use crate::surface_probe::probe_surface;
+        use glam::Vec3;
+        use voxel_core::stress::{unpack_surface, SURFACE_INTERIOR};
+
+        let chunk_size = self.chunk_size();
+        let world_scale = self.get_world_scale();
+
+        let rust_center = from_ue_world_pos(center_ue_x, center_ue_y, center_ue_z, world_scale);
+        let radius_voxels = radius_ue / world_scale;
+        let r2 = radius_voxels * radius_voxels;
+
+        let cs = chunk_size as i32;
+        let min_rx = (rust_center.x - radius_voxels).floor() as i32;
+        let max_rx = (rust_center.x + radius_voxels).ceil() as i32;
+        let min_ry = (rust_center.y - radius_voxels).floor() as i32;
+        let max_ry = (rust_center.y + radius_voxels).ceil() as i32;
+        let min_rz = (rust_center.z - radius_voxels).floor() as i32;
+        let max_rz = (rust_center.z + radius_voxels).ceil() as i32;
+
+        let cx_min = min_rx.div_euclid(cs);
+        let cx_max = max_rx.div_euclid(cs);
+        let cy_min = min_ry.div_euclid(cs);
+        let cy_max = max_ry.div_euclid(cs);
+        let cz_min = min_rz.div_euclid(cs);
+        let cz_max = max_rz.div_euclid(cs);
+
+        // Same retry/contention semantics as the chunk variant — see comment
+        // there. Critical for the mining-burst path that fires while the
+        // worker is still updating stress fields.
+        let store = {
+            let mut got = None;
+            for _ in 0..5 {
+                if let Ok(s) = self.store.try_read() { got = Some(s); break; }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            match got {
+                Some(s) => s,
+                None => return (Vec::new(), false),
+            }
+        };
+
+        let mut out = Vec::new();
+        for cz in cz_min..=cz_max {
+            for cy in cy_min..=cy_max {
+                for cx in cx_min..=cx_max {
+                    let sf = match store.stress_fields.get(&(cx, cy, cz)) {
+                        Some(sf) => sf,
+                        None => continue,
+                    };
+                    for lz in 0..chunk_size {
+                        for ly in 0..chunk_size {
+                            for lx in 0..chunk_size {
+                                let eff = sf.effective(lx, ly, lz);
+                                if eff < COLLAPSE_IMMINENT_STRESS {
+                                    continue;
+                                }
+                                let surface_kind = unpack_surface(sf.get_class(lx, ly, lz));
+                                if surface_kind == SURFACE_INTERIOR {
+                                    continue;
+                                }
+
+                                let rust_x = cx * cs + lx as i32;
+                                let rust_y = cy * cs + ly as i32;
+                                let rust_z = cz * cs + lz as i32;
+                                let rust_center_cell = Vec3::new(
+                                    rust_x as f32 + 0.5,
+                                    rust_y as f32 + 0.5,
+                                    rust_z as f32 + 0.5,
+                                );
+
+                                let dx = rust_center_cell.x - rust_center.x;
+                                let dy = rust_center_cell.y - rust_center.y;
+                                let dz = rust_center_cell.z - rust_center.z;
+                                if dx * dx + dy * dy + dz * dz > r2 {
+                                    continue;
+                                }
+
+                                let probe = probe_surface(&store, rust_center_cell, chunk_size, Vec3::Y);
+
+                                let ue_x = rust_center_cell.x * world_scale;
+                                let ue_y = -rust_center_cell.z * world_scale;
+                                let ue_z = rust_center_cell.y * world_scale;
+
+                                let nx_ue = probe.normal.x;
+                                let ny_ue = -probe.normal.z;
+                                let nz_ue = probe.normal.y;
+
+                                out.push(crate::types::FfiOverstressedCell {
+                                    world_x: ue_x,
+                                    world_y: ue_y,
+                                    world_z: ue_z,
+                                    normal_x: nx_ue,
+                                    normal_y: ny_ue,
+                                    normal_z: nz_ue,
+                                    stress: eff,
+                                    surface_kind,
+                                    _padding: [0; 3],
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        (out, true)
     }
 
     /// Synchronous "is a path possible from A to B" check. Runs A* under a
@@ -1727,6 +1989,15 @@ impl VoxelEngine {
             op: request.op,
             falloff: request.falloff,
         }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
+    /// Wipe every loaded chunk's painted-stress overlay back to empty.
+    /// Returns 1 on success, 0 if queue full.
+    pub fn request_brush_clear_all_painted_stress(&self) -> u32 {
+        match self.mine_tx.try_send(WorkerRequest::BrushClearAllPaintedStress) {
             Ok(()) => 1,
             Err(_) => 0,
         }
