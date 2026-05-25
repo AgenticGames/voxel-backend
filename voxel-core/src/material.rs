@@ -93,58 +93,25 @@ pub enum Material {
 }
 
 impl Material {
+    /// Highest assigned discriminant. Discriminants 0..=MAX_DISCRIMINANT are
+    /// all valid `Material` variants — the round-trip test below asserts this.
+    /// When you add a new variant, bump this constant.
+    pub const MAX_DISCRIMINANT: u8 = Material::Amphibolite as u8;
+
+    #[inline]
     pub fn from_u8(v: u8) -> Self {
-        match v {
-            1 => Material::Sandstone,
-            2 => Material::Limestone,
-            3 => Material::Granite,
-            4 => Material::Basalt,
-            5 => Material::Slate,
-            6 => Material::Marble,
-            7 => Material::Iron,
-            8 => Material::Copper,
-            9 => Material::Malachite,
-            10 => Material::Tin,
-            11 => Material::Gold,
-            12 => Material::Diamond,
-            13 => Material::Kimberlite,
-            14 => Material::Sulfide,
-            15 => Material::Quartz,
-            16 => Material::Pyrite,
-            17 => Material::Amethyst,
-            18 => Material::Crystal,
-            19 => Material::Coal,
-            20 => Material::Graphite,
-            21 => Material::Opal,
-            22 => Material::Hornfels,
-            23 => Material::Garnet,
-            24 => Material::Diopside,
-            25 => Material::Gypsum,
-            26 => Material::Skarn,
-            27 => Material::Ice,
-            28 => Material::Travertine,
-            29 => Material::Permafrost,
-            30 => Material::Hoarfrost,
-            31 => Material::BlackIce,
-            32 => Material::Obsidian,
-            33 => Material::Pumice,
-            34 => Material::Scoria,
-            35 => Material::Sinter,
-            36 => Material::Sulfur,
-            37 => Material::Flowstone,
-            38 => Material::Moonmilk,
-            39 => Material::Tufa,
-            40 => Material::Mycelium,
-            41 => Material::Glowstone,
-            42 => Material::MushroomStalk,
-            43 => Material::MushroomGill,
-            44 => Material::PurpleCap,
-            45 => Material::TealCap,
-            46 => Material::AmberCap,
-            47 => Material::IceSheet,
-            48 => Material::FrozenGlow,
-            49 => Material::Amphibolite,
-            _ => Material::Air,
+        // The enum is `#[repr(u8)]` with consecutive discriminants 0..=MAX
+        // (asserted by `material_discriminants_are_dense`). One bounds check
+        // + transmute replaces a 50-arm match — meaningful on hot per-voxel
+        // paths: DeltaSnapshot::apply_to (~35K calls/chunk on save load),
+        // sleep manifest delta apply (per voxel_change), and the sleep
+        // montage animation loop (per voxel per frame).
+        if v <= Self::MAX_DISCRIMINANT {
+            // SAFETY: `Material` is `#[repr(u8)]` and every value in
+            // 0..=MAX_DISCRIMINANT is an assigned variant.
+            unsafe { std::mem::transmute::<u8, Material>(v) }
+        } else {
+            Material::Air
         }
     }
 
@@ -465,5 +432,29 @@ mod tests {
         for &mat in Material::all_solid() {
             assert_eq!(Material::from_u8(mat as u8), mat, "round-trip failed for {:?}", mat);
         }
+    }
+
+    #[test]
+    fn material_discriminants_are_dense() {
+        // SAFETY contract for `from_u8`: every value 0..=MAX_DISCRIMINANT
+        // must be an assigned variant. Air covers 0; all_solid covers the
+        // rest. If a future change introduces a gap (e.g. removes a variant
+        // without renumbering), this test fails and `from_u8` would otherwise
+        // transmute into an invalid discriminant — UB.
+        let mut seen = vec![false; (Material::MAX_DISCRIMINANT as usize) + 1];
+        seen[Material::Air as usize] = true;
+        for &mat in Material::all_solid() {
+            seen[mat as usize] = true;
+        }
+        for (i, ok) in seen.iter().enumerate() {
+            assert!(*ok, "Material discriminant {} is unassigned (gap in enum)", i);
+        }
+    }
+
+    #[test]
+    fn material_from_u8_out_of_range_returns_air() {
+        assert_eq!(Material::from_u8(Material::MAX_DISCRIMINANT + 1), Material::Air);
+        assert_eq!(Material::from_u8(100), Material::Air);
+        assert_eq!(Material::from_u8(255), Material::Air);
     }
 }
