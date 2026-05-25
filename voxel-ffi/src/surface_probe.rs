@@ -22,6 +22,7 @@
 use glam::Vec3;
 
 use crate::store::ChunkStore;
+use voxel_core::density::DensityField;
 
 /// Surface-kind output of [`probe_surface`]. Matches the u8 encoding in
 /// `FfiSurfaceProbe.kind`.
@@ -51,20 +52,52 @@ const PROBE_DIRECTIONS: [(i32, i32, i32); 14] = [
     ( 1, 1,-1), (-1, 1,-1), ( 1,-1,-1), (-1,-1,-1),
 ];
 
-/// Sample one world-voxel as solid or air. Treats unloaded chunks as solid
-/// — placement validators should refuse to anchor against unloaded geometry
-/// (the player can't see it either, and it may be carved away on stream-in).
-fn is_solid_at(store: &ChunkStore, wx: i32, wy: i32, wz: i32, chunk_size: usize) -> bool {
-    let cs_i = chunk_size as i32;
-    let cx = wx.div_euclid(cs_i);
-    let cy = wy.div_euclid(cs_i);
-    let cz = wz.div_euclid(cs_i);
-    let lx = wx.rem_euclid(cs_i) as usize;
-    let ly = wy.rem_euclid(cs_i) as usize;
-    let lz = wz.rem_euclid(cs_i) as usize;
-    match store.density_fields.get(&(cx, cy, cz)) {
-        Some(df) => df.get(lx, ly, lz).material.is_solid(),
-        None => true,
+/// Chunk-pointer-cached sampler. A single `probe_surface` call issues hundreds
+/// of `is_solid` reads whose working set is dominated by 1–8 chunks; reusing
+/// the last-resolved `&DensityField` between consecutive same-chunk reads
+/// skips the `HashMap::get` AND the `div_euclid` chunk-key math.
+struct Sampler<'a> {
+    store: &'a ChunkStore,
+    chunk_size_i: i32,
+    last_key: (i32, i32, i32),
+    last_df: Option<&'a DensityField>,
+    have_last: bool,
+}
+
+impl<'a> Sampler<'a> {
+    fn new(store: &'a ChunkStore, chunk_size: usize) -> Self {
+        Self {
+            store,
+            chunk_size_i: chunk_size as i32,
+            last_key: (0, 0, 0),
+            last_df: None,
+            have_last: false,
+        }
+    }
+
+    /// Unloaded chunks classify as solid — placement validators should refuse
+    /// to anchor against geometry that may be carved away on stream-in.
+    #[inline]
+    fn is_solid(&mut self, wx: i32, wy: i32, wz: i32) -> bool {
+        let cs = self.chunk_size_i;
+        let cx = wx.div_euclid(cs);
+        let cy = wy.div_euclid(cs);
+        let cz = wz.div_euclid(cs);
+        let key = (cx, cy, cz);
+        if !self.have_last || key != self.last_key {
+            self.last_df = self.store.density_fields.get(&key);
+            self.last_key = key;
+            self.have_last = true;
+        }
+        match self.last_df {
+            Some(df) => {
+                let lx = wx.rem_euclid(cs) as usize;
+                let ly = wy.rem_euclid(cs) as usize;
+                let lz = wz.rem_euclid(cs) as usize;
+                df.get(lx, ly, lz).material.is_solid()
+            }
+            None => true,
+        }
     }
 }
 
@@ -72,17 +105,16 @@ fn is_solid_at(store: &ChunkStore, wx: i32, wy: i32, wz: i32, chunk_size: usize)
 /// Euclidean distance (in voxels) at which the first solid voxel was hit,
 /// capped at `MAX_PROBE_VOXELS` worth of steps.
 fn distance_to_solid(
-    store: &ChunkStore,
+    sampler: &mut Sampler,
     ox: i32, oy: i32, oz: i32,
     dx: i32, dy: i32, dz: i32,
-    chunk_size: usize,
 ) -> f32 {
     let step_len = ((dx * dx + dy * dy + dz * dz) as f32).sqrt();
     for step in 1..=MAX_PROBE_VOXELS {
         let sx = ox + dx * step;
         let sy = oy + dy * step;
         let sz = oz + dz * step;
-        if is_solid_at(store, sx, sy, sz, chunk_size) {
+        if sampler.is_solid(sx, sy, sz) {
             return (step - 1) as f32 * step_len;
         }
     }
@@ -120,49 +152,65 @@ pub fn probe_surface(
     let oy = rust_pos.y.round() as i32;
     let oz = rust_pos.z.round() as i32;
 
-    let origin_solid = is_solid_at(store, ox, oy, oz, chunk_size);
+    let mut sampler = Sampler::new(store, chunk_size);
 
-    // Averaged gradient over a 3x3x3 cell — points from rock toward air.
-    let mut nx = 0.0_f32;
-    let mut ny = 0.0_f32;
-    let mut nz = 0.0_f32;
-    for dz in -1..=1i32 {
-        for dy in -1..=1i32 {
-            for dx in -1..=1i32 {
-                let s_minus_x = is_solid_at(store, ox + dx - 1, oy + dy, oz + dz, chunk_size) as i32;
-                let s_plus_x  = is_solid_at(store, ox + dx + 1, oy + dy, oz + dz, chunk_size) as i32;
-                let s_minus_y = is_solid_at(store, ox + dx, oy + dy - 1, oz + dz, chunk_size) as i32;
-                let s_plus_y  = is_solid_at(store, ox + dx, oy + dy + 1, oz + dz, chunk_size) as i32;
-                let s_minus_z = is_solid_at(store, ox + dx, oy + dy, oz + dz - 1, chunk_size) as i32;
-                let s_plus_z  = is_solid_at(store, ox + dx, oy + dy, oz + dz + 1, chunk_size) as i32;
-                nx += (s_minus_x - s_plus_x) as f32;
-                ny += (s_minus_y - s_plus_y) as f32;
-                nz += (s_minus_z - s_plus_z) as f32;
+    // Precompute a 5x5x5 cube of is_solid samples spanning [-2..=2] around
+    // origin. The 3x3x3 gradient loop below would otherwise re-sample the
+    // same cells 37 redundant times (162 reads land in 125 unique cells).
+    let mut cube = [[[false; 5]; 5]; 5];
+    for cz in 0..5usize {
+        for cy in 0..5usize {
+            for cx in 0..5usize {
+                cube[cx][cy][cz] = sampler.is_solid(
+                    ox + cx as i32 - 2,
+                    oy + cy as i32 - 2,
+                    oz + cz as i32 - 2,
+                );
             }
         }
     }
-    let normal = if nx * nx + ny * ny + nz * nz < 1e-6 {
+    let origin_solid = cube[2][2][2];
+
+    // Averaged gradient over a 3x3x3 cell — points from rock toward air.
+    // Indices into `cube` are offset by +2 (cube[2][2][2] = origin).
+    let mut nx = 0i32;
+    let mut ny = 0i32;
+    let mut nz = 0i32;
+    for dz in -1..=1i32 {
+        for dy in -1..=1i32 {
+            for dx in -1..=1i32 {
+                let (cx, cy, cz) = ((dx + 2) as usize, (dy + 2) as usize, (dz + 2) as usize);
+                nx += cube[cx - 1][cy    ][cz    ] as i32 - cube[cx + 1][cy    ][cz    ] as i32;
+                ny += cube[cx    ][cy - 1][cz    ] as i32 - cube[cx    ][cy + 1][cz    ] as i32;
+                nz += cube[cx    ][cy    ][cz - 1] as i32 - cube[cx    ][cy    ][cz + 1] as i32;
+            }
+        }
+    }
+    let nxf = nx as f32;
+    let nyf = ny as f32;
+    let nzf = nz as f32;
+    let normal = if nxf * nxf + nyf * nyf + nzf * nzf < 1e-6 {
         if normal_hint.length_squared() > 1e-6 {
             normal_hint.normalize()
         } else {
             Vec3::Y
         }
     } else {
-        Vec3::new(nx, ny, nz).normalize()
+        Vec3::new(nxf, nyf, nzf).normalize()
     };
 
     let clearance = [
-        distance_to_solid(store, ox, oy, oz,  1, 0, 0, chunk_size),
-        distance_to_solid(store, ox, oy, oz, -1, 0, 0, chunk_size),
-        distance_to_solid(store, ox, oy, oz,  0, 1, 0, chunk_size),
-        distance_to_solid(store, ox, oy, oz,  0,-1, 0, chunk_size),
-        distance_to_solid(store, ox, oy, oz,  0, 0, 1, chunk_size),
-        distance_to_solid(store, ox, oy, oz,  0, 0,-1, chunk_size),
+        distance_to_solid(&mut sampler, ox, oy, oz,  1, 0, 0),
+        distance_to_solid(&mut sampler, ox, oy, oz, -1, 0, 0),
+        distance_to_solid(&mut sampler, ox, oy, oz,  0, 1, 0),
+        distance_to_solid(&mut sampler, ox, oy, oz,  0,-1, 0),
+        distance_to_solid(&mut sampler, ox, oy, oz,  0, 0, 1),
+        distance_to_solid(&mut sampler, ox, oy, oz,  0, 0,-1),
     ];
 
     let mut cavity_radius = (MAX_PROBE_VOXELS as f32) * (3.0_f32).sqrt();
     for &(dx, dy, dz) in &PROBE_DIRECTIONS {
-        let d = distance_to_solid(store, ox, oy, oz, dx, dy, dz, chunk_size);
+        let d = distance_to_solid(&mut sampler, ox, oy, oz, dx, dy, dz);
         if d < cavity_radius {
             cavity_radius = d;
         }
