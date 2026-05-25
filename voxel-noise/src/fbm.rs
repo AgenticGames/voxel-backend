@@ -5,15 +5,28 @@ pub struct Fbm<N: NoiseSource> {
     pub octaves: u32,
     pub lacunarity: f64,
     pub persistence: f64,
+    /// Precomputed sum of `persistence^k` for k=0..octaves. Invariant per
+    /// instance; previously summed inside every `sample` call. Stored as the
+    /// actual sum (not its reciprocal) so the final `value / max_amplitude`
+    /// stays bit-identical to the previous implementation — world seeds and
+    /// saved noise fields don't drift.
+    max_amplitude: f64,
 }
 
 impl<N: NoiseSource> Fbm<N> {
     pub fn new(source: N, octaves: u32, lacunarity: f64, persistence: f64) -> Self {
+        let mut max_amplitude = 0.0;
+        let mut amplitude = 1.0;
+        for _ in 0..octaves {
+            max_amplitude += amplitude;
+            amplitude *= persistence;
+        }
         Self {
             source,
             octaves,
             lacunarity,
             persistence,
+            max_amplitude,
         }
     }
 }
@@ -23,7 +36,6 @@ impl<N: NoiseSource> NoiseSource for Fbm<N> {
         let mut value = 0.0;
         let mut amplitude = 1.0;
         let mut frequency = 1.0;
-        let mut max_amplitude = 0.0;
 
         for _ in 0..self.octaves {
             value += self.source.sample(
@@ -31,12 +43,11 @@ impl<N: NoiseSource> NoiseSource for Fbm<N> {
                 y * frequency,
                 z * frequency,
             ) * amplitude;
-            max_amplitude += amplitude;
             amplitude *= self.persistence;
             frequency *= self.lacunarity;
         }
 
-        value / max_amplitude
+        value / self.max_amplitude
     }
 }
 

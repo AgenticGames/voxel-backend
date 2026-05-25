@@ -6,6 +6,11 @@ pub struct RidgedMulti<N: NoiseSource> {
     pub lacunarity: f64,
     pub gain: f64,
     spectral_weights: Vec<f64>,
+    /// Precomputed `spectral_weights.iter().sum()`. Previously recomputed on
+    /// every `sample` call (a Vec iteration + sum); now constructed once.
+    /// Output is bit-identical because we feed the same value through the
+    /// same `(value / max_val) * 2.0 - 1.0` expression.
+    spectral_weight_sum: f64,
 }
 
 impl<N: NoiseSource> RidgedMulti<N> {
@@ -17,12 +22,14 @@ impl<N: NoiseSource> RidgedMulti<N> {
             spectral_weights.push(freq.powf(-1.0));
             freq *= lacunarity;
         }
+        let spectral_weight_sum = spectral_weights.iter().sum();
         Self {
             source,
             octaves,
             lacunarity,
             gain,
             spectral_weights,
+            spectral_weight_sum,
         }
     }
 }
@@ -52,10 +59,8 @@ impl<N: NoiseSource> NoiseSource for RidgedMulti<N> {
             frequency *= self.lacunarity;
         }
 
-        // Normalize to roughly [-1, 1]
-        // The sum of spectral_weights gives the max possible value
-        let max_val: f64 = self.spectral_weights.iter().sum();
-        (value / max_val) * 2.0 - 1.0
+        // Normalize to roughly [-1, 1] using the precomputed weight sum.
+        (value / self.spectral_weight_sum) * 2.0 - 1.0
     }
 }
 
