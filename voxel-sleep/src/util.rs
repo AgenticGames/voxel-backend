@@ -302,15 +302,21 @@ pub struct VeinGrowthParams {
 ///
 /// For hydrothermal veins (exclude_aureole=true): any air face neighbor counts,
 /// since these veins ARE the primary deposit on cave walls.
-fn is_surface_exposed(
-    density_fields: &HashMap<(i32, i32, i32), DensityField>,
+///
+/// Takes a `ChunkSampleCache` so that the 6-direction (and, in aureole mode,
+/// 6×6=36-direction) neighborhood scan reuses the chunk-pointer lookup. All
+/// probed positions live inside a single 5³ window around `pos`, so the cache
+/// hit rate is very high (typically >90%).
+fn is_surface_exposed<'a>(
+    density_fields: &'a HashMap<(i32, i32, i32), DensityField>,
+    cache: &mut ChunkSampleCache<'a>,
     pos: (i32, i32, i32),
     chunk_size: usize,
     aureole_only: bool,
 ) -> bool {
     for &(dx, dy, dz) in &FACE_OFFSETS {
         let n = (pos.0 + dx, pos.1 + dy, pos.2 + dz);
-        let mat = sample_material(density_fields, n.0, n.1, n.2, chunk_size);
+        let mat = cache.material(density_fields, n.0, n.1, n.2, chunk_size);
         if mat.map_or(false, |m| !m.is_solid()) {
             if !aureole_only {
                 // Hydrothermal: any air neighbor counts
@@ -320,7 +326,7 @@ fn is_surface_exposed(
             for &(ax, ay, az) in &FACE_OFFSETS {
                 let an = (n.0 + ax, n.1 + ay, n.2 + az);
                 if an == pos { continue; }
-                if let Some(am) = sample_material(density_fields, an.0, an.1, an.2, chunk_size) {
+                if let Some(am) = cache.material(density_fields, an.0, an.1, an.2, chunk_size) {
                     if am == Material::Hornfels || am == Material::Skarn {
                         return true;
                     }
@@ -335,8 +341,8 @@ fn is_surface_exposed(
 ///
 /// Returns world-coordinate positions to convert to ore. The seed itself
 /// is included in the result.
-pub fn grow_vein(
-    density_fields: &HashMap<(i32, i32, i32), DensityField>,
+pub fn grow_vein<'a>(
+    density_fields: &'a HashMap<(i32, i32, i32), DensityField>,
     seed: (i32, i32, i32),
     params: &VeinGrowthParams,
     chunk_size: usize,
@@ -352,7 +358,11 @@ pub fn grow_vein(
     // This prevents veins from gaming the ratio by poking through random thin walls.
     let mut surface_count = 0u32;
     let aureole_surface_mode = !params.exclude_aureole; // aureole veins require Hornfels/Skarn adjacency
-    if is_surface_exposed(density_fields, seed, chunk_size, aureole_surface_mode) {
+    // Single chunk-pointer cache shared by every sample_material probe inside this
+    // vein's growth — every probed voxel lives within the vein's small extent
+    // (≤max_size voxels, usually well under one or two chunks), so hit rate is high.
+    let mut cache = ChunkSampleCache::new();
+    if is_surface_exposed(density_fields, &mut cache, seed, chunk_size, aureole_surface_mode) {
         surface_count += 1;
     }
 
@@ -371,7 +381,7 @@ pub fn grow_vein(
             if visited.contains(&n) {
                 continue;
             }
-            if let Some(mat) = sample_material(density_fields, n.0, n.1, n.2, chunk_size) {
+            if let Some(mat) = cache.material(density_fields, n.0, n.1, n.2, chunk_size) {
                 if !mat.is_host_rock() {
                     continue;
                 }
@@ -395,7 +405,7 @@ pub fn grow_vein(
                     VeinBias::Branching => 1.0,
                     VeinBias::WallClimbing { wall_normal, weight_up, weight_depth, weight_lateral, weight_down, surface_ratio } => {
                         // Surface ratio enforcement
-                        let is_exposed = is_surface_exposed(density_fields, n, chunk_size, aureole_surface_mode);
+                        let is_exposed = is_surface_exposed(density_fields, &mut cache, n, chunk_size, aureole_surface_mode);
                         let current_ratio = if result.is_empty() { 1.0 } else { surface_count as f32 / result.len() as f32 };
                         let surface_penalty = if !is_exposed && current_ratio < *surface_ratio { 0.05 } else { 1.0 };
 
@@ -459,7 +469,7 @@ pub fn grow_vein(
             let (pos, _) = candidates.remove(chosen_idx);
             visited.insert(pos);
             // Track surface-exposed count for WallClimbing surface_ratio
-            if is_surface_exposed(density_fields, pos, chunk_size, aureole_surface_mode) {
+            if is_surface_exposed(density_fields, &mut cache, pos, chunk_size, aureole_surface_mode) {
                 surface_count += 1;
             }
             result.push(pos);
