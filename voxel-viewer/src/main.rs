@@ -426,7 +426,10 @@ fn serve_generate(
     let mut stress_vertical: Option<f32> = None;
     let mut stress_prop_radius: Option<u32> = None;
     let mut stress_max_collapse: Option<u32> = None;
-    // Sleep collapse settings (strut survival per type)
+    // Sleep collapse settings (strut survival per type).
+    // 2026-05-26: removed Slate/Granite/Limestone (collapsed to Copper); added Mithril.
+    // Legacy slate/granite/limestone params still accepted on the query string
+    // and routed to Copper to keep bookmarks alive.
     let mut collapse_slate: Option<f32> = None;
     let mut collapse_granite: Option<f32> = None;
     let mut collapse_limestone: Option<f32> = None;
@@ -434,6 +437,7 @@ fn serve_generate(
     let mut collapse_iron: Option<f32> = None;
     let mut collapse_steel: Option<f32> = None;
     let mut collapse_crystal: Option<f32> = None;
+    let mut collapse_mithril: Option<f32> = None;
     let mut collapse_stress_mult: Option<f32> = None;
     let mut collapse_max_cascade: Option<u32> = None;
     let mut collapse_rubble: Option<f32> = None;
@@ -604,6 +608,7 @@ fn serve_generate(
             "collapse_iron" => { collapse_iron = val.parse().ok(); }
             "collapse_steel" => { collapse_steel = val.parse().ok(); }
             "collapse_crystal" => { collapse_crystal = val.parse().ok(); }
+            "collapse_mithril" => { collapse_mithril = val.parse().ok(); }
             "collapse_stress_mult" => { collapse_stress_mult = val.parse().ok(); }
             "collapse_max_cascade" => { collapse_max_cascade = val.parse().ok(); }
             "collapse_rubble" => { collapse_rubble = val.parse().ok(); }
@@ -814,14 +819,16 @@ fn serve_generate(
     if let Some(v) = stress_vertical { sleep_cfg.stress.vertical_support_factor = v; }
     if let Some(v) = stress_prop_radius { sleep_cfg.stress.propagation_radius = v; }
     if let Some(v) = stress_max_collapse { sleep_cfg.stress.max_collapse_volume = v; }
-    // Sleep collapse
-    if let Some(v) = collapse_slate { sleep_cfg.collapse.strut_survival[1] = v; }
-    if let Some(v) = collapse_granite { sleep_cfg.collapse.strut_survival[2] = v; }
-    if let Some(v) = collapse_limestone { sleep_cfg.collapse.strut_survival[3] = v; }
-    if let Some(v) = collapse_copper { sleep_cfg.collapse.strut_survival[4] = v; }
-    if let Some(v) = collapse_iron { sleep_cfg.collapse.strut_survival[5] = v; }
-    if let Some(v) = collapse_steel { sleep_cfg.collapse.strut_survival[6] = v; }
-    if let Some(v) = collapse_crystal { sleep_cfg.collapse.strut_survival[7] = v; }
+    // Sleep collapse — strut lineup overhauled 2026-05-26.
+    // Old (Slate/Granite/Limestone) removed; new lineup is Copper..Mithril.
+    // Legacy query params for the old stones map onto Copper (T1) so older
+    // dashboard bookmarks don't 500.
+    let copper_legacy_or_new = collapse_copper.or(collapse_slate).or(collapse_granite).or(collapse_limestone);
+    if let Some(v) = copper_legacy_or_new { sleep_cfg.collapse.strut_survival[1] = v; }
+    if let Some(v) = collapse_iron { sleep_cfg.collapse.strut_survival[2] = v; }
+    if let Some(v) = collapse_steel { sleep_cfg.collapse.strut_survival[3] = v; }
+    if let Some(v) = collapse_crystal { sleep_cfg.collapse.strut_survival[4] = v; }
+    if let Some(v) = collapse_mithril { sleep_cfg.collapse.strut_survival[5] = v; }
     if let Some(v) = collapse_stress_mult { sleep_cfg.collapse.stress_multiplier = v; }
     if let Some(v) = collapse_max_cascade { sleep_cfg.collapse.max_cascade_iterations = v; }
     if let Some(v) = collapse_rubble { sleep_cfg.collapse.rubble_fill_ratio = v; }

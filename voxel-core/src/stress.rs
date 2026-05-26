@@ -222,39 +222,123 @@ impl StressField {
     }
 }
 
-/// Support type enum (NOT a Material variant).
+/// Support (strut) type enum.
+///
+/// 5-tier metal/crystal lineup (overhauled 2026-05-26): Copper → Iron → Steel →
+/// Crystal → Mithril. The 3 stone struts from the Feb 2026 lineup
+/// (Slate/Granite/Limestone) were dropped — they were functionally identical
+/// at hardness=0.95 and didn't pay for their slot in the type table. Legacy
+/// IDs 1/2/3 in older saves migrate to Copper (1) on load — see
+/// `voxel-ffi/src/delta.rs` save-format v4 read path.
+///
+/// Fits in 3 bits, leaving room if a future tier is needed.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SupportType {
     None = 0,
-    SlateStrut = 1,
-    GraniteStrut = 2,
-    LimestoneStrut = 3,
-    CopperStrut = 4,
-    IronStrut = 5,
-    SteelStrut = 6,
-    CrystalStrut = 7,
+    Copper = 1,
+    Iron = 2,
+    Steel = 3,
+    Crystal = 4,
+    Mithril = 5,
 }
 
 impl SupportType {
     pub fn from_u8(v: u8) -> Self {
         match v {
-            1 => SupportType::SlateStrut,
-            2 => SupportType::GraniteStrut,
-            3 => SupportType::LimestoneStrut,
-            4 => SupportType::CopperStrut,
-            5 => SupportType::IronStrut,
-            6 => SupportType::SteelStrut,
-            7 => SupportType::CrystalStrut,
+            1 => SupportType::Copper,
+            2 => SupportType::Iron,
+            3 => SupportType::Steel,
+            4 => SupportType::Crystal,
+            5 => SupportType::Mithril,
+            _ => SupportType::None,
+        }
+    }
+
+    /// Map a legacy (pre-2026-05-26) SupportType byte to the new lineup.
+    /// Legacy values 1/2/3 (Slate/Granite/Limestone) all collapse to Copper.
+    /// Legacy 4/5/6/7 (Copper/Iron/Steel/Crystal) shift down one slot.
+    /// Used by ChunkSnapshot v3→v4 migration and the UE save-loader.
+    pub fn from_legacy_u8(v: u8) -> Self {
+        match v {
+            1 | 2 | 3 => SupportType::Copper,   // Slate/Granite/Limestone → Copper
+            4 => SupportType::Copper,           // Old Copper (was idx 4)
+            5 => SupportType::Iron,             // Old Iron (was idx 5)
+            6 => SupportType::Steel,            // Old Steel (was idx 6)
+            7 => SupportType::Crystal,          // Old Crystal (was idx 7)
             _ => SupportType::None,
         }
     }
 }
 
+/// Per-tier tuning. One entry per `SupportType` variant (index 0 = None, unused).
+///
+/// - `hardness`: flat reduction this strut subtracts from raw stress, falling off
+///   as `hardness / dist` per neighbor voxel inside `radius`. ×10 the Feb 2026
+///   values so the reduction actually moves the v2 span-stress needle.
+/// - `radius`: per-strut sphere of influence (voxels). Replaces the old single
+///   `StressConfig::support_radius` — each tier owns its reach.
+/// - `max_hp`: initial HP assigned at placement. Decremented per recalc by
+///   `max(0, load_borne - hp_decay_threshold) * HP_DAMAGE_SCALE`.
+/// - `hp_decay_threshold`: load-borne amount the strut can absorb each recalc
+///   tick before HP starts ticking down. Higher tiers idle under more load.
+#[derive(Debug, Clone, Copy)]
+pub struct StrutTuning {
+    pub hardness: f32,
+    pub radius: u8,
+    pub max_hp: u16,
+    pub hp_decay_threshold: f32,
+}
+
+/// Default per-tier tuning table. Indexed by `SupportType as usize`.
+///
+/// Tier shape (gentle ramp, each tier owns one differentiating axis):
+/// - Copper  (T1): starter — cheapest, smallest radius, low HP.
+/// - Iron    (T2): balanced workhorse — bread & butter for active mining.
+/// - Steel   (T3): wide-radius specialist — covers more area per strut.
+/// - Crystal (T4): HP tank — holds the vault under brutal load.
+/// - Mithril (T5): endgame all-rounder — Spider Queen room anchor.
+pub const STRUT_TUNING: [StrutTuning; 6] = [
+    // None
+    StrutTuning { hardness: 0.0, radius: 0, max_hp: 0,    hp_decay_threshold: 0.0 },
+    // Copper (T1)
+    StrutTuning { hardness:  8.0, radius: 2, max_hp:   50, hp_decay_threshold: 0.5 },
+    // Iron (T2)
+    StrutTuning { hardness: 14.0, radius: 3, max_hp:  150, hp_decay_threshold: 1.0 },
+    // Steel (T3) — wide radius for area coverage
+    StrutTuning { hardness: 18.0, radius: 4, max_hp:  300, hp_decay_threshold: 1.5 },
+    // Crystal (T4) — HP tank
+    StrutTuning { hardness: 25.0, radius: 3, max_hp:  800, hp_decay_threshold: 2.0 },
+    // Mithril (T5) — endgame
+    StrutTuning { hardness: 35.0, radius: 5, max_hp: 2000, hp_decay_threshold: 2.5 },
+];
+
+/// Maximum `radius` value across all tiers — used as the bounding box for
+/// `any_supports_in_radius_box` short-circuits when the caller doesn't yet
+/// know which specific tier sits where. Recompute if STRUT_TUNING changes.
+pub const MAX_STRUT_RADIUS: u8 = 5;
+
+/// Per-recalc HP-damage scale applied after subtracting `hp_decay_threshold`.
+/// Tune to taste — higher = struts break faster under sustained load.
+pub const HP_DAMAGE_SCALE: f32 = 1.0;
+
+/// HP damage per voxel blocked by a strut during the cinematic mining BFS halt.
+/// One mine event that would have peeled 200 voxels into a single Crystal Strut
+/// (HP 800) chews through 200 * 0.5 = 100 HP — strut survives ~8 such saves.
+pub const BFS_HALT_DAMAGE_SCALE: f32 = 0.5;
+
 /// Per-voxel support data for a chunk.
+///
+/// Two parallel arrays:
+/// - `supports[i]`: `SupportType` byte (None=0..Mithril=5). 1 byte/cell.
+/// - `support_hp[i]`: lazy `Vec<u16>`. Empty when chunk has no struts; allocated
+///   on first non-None `set()`. 2 bytes/cell when populated. Indexed identically.
 #[derive(Debug, Clone)]
 pub struct SupportField {
     pub supports: Vec<SupportType>,
+    /// Per-voxel HP. Lazy-allocated: empty Vec when `non_none_count == 0`,
+    /// `size^3` entries otherwise. Indexed identically to `supports`.
+    pub support_hp: Vec<u16>,
     pub size: usize,
     /// Count of cells where supports[i] != SupportType::None.
     /// Maintained by `set()` so callers can do an O(1) "any support here?"
@@ -266,6 +350,7 @@ impl SupportField {
     pub fn new(size: usize) -> Self {
         Self {
             supports: vec![SupportType::None; size * size * size],
+            support_hp: Vec::new(),
             size,
             non_none_count: 0,
         }
@@ -281,10 +366,32 @@ impl SupportField {
         self.supports[self.index(x, y, z)]
     }
 
+    /// Read HP at one cell. Returns 0 if the cell has no strut OR the HP array
+    /// is not yet allocated (no struts placed in this chunk yet).
+    #[inline]
+    pub fn get_hp(&self, x: usize, y: usize, z: usize) -> u16 {
+        if self.support_hp.is_empty() {
+            0
+        } else {
+            self.support_hp[self.index(x, y, z)]
+        }
+    }
+
+    fn ensure_hp_alloc(&mut self) {
+        if self.support_hp.is_empty() {
+            self.support_hp = vec![0u16; self.size * self.size * self.size];
+        }
+    }
+
+    /// Place / clear / replace a strut. Initializes HP to `STRUT_TUNING[type].max_hp`
+    /// when placing a NEW strut (or REPLACING a different type). Preserves HP when
+    /// the same type is re-`set()` at the same cell (so a touch-up doesn't refill).
+    /// Clears HP to 0 when setting back to None.
     #[inline]
     pub fn set(&mut self, x: usize, y: usize, z: usize, support_type: SupportType) {
         let idx = self.index(x, y, z);
-        let was_none = self.supports[idx] == SupportType::None;
+        let was = self.supports[idx];
+        let was_none = was == SupportType::None;
         let is_none = support_type == SupportType::None;
         match (was_none, is_none) {
             (true, false) => self.non_none_count = self.non_none_count.saturating_add(1),
@@ -292,11 +399,63 @@ impl SupportField {
             _ => {}
         }
         self.supports[idx] = support_type;
+        // HP bookkeeping: only touch if state actually changed (different type
+        // or transition to/from None). Same-type re-set preserves HP — important
+        // for cinematic strut replacement that re-runs through set() each tick.
+        if was != support_type {
+            if is_none {
+                if !self.support_hp.is_empty() {
+                    self.support_hp[idx] = 0;
+                }
+            } else {
+                self.ensure_hp_alloc();
+                self.support_hp[idx] = STRUT_TUNING[support_type as usize].max_hp;
+            }
+        }
+    }
+
+    /// Set HP directly (used by save/load restore, debugger pokes, tests).
+    /// No-op if the cell has no strut. Allocates the HP array if needed.
+    pub fn set_hp(&mut self, x: usize, y: usize, z: usize, hp: u16) {
+        if self.supports[self.index(x, y, z)] == SupportType::None {
+            return;
+        }
+        self.ensure_hp_alloc();
+        let idx = self.index(x, y, z);
+        self.support_hp[idx] = hp;
+    }
+
+    /// Subtract `amount` HP from the cell, saturating at 0. Returns `true`
+    /// when this call brought HP from `>0` down to `0` (caller should emit
+    /// a StrutBroken event + clear the support). Returns `false` if no
+    /// strut, already broken, or HP > 0 after subtract.
+    pub fn damage_hp(&mut self, x: usize, y: usize, z: usize, amount: f32) -> bool {
+        if amount <= 0.0 { return false; }
+        let idx = self.index(x, y, z);
+        if self.supports[idx] == SupportType::None { return false; }
+        if self.support_hp.is_empty() { return false; } // shouldn't happen if support set
+        let prev = self.support_hp[idx];
+        if prev == 0 { return false; }
+        let dec = amount.round().clamp(0.0, u16::MAX as f32) as u16;
+        let next = prev.saturating_sub(dec);
+        self.support_hp[idx] = next;
+        next == 0
     }
 
     #[inline]
     pub fn has_support(&self, x: usize, y: usize, z: usize) -> bool {
         self.get(x, y, z) != SupportType::None
+    }
+
+    /// True when the cell has a strut with HP > 0. Used by the v2 stress
+    /// reducer and the cinematic BFS halt to ignore broken struts that
+    /// haven't yet been cleared by the worker tick.
+    #[inline]
+    pub fn is_strut_alive(&self, x: usize, y: usize, z: usize) -> bool {
+        let idx = self.index(x, y, z);
+        if self.supports[idx] == SupportType::None { return false; }
+        if self.support_hp.is_empty() { return true; } // backwards-compat: assume alive
+        self.support_hp[idx] > 0
     }
 
     /// O(1): true if every cell in this chunk's support field is `SupportType::None`.
@@ -395,16 +554,18 @@ pub const DEFAULT_MATERIAL_HARDNESS: [f32; 50] = [
     0.78,  // Amphibolite (hard metabasite, hornblende-rich)
 ];
 
-/// Support hardness values (how much stress each support type absorbs).
-pub const SUPPORT_HARDNESS: [f32; 8] = [
-    0.0,   // None
-    0.95,  // SlateStrut (Tier 1)
-    0.95,  // GraniteStrut (Tier 1)
-    0.95,  // LimestoneStrut (Tier 1)
-    1.10,  // CopperStrut (Tier 2)
-    1.30,  // IronStrut (Tier 3)
-    1.50,  // SteelStrut (Tier 4)
-    1.80,  // CrystalStrut (Tier 5)
+/// LEGACY: Pre-2026-05-26 single-array support hardness. Superseded by
+/// `STRUT_TUNING` per-tier struct above which also owns radius + HP. Kept as
+/// a back-compat ABI const for any external snapshot blob that referenced it
+/// — internal code paths now sample STRUT_TUNING directly.
+#[deprecated(note = "use STRUT_TUNING[type].hardness instead")]
+pub const SUPPORT_HARDNESS: [f32; 6] = [
+    0.0,                              // None
+    STRUT_TUNING[1].hardness,         // Copper
+    STRUT_TUNING[2].hardness,         // Iron
+    STRUT_TUNING[3].hardness,         // Steel
+    STRUT_TUNING[4].hardness,         // Crystal
+    STRUT_TUNING[5].hardness,         // Mithril
 ];
 
 // ── StressConfig (moved from voxel-gen) ──
@@ -421,7 +582,11 @@ pub struct StressConfig {
     pub lateral_support_factor: f32,
     /// Contribution factor for voxel directly below.
     pub vertical_support_factor: f32,
-    /// Effect radius of support structures.
+    /// LEGACY: Pre-2026-05-26 single sphere-of-influence radius for struts.
+    /// Superseded by `STRUT_TUNING[type].radius` (per-tier). Internal stress
+    /// math now samples STRUT_TUNING directly; this field is kept only to
+    /// preserve FFI struct layout for in-flight DLL/editor pairs and to
+    /// document where the old knob used to live.
     pub support_radius: u32,
     /// ⚠ LEGACY: BFS recalc radius for the OLD immediate-collapse pipeline.
     /// Mining no longer uses this — see `mining_stress_scan_buffer` below for
@@ -441,8 +606,10 @@ pub struct StressConfig {
     pub warn_creak_threshold: f32,
     /// Stress threshold for shake warning (90%).
     pub warn_shake_threshold: f32,
-    /// Per-support-type hardness values (indexed by SupportType as u8).
-    pub support_hardness: [f32; 8],
+    /// LEGACY: Pre-2026-05-26 per-tier hardness array. Superseded by
+    /// `STRUT_TUNING[type].hardness`. Mirrored here for ABI compatibility
+    /// only; internal math ignores this field.
+    pub support_hardness: [f32; 6],
 
     // ── V2 algorithm fields ──
 
@@ -506,6 +673,7 @@ impl Default for StressConfig {
             warn_dust_threshold: 0.4,
             warn_creak_threshold: 0.6,
             warn_shake_threshold: 0.8,
+            #[allow(deprecated)]
             support_hardness: SUPPORT_HARDNESS,
             // V2 defaults
             lateral_transfer_factor: 0.7,
@@ -542,6 +710,22 @@ pub struct OverstressedVoxel {
 pub struct StressResult {
     pub overstressed: Vec<OverstressedVoxel>,
     pub affected_chunks: Vec<(i32, i32, i32)>,
+    /// Struts whose HP hit 0 during this recalc (load-decay) — caller should
+    /// emit `StrutBroken` events to the UE side AND clear them from the
+    /// support field. The set is empty when no struts were over their decay
+    /// threshold or no load-tracking was enabled.
+    pub broken_struts: Vec<BrokenStrutEvent>,
+}
+
+/// One strut whose HP fell to 0 during a stress recalc tick.
+/// Cell coords are local within `chunk`; sleep/worker callers convert to world.
+#[derive(Debug, Clone, Copy)]
+pub struct BrokenStrutEvent {
+    pub chunk: (i32, i32, i32),
+    pub lx: usize,
+    pub ly: usize,
+    pub lz: usize,
+    pub support_type: SupportType,
 }
 
 /// A single collapsed voxel.
@@ -707,6 +891,92 @@ fn sample_support(
         .unwrap_or(SupportType::None)
 }
 
+/// Sample whether a strut at world coordinates is alive (HP > 0). False when
+/// the cell has no strut, the chunk isn't loaded, or HP has been ground to 0.
+/// Stress reduction and BFS halt both gate on this — broken-but-not-yet-cleared
+/// struts must not pretend to be holding rock up.
+fn sample_strut_alive(
+    support_fields: &HashMap<(i32, i32, i32), SupportField>,
+    wx: i32, wy: i32, wz: i32,
+    chunk_size: usize,
+) -> bool {
+    let (key, lx, ly, lz) = world_to_chunk_local(wx, wy, wz, chunk_size);
+    support_fields
+        .get(&key)
+        .map(|sf| sf.is_strut_alive(lx, ly, lz))
+        .unwrap_or(false)
+}
+
+/// Walk the same per-voxel strut neighborhood that `calc_voxel_stress_v2`
+/// walks for stress reduction, and accumulate each strut's `hardness/dist`
+/// contribution into `loads`. Keyed by (chunk, local_xyz). Only alive struts
+/// (HP > 0) and only struts inside their per-tier radius are counted.
+///
+/// Cheap when no struts exist: the `any_supports_in_radius_box` short-circuit
+/// matches the stress calc's own guard, so the cost is ~0 for early game.
+fn accumulate_strut_load_at_voxel(
+    support_fields: &HashMap<(i32, i32, i32), SupportField>,
+    loads: &mut std::collections::HashMap<((i32, i32, i32), usize, usize, usize), f32>,
+    wx: i32, wy: i32, wz: i32,
+    chunk_size: usize,
+) {
+    let sr = MAX_STRUT_RADIUS as i32;
+    if !any_supports_in_radius_box(support_fields, wx, wy, wz, sr, chunk_size) {
+        return;
+    }
+    for dz in -sr..=sr {
+        for dy in -sr..=sr {
+            for dx in -sr..=sr {
+                if dx == 0 && dy == 0 && dz == 0 { continue; }
+                let sx = wx + dx;
+                let sy = wy + dy;
+                let sz = wz + dz;
+                let support = sample_support(support_fields, sx, sy, sz, chunk_size);
+                if support == SupportType::None { continue; }
+                let tuning = STRUT_TUNING[support as u8 as usize];
+                let r2 = (tuning.radius as i32) * (tuning.radius as i32);
+                let d2 = dx * dx + dy * dy + dz * dz;
+                if d2 > r2 { continue; }
+                if !sample_strut_alive(support_fields, sx, sy, sz, chunk_size) { continue; }
+                let dist = (d2 as f32).sqrt();
+                let contribution = tuning.hardness / dist;
+                let (skey, slx, sly, slz) = world_to_chunk_local(sx, sy, sz, chunk_size);
+                *loads.entry((skey, slx, sly, slz)).or_insert(0.0) += contribution;
+            }
+        }
+    }
+}
+
+/// Apply load-decay HP damage to every strut in `loads`. Each strut takes
+/// `max(0, load_borne - tier_decay_threshold) * HP_DAMAGE_SCALE` HP damage;
+/// HP is saturating at 0. Returns the list of struts that just hit 0 — caller
+/// must clear those cells (via `SupportField::set(.., None)`) and emit
+/// `StrutBroken` events.
+fn apply_strut_load_damage(
+    support_fields: &mut HashMap<(i32, i32, i32), SupportField>,
+    loads: &std::collections::HashMap<((i32, i32, i32), usize, usize, usize), f32>,
+) -> Vec<BrokenStrutEvent> {
+    let mut broken = Vec::new();
+    for (&(chunk_key, lx, ly, lz), &load) in loads.iter() {
+        let sf = match support_fields.get_mut(&chunk_key) {
+            Some(s) => s,
+            None => continue,
+        };
+        let stype = sf.get(lx, ly, lz);
+        if stype == SupportType::None { continue; }
+        let tuning = STRUT_TUNING[stype as u8 as usize];
+        let excess = load - tuning.hp_decay_threshold;
+        if excess <= 0.0 { continue; }
+        let damage = excess * HP_DAMAGE_SCALE;
+        if sf.damage_hp(lx, ly, lz, damage) {
+            broken.push(BrokenStrutEvent {
+                chunk: chunk_key, lx, ly, lz, support_type: stype,
+            });
+        }
+    }
+    broken
+}
+
 /// Count contiguous solid voxels above (Y+) a position, capped at 32.
 fn column_weight_above(
     density_fields: &HashMap<(i32, i32, i32), DensityField>,
@@ -789,14 +1059,18 @@ pub fn calc_voxel_stress(
         }
     }
 
-    // 3. Support structure bonus: nearby supports reduce stress
+    // 3. Support structure bonus: nearby ALIVE struts reduce stress.
     //
-    // Fast skip: if no chunk in the (2sr+1)^3 voxel box around (wx,wy,wz) has
-    // any non-None supports, the entire 7^3 sample_support sweep below is pure
-    // waste. Cheap O(<=8) chunk lookups guard the 342-call HashMap walk.
-    // For early-game (0 struts placed in the world) this short-circuits ~100%
-    // of stressed voxels.
-    let sr = config.support_radius as i32;
+    // Per-tier sphere of influence: each strut samples its own
+    // `STRUT_TUNING[type].radius` (Copper=2 .. Mithril=5). We walk the MAX
+    // radius bounding box and let the inner check filter out cells that
+    // sit outside any individual strut's radius.
+    //
+    // Fast skip: if no chunk in the bounding box has any non-None supports,
+    // the entire sweep below is pure waste. Cheap O(<=8) chunk lookups guard
+    // the per-voxel HashMap walk. For early-game (0 struts placed in the
+    // world) this short-circuits ~100% of stressed voxels.
+    let sr = MAX_STRUT_RADIUS as i32;
     if any_supports_in_radius_box(support_fields, wx, wy, wz, sr, chunk_size) {
         for dz in -sr..=sr {
             for dy in -sr..=sr {
@@ -805,11 +1079,19 @@ pub fn calc_voxel_stress(
                         continue;
                     }
                     let support = sample_support(support_fields, wx + dx, wy + dy, wz + dz, chunk_size);
-                    if support != SupportType::None {
-                        let dist = ((dx * dx + dy * dy + dz * dz) as f32).sqrt();
-                        let support_value = config.support_hardness[support as u8 as usize];
-                        raw_stress -= support_value / dist;
+                    if support == SupportType::None { continue; }
+                    let tuning = STRUT_TUNING[support as u8 as usize];
+                    let r2 = (tuning.radius as i32) * (tuning.radius as i32);
+                    let d2 = dx * dx + dy * dy + dz * dz;
+                    if d2 > r2 { continue; }
+                    // Broken struts (HP=0) contribute nothing — the worker
+                    // tick will clear them, but until it does we must not
+                    // pretend they're still holding the rock up.
+                    if !sample_strut_alive(support_fields, wx + dx, wy + dy, wz + dz, chunk_size) {
+                        continue;
                     }
+                    let dist = (d2 as f32).sqrt();
+                    raw_stress -= tuning.hardness / dist;
                 }
             }
         }
@@ -1312,14 +1594,17 @@ pub fn calc_voxel_stress_v2(
     } else { 0.0 };
     raw_stress += xsec_stress;
 
-    // Support structure bonus: nearby struts reduce stress.
+    // Support structure bonus: nearby ALIVE struts reduce stress.
     //
-    // Fast skip: if no chunk in the (2sr+1)^3 voxel box around (wx,wy,wz) has
-    // any non-None supports, the entire 7^3 sample_support sweep below is pure
-    // waste. Cheap O(<=8) chunk lookups guard the 342-call HashMap walk.
-    // For early-game (0 struts placed in the world) this short-circuits ~100%
-    // of stressed voxels in this hot loop.
-    let sr = config.support_radius as i32;
+    // Per-tier sphere of influence: each strut samples its own
+    // `STRUT_TUNING[type].radius` (Copper=2 .. Mithril=5). Walk the MAX
+    // radius bounding box; per-cell distance check filters by tier radius.
+    //
+    // Fast skip: if no chunk in the box has any non-None supports, the
+    // entire sweep is pure waste. Cheap O(<=8) chunk lookups guard the
+    // per-voxel HashMap walk. For early-game (0 struts placed in the
+    // world) this short-circuits ~100% of stressed voxels in this hot loop.
+    let sr = MAX_STRUT_RADIUS as i32;
     if any_supports_in_radius_box(support_fields, wx, wy, wz, sr, chunk_size) {
         for dz in -sr..=sr {
             for dy in -sr..=sr {
@@ -1328,11 +1613,17 @@ pub fn calc_voxel_stress_v2(
                         continue;
                     }
                     let support = sample_support(support_fields, wx + dx, wy + dy, wz + dz, chunk_size);
-                    if support != SupportType::None {
-                        let dist = ((dx * dx + dy * dy + dz * dz) as f32).sqrt();
-                        let support_value = config.support_hardness[support as u8 as usize];
-                        raw_stress -= support_value / dist;
+                    if support == SupportType::None { continue; }
+                    let tuning = STRUT_TUNING[support as u8 as usize];
+                    let r2 = (tuning.radius as i32) * (tuning.radius as i32);
+                    let d2 = dx * dx + dy * dy + dz * dz;
+                    if d2 > r2 { continue; }
+                    // Broken strut (HP=0, awaiting cleanup) contributes nothing.
+                    if !sample_strut_alive(support_fields, wx + dx, wy + dy, wz + dz, chunk_size) {
+                        continue;
                     }
+                    let dist = (d2 as f32).sqrt();
+                    raw_stress -= tuning.hardness / dist;
                 }
             }
         }
@@ -1395,6 +1686,12 @@ pub fn recalc_stress_region_v2(
 /// V2 stress recalculation with optional position-based filtering.
 /// If `events` is non-empty, only voxels within any event's radius are recalculated.
 /// If `events` is empty, all voxels in `dirty_chunks` are recalculated (full mode).
+///
+/// NOTE: this signature is the legacy entry — it cannot damage strut HP because
+/// it takes `support_fields` as `&` (read-only). Callers that need HP decay
+/// (the live worker stress pass) should call `recalc_stress_region_v2_with_load_decay`
+/// below, which takes `&mut support_fields`. This wrapper exists for overlay /
+/// preview / debug / test sites that just want stress numbers.
 pub fn recalc_stress_region_v2_filtered(
     density_fields: &HashMap<(i32, i32, i32), DensityField>,
     stress_fields: &mut HashMap<(i32, i32, i32), StressField>,
@@ -1500,6 +1797,137 @@ pub fn recalc_stress_region_v2_filtered(
     StressResult {
         overstressed,
         affected_chunks: affected_chunks.into_iter().collect(),
+        broken_struts: Vec::new(), // read-only entry — no HP damage tracked
+    }
+}
+
+/// V2 recalc that ALSO tracks per-strut load and damages HP / clears
+/// broken struts. The hot live-mining + sleep path. Returns the standard
+/// stress result with `broken_struts` populated when any HP hit 0.
+///
+/// Callers that don't need HP decay (overlay previews, debug, tests) should
+/// use `recalc_stress_region_v2_filtered` above which takes `&` not `&mut`.
+pub fn recalc_stress_region_v2_with_load_decay(
+    density_fields: &HashMap<(i32, i32, i32), DensityField>,
+    stress_fields: &mut HashMap<(i32, i32, i32), StressField>,
+    support_fields: &mut HashMap<(i32, i32, i32), SupportField>,
+    config: &StressConfig,
+    dirty_chunks: &[(i32, i32, i32)],
+    events: &[StressDirtyEvent],
+    chunk_size: usize,
+) -> StressResult {
+    let use_filter = !events.is_empty();
+    let support_scores = ground_connectivity_pass(density_fields, dirty_chunks, chunk_size, config);
+
+    let cs = chunk_size;
+    let grid_size = cs + 1;
+    let mut overstressed = Vec::new();
+    let mut affected_chunks = HashSet::new();
+    let mut loads: std::collections::HashMap<((i32, i32, i32), usize, usize, usize), f32> =
+        std::collections::HashMap::new();
+
+    for &(cx, cy, cz) in dirty_chunks {
+        let df = match density_fields.get(&(cx, cy, cz)) {
+            Some(d) => d,
+            None => continue,
+        };
+
+        for z in 0..grid_size {
+            for y in 0..grid_size {
+                for x in 0..grid_size {
+                    if !df.get(x, y, z).material.is_solid() {
+                        if let Some(sf) = stress_fields.get_mut(&(cx, cy, cz)) {
+                            sf.set(x, y, z, 0.0);
+                            sf.set_class(x, y, z, 0);
+                        }
+                        continue;
+                    }
+
+                    let wx = cx * cs as i32 + x as i32;
+                    let wy = cy * cs as i32 + y as i32;
+                    let wz = cz * cs as i32 + z as i32;
+
+                    if use_filter && !in_any_event(events, wx, wy, wz) { continue; }
+
+                    let my_support = support_scores
+                        .get(&(cx, cy, cz))
+                        .map(|sf| sf.get(x, y, z))
+                        .unwrap_or(1.0);
+                    if my_support >= config.ground_threshold {
+                        let below_solid = sample_world(density_fields, wx, wy - 1, wz, cs)
+                            .map(|(_, m)| m.is_solid()).unwrap_or(true);
+                        let mut air_n = 0u8;
+                        for &(dx, dy, dz) in &[(1i32,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)] {
+                            if let Some((_, m)) = sample_world(density_fields, wx+dx, wy+dy, wz+dz, cs) {
+                                if !m.is_solid() { air_n += 1; }
+                            }
+                        }
+                        let stype = if air_n == 0 { SURFACE_INTERIOR }
+                            else if below_solid { SURFACE_FLOOR }
+                            else { SURFACE_WALL };
+                        if let Some(sf) = stress_fields.get_mut(&(cx, cy, cz)) {
+                            sf.set(x, y, z, 0.0);
+                            sf.set_class(x, y, z, pack_classification(stype, SOURCE_NONE));
+                        }
+                        continue;
+                    }
+
+                    let (stress, classification) = calc_voxel_stress_v2(
+                        density_fields, support_fields, &support_scores,
+                        config, wx, wy, wz, cs,
+                    );
+
+                    // Record this voxel's incoming strut load so the post-pass
+                    // HP-decay step knows which struts bore the weight. Only
+                    // count load when the voxel had non-zero residual stress —
+                    // a strut sitting in a stable region (test fixtures,
+                    // grounded rock with no span) shouldn't wear down just
+                    // by existing. Painted stress also counts so creative
+                    // brushes can burn struts down deliberately.
+                    let painted_now = stress_fields
+                        .get(&(cx, cy, cz))
+                        .map(|sf| sf.painted(x, y, z))
+                        .unwrap_or(0.0);
+                    if stress > 0.001 || painted_now > 0.001 {
+                        accumulate_strut_load_at_voxel(support_fields, &mut loads, wx, wy, wz, cs);
+                    }
+
+                    let painted = stress_fields
+                        .get(&(cx, cy, cz))
+                        .map(|sf| sf.painted(x, y, z))
+                        .unwrap_or(0.0);
+                    if let Some(sf) = stress_fields.get_mut(&(cx, cy, cz)) {
+                        sf.set(x, y, z, stress);
+                        sf.set_class(x, y, z, classification);
+                        affected_chunks.insert((cx, cy, cz));
+                    }
+
+                    let eff = stress + painted;
+                    if eff >= 1.0 {
+                        overstressed.push(OverstressedVoxel {
+                            world_x: wx, world_y: wy, world_z: wz, stress: eff,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Apply HP damage based on accumulated loads. Broken struts are cleared
+    // from the support field so the *next* stress recalc (caller-driven) sees
+    // the new world state.
+    let broken = apply_strut_load_damage(support_fields, &loads);
+    for ev in &broken {
+        if let Some(sf) = support_fields.get_mut(&ev.chunk) {
+            sf.set(ev.lx, ev.ly, ev.lz, SupportType::None);
+            affected_chunks.insert(ev.chunk);
+        }
+    }
+
+    StressResult {
+        overstressed,
+        affected_chunks: affected_chunks.into_iter().collect(),
+        broken_struts: broken,
     }
 }
 
@@ -1564,6 +1992,7 @@ pub fn recalc_stress_region(
     StressResult {
         overstressed,
         affected_chunks: affected_chunks.into_iter().collect(),
+        broken_struts: Vec::new(),
     }
 }
 
@@ -1792,14 +2221,19 @@ pub fn apply_pending_pile_with_result(
 pub fn detect_and_execute_collapses_v2(
     density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
     stress_fields: &mut HashMap<(i32, i32, i32), StressField>,
-    support_fields: &HashMap<(i32, i32, i32), SupportField>,
+    support_fields: &mut HashMap<(i32, i32, i32), SupportField>,
     overstressed: &[OverstressedVoxel],
     config: &StressConfig,
     chunk_size: usize,
 ) -> Vec<CollapseEventV2> {
-    detect_and_execute_collapses_v2_with_options(
+    let mut broken = Vec::new();
+    detect_and_execute_collapses_v2_with_force(
         density_fields, stress_fields, support_fields,
-        overstressed, config, chunk_size, false,
+        overstressed, config, chunk_size,
+        false, // defer_pile
+        false, // force_collapse
+        true,  // halt_at_struts — sleep path: alive struts brace the slab
+        &mut broken,
     )
 }
 
@@ -1808,42 +2242,59 @@ pub fn detect_and_execute_collapses_v2(
 /// (cave roof opens immediately) but the rubble pile is NOT placed —
 /// instead, `pending_piles` is populated on each event so the caller can
 /// apply piles later (e.g., scheduled at impact time for the cinematic).
+///
+/// This wrapper enables strut halt by default — alive struts halt the BFS
+/// and take HP damage. Pass the returned events; broken struts are cleared
+/// from `support_fields` and a fresh stress recalc will mark dirty cells.
+/// Use `_with_force` directly when scripted triggers should bypass struts.
 pub fn detect_and_execute_collapses_v2_with_options(
     density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
     stress_fields: &mut HashMap<(i32, i32, i32), StressField>,
-    _support_fields: &HashMap<(i32, i32, i32), SupportField>,
+    support_fields: &mut HashMap<(i32, i32, i32), SupportField>,
     overstressed: &[OverstressedVoxel],
     config: &StressConfig,
     chunk_size: usize,
     defer_pile: bool,
 ) -> Vec<CollapseEventV2> {
+    let mut broken = Vec::new();
     detect_and_execute_collapses_v2_with_force(
         density_fields,
         stress_fields,
-        _support_fields,
+        support_fields,
         overstressed,
         config,
         chunk_size,
         defer_pile,
         false, // force_collapse — default off, natural filters apply
+        true,  // halt_at_struts — alive struts brace the slab
+        &mut broken,
     )
 }
 
-/// Like `detect_and_execute_collapses_v2_with_options` but with an extra
-/// `force_collapse` flag. When set, the grounding filter (`landing_offset
-/// <= 0`) is bypassed and grounded regions are forced to "fall" a small
-/// default distance — used by scripted editor triggers that need to
-/// collapse cave walls / pillars / dome rock that's physically supported
-/// by surrounding terrain but the designer has authored to fall anyway.
+/// Like `detect_and_execute_collapses_v2_with_options` but exposes the
+/// `force_collapse` flag and the `halt_at_struts` flag explicitly.
+///
+/// `force_collapse=true` bypasses the grounding filter (`landing_offset
+/// <= 0`) and forces grounded regions to "fall" a default distance — used
+/// by scripted editor triggers that need to collapse cave walls/pillars
+/// the designer has authored to fall anyway. Combine with
+/// `halt_at_struts=false` to let scripted slabs override struts entirely.
+///
+/// When `halt_at_struts=true`, BFS expansion stops at any voxel within
+/// `MAX_STRUT_RADIUS` of an alive strut, AND each halting strut takes
+/// `blocked_voxels * BFS_HALT_DAMAGE_SCALE` HP damage. Broken struts
+/// are pushed to `broken_out` and cleared from `support_fields`.
 pub fn detect_and_execute_collapses_v2_with_force(
     density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
     stress_fields: &mut HashMap<(i32, i32, i32), StressField>,
-    _support_fields: &HashMap<(i32, i32, i32), SupportField>,
+    support_fields: &mut HashMap<(i32, i32, i32), SupportField>,
     overstressed: &[OverstressedVoxel],
     config: &StressConfig,
     chunk_size: usize,
     defer_pile: bool,
     force_collapse: bool,
+    halt_at_struts: bool,
+    broken_out: &mut Vec<BrokenStrutEvent>,
 ) -> Vec<CollapseEventV2> {
     if overstressed.is_empty() {
         return Vec::new();
@@ -1857,6 +2308,12 @@ pub fn detect_and_execute_collapses_v2_with_force(
         .iter()
         .map(|v| (v.world_x, v.world_y, v.world_z))
         .collect();
+
+    // Per-strut "blocked voxel count" tally, summed across all collapse
+    // events processed in this call. Applied after the loop as HP damage.
+    let mut strut_halt_counts: std::collections::HashMap<((i32,i32,i32), usize, usize, usize), u32> =
+        std::collections::HashMap::new();
+    let sr_max = MAX_STRUT_RADIUS as i32;
 
     for ov in overstressed {
         let start = (ov.world_x, ov.world_y, ov.world_z);
@@ -1887,6 +2344,51 @@ pub fn detect_and_execute_collapses_v2_with_force(
                         let neighbor = (pos.0 + dx, pos.1 + dy, pos.2 + dz);
                         if visited.contains(&neighbor) {
                             continue;
+                        }
+
+                        // Strut halt: if the candidate voxel sits inside the
+                        // sphere of influence of any alive strut, the strut
+                        // braces it — skip expansion and tally the blocked
+                        // cell for post-pass HP damage. Each blocking strut
+                        // in range eats one count.
+                        if halt_at_struts {
+                            let mut halted = false;
+                            if any_supports_in_radius_box(
+                                support_fields, neighbor.0, neighbor.1, neighbor.2,
+                                sr_max, chunk_size,
+                            ) {
+                                for sdz in -sr_max..=sr_max {
+                                    for sdy in -sr_max..=sr_max {
+                                        for sdx in -sr_max..=sr_max {
+                                            if sdx == 0 && sdy == 0 && sdz == 0 { continue; }
+                                            let sx = neighbor.0 + sdx;
+                                            let sy = neighbor.1 + sdy;
+                                            let sz = neighbor.2 + sdz;
+                                            let support = sample_support(
+                                                support_fields, sx, sy, sz, chunk_size,
+                                            );
+                                            if support == SupportType::None { continue; }
+                                            let tuning = STRUT_TUNING[support as u8 as usize];
+                                            let r2 = (tuning.radius as i32) * (tuning.radius as i32);
+                                            let d2 = sdx*sdx + sdy*sdy + sdz*sdz;
+                                            if d2 > r2 { continue; }
+                                            if !sample_strut_alive(support_fields, sx, sy, sz, chunk_size) {
+                                                continue;
+                                            }
+                                            halted = true;
+                                            let (skey, slx, sly, slz) =
+                                                world_to_chunk_local(sx, sy, sz, chunk_size);
+                                            *strut_halt_counts
+                                                .entry((skey, slx, sly, slz))
+                                                .or_insert(0) += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            if halted {
+                                visited.insert(neighbor); // mark to avoid re-checking
+                                continue;
+                            }
                         }
 
                         // Include neighbor if:
@@ -2389,14 +2891,40 @@ pub fn detect_and_execute_collapses_v2_with_force(
         });
     }
 
+    // Apply BFS-halt HP damage to each strut that braced part of a slab.
+    // Each blocked voxel = BFS_HALT_DAMAGE_SCALE HP off the strut. Broken
+    // struts get cleared and pushed to `broken_out` so the caller can emit
+    // StrutBroken events to UE.
+    if halt_at_struts && !strut_halt_counts.is_empty() {
+        for ((chunk_key, lx, ly, lz), count) in strut_halt_counts {
+            let damage = count as f32 * BFS_HALT_DAMAGE_SCALE;
+            let stype = support_fields
+                .get(&chunk_key)
+                .map(|sf| sf.get(lx, ly, lz))
+                .unwrap_or(SupportType::None);
+            if stype == SupportType::None { continue; }
+            if let Some(sf) = support_fields.get_mut(&chunk_key) {
+                if sf.damage_hp(lx, ly, lz, damage) {
+                    sf.set(lx, ly, lz, SupportType::None);
+                    broken_out.push(BrokenStrutEvent {
+                        chunk: chunk_key, lx, ly, lz, support_type: stype,
+                    });
+                }
+            }
+        }
+    }
+
     events
 }
 
 /// V2 post-change stress update: runs ground connectivity + collapse detection with cascade.
+/// `support_fields` is `&mut` so strut HP can decay and broken struts can be
+/// cleared during the cascade. Callers that don't want HP decay should use
+/// the lower-level `recalc_stress_region_v2_filtered` + manual collapse.
 pub fn post_change_stress_update_v2(
     density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
     stress_fields: &mut HashMap<(i32, i32, i32), StressField>,
-    support_fields: &HashMap<(i32, i32, i32), SupportField>,
+    support_fields: &mut HashMap<(i32, i32, i32), SupportField>,
     config: &StressConfig,
     dirty_chunks: &[(i32, i32, i32)],
     chunk_size: usize,
@@ -2549,28 +3077,78 @@ mod tests {
         let mut sf = SupportField::new(17);
         assert_eq!(sf.supports.len(), 17 * 17 * 17);
         assert!(!sf.has_support(0, 0, 0));
-        sf.set(3, 3, 3, SupportType::SlateStrut);
+        sf.set(3, 3, 3, SupportType::Copper);
         assert!(sf.has_support(3, 3, 3));
-        assert_eq!(sf.get(3, 3, 3), SupportType::SlateStrut);
+        assert_eq!(sf.get(3, 3, 3), SupportType::Copper);
     }
 
     #[test]
     fn support_type_from_u8() {
         assert_eq!(SupportType::from_u8(0), SupportType::None);
-        assert_eq!(SupportType::from_u8(1), SupportType::SlateStrut);
-        assert_eq!(SupportType::from_u8(2), SupportType::GraniteStrut);
-        assert_eq!(SupportType::from_u8(3), SupportType::LimestoneStrut);
-        assert_eq!(SupportType::from_u8(4), SupportType::CopperStrut);
-        assert_eq!(SupportType::from_u8(5), SupportType::IronStrut);
-        assert_eq!(SupportType::from_u8(6), SupportType::SteelStrut);
-        assert_eq!(SupportType::from_u8(7), SupportType::CrystalStrut);
+        assert_eq!(SupportType::from_u8(1), SupportType::Copper);
+        assert_eq!(SupportType::from_u8(2), SupportType::Iron);
+        assert_eq!(SupportType::from_u8(3), SupportType::Steel);
+        assert_eq!(SupportType::from_u8(4), SupportType::Crystal);
+        assert_eq!(SupportType::from_u8(5), SupportType::Mithril);
+        assert_eq!(SupportType::from_u8(6), SupportType::None); // out of range
         assert_eq!(SupportType::from_u8(255), SupportType::None);
+    }
+
+    #[test]
+    fn support_type_from_legacy_u8() {
+        // Pre-2026-05-26 IDs: Slate=1, Granite=2, Limestone=3, Copper=4,
+        // Iron=5, Steel=6, Crystal=7. Stone struts collapse to Copper,
+        // metals shift down one slot.
+        assert_eq!(SupportType::from_legacy_u8(1), SupportType::Copper); // Slate
+        assert_eq!(SupportType::from_legacy_u8(2), SupportType::Copper); // Granite
+        assert_eq!(SupportType::from_legacy_u8(3), SupportType::Copper); // Limestone
+        assert_eq!(SupportType::from_legacy_u8(4), SupportType::Copper); // Old Copper at 4
+        assert_eq!(SupportType::from_legacy_u8(5), SupportType::Iron);   // Old Iron at 5
+        assert_eq!(SupportType::from_legacy_u8(6), SupportType::Steel);  // Old Steel at 6
+        assert_eq!(SupportType::from_legacy_u8(7), SupportType::Crystal);// Old Crystal at 7
+        assert_eq!(SupportType::from_legacy_u8(255), SupportType::None);
     }
 
     #[test]
     fn hardness_tables_correct_length() {
         assert_eq!(DEFAULT_MATERIAL_HARDNESS.len(), 50);
-        assert_eq!(SUPPORT_HARDNESS.len(), 8);
+        #[allow(deprecated)]
+        { assert_eq!(SUPPORT_HARDNESS.len(), 6); }
+        assert_eq!(STRUT_TUNING.len(), 6);
+    }
+
+    #[test]
+    fn strut_hp_storage_and_decay() {
+        // Tier auto-fills HP on placement; same-type re-set preserves HP;
+        // damage_hp saturates and reports break only on the killing blow;
+        // setting to None zeros HP.
+        let mut sf = SupportField::new(8);
+        sf.set(2, 2, 2, SupportType::Iron);
+        assert_eq!(sf.get_hp(2, 2, 2), STRUT_TUNING[SupportType::Iron as usize].max_hp);
+        // Burn down to mid-HP.
+        let alive_before = sf.is_strut_alive(2, 2, 2);
+        assert!(alive_before);
+        let died1 = sf.damage_hp(2, 2, 2, 50.0);
+        assert!(!died1);
+        // Same-type re-set preserves HP (doesn't refill).
+        sf.set(2, 2, 2, SupportType::Iron);
+        let hp_after_reset = sf.get_hp(2, 2, 2);
+        assert_eq!(hp_after_reset, 100); // 150 - 50
+        // Replacing with a different type refills HP for the new tier.
+        sf.set(2, 2, 2, SupportType::Crystal);
+        assert_eq!(sf.get_hp(2, 2, 2), STRUT_TUNING[SupportType::Crystal as usize].max_hp);
+        // Damage to exactly 0 returns true once.
+        let died2 = sf.damage_hp(2, 2, 2, 5000.0);
+        assert!(died2);
+        assert_eq!(sf.get_hp(2, 2, 2), 0);
+        assert!(!sf.is_strut_alive(2, 2, 2));
+        // A second call returns false (already broken).
+        let died3 = sf.damage_hp(2, 2, 2, 100.0);
+        assert!(!died3);
+        // Setting to None clears HP and decrements count.
+        sf.set(2, 2, 2, SupportType::None);
+        assert_eq!(sf.get_hp(2, 2, 2), 0);
+        assert!(sf.is_empty());
     }
 
     fn make_density_field(size: usize, fill_solid: bool) -> DensityField {
@@ -2742,7 +3320,7 @@ mod tests {
         }
 
         if let Some(sf) = support_fields_with.get_mut(&(0, 0, 0)) {
-            sf.set(8, 7, 8, SupportType::SteelStrut);
+            sf.set(8, 7, 8, SupportType::Steel);
         }
 
         let stress_without = calc_voxel_stress(
@@ -2772,7 +3350,7 @@ mod tests {
     fn collapse_converts_to_air() {
         let mut density_fields = HashMap::new();
         let mut stress_fields = HashMap::new();
-        let support_fields = HashMap::new();
+        let mut support_fields = HashMap::new();
         let config = default_config();
 
         let df = make_density_field(17, true);
@@ -2909,7 +3487,7 @@ mod tests {
     #[test]
     fn v2_slab_coherence() {
         // Create a slab scenario and verify collapsed region is contiguous
-        let (mut density_fields, mut stress_fields, support_fields) = make_solid_world();
+        let (mut density_fields, mut stress_fields, mut support_fields) = make_solid_world();
         let config = default_config();
 
         // Create a group of overstressed voxels in a 3x1x3 pattern
@@ -2935,7 +3513,7 @@ mod tests {
         }
 
         let events = detect_and_execute_collapses_v2(
-            &mut density_fields, &mut stress_fields, &support_fields,
+            &mut density_fields, &mut stress_fields, &mut support_fields,
             &overstressed, &config, 16,
         );
 
@@ -2949,7 +3527,7 @@ mod tests {
     #[test]
     fn v2_slab_landing_preserves_shape() {
         // Slab at y=10, floor at y=5, should land at y=6
-        let (mut density_fields, mut stress_fields, support_fields) = make_solid_world();
+        let (mut density_fields, mut stress_fields, mut support_fields) = make_solid_world();
         let config = default_config();
 
         // Carve air from y=6 to y=9
@@ -2976,7 +3554,7 @@ mod tests {
         }
 
         let events = detect_and_execute_collapses_v2(
-            &mut density_fields, &mut stress_fields, &support_fields,
+            &mut density_fields, &mut stress_fields, &mut support_fields,
             &overstressed, &config, 16,
         );
 
@@ -3046,7 +3624,7 @@ mod tests {
         }
         // Place a steel strut just below the ceiling
         if let Some(sf) = support_fields_with.get_mut(&(0, 0, 0)) {
-            sf.set(8, 7, 8, SupportType::SteelStrut);
+            sf.set(8, 7, 8, SupportType::Steel);
         }
 
         let scores = ground_connectivity_pass(

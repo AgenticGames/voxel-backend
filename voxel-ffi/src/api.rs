@@ -379,6 +379,10 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
             // stashed into path_results — it never reaches this match in
             // practice. Listed here only for exhaustiveness.
             WorkerResult::PathComputed { .. } => ptr::null_mut(),
+            // StrutsBroken is intercepted in engine.poll_result() and stashed
+            // for UE to drain via voxel_take_struts_broken — reaching this
+            // arm means the intercept missed; safe to drop.
+            WorkerResult::StrutsBroken { .. } => ptr::null_mut(),
             WorkerResult::PilePreviewTier { mesh, fall_data } => {
                 // One tier of the pre-commit pile preview. fall_data carries
                 // tier_index in pile_tier_index, spawn_x/y/z is the pile
@@ -1086,8 +1090,10 @@ pub unsafe extern "C" fn voxel_query_path_exists(
 }
 
 /// Place a support structure at a UE world position.
-/// support_type: 1=SlateStrut, 2=GraniteStrut, 3=LimestoneStrut, 4=CopperStrut,
-///               5=IronStrut, 6=SteelStrut, 7=CrystalStrut.
+/// support_type (2026-05-26+): 1=Copper, 2=Iron, 3=Steel, 4=Crystal, 5=Mithril.
+/// Legacy IDs 6/7 from the pre-overhaul UE plugin (Steel/Crystal at 6/7) are
+/// remapped via `SupportType::from_legacy_u8` — the in-flight DLL/editor pair
+/// during the rollout doesn't garble.
 /// Returns 1 on success (queued), 0 on failure.
 #[no_mangle]
 pub unsafe extern "C" fn voxel_place_support(
@@ -1135,6 +1141,88 @@ pub unsafe extern "C" fn voxel_remove_support(
         rust_pos.y as i32,
         rust_pos.z as i32,
     )
+}
+
+/// Drain all pending broken-strut events. Caller passes a pointer to
+/// `*mut FfiStrutBroken` (out_ptr) and a pointer to a u32 (out_count).
+/// On return:
+///   - `out_count` is set to the number of broken-strut events drained.
+///   - `out_ptr` points to a heap-allocated array of length `out_count`,
+///     or NULL when count is 0.
+///   - Caller MUST call `voxel_free_struts_broken(ptr, count)` to release
+///     the array when done.
+///
+/// Returns 1 on success, 0 if `engine` is null. A successful call with
+/// count=0 is normal (no struts broken this frame) — `out_ptr` will be NULL
+/// in that case and `voxel_free_struts_broken` is a no-op on NULL.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_take_struts_broken(
+    engine: *mut c_void,
+    out_ptr: *mut *mut crate::types::FfiStrutBroken,
+    out_count: *mut u32,
+) -> u32 {
+    if engine.is_null() || out_ptr.is_null() || out_count.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let mut drained = engine.drain_struts_broken();
+    let count = drained.len() as u32;
+    *out_count = count;
+    if count == 0 {
+        *out_ptr = std::ptr::null_mut();
+    } else {
+        drained.shrink_to_fit();
+        let boxed = drained.into_boxed_slice();
+        *out_ptr = Box::into_raw(boxed) as *mut crate::types::FfiStrutBroken;
+    }
+    1
+}
+
+/// Free a struts-broken array returned by `voxel_take_struts_broken`.
+/// Safe to call with NULL ptr (no-op).
+#[no_mangle]
+pub unsafe extern "C" fn voxel_free_struts_broken(
+    ptr: *mut crate::types::FfiStrutBroken,
+    count: u32,
+) {
+    if ptr.is_null() || count == 0 { return; }
+    let slice = std::slice::from_raw_parts_mut(ptr, count as usize);
+    let _ = Box::from_raw(slice as *mut [crate::types::FfiStrutBroken]);
+}
+
+/// Synchronously query a strut's HP/type at a UE world position. UE uses this
+/// for the aim-inspect HP-bar widget. Caller passes a pointer to a stack-
+/// allocated `FfiStrutInfo`; no heap allocation, no paired free needed.
+///
+/// `valid==0`: store lock contended; UE should keep the existing bar value
+///             and retry next frame.
+/// `valid==1, support_type==0`: chunk loaded, no strut at this voxel.
+/// `valid==1, support_type>=1`: strut found; read `hp` / `max_hp`.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_query_strut_hp(
+    engine: *mut c_void,
+    world_x: f32,
+    world_y: f32,
+    world_z: f32,
+    out_info: *mut crate::types::FfiStrutInfo,
+) -> u32 {
+    use crate::convert::from_ue_world_pos;
+
+    if engine.is_null() || out_info.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let world_scale = 15.0f32;
+    let rust_pos = from_ue_world_pos(world_x, world_y, world_z, world_scale);
+    let (stype, hp, max_hp, valid) = engine.query_strut_hp(
+        rust_pos.x as i32, rust_pos.y as i32, rust_pos.z as i32,
+    );
+    (*out_info) = crate::types::FfiStrutInfo {
+        support_type: stype, _pad: [0; 1],
+        hp, max_hp,
+        valid, _pad2: [0; 1],
+    };
+    1
 }
 
 /// Set the stress configuration. Takes a pointer to FfiStressConfig.
@@ -4082,7 +4170,7 @@ mod tests {
             sleep_growth_density_min: 0.3,
             sleep_growth_density_max: 0.6,
             // Sleep Collapse
-            sleep_strut_survival: [0.0, 0.25, 0.30, 0.25, 0.55, 0.70, 0.85, 0.95],
+            sleep_strut_survival: [0.0, 0.50, 0.70, 0.85, 0.95, 0.99],
             sleep_stress_multiplier: 1.5,
             sleep_max_cascade_iterations: 8,
             sleep_rubble_fill_ratio: 0.40,

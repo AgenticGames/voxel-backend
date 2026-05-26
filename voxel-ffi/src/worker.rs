@@ -363,8 +363,9 @@ fn try_process_stress_queue(
     world_scale: f32,
 ) -> bool {
     use voxel_core::stress::{
-        recalc_stress_region_v2_filtered, detect_and_execute_collapses_v2,
+        recalc_stress_region_v2_with_load_decay, detect_and_execute_collapses_v2,
     };
+    let _ = detect_and_execute_collapses_v2; // legacy import retained for symmetry
     use crate::types::FfiStressWarning;
     use std::io::Write;
     use std::collections::HashSet;
@@ -425,11 +426,15 @@ fn try_process_stress_queue(
 
     let recalc_start = std::time::Instant::now();
 
-    // Run v2 stress recalculation — only voxels within event radii are recalculated
+    // Run v2 stress recalculation — only voxels within event radii are recalculated.
+    // Use the load-decay variant so live mining wears nearby struts. Broken
+    // struts are accumulated into `result.broken_struts` and forwarded as a
+    // `StrutsBroken` worker result so UE can play breaking VFX + refresh the
+    // crack overlay around each broken strut's world position.
     let mut result = {
         let mut s = store.write().unwrap();
         let (density, stress, support) = s.sleep_fields_mut();
-        recalc_stress_region_v2_filtered(
+        recalc_stress_region_v2_with_load_decay(
             density,
             stress,
             support,
@@ -441,6 +446,29 @@ fn try_process_stress_queue(
     };
 
     let recalc_ms = recalc_start.elapsed().as_secs_f64() * 1000.0;
+
+    // Forward load-decay broken struts to UE before the collapse pass, so the
+    // breaking VFX plays right when stress crosses the strut's tolerance —
+    // even if no slab fall is triggered. UE deduplicates by world voxel
+    // position vs PlacedSupports, so emitting twice (load-decay here + later
+    // BFS-halt) is harmless.
+    if !result.broken_struts.is_empty() {
+        let ffi_struts: Vec<crate::types::FfiStrutBroken> = result.broken_struts
+            .iter()
+            .map(|ev| {
+                let cs = chunk_size as i32;
+                crate::types::FfiStrutBroken {
+                    world_x: ev.chunk.0 * cs + ev.lx as i32,
+                    world_y: ev.chunk.1 * cs + ev.ly as i32,
+                    world_z: ev.chunk.2 * cs + ev.lz as i32,
+                    support_type: ev.support_type as u8,
+                    source: 0, // load decay
+                    _pad: [0; 2],
+                }
+            })
+            .collect();
+        let _ = result_tx.send(WorkerResult::StrutsBroken { struts: ffi_struts });
+    }
 
     // Count stress distribution for DIRTY CHUNKS ONLY (what we just recalculated)
     {
@@ -694,34 +722,70 @@ fn try_process_stress_queue(
 
         let collapse_start = std::time::Instant::now();
         let mut events: Vec<voxel_core::stress::CollapseEventV2> = Vec::new();
+        // Broken-strut events accumulated across both natural + scripted
+        // passes — forwarded as a `StrutsBroken` result so UE can play the
+        // breaking VFX + refresh crack overlay around each broken strut.
+        let mut broken_struts: Vec<voxel_core::stress::BrokenStrutEvent> = Vec::new();
         // Natural collapse pass: only stress-recalc'd overstressed cells.
         // Filters (size / grounding / cohesion) apply normally so player
         // mining doesn't trigger spurious cave-ins on supported rock.
+        // Strut halt is ENABLED here — alive struts brace the slab and
+        // take HP damage proportional to blocked volume.
         if !result.overstressed.is_empty() {
             let (density, stress, support) = s.sleep_fields_mut();
-            let natural = voxel_core::stress::detect_and_execute_collapses_v2_with_options(
+            let natural = voxel_core::stress::detect_and_execute_collapses_v2_with_force(
                 density, stress, support,
                 &result.overstressed,
                 &stress_cfg, chunk_size,
-                true, // defer_pile
+                true,  // defer_pile
+                false, // force_collapse — natural filters apply
+                true,  // halt_at_struts — alive struts brace the slab
+                &mut broken_struts,
             );
             events.extend(natural);
         }
         // Scripted-trigger pass: force_collapse=true. Bypasses the
         // grounding filter; designer-painted regions on cave walls or
         // pillars fall even though they're physically supported.
+        // Scripted triggers also bypass the strut-halt — the designer's
+        // authored event overrides player struts (otherwise a single Crystal
+        // Strut could veto a boss-room collapse cinematic).
         if !trigger_seed_overstressed.is_empty() {
             let (density, stress, support) = s.sleep_fields_mut();
+            let mut _scripted_broken: Vec<voxel_core::stress::BrokenStrutEvent> = Vec::new();
             let forced = voxel_core::stress::detect_and_execute_collapses_v2_with_force(
                 density, stress, support,
                 &trigger_seed_overstressed,
                 &stress_cfg, chunk_size,
                 true,  // defer_pile
                 true,  // force_collapse
+                false, // halt_at_struts — scripted: ignore struts
+                &mut _scripted_broken,
             );
             events.extend(forced);
         }
         let collapse_ms = collapse_start.elapsed().as_secs_f64() * 1000.0;
+
+        // BFS-halt broken struts (the slab couldn't be braced anymore) ride
+        // back to UE so the breaking VFX + crack overlay can refresh around
+        // each one. Source=1 distinguishes from load-decay (source=0).
+        if !broken_struts.is_empty() {
+            let ffi_struts: Vec<crate::types::FfiStrutBroken> = broken_struts
+                .iter()
+                .map(|ev| {
+                    let cs = chunk_size as i32;
+                    crate::types::FfiStrutBroken {
+                        world_x: ev.chunk.0 * cs + ev.lx as i32,
+                        world_y: ev.chunk.1 * cs + ev.ly as i32,
+                        world_z: ev.chunk.2 * cs + ev.lz as i32,
+                        support_type: ev.support_type as u8,
+                        source: 1, // BFS halt
+                        _pad: [0; 2],
+                    }
+                })
+                .collect();
+            let _ = result_tx.send(WorkerResult::StrutsBroken { struts: ffi_struts });
+        }
 
         if !events.is_empty() {
             let total_voxels: u32 = events.iter().map(|e| e.total_volume).sum();
@@ -3834,7 +3898,12 @@ fn handle_request(
         WorkerRequest::PlaceSupport { world_x, world_y, world_z, support_type } => {
             let cfg = config.read().unwrap().clone();
             let stress_cfg = stress_config.read().unwrap().clone();
-            let st = SupportType::from_u8(support_type);
+            // Defensive: if an old UE editor (pre-2026-05-26) sends a
+            // legacy SupportType byte (Slate/Granite/Limestone at 1/2/3 or
+            // Copper/Iron/Steel/Crystal at 4/5/6/7), remap to the new
+            // lineup so the in-flight transition window can't crash. New
+            // UE plugins send 1-5 directly and pass through.
+            let st = SupportType::from_legacy_u8(support_type);
 
             let mut s = store.write().unwrap();
             let (success, _collapse_events, dirty_bounds) = s.place_support(

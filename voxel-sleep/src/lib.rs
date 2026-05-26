@@ -1574,9 +1574,9 @@ mod tests {
         let mut fluid = FluidSnapshot::default();
 
         if let Some(sf) = support_fields.get_mut(&(0, 0, 0)) {
-            sf.set(5, 5, 5, SupportType::SlateStrut);
-            sf.set(6, 5, 5, SupportType::SlateStrut);
-            sf.set(7, 5, 5, SupportType::CopperStrut);
+            sf.set(5, 5, 5, SupportType::Copper);
+            sf.set(6, 5, 5, SupportType::Copper);
+            sf.set(7, 5, 5, SupportType::Iron);
         }
 
         let config = SleepConfig::default();

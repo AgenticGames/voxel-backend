@@ -205,15 +205,32 @@ impl ChunkStore {
     }
 
     pub fn unload(&mut self, key: (i32, i32, i32)) {
-        // Preserve density+painted-stress snapshot if this chunk was modified
-        // (mining/flatten/sleep/PaintStress brush). Capturing the painted overlay
-        // here means it round-trips through unload→reload without leaking memory.
+        // Preserve density+painted-stress+support snapshot if this chunk was
+        // modified (mining/flatten/sleep/PaintStress brush/strut placement).
+        // Capturing all three overlays here means everything round-trips
+        // through unload→reload without leaking memory. Struts especially
+        // MUST be captured here — pre-2026-05-26 they were silently dropped
+        // on chunk eviction, leaving visible UE actors with zero Rust-side
+        // stress contribution.
         if self.modification_tracker.dirty_chunks.contains(&key) {
             if let Some(df) = self.density_fields.get(&key) {
                 let sf = self.stress_fields.get(&key);
-                self.preserved_snapshots.insert(key, ChunkSnapshot::from_chunk(df, sf));
+                let supf = self.support_fields.get(&key);
+                self.preserved_snapshots.insert(key, ChunkSnapshot::from_chunk(df, sf, supf));
             }
             self.modification_tracker.remove(&key);
+        }
+        // Also preserve struts even when the chunk isn't dirty-tracked — a
+        // chunk that has only had struts placed in it (no density edits) is
+        // not in `dirty_chunks` but its supports MUST survive unload. Mirror
+        // the mushroom logic below.
+        if let Some(supf) = self.support_fields.get(&key) {
+            if !supf.is_empty() && !self.preserved_snapshots.contains_key(&key) {
+                if let Some(df) = self.density_fields.get(&key) {
+                    let sf = self.stress_fields.get(&key);
+                    self.preserved_snapshots.insert(key, ChunkSnapshot::from_chunk(df, sf, Some(supf)));
+                }
+            }
         }
         // Preserve mushrooms whenever the chunk has any — independent of the
         // dirty-tracker because painting mushrooms doesn't mutate density. A
@@ -1604,11 +1621,24 @@ impl ChunkStore {
         }
 
         // Tier 3: currently loaded dirty chunks (freshest). Capture the
-        // painted-stress overlay too so PaintStress brush strokes persist.
+        // painted-stress overlay + struts + HP too so all overlays persist.
         for key in &self.modification_tracker.dirty_chunks {
             if let Some(df) = self.density_fields.get(key) {
                 let sf = self.stress_fields.get(key);
-                snapshots.insert(*key, ChunkSnapshot::from_chunk(df, sf));
+                let supf = self.support_fields.get(key);
+                snapshots.insert(*key, ChunkSnapshot::from_chunk(df, sf, supf));
+            }
+        }
+        // Tier 3b: chunks with struts but no density edits — still need
+        // the support overlay persisted. The earlier `unload()` path
+        // captures these on eviction; the same logic here picks up
+        // currently-loaded ones at save time.
+        for (key, supf) in &self.support_fields {
+            if supf.is_empty() { continue; }
+            if snapshots.contains_key(key) { continue; }
+            if let Some(df) = self.density_fields.get(key) {
+                let sf = self.stress_fields.get(key);
+                snapshots.insert(*key, ChunkSnapshot::from_chunk(df, sf, Some(supf)));
             }
         }
 
@@ -1728,6 +1758,15 @@ impl ChunkStore {
                     if let Some(sf) = self.stress_fields.get_mut(&key) {
                         snap.apply_painted_stress_to(sf);
                     }
+                    // Make sure the support field exists at the chunk size
+                    // before applying. SupportField is created lazily on
+                    // first place; absent here means "never had struts in
+                    // this session", which is fine — we'll insert a fresh
+                    // one and apply_supports_to fills it in.
+                    let chunk_size = df.size;
+                    let supf = self.support_fields.entry(key)
+                        .or_insert_with(|| SupportField::new(chunk_size));
+                    snap.apply_supports_to(supf);
                     self.preserved_snapshots.remove(&key);
                     self.modification_tracker.mark_dirty(key);
                     applied = true;

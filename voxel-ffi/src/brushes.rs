@@ -50,7 +50,8 @@ fn capture_undo_for_range(
                 let key = (cx, cy, cz);
                 if let Some(density) = store.density_fields.get(&key) {
                     let sf = store.stress_fields.get(&key);
-                    snapshots.push((key, ChunkSnapshot::from_chunk(density, sf)));
+                    let supf = store.support_fields.get(&key);
+                    snapshots.push((key, ChunkSnapshot::from_chunk(density, sf, supf)));
                 }
             }
         }
@@ -3602,13 +3603,13 @@ mod tests {
         let mut sf = StressField::new(df.size);
 
         // Capture None when nothing has been painted.
-        let snap_empty = ChunkSnapshot::from_chunk(df, Some(&sf));
+        let snap_empty = ChunkSnapshot::from_chunk(df, Some(&sf), None);
         assert!(snap_empty.painted_stress.is_none(), "None when no overlay");
 
         // Paint a few cells and re-capture.
         sf.add_painted(4, 4, 4, 0.7, 2.0);
         sf.add_painted(5, 4, 4, 0.4, 2.0);
-        let snap_with = ChunkSnapshot::from_chunk(df, Some(&sf));
+        let snap_with = ChunkSnapshot::from_chunk(df, Some(&sf), None);
         assert!(snap_with.painted_stress.is_some(), "Some after paint");
 
         // Restore onto a fresh field.

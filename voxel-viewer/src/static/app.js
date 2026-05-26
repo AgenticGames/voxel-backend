@@ -1641,14 +1641,15 @@
             appendParam(parts, "stress_vertical", "gen-stress-vertical");
             appendParam(parts, "stress_prop_radius", "gen-stress-prop-radius");
             appendParam(parts, "stress_max_collapse", "gen-stress-max-collapse");
-            // Sleep collapse settings
-            appendParam(parts, "collapse_slate", "gen-collapse-slate");
-            appendParam(parts, "collapse_granite", "gen-collapse-granite");
-            appendParam(parts, "collapse_limestone", "gen-collapse-limestone");
+            // Sleep collapse settings — 2026-05-26: strut lineup overhauled.
+            // Old Slate/Granite/Limestone sliders removed; new Mithril added.
+            // The legacy IDs (slate/granite/limestone) are still sent by the
+            // backend's request handler if elements exist, routed to Copper.
             appendParam(parts, "collapse_copper", "gen-collapse-copper");
             appendParam(parts, "collapse_iron", "gen-collapse-iron");
             appendParam(parts, "collapse_steel", "gen-collapse-steel");
             appendParam(parts, "collapse_crystal", "gen-collapse-crystal");
+            appendParam(parts, "collapse_mithril", "gen-collapse-mithril");
             appendParam(parts, "collapse_stress_mult", "gen-collapse-stress-mult");
             appendParam(parts, "collapse_max_cascade", "gen-collapse-max-cascade");
             appendParam(parts, "collapse_rubble", "gen-collapse-rubble");

@@ -9,7 +9,7 @@ use std::io::{self, Read, Write};
 
 use voxel_core::material::Material;
 use voxel_core::octree::node::VoxelSample;
-use voxel_core::stress::StressField;
+use voxel_core::stress::{StressField, SupportField, SupportType, STRUT_TUNING};
 use voxel_gen::density::DensityField;
 
 /// Magic bytes for the save file header.
@@ -21,7 +21,14 @@ const MAGIC: [u8; 4] = *b"MXSV";
 ///   2 — adds editor collapse triggers + next_trigger_id (see triggers.rs)
 ///   3 — adds per-chunk painted-stress overlay (creative PaintStress brush)
 ///   4 — adds Crystal Anchor pending/grown state as JSON blob
-const VERSION: u32 = 5;
+///   5 — adds per-chunk mushroom placements (worldgen + painted)
+///   6 — adds per-chunk supports + support_hp arrays (strut overhaul). Pre-v6
+///       saves never persisted SupportField at all, so chunks reload with no
+///       struts — visible AVoxelSupportActor actors in UE remain (loaded via
+///       VoxelSaveManager) but contribute zero stress reduction until the
+///       player re-places them. Acceptable: there were no shipped builds with
+///       struts placed pre-v6.
+const VERSION: u32 = 6;
 
 // ── Data structures ────────────────────────────────────────────────────
 
@@ -38,6 +45,13 @@ pub struct ChunkSnapshot {
     /// `Some(bytes)` = length size^3 * 4 (LE f32 per voxel). On apply, this
     /// overwrites the chunk's `StressField::painted_stress` in full.
     pub painted_stress: Option<Vec<u8>>,
+    /// Optional per-voxel SupportType bytes (1 byte/cell). `None` = no struts
+    /// placed (the common case — most chunks have zero struts). `Some(bytes)`
+    /// = length size^3.
+    pub supports: Option<Vec<u8>>,
+    /// Optional per-voxel u16 HP. Always paired with `supports` when present —
+    /// loading one without the other is a no-op. Length size^3 * 2 (LE u16).
+    pub support_hp: Option<Vec<u8>>,
 }
 
 /// All world modification data needed to restore a saved game.
@@ -76,8 +90,8 @@ pub struct ModificationTracker {
 
 impl ChunkSnapshot {
     /// Capture a snapshot from a live DensityField (density+material only).
-    /// `painted_stress` is `None` — see [`Self::from_chunk`] to also capture
-    /// the painted-stress overlay.
+    /// `painted_stress` / `supports` / `support_hp` are `None` — see
+    /// [`Self::from_chunk`] to also capture overlays + struts.
     pub fn from_density(df: &DensityField) -> Self {
         let total = df.samples.len();
         let mut packed = Vec::with_capacity(total * 5);
@@ -89,13 +103,20 @@ impl ChunkSnapshot {
             size: df.size as u32,
             packed,
             painted_stress: None,
+            supports: None,
+            support_hp: None,
         }
     }
 
-    /// Capture density+material AND the painted-stress overlay if `sf` has one.
-    /// Used by every brush so undo can restore the full chunk state, including
-    /// any PaintStress strokes that touched the chunk.
-    pub fn from_chunk(df: &DensityField, sf: Option<&StressField>) -> Self {
+    /// Capture density+material AND the painted-stress overlay AND the
+    /// support field (struts + HP) if present. Used by every brush so undo
+    /// can restore the full chunk state, including any PaintStress strokes
+    /// that touched the chunk AND any struts placed/broken in the region.
+    pub fn from_chunk(
+        df: &DensityField,
+        sf: Option<&StressField>,
+        supf: Option<&SupportField>,
+    ) -> Self {
         let mut snap = Self::from_density(df);
         if let Some(sf) = sf {
             if sf.has_painted_layer() {
@@ -104,6 +125,29 @@ impl ChunkSnapshot {
                     bytes.extend_from_slice(&v.to_le_bytes());
                 }
                 snap.painted_stress = Some(bytes);
+            }
+        }
+        if let Some(supf) = supf {
+            if !supf.is_empty() {
+                let n = supf.supports.len();
+                let mut sbytes = Vec::with_capacity(n);
+                for s in &supf.supports {
+                    sbytes.push(*s as u8);
+                }
+                snap.supports = Some(sbytes);
+                // HP array is lazy-allocated on first non-None set, so it
+                // should be present whenever non_none_count > 0. Defensive:
+                // emit a zero-filled array if it isn't.
+                let hp_src: std::borrow::Cow<Vec<u16>> = if supf.support_hp.len() == n {
+                    std::borrow::Cow::Borrowed(&supf.support_hp)
+                } else {
+                    std::borrow::Cow::Owned(vec![0u16; n])
+                };
+                let mut hp_bytes = Vec::with_capacity(n * 2);
+                for &h in hp_src.iter() {
+                    hp_bytes.extend_from_slice(&h.to_le_bytes());
+                }
+                snap.support_hp = Some(hp_bytes);
             }
         }
         snap
@@ -146,6 +190,65 @@ impl ChunkSnapshot {
     pub fn sample_count(&self) -> usize {
         let s = self.size as usize;
         s * s * s
+    }
+
+    /// Restore the support field (strut type + HP) from this snapshot. Mirrors
+    /// `apply_painted_stress_to`. When `supports` is `None`, wipes any existing
+    /// support entries (so undo of "first strut placement" reverts cleanly).
+    ///
+    /// Save format v6+ always uses the post-2026-05-26 SupportType IDs
+    /// (Copper=1 .. Mithril=5). Pre-v6 saves never persisted supports at all.
+    /// So this path uses `SupportType::from_u8` (no migration). For UE-side
+    /// legacy actor bytes see `AVoxelSupportActor::MigrateLegacyId`.
+    pub fn apply_supports_to(&self, supf: &mut SupportField) {
+        let n = supf.supports.len();
+        match (&self.supports, &self.support_hp) {
+            (None, _) => {
+                for i in 0..n {
+                    supf.supports[i] = SupportType::None;
+                }
+                supf.support_hp.clear();
+                supf.non_none_count = 0;
+            }
+            (Some(sbytes), hp_opt) => {
+                if sbytes.len() != n { return; }
+                // Decide once: do we have a valid HP array?
+                let hp_bytes_opt: Option<&Vec<u8>> = hp_opt
+                    .as_ref()
+                    .filter(|hp| hp.len() == n * 2);
+                if hp_bytes_opt.is_some() && supf.support_hp.len() != n {
+                    supf.support_hp = vec![0u16; n];
+                }
+                let mut count = 0u32;
+                for i in 0..n {
+                    let stype = SupportType::from_u8(sbytes[i]);
+                    supf.supports[i] = stype;
+                    if stype != SupportType::None { count += 1; }
+                    if let Some(hp_bytes) = hp_bytes_opt {
+                        let off = i * 2;
+                        let hp = u16::from_le_bytes([hp_bytes[off], hp_bytes[off + 1]]);
+                        // If the load saw legacy IDs that got remapped, the HP
+                        // value is whatever the old save persisted — clamp to
+                        // the new tier's max so we don't end up with a Copper
+                        // strut at 800 HP.
+                        let max_hp = STRUT_TUNING[stype as u8 as usize].max_hp;
+                        supf.support_hp[i] = if stype == SupportType::None {
+                            0
+                        } else {
+                            hp.min(max_hp)
+                        };
+                    } else if stype != SupportType::None {
+                        // No HP in save (was set() before HP existed) — refill
+                        // to tier max so the strut starts fresh.
+                        if supf.support_hp.is_empty() {
+                            supf.support_hp = vec![0u16; n];
+                        }
+                        supf.support_hp[i] = STRUT_TUNING[stype as u8 as usize].max_hp;
+                    }
+                }
+                supf.non_none_count = count;
+            }
+        }
     }
 
     /// Restore the painted-stress overlay on `sf` from this snapshot.
@@ -346,6 +449,40 @@ impl WorldSaveData {
             }
         }
 
+        // v6: per-chunk SupportField (struts + HP). Sparse — only chunks with
+        // at least one strut are emitted. Each entry has supports bytes
+        // (size^3 * 1) + support_hp bytes (size^3 * 2). Chunks without strut
+        // data write 0 in the count slot and skip the body.
+        //
+        // Format:
+        //   [4] support_chunk_count u32
+        //   per entry:
+        //     [4] cx i32, [4] cy i32, [4] cz i32
+        //     [4] support_byte_count u32   (= size^3)
+        //     [size^3] supports bytes      (SupportType per cell)
+        //     [4] hp_byte_count u32        (= size^3 * 2)
+        //     [size^3 * 2] hp bytes        (LE u16 per cell)
+        let support_entries: Vec<(&(i32, i32, i32), &Vec<u8>, &Vec<u8>)> = self
+            .chunk_snapshots
+            .iter()
+            .filter_map(|(k, snap)| {
+                match (snap.supports.as_ref(), snap.support_hp.as_ref()) {
+                    (Some(s), Some(h)) => Some((k, s, h)),
+                    _ => None,
+                }
+            })
+            .collect();
+        w.write_all(&(support_entries.len() as u32).to_le_bytes())?;
+        for (&(cx, cy, cz), sbytes, hbytes) in support_entries {
+            w.write_all(&cx.to_le_bytes())?;
+            w.write_all(&cy.to_le_bytes())?;
+            w.write_all(&cz.to_le_bytes())?;
+            w.write_all(&(sbytes.len() as u32).to_le_bytes())?;
+            w.write_all(sbytes)?;
+            w.write_all(&(hbytes.len() as u32).to_le_bytes())?;
+            w.write_all(hbytes)?;
+        }
+
         Ok(())
     }
 
@@ -390,7 +527,12 @@ impl WorldSaveData {
             r.read_exact(&mut packed).map_err(|_| DeltaError::TruncatedData)?;
             chunk_snapshots.insert(
                 (cx, cy, cz),
-                ChunkSnapshot { size, packed, painted_stress: None },
+                ChunkSnapshot {
+                    size, packed,
+                    painted_stress: None,
+                    supports: None,
+                    support_hp: None,
+                },
             );
         }
 
@@ -520,6 +662,40 @@ impl WorldSaveData {
                 if !placements.is_empty() {
                     mushroom_placements.insert((cx, cy, cz), placements);
                 }
+            }
+        }
+
+        // v6: per-chunk SupportField (struts + HP). v1-v5 saves end here;
+        // chunks reload with no struts (visible UE actors persist via
+        // VoxelSaveManager but Rust-side stress reduction is gone until the
+        // player re-places).
+        if version >= 6 {
+            let support_chunk_count = read_u32(r)? as usize;
+            if support_chunk_count > 100_000 {
+                return Err(DeltaError::TooManyChunks(support_chunk_count));
+            }
+            for _ in 0..support_chunk_count {
+                let cx = read_i32(r)?;
+                let cy = read_i32(r)?;
+                let cz = read_i32(r)?;
+                let s_count = read_u32(r)? as usize;
+                if s_count > 256 * 256 * 256 {
+                    return Err(DeltaError::TruncatedData);
+                }
+                let mut sbytes = vec![0u8; s_count];
+                r.read_exact(&mut sbytes).map_err(|_| DeltaError::TruncatedData)?;
+                let h_count = read_u32(r)? as usize;
+                if h_count != s_count * 2 {
+                    return Err(DeltaError::TruncatedData);
+                }
+                let mut hbytes = vec![0u8; h_count];
+                r.read_exact(&mut hbytes).map_err(|_| DeltaError::TruncatedData)?;
+                if let Some(snap) = chunk_snapshots.get_mut(&(cx, cy, cz)) {
+                    snap.supports = Some(sbytes);
+                    snap.support_hp = Some(hbytes);
+                }
+                // Drop entries for chunks without a density snapshot — they
+                // can't be re-applied anyway.
             }
         }
 
@@ -926,7 +1102,7 @@ mod tests {
         // Capture into a snapshot (what `unload` does for a dirty chunk),
         // tuck into a save, serialize to bytes, then go through the
         // round-trip the save file would do.
-        let snap = ChunkSnapshot::from_chunk(&df, Some(&sf));
+        let snap = ChunkSnapshot::from_chunk(&df, Some(&sf), None);
         assert!(snap.painted_stress.is_some(), "snapshot captured painted layer");
 
         let mut save = WorldSaveData::default();
@@ -1003,5 +1179,97 @@ mod tests {
             assert_eq!(orig.density, rest.density, "density at {i}");
             assert_eq!(orig.material, rest.material, "material at {i}");
         }
+    }
+
+    // ─── Strut persistence + migration tests (added 2026-05-26 overhaul) ──
+
+    #[test]
+    fn supports_capture_in_chunk_snapshot() {
+        // ChunkSnapshot::from_chunk should capture struts + HP when supf is Some
+        // and non-empty. Empty SupportField → supports/support_hp stay None.
+        use voxel_core::stress::{SupportField, SupportType, STRUT_TUNING};
+
+        let df = make_test_density(5);
+
+        let empty_supf = SupportField::new(df.size);
+        let snap_empty = ChunkSnapshot::from_chunk(&df, None, Some(&empty_supf));
+        assert!(snap_empty.supports.is_none());
+        assert!(snap_empty.support_hp.is_none());
+
+        let mut supf = SupportField::new(df.size);
+        supf.set(2, 2, 2, SupportType::Crystal);
+        supf.set(3, 2, 2, SupportType::Mithril);
+        let snap = ChunkSnapshot::from_chunk(&df, None, Some(&supf));
+        assert!(snap.supports.is_some());
+        assert!(snap.support_hp.is_some());
+
+        // Roundtrip onto a fresh field and verify HP came back correctly.
+        let mut restored = SupportField::new(df.size);
+        snap.apply_supports_to(&mut restored);
+        assert_eq!(restored.get(2, 2, 2), SupportType::Crystal);
+        assert_eq!(restored.get(3, 2, 2), SupportType::Mithril);
+        assert_eq!(
+            restored.get_hp(2, 2, 2),
+            STRUT_TUNING[SupportType::Crystal as usize].max_hp
+        );
+        assert_eq!(
+            restored.get_hp(3, 2, 2),
+            STRUT_TUNING[SupportType::Mithril as usize].max_hp
+        );
+        assert_eq!(restored.non_none_count, 2);
+    }
+
+    #[test]
+    fn supports_legacy_id_migration() {
+        // Save format v6 stores current IDs (1=Copper..5=Mithril), so the
+        // delta apply path does NOT migrate. Legacy migration happens at
+        // the UE-side actor save boundary (see AVoxelSupportActor::MigrateLegacyId)
+        // and also in `request_place_support` for in-flight DLL/editor pairs.
+        // Verify the Rust legacy helper directly.
+        use voxel_core::stress::SupportType;
+
+        assert_eq!(SupportType::from_legacy_u8(1), SupportType::Copper); // Slate
+        assert_eq!(SupportType::from_legacy_u8(2), SupportType::Copper); // Granite
+        assert_eq!(SupportType::from_legacy_u8(3), SupportType::Copper); // Limestone
+        assert_eq!(SupportType::from_legacy_u8(4), SupportType::Copper); // Old Copper@4
+        assert_eq!(SupportType::from_legacy_u8(5), SupportType::Iron);   // Old Iron@5
+        assert_eq!(SupportType::from_legacy_u8(6), SupportType::Steel);  // Old Steel@6
+        assert_eq!(SupportType::from_legacy_u8(7), SupportType::Crystal);// Old Crystal@7
+    }
+
+    #[test]
+    fn save_format_v6_strut_roundtrip() {
+        // Full save/deserialize cycle with struts present in two chunks.
+        use voxel_core::stress::{SupportField, SupportType};
+
+        let df1 = make_test_density(5);
+        let mut supf1 = SupportField::new(df1.size);
+        supf1.set(1, 1, 1, SupportType::Iron);
+
+        let df2 = make_test_density(5);
+        let mut supf2 = SupportField::new(df2.size);
+        supf2.set(2, 2, 2, SupportType::Mithril);
+
+        let mut save = WorldSaveData::default();
+        save.chunk_snapshots.insert(
+            (0, 0, 0), ChunkSnapshot::from_chunk(&df1, None, Some(&supf1))
+        );
+        save.chunk_snapshots.insert(
+            (-1, 0, 0), ChunkSnapshot::from_chunk(&df2, None, Some(&supf2))
+        );
+
+        let bytes = save.serialize();
+        let restored = WorldSaveData::deserialize(&bytes).unwrap();
+        assert_eq!(restored.chunk_snapshots.len(), 2);
+
+        let s1 = &restored.chunk_snapshots[&(0, 0, 0)];
+        let mut sf1 = SupportField::new(df1.size);
+        s1.apply_supports_to(&mut sf1);
+        assert_eq!(sf1.get(1, 1, 1), SupportType::Iron);
+
+        let s2 = &restored.chunk_snapshots[&(-1, 0, 0)];
+        let mut sf2 = SupportField::new(df2.size);
+        s2.apply_supports_to(&mut sf2);
+        assert_eq!(sf2.get(2, 2, 2), SupportType::Mithril);
     }
 }

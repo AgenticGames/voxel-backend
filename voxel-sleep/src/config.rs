@@ -899,12 +899,18 @@ impl Default for MineralConfig {
 /// Structural collapse configuration for sleep cycles.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollapseConfig {
-    pub strut_survival: [f32; 8],
+    /// Per-tier sleep-time survival rate (index by SupportType as u8).
+    /// 6 entries (None + 5 tiers). Pre-2026-05-26 was [f32; 8] with three
+    /// stone struts at indices 1-3; current lineup is Copper=1..Mithril=5.
+    pub strut_survival: [f32; 6],
     pub stress_multiplier: f32,
     pub max_cascade_iterations: u32,
     pub rubble_fill_ratio: f32,
     pub min_stress_for_cascade: f32,
     pub rubble_material_match: bool,
+    /// LEGACY: pre-2026-05-26 stress penalty on supports during collapse.
+    /// Was never consumed in the v2 cascade path; kept as a config slot for
+    /// ABI/serde stability. Internal code now ignores it.
     pub support_stress_penalty: f32,
     pub collapse_enabled: bool,
 }
@@ -914,13 +920,11 @@ impl Default for CollapseConfig {
         Self {
             strut_survival: [
                 0.0,   // None (unused)
-                0.25,  // SlateStrut
-                0.30,  // GraniteStrut
-                0.25,  // LimestoneStrut
-                0.55,  // CopperStrut
-                0.70,  // IronStrut
-                0.85,  // SteelStrut
-                0.95,  // CrystalStrut
+                0.50,  // Copper  (T1)
+                0.70,  // Iron    (T2)
+                0.85,  // Steel   (T3)
+                0.95,  // Crystal (T4)
+                0.99,  // Mithril (T5)
             ],
             stress_multiplier: 0.8,
             max_cascade_iterations: 3,

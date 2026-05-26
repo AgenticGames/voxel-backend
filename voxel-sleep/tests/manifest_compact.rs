@@ -132,16 +132,16 @@ fn compact_support_changes_coalesce() {
     let mut manifest = ChangeManifest::new();
     manifest.record_support_change(
         (0, 0, 0), 2, 2, 2,
-        SupportType::None, SupportType::SlateStrut,
+        SupportType::None, SupportType::Copper,
     );
     manifest.record_support_change(
         (0, 0, 0), 2, 2, 2,
-        SupportType::SlateStrut, SupportType::CrystalStrut,
+        SupportType::Copper, SupportType::Crystal,
     );
 
     manifest.compact();
     let delta = manifest.chunk_deltas.get(&(0, 0, 0)).unwrap();
     assert_eq!(delta.support_changes.len(), 1);
     assert_eq!(delta.support_changes[0].old_support, SupportType::None as u8);
-    assert_eq!(delta.support_changes[0].new_support, SupportType::CrystalStrut as u8);
+    assert_eq!(delta.support_changes[0].new_support, SupportType::Crystal as u8);
 }

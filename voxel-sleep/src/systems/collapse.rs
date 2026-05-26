@@ -6,8 +6,8 @@ use voxel_core::density::DensityField;
 use voxel_core::material::Material;
 use voxel_core::stress::{
     StressField, SupportField, SupportType, StressConfig, CollapseEvent,
-    CollapseEventV2, recalc_stress_region_v2, detect_and_execute_collapses_v2,
-    world_to_chunk_local,
+    CollapseEventV2, recalc_stress_region_v2_with_load_decay,
+    detect_and_execute_collapses_v2, world_to_chunk_local,
 };
 use crate::config::CollapseConfig;
 use crate::manifest::ChangeManifest;
@@ -123,14 +123,28 @@ pub fn apply_collapse(
     sleep_stress_config.overhang_weight *= config.stress_multiplier;
     sleep_stress_config.span_weight *= config.stress_multiplier;
 
-    let stress_result = recalc_stress_region_v2(
+    // Use the load-decay variant: each strut absorbs its share of the
+    // recalc-time stress reduction; HP ticks down by
+    // `max(0, load_borne - tier_threshold) * HP_DAMAGE_SCALE` per recalc.
+    // Sleep passes therefore wear struts over geological time without
+    // requiring player mining activity nearby.
+    let stress_result = recalc_stress_region_v2_with_load_decay(
         density_fields,
         stress_fields,
         support_fields,
         &sleep_stress_config,
         chunks,
+        &[],
         chunk_size,
     );
+    // Manifest the load-decay broken struts so save/load can roundtrip them.
+    for ev in &stress_result.broken_struts {
+        result.manifest.record_support_change(
+            ev.chunk, ev.lx, ev.ly, ev.lz,
+            ev.support_type, SupportType::None,
+        );
+        result.supports_degraded += 1;
+    }
 
     result.timings.stress_amplification = t_step2.elapsed();
 
@@ -280,7 +294,7 @@ mod tests {
     /// Create a collapse config where slate struts always fail.
     fn config_slate_always_fails() -> CollapseConfig {
         let mut survival = CollapseConfig::default().strut_survival;
-        survival[SupportType::SlateStrut as usize] = 0.0;
+        survival[SupportType::Copper as usize] = 0.0;
         CollapseConfig {
             strut_survival: survival,
             stress_multiplier: 1.5,
@@ -293,7 +307,7 @@ mod tests {
     /// Create a collapse config where crystal struts always survive.
     fn config_crystal_always_survives() -> CollapseConfig {
         let mut survival = CollapseConfig::default().strut_survival;
-        survival[SupportType::CrystalStrut as usize] = 1.0;
+        survival[SupportType::Crystal as usize] = 1.0;
         CollapseConfig {
             strut_survival: survival,
             stress_multiplier: 1.5,
@@ -308,7 +322,7 @@ mod tests {
         let (mut density_fields, mut stress_fields, mut support_fields) = make_solid_world();
 
         // Place a SlateStrut at (0,0,0) chunk, local (5,5,5)
-        support_fields.get_mut(&(0, 0, 0)).unwrap().set(5, 5, 5, SupportType::SlateStrut);
+        support_fields.get_mut(&(0, 0, 0)).unwrap().set(5, 5, 5, SupportType::Copper);
 
         let config = config_slate_always_fails();
         let stress_config = StressConfig::default();
@@ -336,7 +350,7 @@ mod tests {
         let (mut density_fields, mut stress_fields, mut support_fields) = make_solid_world();
 
         // Place CrystalStrut at (0,0,0) chunk, local (5,5,5)
-        support_fields.get_mut(&(0, 0, 0)).unwrap().set(5, 5, 5, SupportType::CrystalStrut);
+        support_fields.get_mut(&(0, 0, 0)).unwrap().set(5, 5, 5, SupportType::Crystal);
 
         let config = config_crystal_always_survives();
         let stress_config = StressConfig::default();
@@ -353,7 +367,7 @@ mod tests {
         assert_eq!(result.supports_degraded, 0, "CrystalStrut with 100% survival should not degrade");
         assert_eq!(
             support_fields.get(&(0, 0, 0)).unwrap().get(5, 5, 5),
-            SupportType::CrystalStrut,
+            SupportType::Crystal,
             "CrystalStrut should still be present"
         );
     }
@@ -390,7 +404,7 @@ mod tests {
 
         // Run collapse with low multiplier (no cascade) and verify stress is computed
         let config = CollapseConfig {
-            strut_survival: [1.0; 8],
+            strut_survival: [1.0; 6],
             stress_multiplier: 1.5,
             max_cascade_iterations: 0,
             ..CollapseConfig::default()
@@ -430,9 +444,9 @@ mod tests {
 
         // Place several SlateStruts in chunk (0,0,0)
         let sf = support_fields.get_mut(&(0, 0, 0)).unwrap();
-        sf.set(3, 3, 3, SupportType::SlateStrut);
-        sf.set(5, 5, 5, SupportType::SlateStrut);
-        sf.set(7, 7, 7, SupportType::SlateStrut);
+        sf.set(3, 3, 3, SupportType::Copper);
+        sf.set(5, 5, 5, SupportType::Copper);
+        sf.set(7, 7, 7, SupportType::Copper);
 
         let config = config_slate_always_fails();
         let stress_config = StressConfig::default();
@@ -459,7 +473,7 @@ mod tests {
         );
         // Each should be SlateStrut -> None
         for change in &delta.support_changes {
-            assert_eq!(change.old_support, SupportType::SlateStrut as u8);
+            assert_eq!(change.old_support, SupportType::Copper as u8);
             assert_eq!(change.new_support, SupportType::None as u8);
         }
     }
@@ -533,9 +547,9 @@ mod tests {
             let (mut density_fields, mut stress_fields, mut support_fields) = make_solid_world();
             // Place some supports of different types
             let sf = support_fields.get_mut(&(0, 0, 0)).unwrap();
-            sf.set(3, 3, 3, SupportType::SlateStrut);
-            sf.set(5, 5, 5, SupportType::CopperStrut);
-            sf.set(8, 8, 8, SupportType::CrystalStrut);
+            sf.set(3, 3, 3, SupportType::Copper);
+            sf.set(5, 5, 5, SupportType::Iron);
+            sf.set(8, 8, 8, SupportType::Crystal);
 
             let mut rng = ChaCha8Rng::seed_from_u64(42);
             let result = apply_collapse(

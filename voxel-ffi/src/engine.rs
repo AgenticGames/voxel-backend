@@ -130,6 +130,10 @@ pub struct VoxelEngine {
     /// Stash of completed path results, keyed by request_id. Drained by
     /// `voxel_path_poll` and TTL-pruned in `poll_result`.
     path_results: Arc<Mutex<PathResultStore>>,
+    /// Stash of broken-strut events. Worker pushes via `poll_result`'s
+    /// intercept; UE drains all at once via `voxel_take_struts_broken`
+    /// at end-of-frame.
+    strut_broken_stash: Arc<Mutex<Vec<crate::types::FfiStrutBroken>>>,
     /// Server-side monotonic request id allocator so callers don't have to.
     next_path_request_id: Arc<AtomicU32>,
 
@@ -497,6 +501,7 @@ impl VoxelEngine {
             workers,
             path_tx,
             path_results: Arc::new(Mutex::new(PathResultStore::default())),
+            strut_broken_stash: Arc::new(Mutex::new(Vec::new())),
             next_path_request_id: Arc::new(AtomicU32::new(1)),
             occupied_cells: Arc::clone(&occupied_cells),
             crystal_anchors,
@@ -691,9 +696,26 @@ impl VoxelEngine {
                 }
                 None
             }
+            Ok(WorkerResult::StrutsBroken { struts }) => {
+                if let Ok(mut stash) = self.strut_broken_stash.lock() {
+                    stash.extend(struts);
+                }
+                None
+            }
             Ok(other) => Some(other),
             Err(_) => None,
         }
+    }
+
+    /// Drain all pending broken-strut events. Called by UE per-frame via
+    /// `voxel_take_struts_broken`. The stash is emptied — UE owns the
+    /// returned data.
+    pub fn drain_struts_broken(&self) -> Vec<crate::types::FfiStrutBroken> {
+        let mut stash = match self.strut_broken_stash.lock() {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        std::mem::take(&mut *stash)
     }
 
     // ─── Pathfinding public API ─────────────────────────────────
@@ -1657,6 +1679,32 @@ impl VoxelEngine {
             Ok(()) => 1,
             Err(_) => 0,
         }
+    }
+
+    /// Synchronously read a strut's HP/type at a Rust voxel position.
+    /// Returns `(support_type, hp, max_hp, valid)` where valid=0 means the
+    /// store lock was contended — UE should hold the previous bar value
+    /// and retry next frame. Used by the UE strut-inspect HP bar widget.
+    pub fn query_strut_hp(&self, world_x: i32, world_y: i32, world_z: i32) -> (u8, u16, u16, u8) {
+        use voxel_core::stress::{world_to_chunk_local, STRUT_TUNING};
+        let cfg = self.config.read().unwrap();
+        let chunk_size = cfg.chunk_size;
+        drop(cfg);
+        let (key, lx, ly, lz) = world_to_chunk_local(world_x, world_y, world_z, chunk_size);
+        // Retry 5x/2ms on contention — mirrors voxel_query_stress pattern.
+        for _attempt in 0..5 {
+            if let Ok(s) = self.store.try_read() {
+                if let Some(supf) = s.support_fields.get(&key) {
+                    let stype = supf.get(lx, ly, lz);
+                    let hp = supf.get_hp(lx, ly, lz);
+                    let max_hp = STRUT_TUNING[stype as u8 as usize].max_hp;
+                    return (stype as u8, hp, max_hp, 1);
+                }
+                return (0, 0, 0, 1); // chunk loaded but no support field — no strut
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        (0, 0, 0, 0) // contended, signal UE to keep prior state
     }
 
     /// Request flattening a terrace at a UE world position.

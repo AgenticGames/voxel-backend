@@ -119,6 +119,12 @@ pub enum FfiResultType {
     CollapsePilePreviewTier = 10,
 }
 
+// NOTE: StrutsBroken does not appear in this enum. UE drains broken-strut
+// events via `voxel_take_struts_broken` (see api.rs) — the engine stashes
+// them in a take-once buffer keyed by world voxel position, avoiding both
+// the heap allocation inside the polled FfiResult and the ordering issue
+// of interleaving struts with mesh/collapse results.
+
 /// SoA layout for fluid mesh data. Pointers owned by Rust, freed via `voxel_free_result`.
 #[repr(C)]
 pub struct FfiFluidMeshData {
@@ -806,8 +812,9 @@ pub struct FfiEngineConfig {
     pub sleep_pyrite_crust_prob: f32,
     pub sleep_growth_density_min: f32,
     pub sleep_growth_density_max: f32,
-    // Collapse
-    pub sleep_strut_survival: [f32; 8],
+    // Collapse — strut_survival shrunk from [f32; 8] to [f32; 6] on 2026-05-26.
+    // 6 entries: None=0, Copper=1, Iron=2, Steel=3, Crystal=4, Mithril=5.
+    pub sleep_strut_survival: [f32; 6],
     pub sleep_stress_multiplier: f32,
     pub sleep_max_cascade_iterations: u32,
     pub sleep_rubble_fill_ratio: f32,
@@ -1637,7 +1644,11 @@ pub struct FfiStressConfig {
     pub warn_dust_threshold: f32,
     pub warn_creak_threshold: f32,
     pub warn_shake_threshold: f32,
-    pub support_hardness: [f32; 8],
+    /// LEGACY ABI slot — kept for layout stability. Pre-2026-05-26 stress
+    /// system used a single per-tier hardness array. New system uses
+    /// `STRUT_TUNING` per-tier struct (in voxel-core/src/stress.rs). UE side
+    /// should set this to all zeros; internal math ignores it now.
+    pub support_hardness: [f32; 6],
     // V2 fields
     pub lateral_transfer_factor: f32,
     pub vertical_transfer_factor: f32,
@@ -2144,6 +2155,47 @@ pub enum WorkerResult {
         status: u8,
         nodes_ue: Vec<crate::pathing::PathNodeUE>,
     },
+    /// One or more struts hit 0 HP. UE should look up the corresponding
+    /// `AVoxelSupportActor` via `PlacedSupports` (keyed by voxel position),
+    /// play the breaking VFX, and refresh the crack overlay in a sphere
+    /// around the strut so the newly-unsupported walls flash red.
+    StrutsBroken {
+        struts: Vec<FfiStrutBroken>,
+    },
+}
+
+/// One broken strut event for `WorkerResult::StrutsBroken`.
+/// Position is reported in WORLD VOXEL coords (Rust frame). UE converts to
+/// world space via `RustToUE` + WorldScale and indexes `PlacedSupports`.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct FfiStrutBroken {
+    pub world_x: i32,
+    pub world_y: i32,
+    pub world_z: i32,
+    /// SupportType byte (Copper=1 .. Mithril=5). 0 = None, never emitted.
+    pub support_type: u8,
+    /// Why the strut broke: 0 = load decay (recalc-time HP exhaustion),
+    /// 1 = BFS halt (cinematic mining absorbed the slab).
+    pub source: u8,
+    pub _pad: [u8; 2],
+}
+
+/// FFI inspect result for `voxel_query_strut_hp`. UE renders a small HP bar
+/// over the strut when the player aims at one. Lock-contention is signalled
+/// via `valid` (0 = retry blocked, 1 = ok, type may still be None).
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct FfiStrutInfo {
+    /// SupportType byte at the queried voxel. 0 = no strut here.
+    pub support_type: u8,
+    pub _pad: [u8; 1],
+    pub hp: u16,
+    pub max_hp: u16,
+    /// 0 = lock contended (UE should preserve prior bar / hide).
+    /// 1 = read OK (treat `support_type==0` as "no strut here, hide the bar").
+    pub valid: u8,
+    pub _pad2: [u8; 1],
 }
 
 /// FFI result for world scan. JSON report is passed as a heap-allocated string.
