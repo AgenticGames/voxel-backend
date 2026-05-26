@@ -132,6 +132,67 @@ pub fn sample_material(
         .map(|df| df.get(lx, ly, lz).material)
 }
 
+/// Tiny single-slot chunk-pointer cache for tight world-coord sampling loops.
+///
+/// `sample_material` does a `HashMap<(i32,i32,i32), DensityField>` lookup per
+/// call using the default SipHash hasher (~30-50 ns each). Inside a small
+/// neighborhood-search box (e.g. Phase 4 ore-search: up to (2*r+1)^3 ≈ 343
+/// iterations per candidate), most adjacent world coordinates land in the
+/// SAME chunk — so the hash lookup is wasted work on the cache-hit case.
+///
+/// Cache hit rate inside a typical 7-voxel-radius box in 16³ chunks is
+/// 80–95 %; cached path is a single pointer compare + deref (~2-5 ns), so
+/// we eliminate the vast majority of hash-and-probe cost on the inner loop.
+///
+/// Usage:
+/// ```ignore
+/// let mut cache = ChunkSampleCache::new();
+/// for ... { for ... { for ... {
+///     if let Some(mat) = cache.material(density_fields, sx, sy, sz, chunk_size) { ... }
+/// }}}
+/// ```
+///
+/// Caller is responsible for invalidating (drop + remake) the cache if it
+/// mutates `density_fields`. For read-only inner loops this is fire-and-forget.
+pub struct ChunkSampleCache<'a> {
+    last_key: Option<(i32, i32, i32)>,
+    last_df: Option<&'a DensityField>,
+}
+
+impl<'a> ChunkSampleCache<'a> {
+    #[inline]
+    pub fn new() -> Self {
+        Self { last_key: None, last_df: None }
+    }
+
+    /// Cached version of `sample_material`. Returns the material at the
+    /// requested world coord, or None if the chunk isn't loaded.
+    #[inline]
+    pub fn material(
+        &mut self,
+        density_fields: &'a HashMap<(i32, i32, i32), DensityField>,
+        wx: i32,
+        wy: i32,
+        wz: i32,
+        chunk_size: usize,
+    ) -> Option<Material> {
+        let (chunk_key, lx, ly, lz) = world_to_chunk_local(wx, wy, wz, chunk_size);
+        let df = if self.last_key == Some(chunk_key) {
+            self.last_df
+        } else {
+            let r = density_fields.get(&chunk_key);
+            self.last_key = Some(chunk_key);
+            self.last_df = r;
+            r
+        };
+        df.map(|df| df.get(lx, ly, lz).material)
+    }
+}
+
+impl<'a> Default for ChunkSampleCache<'a> {
+    fn default() -> Self { Self::new() }
+}
+
 /// Count 6-connected neighbors matching a predicate.
 pub fn count_neighbors(
     density_fields: &HashMap<(i32, i32, i32), DensityField>,
@@ -162,6 +223,10 @@ pub fn has_material_within_radius(
     radius: i32,
     target: Material,
 ) -> bool {
+    // Adjacent (sdx,sdy,sdz) inside the (2r+1)^3 search box mostly land in
+    // the same chunk — cache the last density-field pointer to skip the
+    // HashMap probe on the ~85% cache-hit case.
+    let mut cache = ChunkSampleCache::new();
     for dx in -radius..=radius {
         for dy in -radius..=radius {
             for dz in -radius..=radius {
@@ -172,7 +237,7 @@ pub fn has_material_within_radius(
                     continue;
                 }
                 if let Some(mat) =
-                    sample_material(density_fields, wx + dx, wy + dy, wz + dz, chunk_size)
+                    cache.material(density_fields, wx + dx, wy + dy, wz + dz, chunk_size)
                 {
                     if mat == target {
                         return true;
