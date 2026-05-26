@@ -15,11 +15,15 @@ use crate::manifest::ChangeManifest;
 use crate::TransformEntry;
 use crate::trace;
 
-/// B3.2: wall-clock budget for the collapse cascade. When the cascade
-/// exceeds this in `apply_collapse`, the outer per-seed loop aborts and
-/// returns the events accumulated so far. Prevents Phase 4 from hanging
-/// the sleep montage forever on a pathologically dense world.
-const COLLAPSE_BUDGET: Duration = Duration::from_secs(10);
+/// Wall-clock budget for the collapse cascade. When the cascade exceeds
+/// this in `apply_collapse`, the outer per-seed loop aborts and returns
+/// the events accumulated so far. Prevents Phase 4 from hanging the
+/// sleep montage forever on a pathologically dense world.
+///
+/// 5 s ceiling per the user spec (B3.3): 10 s is already a blown UX
+/// budget for "Time passes…" text. Sub-budgets for other steps live in
+/// `voxel-sleep/src/phases/deeptime.rs`.
+const COLLAPSE_BUDGET: Duration = Duration::from_secs(5);
 
 /// Per-sub-step timing data from the collapse pass.
 #[derive(Debug, Clone, Default)]

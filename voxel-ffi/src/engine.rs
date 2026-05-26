@@ -4076,6 +4076,11 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
             max_enrichment_per_chunk: if c.sleep_max_enrichment_per_chunk > 0 { c.sleep_max_enrichment_per_chunk } else { 400 },
             enrichment_search_radius: if c.sleep_enrichment_search_radius != 0 { c.sleep_enrichment_search_radius } else { 12 },
             enrichment_enabled: c.sleep_enrichment_enabled != 0,
+            // Off by default — Block 3.3 disabled ambient groundwater
+            // enrichment (Phase 4 step 2) due to catastrophic perf on
+            // dense worlds. No FFI knob yet; flip in code once a perf
+            // fix lands.
+            ambient_enrichment_enabled: false,
             enrichment_cluster_min: if c.sleep_enrichment_cluster_min > 0 { c.sleep_enrichment_cluster_min } else { 3 },
             enrichment_cluster_max: if c.sleep_enrichment_cluster_max > 0 { c.sleep_enrichment_cluster_max } else { 30 },
             vein_thickening_enabled: c.sleep_vein_thickening_enabled != 0,

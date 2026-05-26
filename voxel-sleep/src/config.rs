@@ -667,6 +667,14 @@ pub struct DeepTimeConfig {
     pub max_enrichment_per_chunk: u32,
     pub enrichment_search_radius: i32,
     pub enrichment_enabled: bool,
+    /// Ambient groundwater enrichment (step 2 of Phase 4). Disabled by
+    /// default since the inner loop's ore-search probe is O(31³ × 11³)
+    /// per chunk, which makes Phase 4 stall for 20-100+ s on dense
+    /// worlds. Cosmetic enrichment of trace minerals on drip-zone host
+    /// rock — not worth the perf cost. Re-enable per save via config
+    /// panel if a future perf pass makes it cheap.
+    #[serde(default)]
+    pub ambient_enrichment_enabled: bool,
     /// Minimum cluster size when enrichment triggers grow_vein()
     #[serde(default = "default_enrichment_cluster_min")]
     pub enrichment_cluster_min: u32,
@@ -719,6 +727,9 @@ impl Default for DeepTimeConfig {
             max_enrichment_per_chunk: 400,
             enrichment_search_radius: 12,
             enrichment_enabled: true,
+            // Off by default — see field comment. Step 2 of Phase 4 has
+            // catastrophic perf on dense worlds (20-100+ s).
+            ambient_enrichment_enabled: false,
             enrichment_cluster_min: 3,
             enrichment_cluster_max: 30,
             vein_thickening_enabled: true,

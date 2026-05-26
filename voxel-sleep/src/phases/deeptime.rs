@@ -103,16 +103,38 @@ pub fn apply_deeptime(
     let mut result = DeepTimeResult::default();
     let field_size = chunk_size + 1;
 
-    // B3.2: per-sub-step trace so we can see which sub-step inside Phase 4
-    // gums up on dense worlds. Without this, the sleep_trace.log shows
-    // only "Phase 4 start" and we can't tell what stalled.
+    // B3.2/B3.3: per-sub-step trace + Phase 4 total budget. The trace
+    // lets us see which sub-step is the bottleneck. The budget makes
+    // sure no single sub-step (or combination) hangs the montage past
+    // 5 s of "Time passes…" black screen. Checked between sub-steps;
+    // when exceeded, remaining sub-steps are skipped and Phase 4
+    // returns whatever it had so far.
+    const PHASE4_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
     let t_deeptime_start = std::time::Instant::now();
     let mut t_substep = t_deeptime_start;
     trace(&format!(
-        "Phase 4 (deeptime) sub-steps begin chunks={} fluid_chunks={} nests={} corpses={}",
+        "Phase 4 (deeptime) sub-steps begin chunks={} fluid_chunks={} nests={} corpses={} budget={}s",
         chunks.len(), fluid_snapshot.chunks.len(),
-        nest_positions.len(), corpse_positions.len()
+        nest_positions.len(), corpse_positions.len(),
+        PHASE4_BUDGET.as_secs()
     ));
+
+    // Helper: between-sub-step budget check. Returns true if we should
+    // abort the remaining sub-steps.
+    let phase4_deadline = t_deeptime_start + PHASE4_BUDGET;
+    macro_rules! check_phase4_budget {
+        ($step_name:expr) => {
+            if std::time::Instant::now() >= phase4_deadline {
+                trace(&format!(
+                    "Phase 4 BUDGET EXCEEDED after {} — skipping remaining sub-steps. Elapsed {:.2}ms / budget {}ms",
+                    $step_name,
+                    t_deeptime_start.elapsed().as_secs_f32() * 1000.0,
+                    PHASE4_BUDGET.as_millis()
+                ));
+                return result;
+            }
+        };
+    }
 
     struct Candidate {
         chunk_key: (i32, i32, i32),
@@ -229,6 +251,7 @@ pub fn apply_deeptime(
         "Phase 4 step 1 (supergene enrichment) end in {:.2}ms candidates_so_far={}",
         t_substep.elapsed().as_secs_f32() * 1000.0, candidates.len()
     ));
+    check_phase4_budget!("step 1 (supergene enrichment)");
     t_substep = std::time::Instant::now();
 
     // --- Ambient Groundwater Enrichment ---
@@ -239,7 +262,7 @@ pub fn apply_deeptime(
     // If nearby ore exists, concentrate that. Otherwise, deposit trace minerals
     // naturally present in the host rock geochemistry.
     let mut ambient_enrichment_count = 0u32;
-    if config.enrichment_enabled && groundwater.enabled {
+    if config.enrichment_enabled && groundwater.enabled && config.ambient_enrichment_enabled {
         let search_radius = config.enrichment_search_radius;
         let mut enrichment_per_chunk: HashMap<(i32, i32, i32), u32> = HashMap::new();
 
@@ -389,6 +412,7 @@ pub fn apply_deeptime(
         "Phase 4 step 2 (ambient groundwater enrichment) end in {:.2}ms candidates_so_far={}",
         t_substep.elapsed().as_secs_f32() * 1000.0, candidates.len()
     ));
+    check_phase4_budget!("step 2 (ambient groundwater enrichment)");
     t_substep = std::time::Instant::now();
 
     // --- Vein Thickening (water-proximity coating + fracture fingers) ---
@@ -639,6 +663,7 @@ pub fn apply_deeptime(
         "Phase 4 step 3 (vein thickening) end in {:.2}ms candidates_so_far={}",
         t_substep.elapsed().as_secs_f32() * 1000.0, candidates.len()
     ));
+    check_phase4_budget!("step 3 (vein thickening)");
     t_substep = std::time::Instant::now();
 
     // --- Mature Formations (stalactite growth, column formation) ---
@@ -710,6 +735,7 @@ pub fn apply_deeptime(
         "Phase 4 step 4 (mature formations) end in {:.2}ms candidates_so_far={}",
         t_substep.elapsed().as_secs_f32() * 1000.0, candidates.len()
     ));
+    check_phase4_budget!("step 4 (mature formations)");
     t_substep = std::time::Instant::now();
 
     // --- Nest Fossilization ---
@@ -857,6 +883,7 @@ pub fn apply_deeptime(
         "Phase 4 step 5 (nest fossilization) end in {:.2}ms candidates_so_far={}",
         t_substep.elapsed().as_secs_f32() * 1000.0, candidates.len()
     ));
+    check_phase4_budget!("step 5 (nest fossilization)");
     t_substep = std::time::Instant::now();
 
     // --- Corpse Fossilization ---
@@ -1013,6 +1040,7 @@ pub fn apply_deeptime(
         "Phase 4 step 6 (corpse fossilization) end in {:.2}ms candidates_so_far={}",
         t_substep.elapsed().as_secs_f32() * 1000.0, candidates.len()
     ));
+    check_phase4_budget!("step 6 (corpse fossilization)");
     t_substep = std::time::Instant::now();
 
     // --- Apply all candidates ---
@@ -1064,6 +1092,7 @@ pub fn apply_deeptime(
         "Phase 4 step 7 (apply candidates) end in {:.2}ms total_candidates={}",
         t_substep.elapsed().as_secs_f32() * 1000.0, candidates.len()
     ));
+    check_phase4_budget!("step 7 (apply candidates)");
     t_substep = std::time::Instant::now();
 
     // --- Structural Collapse (delegated to existing collapse.rs) ---
