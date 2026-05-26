@@ -352,6 +352,15 @@ pub fn execute_sleep(
     trace(&format!("execute_sleep chunk_size={} radius={}", chunk_size, config.chunk_radius));
     let t_total = Instant::now();
 
+    // B3.4: total sleep wall-clock budget. The whole execute_sleep
+    // (Phases 1-4 + accumulation + lava solidification) is capped at
+    // this. Checked between phase boundaries; when exceeded, remaining
+    // work is skipped and execute_sleep returns whatever it had so far.
+    // Mirrors B3.3's per-phase budget — 5s is the absolute UX ceiling
+    // for "Time passes…" black screen.
+    const TOTAL_SLEEP_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+    let sleep_deadline = t_total + TOTAL_SLEEP_BUDGET;
+
     // Deterministic RNG seeded from sleep_count
     let mut rng = ChaCha8Rng::seed_from_u64(sleep_count as u64 * 7919 + 42);
 
@@ -684,13 +693,33 @@ pub fn execute_sleep(
     if config.accumulation_enabled {
         let n = config.accumulation_iterations;
         send_progress(progress_tx, 4, "Accumulation", 1_250_000, 0.0, 0, total_chunks, None, 0, String::new());
+        trace(&format!(
+            "Accumulation pass start: iterations={} elapsed_so_far={:.2}ms remaining_budget={:.2}ms",
+            n,
+            t_total.elapsed().as_secs_f32() * 1000.0,
+            sleep_deadline.saturating_duration_since(std::time::Instant::now()).as_secs_f32() * 1000.0
+        ));
 
         for iter in 0..n {
+            // B3.4: total-sleep-budget check at iteration boundary.
+            // Cleanly skip remaining iterations if we've crossed the 5s
+            // ceiling. World state stays consistent.
+            if std::time::Instant::now() >= sleep_deadline {
+                trace(&format!(
+                    "Accumulation BUDGET EXCEEDED at iter {} of {} — skipping remaining iterations. Elapsed {:.2}ms / budget {}ms",
+                    iter, n,
+                    t_total.elapsed().as_secs_f32() * 1000.0,
+                    TOTAL_SLEEP_BUDGET.as_millis()
+                ));
+                break;
+            }
+            let t_iter = std::time::Instant::now();
             let iter_seed = sleep_count as u64 * 7919 + 42 + 1000 + iter as u64 * 1013;
             let mut iter_rng = ChaCha8Rng::seed_from_u64(iter_seed);
 
             // Recompute census each iteration (world evolved)
             let iter_census = compute_resource_census(density_fields, fluid_snapshot, &all_chunks, chunk_size);
+            let t_after_census = std::time::Instant::now();
 
             // Phase 1 accumulation (time_factor = 41.3: 1.24Ma remaining / 3 iters / 10Ka base)
             if config.phase1_enabled {
@@ -731,10 +760,21 @@ pub fn execute_sleep(
             // re-running creates compounding blobs as new ore surfaces generate more seeds.
 
             accum_iterations_run += 1;
+            let iter_ms = t_iter.elapsed().as_secs_f32() * 1000.0;
+            let census_ms = (t_after_census - t_iter).as_secs_f32() * 1000.0;
+            trace(&format!(
+                "Accumulation iter {}/{} done in {:.2}ms (census {:.2}ms, p1+p2 {:.2}ms)",
+                iter + 1, n, iter_ms, census_ms, iter_ms - census_ms
+            ));
             send_progress(progress_tx, 4, "Accumulation", 1_250_000,
                 (iter + 1) as f32 / n as f32, (iter + 1) * total_chunks, n * total_chunks, None, 0,
                 format!("Iteration {}/{}", iter + 1, n));
         }
+        trace(&format!(
+            "Accumulation pass done: {} of {} iterations run, elapsed_total={:.2}ms",
+            accum_iterations_run, n,
+            t_total.elapsed().as_secs_f32() * 1000.0
+        ));
 
         // Merge accumulation totals into grand totals
         total_acid_dissolved += accum_acid;
@@ -752,14 +792,24 @@ pub fn execute_sleep(
 
     // --- Lava Solidification ---
     let mut total_lava_solidified = 0u32;
-    eprintln!("[SLEEP] lava_solidification_enabled={}, fluid_snapshot chunks={}, density_fields={}",
-        config.lava_solidification_enabled, fluid_snapshot.chunks.len(), density_fields.len());
-    if config.lava_solidification_enabled {
+    let t_lava = std::time::Instant::now();
+    if std::time::Instant::now() >= sleep_deadline {
+        trace(&format!(
+            "Lava solidification SKIPPED — total sleep budget exceeded. Elapsed {:.2}ms / budget {}ms",
+            t_total.elapsed().as_secs_f32() * 1000.0,
+            TOTAL_SLEEP_BUDGET.as_millis()
+        ));
+    } else if config.lava_solidification_enabled {
         let (count, entries) = solidify_lava(density_fields, fluid_snapshot, &mut result_manifest, &mut all_dirty, chunk_size);
         total_lava_solidified = count;
         transform_log.extend(entries);
+        trace(&format!(
+            "Lava solidification done in {:.2}ms — {} cells solidified",
+            t_lava.elapsed().as_secs_f32() * 1000.0,
+            total_lava_solidified
+        ));
     } else {
-        eprintln!("[SLEEP] Lava solidification DISABLED by config");
+        trace("Lava solidification DISABLED by config");
     }
 
     // --- Done ---
