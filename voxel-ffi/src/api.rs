@@ -4091,6 +4091,87 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    #[test]
+    fn dump_engine_config_offsets() {
+        use std::mem::offset_of;
+        macro_rules! off { ($f:ident) => { eprintln!("{:40} @ {}", stringify!($f), offset_of!(FfiEngineConfig, $f)); }; }
+        eprintln!("=== FfiEngineConfig layout ===");
+        eprintln!("total size = {}  (UE saw 3488 → 8-byte mismatch)", std::mem::size_of::<FfiEngineConfig>());
+        // Sentinels at known struct positions
+        off!(seed);
+        off!(chunk_size);
+        off!(region_size);
+        // Bracket the legacy sleep* block (right before "new sleep fields"):
+        off!(sleep_time_budget_ms);
+        off!(sleep_chunk_radius);
+        off!(sleep_count);
+        off!(sleep_strut_survival);
+        off!(sleep_stress_multiplier);
+        off!(sleep_max_cascade_iterations);
+        off!(sleep_rubble_fill_ratio);
+        off!(sleep_min_stress_for_cascade);
+        off!(sleep_rubble_material_match);
+        off!(sleep_support_stress_penalty);
+        off!(sleep_collapse_sub_enabled);
+        off!(sleep_groundwater_enabled);
+        off!(sleep_groundwater_strength);
+        off!(sleep_groundwater_depth_scale);
+        off!(sleep_groundwater_drip_multiplier);
+        off!(sleep_phase1_enabled);
+        off!(sleep_phase2_enabled);
+        off!(sleep_phase3_enabled);
+        off!(sleep_phase4_enabled);
+        off!(sleep_acid_dissolution_prob);
+        off!(sleep_flowstone_prob);
+        off!(sleep_enrichment_prob);
+        off!(sleep_vein_thickening_prob);
+        off!(sleep_stalactite_growth_prob);
+        off!(sleep_new_collapse_enabled);
+        off!(sleep_new_stress_multiplier);
+        off!(sleep_new_min_stress_cascade);
+        off!(sleep_new_rubble_fill_ratio);
+        off!(sleep_gw_erosion_power);
+        off!(sleep_gw_flowstone_power);
+        off!(sleep_gw_enrichment_power);
+        off!(sleep_gw_soft_rock_mult);
+        off!(sleep_gw_hard_rock_mult);
+        off!(water_table_enabled);
+        off!(water_table_base_y);
+        off!(water_table_max_drips);
+        off!(pipe_lava_enabled);
+        off!(lava_tube_enabled);
+        off!(hydrothermal_enabled);
+        off!(river_enabled);
+        off!(artesian_enabled);
+        off!(fluid_sources_enabled);
+        off!(fluid_solid_corner_threshold);
+        off!(fluid_flow_solid_threshold);
+        off!(fluid_fractional_capacity);
+        off!(formation_cauldron_wall_inset);
+        off!(formation_cauldron_floor_inset);
+        off!(fluid_source_grace_ticks);
+        off!(sleep_acid_max_dissolved_per_source);
+        off!(sleep_vein_deposit_spacing);
+        off!(sleep_lava_solidification_enabled);
+        off!(sleep_zone_enabled);
+        off!(sleep_heat_multiplier);
+        off!(sleep_radius_scale);
+        off!(sleep_water_boost_max);
+        off!(sleep_water_search_radius_mult);
+        off!(sleep_large_vein_base_size);
+        off!(sleep_small_vein_base_size);
+        off!(sleep_min_lava_zone_size);
+        off!(sleep_garnet_pocket_size);
+        off!(sleep_diopside_pocket_size);
+        off!(sleep_max_aureole_radius);
+        off!(sleep_accumulation_enabled);
+        off!(sleep_accumulation_iterations);
+        off!(sleep_gw_depth_baseline);
+        off!(sleep_gw_porosity_limestone);
+        off!(mushroom_enabled);
+        eprintln!("=== end ===");
+    }
+
     fn test_config() -> FfiEngineConfig {
         FfiEngineConfig {
             seed: 42,

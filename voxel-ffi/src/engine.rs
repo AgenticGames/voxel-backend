@@ -3899,7 +3899,18 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
         chunk_radius: c.sleep_chunk_radius.min(10),
         sleep_count: if c.sleep_count > 0 { c.sleep_count } else { 1 },
         accumulation_enabled: c.sleep_accumulation_enabled != 0,
-        accumulation_iterations: if c.sleep_accumulation_iterations > 0 { c.sleep_accumulation_iterations } else { 3 },
+        // Defensive cap: a misaligned FFI struct can deliver garbage f32 bits
+        // (e.g. 0x42C20000 = f32 97.0 → u32 1,120,010,240). Anything over ~100
+        // would already blow the wall-clock budget, so reject silly values and
+        // log so we notice. Real values are 1..~30.
+        accumulation_iterations: if c.sleep_accumulation_iterations > 0 && c.sleep_accumulation_iterations < 1000 {
+            c.sleep_accumulation_iterations
+        } else {
+            if c.sleep_accumulation_iterations >= 1000 {
+                eprintln!("[engine] sleep_accumulation_iterations garbage value {} (likely FFI misalignment) — clamping to 3", c.sleep_accumulation_iterations);
+            }
+            3
+        },
         lava_solidification_enabled: c.sleep_lava_solidification_enabled != 0,
         nest_positions: Vec::new(),
         corpse_positions: Vec::new(),

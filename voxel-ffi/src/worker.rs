@@ -4270,6 +4270,15 @@ fn handle_request(
         }
         WorkerRequest::MorphStep { chunks, step, total_steps } => {
             let cfg = config.read().unwrap().clone();
+            // CHUNK-DBG: print on first step only to avoid log spam
+            if step == 1 {
+                eprintln!("[CHUNK-DBG] Rust MorphStep step={}/{} chunks.len={}", step, total_steps, chunks.len());
+                for (i, c) in chunks.iter().enumerate() {
+                    if i < 5 || i == chunks.len() / 2 || i >= chunks.len() - 3 {
+                        eprintln!("[CHUNK-DBG]  morph[{}/{}] key=({},{},{})", i, chunks.len(), c.0, c.1, c.2);
+                    }
+                }
+            }
 
             // Borrow cached manifest (set once via set_morph_manifest, reused for all 30 steps)
             // Hold lock for duration of step — acceptable since only one morph runs at a time
@@ -4534,6 +4543,19 @@ fn handle_request(
 
                         let mut converted = convert_mesh_to_ue_scaled(&mesh, cfg.voxel_scale(), world_scale);
                         crate::convert::bucket_mesh_by_material(&mut converted);
+                        // CHUNK-DBG: log vertex bounding box for first step
+                        if step == 1 && (i < 3 || i == chunks.len() / 2 || i >= chunks.len() - 2) {
+                            let key = chunks[i];
+                            let mut mn = (f32::MAX, f32::MAX, f32::MAX);
+                            let mut mx = (f32::MIN, f32::MIN, f32::MIN);
+                            for p in converted.positions.iter().take(50) {
+                                if p.x < mn.0 { mn.0 = p.x; } if p.y < mn.1 { mn.1 = p.y; } if p.z < mn.2 { mn.2 = p.z; }
+                                if p.x > mx.0 { mx.0 = p.x; } if p.y > mx.1 { mx.1 = p.y; } if p.z > mx.2 { mx.2 = p.z; }
+                            }
+                            eprintln!("[CHUNK-DBG]  meshed[{}/{}] key=({},{},{}) verts={} vbox=[({:.0},{:.0},{:.0})..({:.0},{:.0},{:.0})]",
+                                i, chunks.len(), key.0, key.1, key.2, converted.positions.len(),
+                                mn.0, mn.1, mn.2, mx.0, mx.1, mx.2);
+                        }
                         meshes.push(converted);
                     }
                     None => {
