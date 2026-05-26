@@ -23,3 +23,6 @@ pub mod crystal_anchors;
 pub mod poi_scanner;
 pub mod poi_tracker;
 pub mod surface_probe;
+pub mod world_memory_drift;
+pub mod predictor_thread;
+pub mod cinema_bridge;

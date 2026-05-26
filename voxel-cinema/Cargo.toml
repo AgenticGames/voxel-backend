@@ -1,0 +1,11 @@
+[package]
+name = "voxel-cinema"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+glam.workspace = true
+serde.workspace = true
+voxel-core = { path = "../voxel-core" }
+voxel-path = { path = "../voxel-path" }
+voxel-world-memory = { path = "../voxel-world-memory" }

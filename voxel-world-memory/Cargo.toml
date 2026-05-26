@@ -1,0 +1,13 @@
+[package]
+name = "voxel-world-memory"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+glam.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dashmap.workspace = true
+crossbeam-channel.workspace = true
+voxel-core = { path = "../voxel-core" }
+voxel-fluid = { path = "../voxel-fluid" }

@@ -1253,6 +1253,7 @@ mod tests {
             samples: vec![VoxelSample { density: 1.0, material: Material::Granite }; size * size * size],
             size,
             has_geode_material: false,
+            has_ore_material: false,
             air_cell_count: 0,
         }
     }
@@ -1287,6 +1288,7 @@ mod tests {
             samples: vec![VoxelSample { density: -1.0, material: Material::Air }; size * size * size],
             size,
             has_geode_material: false,
+            has_ore_material: false,
             air_cell_count: (size * size * size) as u32,
         };
 

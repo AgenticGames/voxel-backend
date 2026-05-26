@@ -1690,6 +1690,8 @@ impl ChunkStore {
             // Engine::export_save_data fills this in — store doesn't own anchors.
             crystal_anchors_json: String::new(),
             mushroom_placements,
+            // Engine::export_save_data fills this in — store doesn't own WorldMemory.
+            world_memory_blob: Vec::new(),
         }
     }
 

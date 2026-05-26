@@ -159,6 +159,21 @@ pub struct VoxelEngine {
     /// Survives chunk unload (TTL'd at 30 minutes).
     pub poi_tracker: crate::poi_tracker::SharedPoiTracker,
 
+    // ─── World Memory (Block 1: semantically-clustered POIs) ─────
+    /// Persistent Scene store + event queue. Replaces the per-chunk
+    /// `poi_tracker` over time. Block 1 leaves both running; UE migration
+    /// in Block 2 retires the old tracker.
+    pub world_memory: Arc<voxel_world_memory::WorldMemory>,
+
+    // ─── Predictive Sleep (Block 1: removes "Time passes…" wait) ─────
+    /// Latest cached prediction from the `voxel-sleep-predictor` thread.
+    /// `None` before the first prediction lands; overwritten by real
+    /// `execute_sleep` results when they arrive.
+    pub predict_cache: Arc<RwLock<Option<voxel_sleep::predict::PredictedManifest>>>,
+    /// Wake-up signal for the predictor thread. UE pokes this via
+    /// `voxel_request_predict_now` when the player approaches a bedroll.
+    pub predict_wake_tx: Sender<()>,
+
     // Scale
     world_scale: f32,
 }
@@ -176,6 +191,13 @@ impl VoxelEngine {
 
     pub fn get_world_scale(&self) -> f32 {
         self.world_scale
+    }
+
+    /// Borrow a clone of the shared `ChunkStore` handle. Used by helpers
+    /// outside this module (e.g. cinema_bridge) that need to take a brief
+    /// read lock. Cheap (Arc clone).
+    pub fn store_arc(&self) -> Arc<RwLock<ChunkStore>> {
+        Arc::clone(&self.store)
     }
 
     pub fn new(ffi_config: &FfiEngineConfig) -> Self {
@@ -249,6 +271,19 @@ impl VoxelEngine {
 
         // POI tracker — long-running background scorer.
         let poi_tracker = crate::poi_tracker::new_tracker();
+
+        // World Memory — Block 1 Scene store. Wrapped in Arc so the drift
+        // thread + all FFI readers share the same handle.
+        let world_memory: Arc<voxel_world_memory::WorldMemory> =
+            Arc::new(voxel_world_memory::WorldMemory::new());
+
+        // Predictive sleep — cache + wake channel. Cache populated by the
+        // dedicated predictor thread; overwritten authoritatively by the
+        // real `execute_sleep` in the worker loop when it lands.
+        let predict_cache: Arc<RwLock<Option<voxel_sleep::predict::PredictedManifest>>> =
+            Arc::new(RwLock::new(None));
+        let (predict_wake_tx, predict_wake_rx) =
+            crossbeam_channel::bounded::<()>(4);
 
         // Cross-species avoidance — shared occupancy set the path workers
         // read at grid-construction time. UE pushes fresh snapshots ~10Hz.
@@ -479,6 +514,127 @@ impl VoxelEngine {
             workers.push(handle);
         }
 
+        // ─── World Memory Drift — Block 1 background scanner that
+        // produces per-cell-weighted Scene scores. Mirrors POI tracker's
+        // catch_unwind respawn pattern.
+        {
+            let shutdown_t = Arc::clone(&shutdown);
+            let store_t = Arc::clone(&store);
+            let fluid_tx_t = fluid_event_tx.clone();
+            let config_t = Arc::clone(&config);
+            let wm_t = Arc::clone(&world_memory);
+            let builder = thread::Builder::new().name("voxel-world-memory-drift".to_string());
+            let handle = builder
+                .spawn(move || {
+                    const MAX_RESPAWNS: u32 = 8;
+                    let mut respawn = 0u32;
+                    loop {
+                        let outcome = {
+                            let shutdown_t = Arc::clone(&shutdown_t);
+                            let store_t = Arc::clone(&store_t);
+                            let fluid_tx_t = fluid_tx_t.clone();
+                            let config_t = Arc::clone(&config_t);
+                            let wm_t = Arc::clone(&wm_t);
+                            std::panic::catch_unwind(AssertUnwindSafe(move || {
+                                crate::world_memory_drift::world_memory_drift_loop(
+                                    shutdown_t,
+                                    store_t,
+                                    fluid_tx_t,
+                                    config_t,
+                                    wm_t,
+                                );
+                            }))
+                        };
+                        if shutdown_t.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        match outcome {
+                            Ok(()) => break,
+                            Err(payload) => {
+                                respawn += 1;
+                                let msg = crate::panic_log::payload_string(&*payload);
+                                crate::panic_log::note(&format!(
+                                    "world-memory-drift caught panic (respawn {}/{}): {}",
+                                    respawn, MAX_RESPAWNS, msg
+                                ));
+                                if respawn >= MAX_RESPAWNS {
+                                    crate::panic_log::note(
+                                        "world-memory-drift GIVING UP — Scene store frozen",
+                                    );
+                                    break;
+                                }
+                                std::thread::sleep(std::time::Duration::from_millis(500));
+                            }
+                        }
+                    }
+                })
+                .expect("failed to spawn voxel-world-memory-drift thread");
+            workers.push(handle);
+        }
+
+        // ─── Sleep Predictor — Block 1 background thread that runs a
+        // cheap forward-pass to pre-warm the next sleep's outcome.
+        {
+            let shutdown_t = Arc::clone(&shutdown);
+            let store_t = Arc::clone(&store);
+            let fluid_tx_t = fluid_event_tx.clone();
+            let config_t = Arc::clone(&config);
+            let sleep_cfg_t = Arc::clone(&sleep_config);
+            let cache_t = Arc::clone(&predict_cache);
+            let wake_rx_t = predict_wake_rx.clone();
+            let builder = thread::Builder::new().name("voxel-sleep-predictor".to_string());
+            let handle = builder
+                .spawn(move || {
+                    const MAX_RESPAWNS: u32 = 8;
+                    let mut respawn = 0u32;
+                    loop {
+                        let outcome = {
+                            let shutdown_t = Arc::clone(&shutdown_t);
+                            let store_t = Arc::clone(&store_t);
+                            let fluid_tx_t = fluid_tx_t.clone();
+                            let config_t = Arc::clone(&config_t);
+                            let sleep_cfg_t = Arc::clone(&sleep_cfg_t);
+                            let cache_t = Arc::clone(&cache_t);
+                            let wake_rx_t = wake_rx_t.clone();
+                            std::panic::catch_unwind(AssertUnwindSafe(move || {
+                                crate::predictor_thread::predictor_thread_loop(
+                                    shutdown_t,
+                                    store_t,
+                                    fluid_tx_t,
+                                    config_t,
+                                    sleep_cfg_t,
+                                    cache_t,
+                                    wake_rx_t,
+                                );
+                            }))
+                        };
+                        if shutdown_t.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        match outcome {
+                            Ok(()) => break,
+                            Err(payload) => {
+                                respawn += 1;
+                                let msg = crate::panic_log::payload_string(&*payload);
+                                crate::panic_log::note(&format!(
+                                    "sleep-predictor caught panic (respawn {}/{}): {}",
+                                    respawn, MAX_RESPAWNS, msg
+                                ));
+                                if respawn >= MAX_RESPAWNS {
+                                    crate::panic_log::note(
+                                        "sleep-predictor GIVING UP — no prediction cache",
+                                    );
+                                    break;
+                                }
+                                std::thread::sleep(std::time::Duration::from_millis(500));
+                            }
+                        }
+                    }
+                })
+                .expect("failed to spawn voxel-sleep-predictor thread");
+            workers.push(handle);
+        }
+
         VoxelEngine {
             generate_tx,
             mine_tx,
@@ -506,6 +662,9 @@ impl VoxelEngine {
             occupied_cells: Arc::clone(&occupied_cells),
             crystal_anchors,
             poi_tracker,
+            world_memory,
+            predict_cache,
+            predict_wake_tx,
             world_scale,
         }
     }
@@ -614,6 +773,22 @@ impl VoxelEngine {
                 manifest_json,
                 lava_cells,
             }) => {
+                // ─── Block 1: invalidate predictor cache + record event ───
+                // Real sleep result is authoritative; prediction is now stale.
+                if let Ok(mut pc) = self.predict_cache.write() {
+                    *pc = None;
+                }
+                // Record a SleepCompleted event so the drift loop knows to
+                // re-score modified chunks within ~16 ms (vs. waiting for
+                // its next 2 s tick).
+                let manifest_bytes = manifest_json.len() as u32;
+                let _ = self.world_memory.record_event(
+                    voxel_world_memory::WorldEvent::sleep_completed(
+                        chunks_changed,
+                        manifest_bytes,
+                    ),
+                );
+
                 if let Ok(mut sc) = self.sleep_complete.lock() {
                     *sc = Some(SleepCompleteData {
                         chunks_changed,
@@ -2563,6 +2738,8 @@ impl VoxelEngine {
         let mut data = store.collect_save_data();
         // Crystal Growth Bridge state lives outside the store; merge it in.
         data.crystal_anchors_json = self.crystal_anchors.lock().unwrap().to_json_string();
+        // Block 1 v7: WorldMemory state also lives outside the store.
+        data.world_memory_blob = voxel_world_memory::persist::serialize_blob(&self.world_memory);
         data.serialize()
     }
 
@@ -2574,6 +2751,7 @@ impl VoxelEngine {
         match crate::delta::WorldSaveData::deserialize(bytes) {
             Ok(data) => {
                 let anchor_json = data.crystal_anchors_json.clone();
+                let world_memory_blob = data.world_memory_blob.clone();
                 {
                     let mut store = self.store.write().unwrap();
                     store.load_save_data(data);
@@ -2581,6 +2759,14 @@ impl VoxelEngine {
                 // Restore Crystal Anchor manager state from the JSON blob.
                 let restored = crate::crystal_anchors::CrystalAnchorManager::from_json_string(&anchor_json);
                 *self.crystal_anchors.lock().unwrap() = restored;
+                // Block 1 v7: restore WorldMemory blob. On bad bytes the
+                // loader returns Err and we keep WorldMemory empty — the
+                // drift thread repopulates from live state.
+                if !world_memory_blob.is_empty() {
+                    if let Err(e) = voxel_world_memory::persist::load_blob(&self.world_memory, &world_memory_blob) {
+                        eprintln!("[voxel-ffi] WorldMemory blob load failed: {e} — starting empty");
+                    }
+                }
                 true
             }
             Err(e) => {

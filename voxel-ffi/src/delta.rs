@@ -28,7 +28,10 @@ const MAGIC: [u8; 4] = *b"MXSV";
 ///       VoxelSaveManager) but contribute zero stress reduction until the
 ///       player re-places them. Acceptable: there were no shipped builds with
 ///       struts placed pre-v6.
-const VERSION: u32 = 6;
+///   7 — appends an opaque WorldMemory blob trailer (Scenes + history).
+///       Pre-v7 saves load with empty WorldMemory; the drift thread
+///       repopulates from live state in ~2 s. No regression.
+const VERSION: u32 = 7;
 
 // ── Data structures ────────────────────────────────────────────────────
 
@@ -77,6 +80,12 @@ pub struct WorldSaveData {
     /// /erased state persists across save→quit→reload. v1-v4 saves load this
     /// as an empty map.
     pub mushroom_placements: BTreeMap<(i32, i32, i32), Vec<voxel_gen::MushroomPlacement>>,
+    /// Opaque WorldMemory state blob (v7+). voxel-world-memory carries its
+    /// own internal magic + version inside this byte stream, so future
+    /// WorldMemory schema changes don't need to bump `delta.rs::VERSION`.
+    /// Pre-v7 saves load this as an empty Vec — the drift thread
+    /// repopulates from live state on the first tick.
+    pub world_memory_blob: Vec<u8>,
 }
 
 /// Tracks which chunks have been modified at runtime so we know what to save.
@@ -483,6 +492,15 @@ impl WorldSaveData {
             w.write_all(hbytes)?;
         }
 
+        // v7: opaque WorldMemory blob (Scenes + history). Carries its own
+        // internal magic + version inside. v1-v6 saves load this as empty.
+        //
+        // Format:
+        //   [4] blob_len u32  (0 = no scenes captured)
+        //   [blob_len] bytes  (voxel_world_memory::serialize_blob output)
+        w.write_all(&(self.world_memory_blob.len() as u32).to_le_bytes())?;
+        w.write_all(&self.world_memory_blob)?;
+
         Ok(())
     }
 
@@ -501,7 +519,8 @@ impl WorldSaveData {
             return Err(DeltaError::BadMagic);
         }
 
-        // Version. Accept v1..=4 (anchors added in v4).
+        // Version. Accept v1..=7 (current). Older versions still load
+        // with empty trailers (mushrooms, supports, world_memory_blob).
         let version = read_u32(r)?;
         if version < 1 || version > VERSION {
             return Err(DeltaError::UnsupportedVersion(version));
@@ -699,6 +718,20 @@ impl WorldSaveData {
             }
         }
 
+        // v7: opaque WorldMemory blob. Pre-v7 saves load with empty Vec;
+        // drift thread repopulates from live state on first tick.
+        let world_memory_blob = if version >= 7 {
+            let len = read_u32(r)? as usize;
+            if len > 16 * 1024 * 1024 {
+                return Err(DeltaError::TooManyChunks(len));
+            }
+            let mut buf = vec![0u8; len];
+            r.read_exact(&mut buf).map_err(|_| DeltaError::TruncatedData)?;
+            buf
+        } else {
+            Vec::new()
+        };
+
         Ok(WorldSaveData {
             chunk_snapshots,
             terraced_cells,
@@ -707,6 +740,7 @@ impl WorldSaveData {
             next_trigger_id,
             crystal_anchors_json,
             mushroom_placements,
+            world_memory_blob,
         })
     }
 
@@ -1271,5 +1305,121 @@ mod tests {
         let mut sf2 = SupportField::new(df2.size);
         s2.apply_supports_to(&mut sf2);
         assert_eq!(sf2.get(2, 2, 2), SupportType::Mithril);
+    }
+
+    // ─── Block 1: v7 WorldMemory blob migration tests ─────────────────
+
+    #[test]
+    fn v7_empty_blob_roundtrips() {
+        // A fresh save with no WorldMemory state — blob_len=0 trailer.
+        let data = WorldSaveData::default();
+        let bytes = data.serialize();
+        let restored = WorldSaveData::deserialize(&bytes).expect("deserialize");
+        assert!(restored.world_memory_blob.is_empty());
+    }
+
+    #[test]
+    fn v7_populated_blob_roundtrips() {
+        // Write a WorldSaveData with a synthetic 32-byte WM blob, read back.
+        let blob: Vec<u8> = (0..32).map(|i| (i as u8).wrapping_mul(7)).collect();
+        let data = WorldSaveData {
+            world_memory_blob: blob.clone(),
+            ..Default::default()
+        };
+        let bytes = data.serialize();
+        let restored = WorldSaveData::deserialize(&bytes).expect("deserialize");
+        assert_eq!(restored.world_memory_blob, blob);
+    }
+
+    #[test]
+    fn v7_load_real_worldmemory_blob() {
+        // Generate a real WM blob via voxel_world_memory, write a v7 save
+        // containing it, read back, verify the WM round-trips.
+        use voxel_world_memory::scene::{Scene, SceneKind};
+        use voxel_world_memory::WorldMemory;
+
+        let wm = WorldMemory::new();
+        let mut s = Scene::new(
+            wm.alloc_scene_id(),
+            SceneKind::Lava,
+            glam::Vec3::new(10.0, 20.0, 30.0),
+        );
+        s.score = 250.0;
+        s.confidence = 0.95;
+        s.chunks = vec![(1, 0, 0), (2, 0, 0)];
+        wm.scenes.insert(s.id, s.clone());
+        let blob = voxel_world_memory::persist::serialize_blob(&wm);
+        assert!(!blob.is_empty());
+
+        let data = WorldSaveData {
+            world_memory_blob: blob,
+            ..Default::default()
+        };
+        let bytes = data.serialize();
+        let restored = WorldSaveData::deserialize(&bytes).expect("deserialize");
+
+        let wm2 = WorldMemory::new();
+        voxel_world_memory::persist::load_blob(&wm2, &restored.world_memory_blob)
+            .expect("load blob");
+        assert_eq!(wm2.tracked_scene_count(), 1);
+        let restored_scene = wm2.scenes.get(&s.id).expect("scene present").value().clone();
+        assert_eq!(restored_scene.kind, SceneKind::Lava);
+        assert!((restored_scene.score - 250.0).abs() < 1e-3);
+        assert_eq!(restored_scene.chunks, vec![(1, 0, 0), (2, 0, 0)]);
+    }
+
+    #[test]
+    fn v7_garbage_blob_handled_gracefully() {
+        // A v7 save with a corrupt WM blob — the delta loader passes the
+        // bytes through; voxel-world-memory rejects them but the rest of
+        // the save still loads fine.
+        let garbage: Vec<u8> = (0..256).map(|i| ((i * 23) & 0xff) as u8).collect();
+        let data = WorldSaveData {
+            world_memory_blob: garbage.clone(),
+            ..Default::default()
+        };
+        let bytes = data.serialize();
+        // Delta layer should NOT reject garbage — it just carries the blob.
+        let restored = WorldSaveData::deserialize(&bytes).expect("delta should not reject");
+        assert_eq!(restored.world_memory_blob, garbage);
+
+        // When the engine tries to apply it, voxel-world-memory rejects it
+        // and starts empty. Verify by attempting to load.
+        let wm = voxel_world_memory::WorldMemory::new();
+        let load_result = voxel_world_memory::persist::load_blob(&wm, &restored.world_memory_blob);
+        assert!(load_result.is_err()); // BadMagic
+        assert_eq!(wm.tracked_scene_count(), 0); // no partial load
+    }
+
+    /// Build a v6-shaped save byte stream by hand so we can verify the
+    /// v7 reader still accepts older formats. We construct the v7 writer
+    /// output and then patch the version byte back to 6 + truncate the
+    /// trailing world_memory_blob to simulate a v6 save.
+    fn make_v6_save_bytes(data: &WorldSaveData) -> Vec<u8> {
+        let mut bytes = data.serialize();
+        // The world_memory_blob trailer is a u32 length + bytes. For an
+        // empty blob that's exactly 4 trailing bytes of zero. Remove them
+        // to mimic a v6 save (no trailer).
+        let trailer_len = 4 + data.world_memory_blob.len();
+        bytes.truncate(bytes.len() - trailer_len);
+        // Patch the VERSION field (at offset 4..8) back to 6.
+        bytes[4..8].copy_from_slice(&6u32.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn v6_save_loads_via_v7_reader() {
+        // Synthetic save with terraced cells + crystal anchor JSON +
+        // mushroom placements, but no WorldMemory blob (because v6).
+        let mut data = WorldSaveData::default();
+        data.terraced_cells = vec![(1, 2, 3), (4, 5, 6)];
+        data.crystal_anchors_json = "{\"anchors\":[]}".to_string();
+        let v6_bytes = make_v6_save_bytes(&data);
+
+        let restored = WorldSaveData::deserialize(&v6_bytes).expect("v6 reads via v7 reader");
+        assert_eq!(restored.terraced_cells, vec![(1, 2, 3), (4, 5, 6)]);
+        assert_eq!(restored.crystal_anchors_json, "{\"anchors\":[]}");
+        // v6 has no WorldMemory blob — must default to empty.
+        assert!(restored.world_memory_blob.is_empty());
     }
 }

@@ -22,4 +22,6 @@ voxel-noise = { path = "../voxel-noise" }
 voxel-fluid = { path = "../voxel-fluid" }
 voxel-sleep = { path = "../voxel-sleep" }
 voxel-path = { path = "../voxel-path" }
+voxel-world-memory = { path = "../voxel-world-memory" }
+voxel-cinema = { path = "../voxel-cinema" }
 serde_json.workspace = true

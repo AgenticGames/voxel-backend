@@ -3,3 +3,4 @@ pub mod batch_test;
 pub mod inspect;
 pub mod sleep;
 pub mod scan;
+pub mod dormancy;

@@ -7,7 +7,7 @@ fn main() {
 
     if args.len() < 2 {
         eprintln!("Usage: voxel-cli <command> [options]");
-        eprintln!("Commands: generate, batch-test, inspect, sleep, scan");
+        eprintln!("Commands: generate, batch-test, inspect, sleep, scan, dormancy");
         std::process::exit(1);
     }
 
@@ -17,6 +17,7 @@ fn main() {
         "inspect" => commands::inspect::run(&args[2..]),
         "sleep" => commands::sleep::run(&args[2..]),
         "scan" => commands::scan::run(&args[2..]),
+        "dormancy" => commands::dormancy::run(&args[2..]),
         _ => {
             eprintln!("Unknown command: {}", args[1]);
             std::process::exit(1);
