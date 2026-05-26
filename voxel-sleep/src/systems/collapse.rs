@@ -7,11 +7,19 @@ use voxel_core::material::Material;
 use voxel_core::stress::{
     StressField, SupportField, SupportType, StressConfig, CollapseEvent,
     CollapseEventV2, recalc_stress_region_v2_with_load_decay,
-    detect_and_execute_collapses_v2, world_to_chunk_local,
+    detect_and_execute_collapses_v2, detect_and_execute_collapses_v2_with_force_deadline,
+    BrokenStrutEvent, world_to_chunk_local,
 };
 use crate::config::CollapseConfig;
 use crate::manifest::ChangeManifest;
 use crate::TransformEntry;
+use crate::trace;
+
+/// B3.2: wall-clock budget for the collapse cascade. When the cascade
+/// exceeds this in `apply_collapse`, the outer per-seed loop aborts and
+/// returns the events accumulated so far. Prevents Phase 4 from hanging
+/// the sleep montage forever on a pathologically dense world.
+const COLLAPSE_BUDGET: Duration = Duration::from_secs(10);
 
 /// Per-sub-step timing data from the collapse pass.
 #[derive(Debug, Clone, Default)]
@@ -70,6 +78,13 @@ pub fn apply_collapse(
     let mut local_stress_config = stress_config.clone();
     local_stress_config.rubble_fill_ratio = config.rubble_fill_ratio;
 
+    let t_collapse_start = Instant::now();
+    let collapse_deadline = t_collapse_start + COLLAPSE_BUDGET;
+    trace(&format!(
+        "apply_collapse start chunks={} budget={}s",
+        chunks.len(), COLLAPSE_BUDGET.as_secs()
+    ));
+
     // ── Step 1: Support Degradation ──
     let t_step1 = Instant::now();
     for &chunk_key in chunks {
@@ -113,6 +128,11 @@ pub fn apply_collapse(
     }
 
     result.timings.support_degradation = t_step1.elapsed();
+    trace(&format!(
+        "apply_collapse step 1 (support_degrade) end in {:.2}ms degraded={}",
+        result.timings.support_degradation.as_secs_f32() * 1000.0,
+        result.supports_degraded
+    ));
 
     // ── Step 2: V2 Stress Recalculation (ground connectivity + load accumulation) ──
     let t_step2 = Instant::now();
@@ -147,21 +167,43 @@ pub fn apply_collapse(
     }
 
     result.timings.stress_amplification = t_step2.elapsed();
+    trace(&format!(
+        "apply_collapse step 2 (stress_recalc) end in {:.2}ms overstressed={} broken_struts={}",
+        result.timings.stress_amplification.as_secs_f32() * 1000.0,
+        stress_result.overstressed.len(),
+        stress_result.broken_struts.len()
+    ));
 
     // ── Step 3: V2 Collapse Cascade (coherent slab collapse) ──
     let t_step3 = Instant::now();
     let mut total_collapsed_voxels: u32 = 0;
     let mut all_dirty = std::collections::HashSet::new();
+    let mut cascade_hit_deadline = false;
 
     if !stress_result.overstressed.is_empty() {
-        let events = detect_and_execute_collapses_v2(
+        // B3.2: budget the cascade. If it exceeds, abort cleanly with
+        // whatever events accumulated. World state is still consistent —
+        // a future sleep will pick up the remaining work.
+        trace(&format!(
+            "apply_collapse step 3 (cascade) start overstressed={} remaining_budget={:.2}s",
+            stress_result.overstressed.len(),
+            collapse_deadline.saturating_duration_since(std::time::Instant::now()).as_secs_f32()
+        ));
+        let mut broken_local: Vec<BrokenStrutEvent> = Vec::new();
+        let (events, hit_dl) = detect_and_execute_collapses_v2_with_force_deadline(
             density_fields,
             stress_fields,
             support_fields,
             &stress_result.overstressed,
             &sleep_stress_config,
             chunk_size,
+            false, // defer_pile (match basic variant default)
+            false, // force_collapse
+            true,  // halt_at_struts
+            &mut broken_local,
+            Some(collapse_deadline),
         );
+        cascade_hit_deadline = hit_dl;
 
         for event in &events {
             for key in &event.affected_chunks {
@@ -231,6 +273,24 @@ pub fn apply_collapse(
     }
 
     result.timings.collapse_cascade = t_step3.elapsed();
+    trace(&format!(
+        "apply_collapse step 3 (cascade) end in {:.2}ms triggered={} voxels_collapsed={} hit_deadline={}",
+        result.timings.collapse_cascade.as_secs_f32() * 1000.0,
+        result.collapses_triggered,
+        total_collapsed_voxels,
+        cascade_hit_deadline
+    ));
+    if cascade_hit_deadline {
+        trace(&format!(
+            "apply_collapse BUDGET EXCEEDED — cascade aborted after {:.2}s (budget {}s). Partial events kept; future sleeps pick up remaining work.",
+            t_collapse_start.elapsed().as_secs_f32(),
+            COLLAPSE_BUDGET.as_secs()
+        ));
+    }
+    trace(&format!(
+        "apply_collapse done in {:.2}ms",
+        t_collapse_start.elapsed().as_secs_f32() * 1000.0
+    ));
 
     result.dirty_chunks = all_dirty.into_iter().collect();
 

@@ -17,6 +17,7 @@ use crate::systems::collapse::{apply_collapse, CollapseResult};
 use crate::config::{DeepTimeConfig, GroundwaterConfig};
 use crate::systems::groundwater::{ambient_moisture, is_fracture_site};
 use crate::manifest::ChangeManifest;
+use crate::trace;
 use crate::util::{FACE_OFFSETS, sample_material, set_voxel_synced, count_neighbors, has_material_within_radius, grow_vein, default_vein_bias, sleep_vein_size, VeinGrowthParams};
 use crate::{Bottleneck, PhaseDiagnostics, ResourceCensus, TransformEntry};
 
@@ -101,6 +102,17 @@ pub fn apply_deeptime(
 ) -> DeepTimeResult {
     let mut result = DeepTimeResult::default();
     let field_size = chunk_size + 1;
+
+    // B3.2: per-sub-step trace so we can see which sub-step inside Phase 4
+    // gums up on dense worlds. Without this, the sleep_trace.log shows
+    // only "Phase 4 start" and we can't tell what stalled.
+    let t_deeptime_start = std::time::Instant::now();
+    let mut t_substep = t_deeptime_start;
+    trace(&format!(
+        "Phase 4 (deeptime) sub-steps begin chunks={} fluid_chunks={} nests={} corpses={}",
+        chunks.len(), fluid_snapshot.chunks.len(),
+        nest_positions.len(), corpse_positions.len()
+    ));
 
     struct Candidate {
         chunk_key: (i32, i32, i32),
@@ -212,6 +224,12 @@ pub fn apply_deeptime(
             }
         }
     }
+
+    trace(&format!(
+        "Phase 4 step 1 (supergene enrichment) end in {:.2}ms candidates_so_far={}",
+        t_substep.elapsed().as_secs_f32() * 1000.0, candidates.len()
+    ));
+    t_substep = std::time::Instant::now();
 
     // --- Ambient Groundwater Enrichment ---
     // Groundwater dissolves trace minerals from host rock over geological time
@@ -366,6 +384,12 @@ pub fn apply_deeptime(
             }
         }
     }
+
+    trace(&format!(
+        "Phase 4 step 2 (ambient groundwater enrichment) end in {:.2}ms candidates_so_far={}",
+        t_substep.elapsed().as_secs_f32() * 1000.0, candidates.len()
+    ));
+    t_substep = std::time::Instant::now();
 
     // --- Vein Thickening (water-proximity coating + fracture fingers) ---
     if config.vein_thickening_enabled {
@@ -611,6 +635,12 @@ pub fn apply_deeptime(
         }
     }
 
+    trace(&format!(
+        "Phase 4 step 3 (vein thickening) end in {:.2}ms candidates_so_far={}",
+        t_substep.elapsed().as_secs_f32() * 1000.0, candidates.len()
+    ));
+    t_substep = std::time::Instant::now();
+
     // --- Mature Formations (stalactite growth, column formation) ---
     // Stalactites and columns are calcite speleothems — only form under limestone ceilings.
     if config.mature_formations_enabled {
@@ -675,6 +705,12 @@ pub fn apply_deeptime(
             }
         }
     }
+
+    trace(&format!(
+        "Phase 4 step 4 (mature formations) end in {:.2}ms candidates_so_far={}",
+        t_substep.elapsed().as_secs_f32() * 1000.0, candidates.len()
+    ));
+    t_substep = std::time::Instant::now();
 
     // --- Nest Fossilization ---
     let mut nests_fossilized = 0u32;
@@ -816,6 +852,12 @@ pub fn apply_deeptime(
             }
         }
     }
+
+    trace(&format!(
+        "Phase 4 step 5 (nest fossilization) end in {:.2}ms candidates_so_far={}",
+        t_substep.elapsed().as_secs_f32() * 1000.0, candidates.len()
+    ));
+    t_substep = std::time::Instant::now();
 
     // --- Corpse Fossilization ---
     let mut corpses_fossilized = 0u32;
@@ -967,6 +1009,12 @@ pub fn apply_deeptime(
         }
     }
 
+    trace(&format!(
+        "Phase 4 step 6 (corpse fossilization) end in {:.2}ms candidates_so_far={}",
+        t_substep.elapsed().as_secs_f32() * 1000.0, candidates.len()
+    ));
+    t_substep = std::time::Instant::now();
+
     // --- Apply all candidates ---
     let mut enrichment_count = 0u32;
     let mut thickening_count = 0u32;
@@ -1012,6 +1060,12 @@ pub fn apply_deeptime(
     result.nests_fossilized = nests_fossilized;
     result.corpses_fossilized = corpses_fossilized;
 
+    trace(&format!(
+        "Phase 4 step 7 (apply candidates) end in {:.2}ms total_candidates={}",
+        t_substep.elapsed().as_secs_f32() * 1000.0, candidates.len()
+    ));
+    t_substep = std::time::Instant::now();
+
     // --- Structural Collapse (delegated to existing collapse.rs) ---
     if config.collapse.collapse_enabled {
         let collapse_result = apply_collapse(
@@ -1038,6 +1092,12 @@ pub fn apply_deeptime(
         }
         result.collapse_result = Some(collapse_result);
     }
+
+    trace(&format!(
+        "Phase 4 step 8 (structural collapse) end in {:.2}ms (delegated; see apply_collapse traces). Phase 4 TOTAL {:.2}ms",
+        t_substep.elapsed().as_secs_f32() * 1000.0,
+        t_deeptime_start.elapsed().as_secs_f32() * 1000.0
+    ));
 
     // Build transform log for non-collapse changes
     if corpses_fossilized > 0 {

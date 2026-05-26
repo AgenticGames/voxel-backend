@@ -2296,12 +2296,42 @@ pub fn detect_and_execute_collapses_v2_with_force(
     halt_at_struts: bool,
     broken_out: &mut Vec<BrokenStrutEvent>,
 ) -> Vec<CollapseEventV2> {
+    let (events, _hit) = detect_and_execute_collapses_v2_with_force_deadline(
+        density_fields, stress_fields, support_fields,
+        overstressed, config, chunk_size,
+        defer_pile, force_collapse, halt_at_struts,
+        broken_out, None,
+    );
+    events
+}
+
+/// Same as `_with_force` but lets the caller specify a wall-clock deadline.
+/// When `deadline` is `Some(t)` and the per-seed loop crosses it, the
+/// cascade returns whatever events accumulated so far AND `hit_deadline=true`.
+/// Used by `voxel-sleep::systems::collapse::apply_collapse` to put a 10 s
+/// cap on the cascade so a pathological dense world can't black-screen the
+/// player forever waiting on Phase 4. Pass `None` to disable.
+pub fn detect_and_execute_collapses_v2_with_force_deadline(
+    density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
+    stress_fields: &mut HashMap<(i32, i32, i32), StressField>,
+    support_fields: &mut HashMap<(i32, i32, i32), SupportField>,
+    overstressed: &[OverstressedVoxel],
+    config: &StressConfig,
+    chunk_size: usize,
+    defer_pile: bool,
+    force_collapse: bool,
+    halt_at_struts: bool,
+    broken_out: &mut Vec<BrokenStrutEvent>,
+    deadline: Option<std::time::Instant>,
+) -> (Vec<CollapseEventV2>, bool) {
     if overstressed.is_empty() {
-        return Vec::new();
+        return (Vec::new(), false);
     }
 
     let mut visited: HashSet<(i32, i32, i32)> = HashSet::new();
     let mut events = Vec::new();
+    let mut hit_deadline = false;
+    let mut seeds_processed: usize = 0;
 
     // Build set and stress lookup for quick access
     let overstressed_set: HashSet<(i32, i32, i32)> = overstressed
@@ -2316,6 +2346,21 @@ pub fn detect_and_execute_collapses_v2_with_force(
     let sr_max = MAX_STRUT_RADIUS as i32;
 
     for ov in overstressed {
+        // Deadline check — happens at every seed so the longest a single
+        // seed's BFS can stall is bounded by `config.max_collapse_volume`.
+        // When `deadline` is None this is free.
+        if let Some(t) = deadline {
+            if std::time::Instant::now() >= t {
+                hit_deadline = true;
+                eprintln!(
+                    "[stress] detect_and_execute_collapses_v2 hit deadline: processed {}/{} seeds, {} events accumulated",
+                    seeds_processed, overstressed.len(), events.len()
+                );
+                break;
+            }
+        }
+        seeds_processed += 1;
+
         let start = (ov.world_x, ov.world_y, ov.world_z);
         if visited.contains(&start) {
             continue;
@@ -2914,7 +2959,7 @@ pub fn detect_and_execute_collapses_v2_with_force(
         }
     }
 
-    events
+    (events, hit_deadline)
 }
 
 /// V2 post-change stress update: runs ground connectivity + collapse detection with cascade.
