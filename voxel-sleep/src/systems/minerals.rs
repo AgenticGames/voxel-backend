@@ -5,7 +5,7 @@ use voxel_core::density::DensityField;
 use voxel_core::material::Material;
 use crate::config::MineralConfig;
 use crate::manifest::ChangeManifest;
-use crate::util::{FACE_OFFSETS, sample_material, set_voxel_synced, count_neighbors, has_material_within_radius};
+use crate::util::{FACE_OFFSETS, sample_material, set_voxel_synced, count_neighbors_cached, has_material_within_radius, ChunkSampleCache};
 use crate::TransformEntry;
 
 /// Result of mineral growth pass.
@@ -82,6 +82,9 @@ pub fn apply_mineral_growth(
             None => continue,
         };
 
+        // Single per-chunk cache for every count_neighbors_cached probe below.
+        let mut nbr_cache = ChunkSampleCache::new();
+
         for lz in 0..field_size {
             for ly in 0..field_size {
                 for lx in 0..field_size {
@@ -102,8 +105,9 @@ pub fn apply_mineral_growth(
                     // --- Crystal growth ---
                     // Air voxel with 2+ Crystal/Amethyst neighbors
                     if config.crystal_growth_enabled {
-                        let crystal_neighbors = count_neighbors(
+                        let crystal_neighbors = count_neighbors_cached(
                             density_fields,
+                            &mut nbr_cache,
                             wx, wy, wz,
                             chunk_size,
                             |m| m == Material::Crystal || m == Material::Amethyst,
@@ -149,8 +153,9 @@ pub fn apply_mineral_growth(
                     // --- Quartz extension ---
                     // Air voxel at quartz vein tip: exactly 1 Quartz neighbor, 5 non-Quartz
                     if config.quartz_extension_enabled {
-                        let quartz_neighbors = count_neighbors(
+                        let quartz_neighbors = count_neighbors_cached(
                             density_fields,
+                            &mut nbr_cache,
                             wx, wy, wz,
                             chunk_size,
                             |m| m == Material::Quartz,
@@ -177,8 +182,9 @@ pub fn apply_mineral_growth(
                         if (wy as f32) < config.calcite_infill_depth
                             && rng.gen::<f32>() < config.calcite_infill_prob
                         {
-                            let limestone_neighbors = count_neighbors(
+                            let limestone_neighbors = count_neighbors_cached(
                                 density_fields,
+                                &mut nbr_cache,
                                 wx, wy, wz,
                                 chunk_size,
                                 |m| m == Material::Limestone,
@@ -210,8 +216,9 @@ pub fn apply_mineral_growth(
                             {
                                 if mat == Material::Pyrite {
                                     // Check that this Pyrite source has enough solid neighbors
-                                    let solid_count = count_neighbors(
+                                    let solid_count = count_neighbors_cached(
                                         density_fields,
+                                        &mut nbr_cache,
                                         nx, ny, nz,
                                         chunk_size,
                                         |m| m.is_solid(),

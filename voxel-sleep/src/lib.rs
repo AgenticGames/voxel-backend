@@ -251,6 +251,11 @@ fn compute_resource_census(
             None => continue,
         };
 
+        // Per-chunk ChunkSampleCache: every 6-face probe inside this chunk's
+        // iteration lands in either `chunk_key` itself (interior voxels) or a
+        // single neighbor chunk (boundary voxels), so cache hit rate is ~97%.
+        let mut nbr_cache = crate::util::ChunkSampleCache::new();
+
         for lz in 0..field_size {
             for ly in 0..field_size {
                 for lx in 0..field_size {
@@ -270,8 +275,8 @@ fn compute_resource_census(
                     let wy = cy * (chunk_size as i32) + ly as i32;
                     let wz = cz * (chunk_size as i32) + lz as i32;
 
-                    let air_count = crate::util::count_neighbors(
-                        density_fields, wx, wy, wz, chunk_size,
+                    let air_count = crate::util::count_neighbors_cached(
+                        density_fields, &mut nbr_cache, wx, wy, wz, chunk_size,
                         |m| !m.is_solid(),
                     );
 

@@ -5,7 +5,7 @@ use voxel_core::density::DensityField;
 use voxel_core::material::Material;
 use crate::config::MetamorphismConfig;
 use crate::manifest::ChangeManifest;
-use crate::util::{set_voxel_synced, count_neighbors, has_material_within_radius};
+use crate::util::{set_voxel_synced, count_neighbors_cached, has_material_within_radius, ChunkSampleCache};
 use crate::TransformEntry;
 
 /// Result of metamorphism pass on a set of chunks.
@@ -54,6 +54,10 @@ pub fn apply_metamorphism(
             None => continue,
         };
 
+        // Per-chunk neighbor-probe cache shared by every count_neighbors_cached
+        // call inside this chunk's iteration — see ChunkSampleCache notes.
+        let mut nbr_cache = ChunkSampleCache::new();
+
         for lz in 0..field_size {
             for ly in 0..field_size {
                 for lx in 0..field_size {
@@ -76,8 +80,9 @@ pub fn apply_metamorphism(
                             // Limestone -> Marble: deep OR adjacent to Basalt/Kimberlite
                             let deep = (wy as f32) < config.limestone_to_marble_depth;
                             let has_hot_neighbor = if !deep {
-                                count_neighbors(
+                                count_neighbors_cached(
                                     density_fields,
+                                    &mut nbr_cache,
                                     wx, wy, wz,
                                     chunk_size,
                                     |m| m == Material::Basalt || m == Material::Kimberlite,
@@ -103,8 +108,9 @@ pub fn apply_metamorphism(
                             // Sandstone -> Granite: deep AND 4+ solid neighbors
                             let deep = (wy as f32) < config.sandstone_to_granite_depth;
                             if deep {
-                                let solid_count = count_neighbors(
+                                let solid_count = count_neighbors_cached(
                                     density_fields,
+                                    &mut nbr_cache,
                                     wx, wy, wz,
                                     chunk_size,
                                     |m| m.is_solid(),
@@ -125,8 +131,9 @@ pub fn apply_metamorphism(
                         }
                         Material::Slate if config.slate_to_marble_enabled => {
                             // Slate -> Marble: has adjacent Kimberlite neighbor
-                            let has_kimberlite = count_neighbors(
+                            let has_kimberlite = count_neighbors_cached(
                                 density_fields,
+                                &mut nbr_cache,
                                 wx, wy, wz,
                                 chunk_size,
                                 |m| m == Material::Kimberlite,
@@ -146,8 +153,9 @@ pub fn apply_metamorphism(
                         }
                         Material::Granite if config.granite_to_basalt_enabled => {
                             // Granite -> Basalt: has 2+ adjacent air voxels
-                            let air_count = count_neighbors(
+                            let air_count = count_neighbors_cached(
                                 density_fields,
+                                &mut nbr_cache,
                                 wx, wy, wz,
                                 chunk_size,
                                 |m| !m.is_solid(),
@@ -190,8 +198,9 @@ pub fn apply_metamorphism(
                         }
                         Material::Copper if config.copper_to_malachite_enabled => {
                             // Copper -> Malachite: has 1+ adjacent air voxel
-                            let air_count = count_neighbors(
+                            let air_count = count_neighbors_cached(
                                 density_fields,
+                                &mut nbr_cache,
                                 wx, wy, wz,
                                 chunk_size,
                                 |m| !m.is_solid(),

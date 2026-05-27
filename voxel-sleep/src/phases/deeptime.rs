@@ -18,7 +18,7 @@ use crate::config::{DeepTimeConfig, GroundwaterConfig};
 use crate::systems::groundwater::{ambient_moisture, is_fracture_site};
 use crate::manifest::ChangeManifest;
 use crate::trace;
-use crate::util::{FACE_OFFSETS, sample_material, set_voxel_synced, count_neighbors, has_material_within_radius, grow_vein, default_vein_bias, sleep_vein_size, VeinGrowthParams, ChunkSampleCache};
+use crate::util::{FACE_OFFSETS, sample_material, set_voxel_synced, count_neighbors, count_neighbors_cached, has_material_within_radius, grow_vein, default_vein_bias, sleep_vein_size, VeinGrowthParams, ChunkSampleCache};
 use crate::{Bottleneck, PhaseDiagnostics, ResourceCensus, TransformEntry};
 
 /// Result of the deep time phase.
@@ -277,6 +277,11 @@ pub fn apply_deeptime(
                 None => continue,
             };
 
+            // Per-chunk cache for the below-probe + fracture-air-count probes.
+            // Both probe neighborhoods around `(wx, wy, wz)`, which mostly land
+            // in this same chunk while we iterate it.
+            let mut nbr_cache = ChunkSampleCache::new();
+
             for lz in 0..field_size {
                 for ly in 0..field_size {
                     for lx in 0..field_size {
@@ -291,7 +296,7 @@ pub fn apply_deeptime(
                         let wz = cz * (chunk_size as i32) + lz as i32;
 
                         // Drip zone: must have air below
-                        let below = sample_material(density_fields, wx, wy - 1, wz, chunk_size);
+                        let below = nbr_cache.material(density_fields, wx, wy - 1, wz, chunk_size);
                         let has_air_below = matches!(below, Some(m) if !m.is_solid());
                         if !has_air_below {
                             continue;
@@ -302,7 +307,7 @@ pub fn apply_deeptime(
 
                         // Hard rock: enrichment ONLY at fracture sites (1-2 air neighbors)
                         if is_hard {
-                            let air_count = count_neighbors(density_fields, wx, wy, wz, chunk_size, |m| !m.is_solid());
+                            let air_count = count_neighbors_cached(density_fields, &mut nbr_cache, wx, wy, wz, chunk_size, |m| !m.is_solid());
                             if !is_fracture_site(air_count) {
                                 continue;
                             }

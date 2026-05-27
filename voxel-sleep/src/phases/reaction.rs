@@ -14,7 +14,7 @@ use voxel_fluid::FluidSnapshot;
 
 use crate::config::ReactionConfig;
 use crate::manifest::ChangeManifest;
-use crate::util::{FACE_OFFSETS, sample_material, set_voxel_synced, count_neighbors};
+use crate::util::{FACE_OFFSETS, sample_material, set_voxel_synced, count_neighbors_cached, ChunkSampleCache};
 use crate::{Bottleneck, PhaseDiagnostics, ResourceCensus, TransformEntry};
 
 /// Result of the reaction phase.
@@ -69,6 +69,8 @@ pub fn apply_reaction(
                 None => continue,
             };
 
+            let mut nbr_cache = ChunkSampleCache::new();
+
             for lz in 0..field_size {
                 for ly in 0..field_size {
                     for lx in 0..field_size {
@@ -81,8 +83,8 @@ pub fn apply_reaction(
                         let wy = cy * (chunk_size as i32) + ly as i32;
                         let wz = cz * (chunk_size as i32) + lz as i32;
 
-                        let air_count = count_neighbors(
-                            density_fields, wx, wy, wz, chunk_size,
+                        let air_count = count_neighbors_cached(
+                            density_fields, &mut nbr_cache, wx, wy, wz, chunk_size,
                             |m| !m.is_solid(),
                         );
                         if air_count >= 1 {
@@ -208,6 +210,8 @@ pub fn apply_reaction(
                 None => continue,
             };
 
+            let mut nbr_cache = ChunkSampleCache::new();
+
             for lz in 0..field_size {
                 for ly in 0..field_size {
                     for lx in 0..field_size {
@@ -220,8 +224,8 @@ pub fn apply_reaction(
                         let wy = cy * (chunk_size as i32) + ly as i32;
                         let wz = cz * (chunk_size as i32) + lz as i32;
 
-                        let air_count = count_neighbors(
-                            density_fields, wx, wy, wz, chunk_size,
+                        let air_count = count_neighbors_cached(
+                            density_fields, &mut nbr_cache, wx, wy, wz, chunk_size,
                             |m| !m.is_solid(),
                         );
                         if air_count >= 1 {
@@ -315,6 +319,8 @@ pub fn apply_reaction(
                 None => continue,
             };
 
+            let mut nbr_cache = ChunkSampleCache::new();
+
             for lz in 0..field_size {
                 for ly in 0..field_size {
                     for lx in 0..field_size {
@@ -327,8 +333,8 @@ pub fn apply_reaction(
                         let wy = cy * (chunk_size as i32) + ly as i32;
                         let wz = cz * (chunk_size as i32) + lz as i32;
 
-                        let air_count = count_neighbors(
-                            density_fields, wx, wy, wz, chunk_size,
+                        let air_count = count_neighbors_cached(
+                            density_fields, &mut nbr_cache, wx, wy, wz, chunk_size,
                             |m| !m.is_solid(),
                         );
                         if air_count >= 1 {

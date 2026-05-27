@@ -194,6 +194,16 @@ impl<'a> Default for ChunkSampleCache<'a> {
 }
 
 /// Count 6-connected neighbors matching a predicate.
+///
+/// One-shot variant — allocates a fresh `ChunkSampleCache` per call. The cache
+/// still pays for itself within a single call: the 6 face probes around any
+/// non-boundary voxel land in the same chunk, so 5 of the 6 SipHash lookups
+/// collapse to pointer-compares.
+///
+/// For hot triple-nested per-chunk scan loops (resource census, Phase-1
+/// reaction scans, Phase-4 fracture scans, mineral/metamorphism systems),
+/// hoist the cache to the outer loop and call `count_neighbors_cached`
+/// instead — the cache then carries across consecutive voxel iterations.
 pub fn count_neighbors(
     density_fields: &HashMap<(i32, i32, i32), DensityField>,
     wx: i32,
@@ -202,9 +212,27 @@ pub fn count_neighbors(
     chunk_size: usize,
     predicate: impl Fn(Material) -> bool,
 ) -> u32 {
+    let mut cache = ChunkSampleCache::new();
+    count_neighbors_cached(density_fields, &mut cache, wx, wy, wz, chunk_size, predicate)
+}
+
+/// Cached variant of `count_neighbors`. The caller-owned `ChunkSampleCache`
+/// persists across multiple calls, so when the same chunk is probed
+/// repeatedly (typical inside a single-chunk iteration), every face probe
+/// after the first becomes a pointer-compare instead of a SipHash lookup.
+#[inline]
+pub fn count_neighbors_cached<'a>(
+    density_fields: &'a HashMap<(i32, i32, i32), DensityField>,
+    cache: &mut ChunkSampleCache<'a>,
+    wx: i32,
+    wy: i32,
+    wz: i32,
+    chunk_size: usize,
+    predicate: impl Fn(Material) -> bool,
+) -> u32 {
     let mut count = 0u32;
     for &(dx, dy, dz) in &FACE_OFFSETS {
-        if let Some(mat) = sample_material(density_fields, wx + dx, wy + dy, wz + dz, chunk_size) {
+        if let Some(mat) = cache.material(density_fields, wx + dx, wy + dy, wz + dz, chunk_size) {
             if predicate(mat) {
                 count += 1;
             }

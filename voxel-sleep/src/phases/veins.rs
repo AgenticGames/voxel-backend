@@ -19,7 +19,7 @@ use crate::phases::aureole::HeatMap;
 use crate::config::{VeinConfig, GroundwaterConfig};
 use crate::systems::groundwater::ambient_moisture;
 use crate::manifest::ChangeManifest;
-use crate::util::{FACE_OFFSETS, sample_material, set_voxel_synced, count_neighbors, grow_vein, VeinGrowthParams, VeinBias};
+use crate::util::{FACE_OFFSETS, sample_material, set_voxel_synced, count_neighbors_cached, grow_vein, VeinGrowthParams, VeinBias, ChunkSampleCache};
 use crate::{Bottleneck, PhaseDiagnostics, ResourceCensus, TransformEntry};
 
 /// Result of the veins phase.
@@ -974,6 +974,7 @@ pub fn apply_veins(
 
         let mut crystal_count = 0u32;
         let mut calcite_count = 0u32;
+        let mut nbr_cache = ChunkSampleCache::new();
 
         for lz in 0..field_size {
             for ly in 0..field_size {
@@ -989,8 +990,8 @@ pub fn apply_veins(
 
                     // Crystal growth: air with 2+ Crystal/Amethyst neighbors
                     if config.crystal_growth_enabled && crystal_count < config.crystal_growth_max_per_chunk {
-                        let crystal_neighbors = count_neighbors(
-                            density_fields, wx, wy, wz, chunk_size,
+                        let crystal_neighbors = count_neighbors_cached(
+                            density_fields, &mut nbr_cache, wx, wy, wz, chunk_size,
                             |m| m == Material::Crystal || m == Material::Amethyst,
                         );
                         if crystal_neighbors >= 2 && rng.gen::<f32>() < config.crystal_growth_prob {
@@ -1006,8 +1007,8 @@ pub fn apply_veins(
 
                     // Calcite infill: air with 3+ Limestone faces
                     if config.calcite_infill_enabled && calcite_count < config.calcite_infill_max_per_chunk {
-                        let ls_neighbors = count_neighbors(
-                            density_fields, wx, wy, wz, chunk_size,
+                        let ls_neighbors = count_neighbors_cached(
+                            density_fields, &mut nbr_cache, wx, wy, wz, chunk_size,
                             |m| m == Material::Limestone,
                         );
                         if ls_neighbors >= 3 && rng.gen::<f32>() < config.calcite_infill_prob {
