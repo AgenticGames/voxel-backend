@@ -15,7 +15,7 @@ use voxel_fluid::FluidSnapshot;
 use crate::config::{AureoleConfig, GroundwaterConfig};
 use crate::systems::groundwater::ambient_moisture;
 use crate::manifest::ChangeManifest;
-use crate::util::{FACE_OFFSETS, sample_material, set_voxel_synced, grow_vein, VeinGrowthParams, VeinBias, default_vein_bias};
+use crate::util::{FACE_OFFSETS, sample_material, set_voxel_synced, grow_vein, VeinGrowthParams, VeinBias, default_vein_bias, ChunkSampleCache};
 use crate::{Bottleneck, PhaseDiagnostics, ResourceCensus, TransformEntry};
 
 /// Type of heat source for coal maturation decisions.
@@ -1423,6 +1423,11 @@ pub fn apply_aureole(
             .filter(|(_, _, _, valid)| *valid)
             .collect();
 
+        // Per-scan chunk-pointer cache shared across every water cell's 6 face
+        // probes. Adjacent water cells almost always share chunks, so the cache
+        // hit rate is high (~80–95%). density_fields is read-only during scan
+        // (candidates are applied later) so this is safe to hoist.
+        let mut nbr_cache = ChunkSampleCache::new();
         for &((wx, wy, wz), _idx, level, _) in &water_cells {
             // Scale erosion probability by water cell level (more water = stronger erosion)
             let level_factor = level.min(1.0);
@@ -1430,7 +1435,7 @@ pub fn apply_aureole(
                 let nx = wx + dx;
                 let ny = wy + dy;
                 let nz = wz + dz;
-                if let Some(mat) = sample_material(density_fields, nx, ny, nz, chunk_size) {
+                if let Some(mat) = nbr_cache.material(density_fields, nx, ny, nz, chunk_size) {
                     if mat == Material::Limestone || mat == Material::Sandstone {
                         theoretical_max += 1;
                     }
@@ -1487,6 +1492,13 @@ pub fn apply_aureole(
                 None => continue,
             };
 
+            // Per-chunk neighbor-probe cache. Interior voxels (the vast majority
+            // of a 17³ field) have all 6 face neighbors land in this same
+            // chunk; only the 1-voxel-thick boundary shell crosses chunks at
+            // most once per probe. Cache hit rate is ~95%+, replacing each
+            // hash probe (~30-50 ns) with a pointer compare (~3 ns).
+            let mut nbr_cache = ChunkSampleCache::new();
+
             for lz in 0..field_size {
                 for ly in 0..field_size {
                     for lx in 0..field_size {
@@ -1504,7 +1516,7 @@ pub fn apply_aureole(
                         let mut has_air = false;
                         let mut has_air_below = false;
                         for &(dx, dy, dz) in &FACE_OFFSETS {
-                            if let Some(neighbor) = sample_material(density_fields, wx + dx, wy + dy, wz + dz, chunk_size) {
+                            if let Some(neighbor) = nbr_cache.material(density_fields, wx + dx, wy + dy, wz + dz, chunk_size) {
                                 if !neighbor.is_solid() {
                                     has_air = true;
                                     if dy == -1 { has_air_below = true; }

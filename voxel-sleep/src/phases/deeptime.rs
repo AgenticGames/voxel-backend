@@ -689,6 +689,13 @@ pub fn apply_deeptime(
                 None => continue,
             };
 
+            // Per-chunk neighbor-probe cache. Every above/below probe inside
+            // this chunk's iteration shares the same chunk pointer except at
+            // the ly=0 / ly=chunk_size boundaries (~12% of voxels). Cache hit
+            // rate ~88%+, replacing each sample_material SipHash probe with
+            // a pointer compare.
+            let mut nbr_cache = ChunkSampleCache::new();
+
             for lz in 0..field_size {
                 for ly in 0..field_size {
                     for lx in 0..field_size {
@@ -701,8 +708,12 @@ pub fn apply_deeptime(
                         let wy = cy * (chunk_size as i32) + ly as i32;
                         let wz = cz * (chunk_size as i32) + lz as i32;
 
+                        // Cached above-probe is reused below for column
+                        // formation; previously the same probe was repeated.
+                        let above_opt = nbr_cache.material(density_fields, wx, wy + 1, wz, chunk_size);
+
                         // Stalactite growth: only under limestone ceiling (calcite precipitation)
-                        if let Some(above_mat) = sample_material(density_fields, wx, wy + 1, wz, chunk_size) {
+                        if let Some(above_mat) = above_opt {
                             if above_mat == Material::Limestone {
                                 theoretical_max += 1;
                             }
@@ -725,9 +736,8 @@ pub fn apply_deeptime(
                         }
 
                         // Column formation: limestone above AND limestone below
-                        let above = sample_material(density_fields, wx, wy + 1, wz, chunk_size);
-                        let below = sample_material(density_fields, wx, wy - 1, wz, chunk_size);
-                        if above == Some(Material::Limestone) && below == Some(Material::Limestone)
+                        let below = nbr_cache.material(density_fields, wx, wy - 1, wz, chunk_size);
+                        if above_opt == Some(Material::Limestone) && below == Some(Material::Limestone)
                             && rng.gen::<f32>() < config.column_formation_prob * groundwater.flowstone_power * groundwater.soft_rock_mult
                         {
                             candidates.push(Candidate {
