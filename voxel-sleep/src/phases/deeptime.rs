@@ -18,7 +18,7 @@ use crate::config::{DeepTimeConfig, GroundwaterConfig};
 use crate::systems::groundwater::{ambient_moisture, is_fracture_site};
 use crate::manifest::ChangeManifest;
 use crate::trace;
-use crate::util::{FACE_OFFSETS, sample_material, set_voxel_synced, count_neighbors, count_neighbors_cached, has_material_within_radius, grow_vein, default_vein_bias, sleep_vein_size, VeinGrowthParams, ChunkSampleCache};
+use crate::util::{FACE_OFFSETS, sample_material, set_voxel_synced, count_neighbors, count_neighbors_cached, has_any_material_within_radius, grow_vein, default_vein_bias, sleep_vein_size, VeinGrowthParams, ChunkSampleCache};
 use crate::{Bottleneck, PhaseDiagnostics, ResourceCensus, TransformEntry};
 
 /// Result of the deep time phase.
@@ -837,11 +837,14 @@ pub fn apply_deeptime(
                 continue;
             }
 
-            // Decision tree for fossilization material
+            // Decision tree for fossilization material.
+            // One radius-3 Manhattan scan checks all three iron-bearing targets;
+            // previously this walked the same sphere up to 3 times.
             let iron_rich = matches!(host_mat, Material::Basalt)
-                || has_material_within_radius(density_fields, nx, ny, nz, chunk_size, 3, Material::Iron)
-                || has_material_within_radius(density_fields, nx, ny, nz, chunk_size, 3, Material::Sulfide)
-                || has_material_within_radius(density_fields, nx, ny, nz, chunk_size, 3, Material::Pyrite);
+                || has_any_material_within_radius(
+                    density_fields, nx, ny, nz, chunk_size, 3,
+                    &[Material::Iron, Material::Sulfide, Material::Pyrite],
+                );
             let silica_rich = matches!(host_mat, Material::Granite | Material::Sandstone);
 
             let target_mat = if is_buried || !nf.buried_required {
@@ -976,11 +979,14 @@ pub fn apply_deeptime(
             };
             if has_lava { continue; }
 
-            // Material selection for corpse fossilization
+            // Material selection for corpse fossilization.
+            // Single radius-3 Manhattan scan covers all three iron-bearing
+            // targets (previously three separate scans walking the same sphere).
             let iron_rich = matches!(host_mat, Material::Basalt)
-                || has_material_within_radius(density_fields, cx_pos, cy_pos, cz_pos, chunk_size, 3, Material::Iron)
-                || has_material_within_radius(density_fields, cx_pos, cy_pos, cz_pos, chunk_size, 3, Material::Sulfide)
-                || has_material_within_radius(density_fields, cx_pos, cy_pos, cz_pos, chunk_size, 3, Material::Pyrite);
+                || has_any_material_within_radius(
+                    density_fields, cx_pos, cy_pos, cz_pos, chunk_size, 3,
+                    &[Material::Iron, Material::Sulfide, Material::Pyrite],
+                );
 
             let target_mat = if iron_rich && rng.gen::<f32>() < cf.pyrite_prob {
                 // Iron-rich + water → Pyrite replacement mineralization (like real insect fossils)

@@ -251,6 +251,29 @@ pub fn has_material_within_radius(
     radius: i32,
     target: Material,
 ) -> bool {
+    has_any_material_within_radius(density_fields, wx, wy, wz, chunk_size, radius, &[target])
+}
+
+/// Check if any voxel within Manhattan distance <= radius matches ANY of the
+/// given materials. One scan + one cache covers the whole target set, replacing
+/// N separate `has_material_within_radius` calls that all walk the same sphere.
+///
+/// Worst-case (no match) saves ~(N-1)/N of the per-scan cost — typical caller
+/// is the nest/corpse-fossilization "iron_rich" predicate which checked 3
+/// materials and previously walked the radius-3 Manhattan sphere (~63 voxels)
+/// three times.
+pub fn has_any_material_within_radius(
+    density_fields: &HashMap<(i32, i32, i32), DensityField>,
+    wx: i32,
+    wy: i32,
+    wz: i32,
+    chunk_size: usize,
+    radius: i32,
+    targets: &[Material],
+) -> bool {
+    if targets.is_empty() {
+        return false;
+    }
     // Adjacent (sdx,sdy,sdz) inside the (2r+1)^3 search box mostly land in
     // the same chunk — cache the last density-field pointer to skip the
     // HashMap probe on the ~85% cache-hit case.
@@ -267,7 +290,7 @@ pub fn has_material_within_radius(
                 if let Some(mat) =
                     cache.material(density_fields, wx + dx, wy + dy, wz + dz, chunk_size)
                 {
-                    if mat == target {
+                    if targets.iter().any(|&t| t == mat) {
                         return true;
                     }
                 }
