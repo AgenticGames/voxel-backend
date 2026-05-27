@@ -504,6 +504,17 @@ pub fn apply_veins(
                     da.cmp(&db)
                 });
 
+                // Hoisted chunk-pointer cache for the FACE_OFFSETS probes inside
+                // the wall-site scan. The triple-nested local loop visits every
+                // host-rock voxel in the scan box (typ. ~30K per zone), then
+                // does up to 6 sample_material lookups per voxel — but 5 of
+                // those 6 neighbors land in the same chunk we're already in,
+                // so caching the chunk pointer collapses them to a single
+                // pointer-compare each. density_fields is read-only through
+                // this scan; mutations happen later in the apply phase
+                // (line ~1145), so the cache stays valid across iterations.
+                let mut wall_cache = ChunkSampleCache::new();
+
                 for &(ckx, cky, ckz) in &scan_chunks {
                             let ck = (ckx, cky, ckz);
                             let df = match density_fields.get(&ck) {
@@ -539,7 +550,7 @@ pub fn apply_veins(
                                         let mut wall_normal = (0i32, 0i32, 0i32);
                                         let mut has_air_face = false;
                                         for &(dx, dy, dz) in &FACE_OFFSETS {
-                                            if let Some(nm) = sample_material(density_fields, wx + dx, wy + dy, wz + dz, chunk_size) {
+                                            if let Some(nm) = wall_cache.material(density_fields, wx + dx, wy + dy, wz + dz, chunk_size) {
                                                 if !nm.is_solid() {
                                                     wall_normal = (dx, dy, dz);
                                                     has_air_face = true;
