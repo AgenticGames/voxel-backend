@@ -5,7 +5,7 @@ use voxel_core::density::DensityField;
 use voxel_core::material::Material;
 use crate::config::MineralConfig;
 use crate::manifest::ChangeManifest;
-use crate::util::{FACE_OFFSETS, sample_material, set_voxel_synced, count_neighbors_cached, has_material_within_radius, ChunkSampleCache};
+use crate::util::{FACE_OFFSETS, set_voxel_synced, count_neighbors_cached, has_material_within_radius, ChunkSampleCache};
 use crate::TransformEntry;
 
 /// Result of mineral growth pass.
@@ -127,8 +127,12 @@ pub fn apply_mineral_growth(
                     // --- Malachite stalactite ---
                     // Air voxel where (x, y+1, z) is Copper AND Limestone within 2 Manhattan distance
                     if config.malachite_stalactite_enabled {
+                        // Reuse the per-chunk nbr_cache for the single "above" probe.
+                        // 99% chance the (wx, wy+1, wz) voxel lives in the same chunk
+                        // as a face-neighbor we just sampled in the prior crystal-growth
+                        // count, so this collapses to a pointer-compare in the common case.
                         let above_mat =
-                            sample_material(density_fields, wx, wy + 1, wz, chunk_size);
+                            nbr_cache.material(density_fields, wx, wy + 1, wz, chunk_size);
                         if above_mat == Some(Material::Copper) && rng.gen::<f32>() < config.malachite_stalactite_prob {
                             let has_limestone = has_material_within_radius(
                                 density_fields,
@@ -205,14 +209,17 @@ pub fn apply_mineral_growth(
                     // --- Pyrite crust ---
                     // Air adjacent to Pyrite, where the Pyrite source has pyrite_crust_min_solid solid neighbors
                     if config.pyrite_crust_enabled && rng.gen::<f32>() < config.pyrite_crust_prob {
-                        // Check each face neighbor for Pyrite
+                        // Check each face neighbor for Pyrite. Route the 6 face probes
+                        // through the hoisted nbr_cache so they share the chunk-pointer
+                        // lookup with every other probe in this chunk's scan; 5 of 6
+                        // probes on a non-boundary air voxel hit the cache.
                         let mut found_pyrite_source = false;
                         for &(dx, dy, dz) in &FACE_OFFSETS {
                             let nx = wx + dx;
                             let ny = wy + dy;
                             let nz = wz + dz;
                             if let Some(mat) =
-                                sample_material(density_fields, nx, ny, nz, chunk_size)
+                                nbr_cache.material(density_fields, nx, ny, nz, chunk_size)
                             {
                                 if mat == Material::Pyrite {
                                     // Check that this Pyrite source has enough solid neighbors

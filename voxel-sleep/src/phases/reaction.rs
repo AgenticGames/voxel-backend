@@ -14,7 +14,7 @@ use voxel_fluid::FluidSnapshot;
 
 use crate::config::ReactionConfig;
 use crate::manifest::ChangeManifest;
-use crate::util::{FACE_OFFSETS, sample_material, set_voxel_synced, count_neighbors_cached, ChunkSampleCache};
+use crate::util::{FACE_OFFSETS, set_voxel_synced, count_neighbors_cached, ChunkSampleCache};
 use crate::{Bottleneck, PhaseDiagnostics, ResourceCensus, TransformEntry};
 
 /// Result of the reaction phase.
@@ -95,10 +95,15 @@ pub fn apply_reaction(
             }
         }
 
-        // Step 2: BFS from each pyrite site through connected limestone
+        // Step 2: BFS from each pyrite site through connected limestone.
+        // BFS expansion is dominated by 6 face probes per visited voxel; adjacent
+        // limestone voxels almost always share a chunk, so hoisting a single
+        // ChunkSampleCache across every pyrite source eliminates the SipHash
+        // probe on ~5/6 of the face checks (and across-source on top of that).
         let max_depth = config.acid_dissolution_radius as i32;
         let mut dissolved_set: HashSet<(i32, i32, i32)> = HashSet::new();
         let mut acid_bfs_visited: HashSet<(i32, i32, i32)> = HashSet::new();
+        let mut acid_bfs_cache = ChunkSampleCache::new();
 
         for &(px, py, pz) in &pyrite_sites {
             // Start BFS from limestone neighbors of this pyrite
@@ -110,7 +115,7 @@ pub fn apply_reaction(
                 let nx = px + dx;
                 let ny = py + dy;
                 let nz = pz + dz;
-                if let Some(mat) = sample_material(density_fields, nx, ny, nz, chunk_size) {
+                if let Some(mat) = acid_bfs_cache.material(density_fields, nx, ny, nz, chunk_size) {
                     if mat == Material::Limestone && !visited.contains(&(nx, ny, nz)) {
                         visited.insert((nx, ny, nz));
                         queue.push_back(((nx, ny, nz), 1));
@@ -142,7 +147,7 @@ pub fn apply_reaction(
                         let ny = wy + dy;
                         let nz = wz + dz;
                         if !visited.contains(&(nx, ny, nz)) {
-                            if let Some(mat) = sample_material(density_fields, nx, ny, nz, chunk_size) {
+                            if let Some(mat) = acid_bfs_cache.material(density_fields, nx, ny, nz, chunk_size) {
                                 if mat == Material::Limestone {
                                     visited.insert((nx, ny, nz));
                                     queue.push_back(((nx, ny, nz), depth + 1));
@@ -174,13 +179,15 @@ pub fn apply_reaction(
 
         // Gypsum deposition from pyrite acid: CaCO₃ + H₂SO₄ → CaSO₄·2H₂O
         if config.gypsum_enabled {
+            // Dissolved voxels cluster (BFS-connected), so adjacent gypsum probes
+            // land in the same chunk repeatedly — reuse the BFS cache.
             for &(wx, wy, wz) in &dissolved_set {
                 for &(dx, dy, dz) in &FACE_OFFSETS {
                     let nx = wx + dx;
                     let ny = wy + dy;
                     let nz = wz + dz;
                     if dissolved_set.contains(&(nx, ny, nz)) { continue; }
-                    if let Some(mat) = sample_material(density_fields, nx, ny, nz, chunk_size) {
+                    if let Some(mat) = acid_bfs_cache.material(density_fields, nx, ny, nz, chunk_size) {
                         if mat == Material::Limestone && rng.gen::<f32>() < config.gypsum_deposition_prob {
                             let (gck, glx, gly, glz) = world_to_chunk_local(nx, ny, nz, chunk_size);
                             if let Some(df) = density_fields.get(&gck) {
@@ -270,8 +277,11 @@ pub fn apply_reaction(
             }
         }
 
-        // For each lava position, check solid neighbors
+        // For each lava position, check solid neighbors.
+        // Lava cells in a snapshot are typically clustered into connected pools,
+        // so consecutive face probes share chunks — hoist the cache once.
         let mut crust_set: HashSet<(i32, i32, i32)> = HashSet::new();
+        let mut crust_cache = ChunkSampleCache::new();
         for &(lx, ly, lz) in &lava_positions {
             for &(dx, dy, dz) in &FACE_OFFSETS {
                 let nx = lx + dx;
@@ -280,7 +290,7 @@ pub fn apply_reaction(
                 if crust_set.contains(&(nx, ny, nz)) {
                     continue;
                 }
-                if let Some(mat) = sample_material(density_fields, nx, ny, nz, chunk_size) {
+                if let Some(mat) = crust_cache.material(density_fields, nx, ny, nz, chunk_size) {
                     if mat.is_solid() && mat != Material::Basalt && mat != Material::Kimberlite {
                         theoretical_max += 1;
                         if rng.gen::<f32>() < config.basalt_crust_prob {
@@ -374,10 +384,13 @@ pub fn apply_reaction(
             }
         }
 
-        // Step 2: BFS from each sulfide site through connected limestone
+        // Step 2: BFS from each sulfide site through connected limestone.
+        // Same chunk-locality argument as the pyrite BFS above — one cache
+        // shared across every sulfide source's expansion.
         let base_radius = config.sulfide_acid_radius;
         let mut sulfide_dissolved_set: HashSet<(i32, i32, i32)> = HashSet::new();
         let mut sulfide_bfs_visited: HashSet<(i32, i32, i32)> = HashSet::new();
+        let mut sulfide_bfs_cache = ChunkSampleCache::new();
 
         for &(sx, sy, sz, has_water) in &sulfide_sites {
             // Sulfide oxidation requires water as reactant (FeS₂ + 7O₂ + 2H₂O → ...)
@@ -394,7 +407,7 @@ pub fn apply_reaction(
                 let nx = sx + dx;
                 let ny = sy + dy;
                 let nz = sz + dz;
-                if let Some(mat) = sample_material(density_fields, nx, ny, nz, chunk_size) {
+                if let Some(mat) = sulfide_bfs_cache.material(density_fields, nx, ny, nz, chunk_size) {
                     if mat == Material::Limestone && !visited.contains(&(nx, ny, nz)) {
                         visited.insert((nx, ny, nz));
                         queue.push_back(((nx, ny, nz), 1));
@@ -424,7 +437,7 @@ pub fn apply_reaction(
                         let ny = wy + dy;
                         let nz = wz + dz;
                         if !visited.contains(&(nx, ny, nz)) {
-                            if let Some(mat) = sample_material(density_fields, nx, ny, nz, chunk_size) {
+                            if let Some(mat) = sulfide_bfs_cache.material(density_fields, nx, ny, nz, chunk_size) {
                                 if mat == Material::Limestone {
                                     visited.insert((nx, ny, nz));
                                     queue.push_back(((nx, ny, nz), depth + 1));
@@ -456,6 +469,8 @@ pub fn apply_reaction(
 
         // Gypsum deposition: CaCO₃ + H₂SO₄ → CaSO₄·2H₂O (gypsum forms on void walls)
         if config.gypsum_enabled {
+            // Reuse the sulfide BFS cache — dissolved positions are BFS-connected
+            // and the gypsum probes around them stay in the same handful of chunks.
             let dissolved_positions: Vec<(i32, i32, i32)> = sulfide_dissolved_set.iter().copied().collect();
             for &(wx, wy, wz) in &dissolved_positions {
                 // Check face-adjacent voxels of the new void
@@ -464,7 +479,7 @@ pub fn apply_reaction(
                     let ny = wy + dy;
                     let nz = wz + dz;
                     if sulfide_dissolved_set.contains(&(nx, ny, nz)) { continue; }
-                    if let Some(mat) = sample_material(density_fields, nx, ny, nz, chunk_size) {
+                    if let Some(mat) = sulfide_bfs_cache.material(density_fields, nx, ny, nz, chunk_size) {
                         if mat == Material::Limestone && rng.gen::<f32>() < config.gypsum_deposition_prob {
                             let (gck, glx, gly, glz) = world_to_chunk_local(nx, ny, nz, chunk_size);
                             if let Some(df) = density_fields.get(&gck) {
