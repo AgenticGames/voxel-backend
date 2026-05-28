@@ -61,14 +61,29 @@ pub fn world_memory_drift_loop(
     let mut cached_fluid: FluidSnapshot = FluidSnapshot::default();
     crate::panic_log::worker_started();
 
+    // 2026-05-28: chunk the 2s tick into 200ms slices so shutdown
+    // signal gets serviced within ~200ms instead of waiting out the full
+    // sleep. Same idea as poi_tracker.rs and predictor_thread.rs.
+    const SHUTDOWN_POLL_MS: u64 = 200;
+    let poll_slices = (TICK_DURATION_MS / SHUTDOWN_POLL_MS).max(1);
+    let slice_dur = Duration::from_millis(SHUTDOWN_POLL_MS);
+
     loop {
         if shutdown.load(Ordering::Relaxed) {
             break;
         }
-        thread::sleep(tick_dur);
-        if shutdown.load(Ordering::Relaxed) {
+        let mut exit = false;
+        for _ in 0..poll_slices {
+            thread::sleep(slice_dur);
+            if shutdown.load(Ordering::Relaxed) {
+                exit = true;
+                break;
+            }
+        }
+        if exit {
             break;
         }
+        let _ = tick_dur; // reserved for future variable-tick budgeting
         tick += 1;
 
         // Snapshot chunk keys (brief read lock).

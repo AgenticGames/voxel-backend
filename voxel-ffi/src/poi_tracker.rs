@@ -154,14 +154,29 @@ pub fn poi_tracker_loop(
     let mut cached_fluid_snap: FluidSnapshot = FluidSnapshot::default();
     crate::panic_log::worker_started();
 
+    // 2026-05-28: chunk the 2-second tick into 200ms slices so shutdown
+    // signal gets serviced within ~200ms instead of waiting out the full
+    // sleep. Same idea as predictor_thread.rs's select! cleanup.
+    const SHUTDOWN_POLL_MS: u64 = 200;
+    let poll_slices = (TICK_DURATION_MS / SHUTDOWN_POLL_MS).max(1);
+    let slice_dur = Duration::from_millis(SHUTDOWN_POLL_MS);
+
     loop {
         if shutdown.load(Ordering::Relaxed) {
             break;
         }
-        thread::sleep(tick_dur);
-        if shutdown.load(Ordering::Relaxed) {
+        let mut exit = false;
+        for _ in 0..poll_slices {
+            thread::sleep(slice_dur);
+            if shutdown.load(Ordering::Relaxed) {
+                exit = true;
+                break;
+            }
+        }
+        if exit {
             break;
         }
+        let _ = tick_dur; // reserved for future variable-tick budgeting
 
         let tick = tracker.tick_counter.fetch_add(1, Ordering::Relaxed);
 

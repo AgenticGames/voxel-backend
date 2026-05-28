@@ -3159,10 +3159,17 @@ impl VoxelEngine {
 
     pub fn shutdown(mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
-        // Drop senders to unblock recv_timeout
+        // Drop senders to unblock recv_timeout / select! waits. Each closed
+        // channel kicks the corresponding thread's blocking recv to return
+        // Err(Disconnected) immediately, so we don't sit through any
+        // configured wait interval. Most critical for predict_wake_tx —
+        // the predictor's select! has a 60-second default(interval), so
+        // without this drop the join can block ~46-60 seconds (real
+        // user-visible PIE-exit hang we shipped on 2026-05-28).
         drop(self.generate_tx);
         drop(self.mine_tx);
         drop(self.fluid_event_tx);
+        drop(self.predict_wake_tx);
         for handle in self.workers {
             let _ = handle.join();
         }

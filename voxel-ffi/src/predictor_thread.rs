@@ -51,10 +51,18 @@ pub fn predictor_thread_loop(
         if shutdown.load(Ordering::Relaxed) {
             break;
         }
-        // Wait for either wake signal or the periodic timer.
+        // Wait for either wake signal or the periodic timer. The channel
+        // disconnect (engine.shutdown drops predict_wake_tx) returns
+        // Err(_) here — treat as an immediate exit so we don't sit
+        // through the 60-second default interval during PIE teardown.
         let do_predict;
         select! {
-            recv(wake_rx) -> _ => { do_predict = true; }
+            recv(wake_rx) -> msg => {
+                match msg {
+                    Ok(_) => { do_predict = true; }
+                    Err(_) => { break; } // channel closed — engine shutting down
+                }
+            }
             default(interval) => { do_predict = true; }
         }
         if shutdown.load(Ordering::Relaxed) {
