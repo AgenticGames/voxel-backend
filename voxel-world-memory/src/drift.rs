@@ -20,12 +20,20 @@ use crate::WorldMemory;
 
 /// Below this score, a fresh chunk-scoring won't register a new Scene.
 /// Filters noise. Mirrors `MIN_REGISTRABLE_SCORE = 30.0` in voxel-ffi POI
-/// tracker, but in per-cell-weighted scale (so 30.0 / scale ≈ 3.0).
-pub const MIN_REGISTRABLE_SCORE: f32 = 3.0;
+/// tracker, but in per-cell-weighted scale.
+///
+/// 2026-05-27: lowered from 3.0 → 1.0. The aureole-redirect / POI plays
+/// need Scenes to register from sparse data (a handful of lava cells from
+/// a single sleep was scoring below 3.0 and never forming a Scene). 1.0
+/// lets even small clusters become showcase-worthy captures.
+pub const MIN_REGISTRABLE_SCORE: f32 = 1.0;
 
 /// When a Scene's tick-score falls below this, decay-instead-of-overwrite
 /// the stored score. Mirrors `MIN_KEEP_SCORE` in the legacy tracker.
-pub const MIN_KEEP_SCORE: f32 = 1.5;
+///
+/// 2026-05-27: lowered from 1.5 → 0.5 to track the registrable-threshold
+/// change (3.0 → 1.0). Same ratio (0.5×) preserves the decay-band width.
+pub const MIN_KEEP_SCORE: f32 = 0.5;
 
 /// Decay factor for the hysteresis band. Mirrors `SCORE_DECAY_PER_TICK`
 /// in the legacy tracker.
@@ -159,13 +167,18 @@ pub fn drift_tick(wm: &WorldMemory, ctx: &DriftCtx) -> DriftStats {
                 }
             }
             if !bumped && kind != SceneKind::Bridge {
-                // Light event for a non-tracked region — record a tiny
-                // ephemeral scene that the next drift scan will either
-                // confirm (full Scene) or TTL-prune.
+                // Light event for a non-tracked region — record an
+                // ephemeral scene. 2026-05-27: bumped score from
+                // sub-threshold (0.8×) to ABOVE threshold (1.5×) so the
+                // Scene is immediately queryable by the sleep montage
+                // (RefreshScenes returns it, aureole-redirect can pick it
+                // up). Drift's next scan still has the chance to confirm
+                // or TTL-prune it, but this way a sleep that produces
+                // lava can be showcased by the very next sleep cycle.
                 let id = wm.alloc_scene_id();
                 let mut s = Scene::new(id, kind, event_pos_vec);
-                s.score = MIN_REGISTRABLE_SCORE * 0.8; // sub-threshold
-                s.confidence = 0.2;
+                s.score = MIN_REGISTRABLE_SCORE * 1.5;
+                s.confidence = 0.3;
                 s.last_seen_secs = ctx.now_secs;
                 s.record_history(2 /* event-promoted */, ctx.now_secs);
                 wm.scenes.insert(id, s);
@@ -258,7 +271,8 @@ mod tests {
     fn fresh_score_below_min_does_not_register() {
         let wm = WorldMemory::new();
         let mut ctx = DriftCtx::new(0, 30);
-        ctx.fresh_scores.push(fresh((0, 0, 0), SceneKind::Lava, 1.0));
+        // 0.3 < MIN_KEEP_SCORE (0.5) < MIN_REGISTRABLE_SCORE (1.0)
+        ctx.fresh_scores.push(fresh((0, 0, 0), SceneKind::Lava, 0.3));
         let stats = drift_tick(&wm, &ctx);
         assert_eq!(stats.inserted, 0);
         assert_eq!(wm.tracked_scene_count(), 0);
@@ -306,7 +320,7 @@ mod tests {
         {
             let mut ctx = DriftCtx::new(5, 30);
             ctx.fresh_scores
-                .push(fresh((0, 0, 0), SceneKind::Lava, 2.0)); // < MIN_REG=3, > MIN_KEEP=1.5
+                .push(fresh((0, 0, 0), SceneKind::Lava, 0.7)); // < MIN_REG=1.0, > MIN_KEEP=0.5
             let stats = drift_tick(&wm, &ctx);
             assert_eq!(stats.decayed, 1);
         }
