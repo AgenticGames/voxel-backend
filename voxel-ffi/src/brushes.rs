@@ -637,15 +637,66 @@ pub fn paint_ore_deposits(
     let target_count = ((candidates.len() as f32) * density).ceil() as usize;
     let target_count = target_count.max(1);
     let min_spacing2 = min_spacing * min_spacing;
+    // Spatial-hash grid for O(1)-avg spacing check. Cell side = min_spacing, so
+    // any pair closer than that lives in the same or a 26-neighbor cell — we
+    // only ever scan a 3×3×3 window instead of the full `accepted` list.
+    // Determinism: identical iteration order over `candidates` + exhaustive
+    // distance check within the bounded window → same acceptance set as the
+    // prior O(N·K) scan. Verified by `ore_paint_seed_determinism`.
+    // Backing store is a flat Vec<Vec<Vec3>> indexed by linear cell coord —
+    // a HashMap probe measured slower than the linear scan for typical K,
+    // but flat indexing into a brush-AABB-sized grid removes that overhead.
+    let inv_cell = if min_spacing > 1e-6 { 1.0 / min_spacing } else { 1.0 };
+    // Brush AABB in cell coords. `aabb_radius` is the gather radius (already
+    // padded for cluster_size / channel reach) so every candidate falls inside.
+    let cell_min_x = ((center.x - aabb_radius) * inv_cell).floor() as i32 - 1;
+    let cell_min_y = ((center.y - aabb_radius) * inv_cell).floor() as i32 - 1;
+    let cell_min_z = ((center.z - aabb_radius) * inv_cell).floor() as i32 - 1;
+    let cell_max_x = ((center.x + aabb_radius) * inv_cell).floor() as i32 + 1;
+    let cell_max_y = ((center.y + aabb_radius) * inv_cell).floor() as i32 + 1;
+    let cell_max_z = ((center.z + aabb_radius) * inv_cell).floor() as i32 + 1;
+    let dim_x = (cell_max_x - cell_min_x + 1).max(1) as usize;
+    let dim_y = (cell_max_y - cell_min_y + 1).max(1) as usize;
+    let dim_z = (cell_max_z - cell_min_z + 1).max(1) as usize;
+    let mut grid: Vec<Vec<Vec3>> = vec![Vec::new(); dim_x * dim_y * dim_z];
+    let cell_idx = |gx: i32, gy: i32, gz: i32| -> Option<usize> {
+        if gx < cell_min_x || gy < cell_min_y || gz < cell_min_z
+            || gx > cell_max_x || gy > cell_max_y || gz > cell_max_z
+        {
+            return None;
+        }
+        let lx = (gx - cell_min_x) as usize;
+        let ly = (gy - cell_min_y) as usize;
+        let lz = (gz - cell_min_z) as usize;
+        Some((lz * dim_y + ly) * dim_x + lx)
+    };
     let mut accepted: Vec<&WallCandidate> = Vec::new();
     for cand in &candidates {
         if accepted.len() >= target_count {
             break;
         }
-        let too_close = accepted
-            .iter()
-            .any(|a| (a.world_pos - cand.world_pos).length_squared() < min_spacing2);
+        let gx = (cand.world_pos.x * inv_cell).floor() as i32;
+        let gy = (cand.world_pos.y * inv_cell).floor() as i32;
+        let gz = (cand.world_pos.z * inv_cell).floor() as i32;
+        let mut too_close = false;
+        'outer: for dz in -1..=1i32 {
+            for dy in -1..=1i32 {
+                for dx in -1..=1i32 {
+                    if let Some(ix) = cell_idx(gx + dx, gy + dy, gz + dz) {
+                        for p in &grid[ix] {
+                            if (*p - cand.world_pos).length_squared() < min_spacing2 {
+                                too_close = true;
+                                break 'outer;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if !too_close {
+            if let Some(ix) = cell_idx(gx, gy, gz) {
+                grid[ix].push(cand.world_pos);
+            }
             accepted.push(cand);
         }
     }
@@ -3826,6 +3877,62 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_ore_paint_large_brush() {
+        // Worst-case Phase-2 stress: huge brush, max density, full min_spacing
+        // packing. Used to validate the spatial-hash hoist vs the previous
+        // O(N·K) linear scan. Run with:
+        //   cargo test --release -p voxel-ffi bench_ore_paint_large_brush \
+        //     -- --ignored --nocapture
+        let size = 64usize;
+        let mut config = GenerationConfig::default();
+        config.chunk_size = size;
+        let mut store = ChunkStore::new(8);
+        // Build a 3×3×3 grid of solid chunks so the brush has plenty of wall
+        // candidates to chew through.
+        let s = size + 1;
+        for cz in 0..3i32 {
+            for cy in 0..3i32 {
+                for cx in 0..3i32 {
+                    let mut field = DensityField::new(s);
+                    for z in 0..s {
+                        for y in 0..s {
+                            for x in 0..s {
+                                let v = field.get_mut(x, y, z);
+                                v.density = 1.0;
+                                v.material = Material::Limestone;
+                            }
+                        }
+                    }
+                    store.density_fields.insert((cx, cy, cz), field);
+                }
+            }
+        }
+        // Carve an internal cavity so half the brush hits wall voxels.
+        let center = Vec3::new(96.0, 96.0, 96.0);
+        let _ = carve_sphere(&mut store, center, 40.0, &config, 1.0);
+
+        let runs = 5;
+        let mut total = std::time::Duration::ZERO;
+        for _ in 0..runs {
+            // Re-paint each run; ore writes are idempotent on already-ore so
+            // timing stays representative.
+            let t = std::time::Instant::now();
+            let _ = paint_ore_deposits(
+                &mut store, center, 50.0, OreWeights::balanced(),
+                1.5,  // cluster_size — default
+                4.0,  // min_spacing — default
+                0.0, 0.0, 1.0,
+                0.05, // density slider — default OreDensity
+                4242, &config, 1.0,
+            );
+            total += t.elapsed();
+        }
+        let per = total / runs as u32;
+        eprintln!("bench_ore_paint_large_brush: {} runs, avg {:?}", runs, per);
     }
 
     #[test]
