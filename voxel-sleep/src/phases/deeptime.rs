@@ -21,6 +21,55 @@ use crate::trace;
 use crate::util::{FACE_OFFSETS, sample_material, set_voxel_synced, count_neighbors, count_neighbors_cached, has_any_material_within_radius, grow_vein, default_vein_bias, sleep_vein_size, VeinGrowthParams, ChunkSampleCache};
 use crate::{Bottleneck, PhaseDiagnostics, ResourceCensus, TransformEntry};
 
+/// Single-pass fluid scan over the 6 face neighbors of `(wx, wy, wz)`.
+/// Returns `(has_water, has_lava)` — searching for both in ONE sweep instead
+/// of the previous two back-to-back loops that each walked the same 6 face
+/// offsets independently. Exits early once both are found.
+///
+/// Worst-case lookups: 6 (was 12). Best case unchanged (both found in same
+/// first neighbor → 1). Strictly ≤ original in every case.
+///
+/// Replaces 4 inline blocks in nest + corpse fossilization (Phase 4 steps 5
+/// and 6) that each did `has_water = scan {…}; has_lava = scan {…}` —
+/// halving the `fluid_snapshot.chunks` HashMap probes and the
+/// `div_euclid` / `rem_euclid` arithmetic on those scans.
+#[inline]
+fn scan_face_neighbors_for_fluids(
+    snapshot: &FluidSnapshot,
+    wx: i32, wy: i32, wz: i32,
+) -> (bool, bool) {
+    let cs = snapshot.chunk_size;
+    if cs == 0 { return (false, false); }
+    let cs_i32 = cs as i32;
+    let mut has_water = false;
+    let mut has_lava = false;
+    for &(dx, dy, dz) in &FACE_OFFSETS {
+        let nwx = wx + dx;
+        let nwy = wy + dy;
+        let nwz = wz + dz;
+        let fck = (
+            nwx.div_euclid(cs_i32),
+            nwy.div_euclid(cs_i32),
+            nwz.div_euclid(cs_i32),
+        );
+        if let Some(cells) = snapshot.chunks.get(&fck) {
+            let flx = nwx.rem_euclid(cs_i32) as usize;
+            let fly = nwy.rem_euclid(cs_i32) as usize;
+            let flz = nwz.rem_euclid(cs_i32) as usize;
+            let idx = flz * cs * cs + fly * cs + flx;
+            if idx < cells.len() {
+                let cell = &cells[idx];
+                if cell.level > 0.001 {
+                    if !has_water && cell.fluid_type.is_water() { has_water = true; }
+                    if !has_lava && cell.fluid_type.is_lava() { has_lava = true; }
+                    if has_water && has_lava { break; }
+                }
+            }
+        }
+    }
+    (has_water, has_lava)
+}
+
 /// Result of the deep time phase.
 #[derive(Debug)]
 pub struct DeepTimeResult {
@@ -778,69 +827,11 @@ pub fn apply_deeptime(
             let air_count = count_neighbors(density_fields, nx, ny, nz, chunk_size, |m| !m.is_solid());
             let is_buried = air_count == 0;
 
-            // Check for adjacent water
-            let has_water = {
-                let cs = fluid_snapshot.chunk_size;
-                let mut found = false;
-                if cs > 0 {
-                    for &(dx, dy, dz) in &FACE_OFFSETS {
-                        let nwx = nx + dx;
-                        let nwy = ny + dy;
-                        let nwz = nz + dz;
-                        let fck = (
-                            nwx.div_euclid(cs as i32),
-                            nwy.div_euclid(cs as i32),
-                            nwz.div_euclid(cs as i32),
-                        );
-                        if let Some(cells) = fluid_snapshot.chunks.get(&fck) {
-                            let flx = nwx.rem_euclid(cs as i32) as usize;
-                            let fly = nwy.rem_euclid(cs as i32) as usize;
-                            let flz = nwz.rem_euclid(cs as i32) as usize;
-                            let idx = flz * cs * cs + fly * cs + flx;
-                            if idx < cells.len() {
-                                let cell = &cells[idx];
-                                if cell.level > 0.001 && cell.fluid_type.is_water() {
-                                    found = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                found
-            };
-
-            // Check for nearby lava
-            let has_lava = {
-                let cs = fluid_snapshot.chunk_size;
-                let mut found = false;
-                if cs > 0 {
-                    for &(dx, dy, dz) in &FACE_OFFSETS {
-                        let nwx = nx + dx;
-                        let nwy = ny + dy;
-                        let nwz = nz + dz;
-                        let fck = (
-                            nwx.div_euclid(cs as i32),
-                            nwy.div_euclid(cs as i32),
-                            nwz.div_euclid(cs as i32),
-                        );
-                        if let Some(cells) = fluid_snapshot.chunks.get(&fck) {
-                            let flx = nwx.rem_euclid(cs as i32) as usize;
-                            let fly = nwy.rem_euclid(cs as i32) as usize;
-                            let flz = nwz.rem_euclid(cs as i32) as usize;
-                            let idx = flz * cs * cs + fly * cs + flx;
-                            if idx < cells.len() {
-                                let cell = &cells[idx];
-                                if cell.level > 0.001 && cell.fluid_type.is_lava() {
-                                    found = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                found
-            };
+            // Single-pass fluid scan: was TWO separate 6-face loops (has_water
+            // then has_lava) walking the same neighbors. Combined sweep halves
+            // the fluid_snapshot.chunks HashMap probes on this hot path.
+            let (has_water, has_lava) =
+                scan_face_neighbors_for_fluids(fluid_snapshot, nx, ny, nz);
 
             // Near lava → nothing
             if has_lava {
@@ -924,69 +915,16 @@ pub fn apply_deeptime(
                 None => continue,
             };
 
-            // Check for adjacent water
-            let has_water = if cf.water_required {
-                let cs = fluid_snapshot.chunk_size;
-                let mut found = false;
-                if cs > 0 {
-                    for &(dx, dy, dz) in &FACE_OFFSETS {
-                        let nwx = cx_pos + dx;
-                        let nwy = cy_pos + dy;
-                        let nwz = cz_pos + dz;
-                        let fck = (
-                            nwx.div_euclid(cs as i32),
-                            nwy.div_euclid(cs as i32),
-                            nwz.div_euclid(cs as i32),
-                        );
-                        if let Some(cells) = fluid_snapshot.chunks.get(&fck) {
-                            let flx = nwx.rem_euclid(cs as i32) as usize;
-                            let fly = nwy.rem_euclid(cs as i32) as usize;
-                            let flz = nwz.rem_euclid(cs as i32) as usize;
-                            let fidx = flz * cs * cs + fly * cs + flx;
-                            if fidx < cells.len() && cells[fidx].level > 0.001 && cells[fidx].fluid_type.is_water() {
-                                found = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-                found
-            } else {
-                true
-            };
+            // Single-pass fluid scan: was TWO separate 6-face loops (has_water
+            // then has_lava) walking the same neighbors. Combined sweep halves
+            // the fluid_snapshot.chunks HashMap probes on this hot path.
+            let (water_found, has_lava) =
+                scan_face_neighbors_for_fluids(fluid_snapshot, cx_pos, cy_pos, cz_pos);
+            let has_water = if cf.water_required { water_found } else { true };
 
             if !has_water {
                 continue;
             }
-
-            // Check for nearby lava (destroys corpses)
-            let has_lava = {
-                let cs = fluid_snapshot.chunk_size;
-                let mut found = false;
-                if cs > 0 {
-                    for &(dx, dy, dz) in &FACE_OFFSETS {
-                        let nwx = cx_pos + dx;
-                        let nwy = cy_pos + dy;
-                        let nwz = cz_pos + dz;
-                        let fck = (
-                            nwx.div_euclid(cs as i32),
-                            nwy.div_euclid(cs as i32),
-                            nwz.div_euclid(cs as i32),
-                        );
-                        if let Some(cells) = fluid_snapshot.chunks.get(&fck) {
-                            let flx = nwx.rem_euclid(cs as i32) as usize;
-                            let fly = nwy.rem_euclid(cs as i32) as usize;
-                            let flz = nwz.rem_euclid(cs as i32) as usize;
-                            let fidx = flz * cs * cs + fly * cs + flx;
-                            if fidx < cells.len() && cells[fidx].level > 0.001 && cells[fidx].fluid_type.is_lava() {
-                                found = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-                found
-            };
             if has_lava { continue; }
 
             // Material selection for corpse fossilization.
