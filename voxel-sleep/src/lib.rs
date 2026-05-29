@@ -114,6 +114,14 @@ pub struct SleepResult {
     pub lava_solidified: u32,
     /// World voxel positions of lava cells (for montage lava mesh visualization)
     pub lava_cells: Vec<(i32, i32, i32)>,
+    /// World voxel positions of SURFACE-EXPOSED changed voxels (for montage
+    /// camera framing). A changed voxel qualifies only if its post-sleep
+    /// solidity differs from at least one 6-neighbor — i.e. it sits on a
+    /// solid/air boundary the mesher actually renders. Buried change
+    /// (fully-surrounded solid) is excluded so the showcase camera frames
+    /// what the player can SEE, not invisible internal transformation.
+    /// Stride-capped to keep FFI transport + UE per-voxel LOS cheap.
+    pub surface_changed_cells: Vec<(i32, i32, i32)>,
     pub dirty_chunks: Vec<(i32, i32, i32)>,
     pub collapse_events: Vec<voxel_core::stress::CollapseEvent>,
     /// Exact world voxel position of the most intense aureole zone centroid (for montage camera)
@@ -922,6 +930,63 @@ pub fn execute_sleep(
         .map(|h| h.pos)
         .collect();
 
+    // Surface-exposed changed voxels (world voxel coords) for montage camera
+    // framing. The manifest records EVERY changed voxel, including ones buried
+    // deep in solid rock (metamorphism, enrichment) the camera can never see.
+    // Filter to voxels that sit on a solid/air boundary in the POST-sleep
+    // store — those are the ones the mesher renders, i.e. the change the
+    // player actually sees. Stride-cap to ~512 so FFI transport + UE per-voxel
+    // LOS stay cheap; a representative sample is plenty for centroid/coverage.
+    let surface_changed_cells: Vec<(i32, i32, i32)> = {
+        let cs = chunk_size as i32;
+        // Post-sleep solidity at a WORLD voxel coord (cross-chunk). Unloaded
+        // neighbor → treat as solid (don't fabricate a surface from a void).
+        let is_solid_at = |wx: i32, wy: i32, wz: i32| -> bool {
+            let ccx = wx.div_euclid(cs);
+            let ccy = wy.div_euclid(cs);
+            let ccz = wz.div_euclid(cs);
+            match density_fields.get(&(ccx, ccy, ccz)) {
+                Some(f) => {
+                    let lx = wx.rem_euclid(cs) as usize;
+                    let ly = wy.rem_euclid(cs) as usize;
+                    let lz = wz.rem_euclid(cs) as usize;
+                    f.get(lx, ly, lz).material.is_solid()
+                }
+                None => true,
+            }
+        };
+        const NEIGH: [(i32, i32, i32); 6] = [
+            (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
+        ];
+        let mut all: Vec<(i32, i32, i32)> = Vec::new();
+        for ((cx, cy, cz), delta) in result_manifest.chunk_deltas.iter() {
+            for vc in &delta.voxel_changes {
+                let wx = cx * cs + vc.lx as i32;
+                let wy = cy * cs + vc.ly as i32;
+                let wz = cz * cs + vc.lz as i32;
+                let self_solid = is_solid_at(wx, wy, wz);
+                let mut is_surface = false;
+                for (dx, dy, dz) in NEIGH {
+                    if is_solid_at(wx + dx, wy + dy, wz + dz) != self_solid {
+                        is_surface = true;
+                        break;
+                    }
+                }
+                if is_surface {
+                    all.push((wx, wy, wz));
+                }
+            }
+        }
+        // Stride-cap to ~512 representative cells (preserves spatial spread).
+        const MAX_CELLS: usize = 512;
+        if all.len() > MAX_CELLS {
+            let stride = (all.len() + MAX_CELLS - 1) / MAX_CELLS;
+            all.into_iter().step_by(stride).collect()
+        } else {
+            all
+        }
+    };
+
     trace(&format!("execute_sleep returning: dirty_chunks={} metamorphosed={} veins={} collapses={} elapsed={:.2}ms",
         dirty_chunks.len(), total_metamorphosed, total_veins, total_collapses,
         t_total.elapsed().as_secs_f64() * 1000.0));
@@ -948,6 +1013,7 @@ pub fn execute_sleep(
         gypsum_deposited: total_gypsum_deposited,
         lava_solidified: total_lava_solidified,
         lava_cells,
+        surface_changed_cells,
         dirty_chunks,
         collapse_events: all_collapse_events,
         aureole_glimpse_pos,
@@ -1530,6 +1596,10 @@ pub fn execute_aureole_only(
                 Vec::new()
             }
         },
+        // Aureole-only path: no per-voxel surface-change extraction (this path
+        // feeds POI/aureole replay, not the main showcase camera). Left empty;
+        // the camera falls back to chunk-set coverage when this is empty.
+        surface_changed_cells: Vec::new(),
         transform_log,
         manifest: { result_manifest.compact(); result_manifest },
         profile_report,

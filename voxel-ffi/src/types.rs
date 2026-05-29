@@ -1723,6 +1723,12 @@ pub struct FfiSleepResult {
     // Lava cell world voxel positions (for montage lava mesh)
     pub lava_cells: *mut FfiChunkCoord,
     pub lava_cell_count: u32,
+    // Surface-exposed changed voxel world positions (for montage camera
+    // framing — see SleepResult::surface_changed_cells). Packed as
+    // FfiChunkCoord for transport (it's voxel coords, not chunk coords).
+    // APPENDED AT END — UE's FVoxelSleepResult must mirror this exact order.
+    pub surface_changed_cells: *mut FfiChunkCoord,
+    pub surface_changed_cell_count: u32,
 }
 
 /// Morph step result: 8 meshes (one per showcase chunk) for progressive morphing.
@@ -2106,6 +2112,7 @@ pub enum WorkerResult {
         aureole_showcase_block: Option<Vec<(i32, i32, i32)>>,
         manifest_json: String,
         lava_cells: Vec<(i32, i32, i32)>,
+        surface_changed_cells: Vec<(i32, i32, i32)>,
     },
     MorphMeshes {
         step: u32,

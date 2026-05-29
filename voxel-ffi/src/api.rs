@@ -1416,6 +1416,8 @@ pub unsafe extern "C" fn voxel_poll_sleep_result(engine: *mut c_void) -> FfiSlee
         manifest_json_length: 0,
         lava_cells: ptr::null_mut(),
         lava_cell_count: 0,
+        surface_changed_cells: ptr::null_mut(),
+        surface_changed_cell_count: 0,
     };
     if engine.is_null() {
         return empty;
@@ -1492,6 +1494,17 @@ pub unsafe extern "C" fn voxel_poll_sleep_result(engine: *mut c_void) -> FfiSlee
                     ptr
                 },
                 lava_cell_count: data.lava_cells.len() as u32,
+                surface_changed_cells: if data.surface_changed_cells.is_empty() {
+                    ptr::null_mut()
+                } else {
+                    let mut coords: Vec<FfiChunkCoord> = data.surface_changed_cells.iter()
+                        .map(|&(x, y, z)| FfiChunkCoord { x, y, z })
+                        .collect();
+                    let ptr = coords.as_mut_ptr();
+                    std::mem::forget(coords);
+                    ptr
+                },
+                surface_changed_cell_count: data.surface_changed_cells.len() as u32,
             }
         },
         None => empty,
@@ -1640,6 +1653,14 @@ pub unsafe extern "C" fn voxel_free_sleep_result(result: *mut FfiSleepResult) {
             r.lava_cells,
             r.lava_cell_count as usize,
             r.lava_cell_count as usize,
+        );
+    }
+    if !r.surface_changed_cells.is_null() && r.surface_changed_cell_count > 0 {
+        // Reclaim FFI-allocated memory
+        let _ = Vec::from_raw_parts(
+            r.surface_changed_cells,
+            r.surface_changed_cell_count as usize,
+            r.surface_changed_cell_count as usize,
         );
     }
 }
