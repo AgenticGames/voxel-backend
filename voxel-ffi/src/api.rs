@@ -1340,6 +1340,36 @@ pub unsafe extern "C" fn voxel_set_sleep_corpses(
     1
 }
 
+/// Set the tagged top-POI chunks to simulate during the next sleep regardless
+/// of chunk_radius distance. UE passes UE chunk coords (converted to Rust);
+/// it should first ensure these chunks are streamed/generated so the sim has
+/// density to work on. This is what gives distant POIs (a far lava spot, a
+/// bridge across the map) REAL per-voxel reveal data instead of a synthesized
+/// fallback. Call AFTER voxel_set_sleep_config and BEFORE voxel_start_sleep.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_set_sleep_poi_chunks(
+    engine: *mut c_void,
+    chunk_xs: *const i32,
+    chunk_ys: *const i32,
+    chunk_zs: *const i32,
+    count: u32,
+) -> u32 {
+    if engine.is_null() || (count > 0 && (chunk_xs.is_null() || chunk_ys.is_null() || chunk_zs.is_null())) {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let positions: Vec<(i32, i32, i32)> = (0..count as usize)
+        .map(|i| {
+            let ux = *chunk_xs.add(i);
+            let uy = *chunk_ys.add(i);
+            let uz = *chunk_zs.add(i);
+            crate::convert::ue_chunk_to_rust(ux, uy, uz)
+        })
+        .collect();
+    engine.set_sleep_extra_chunks(positions);
+    1
+}
+
 /// Start a deep sleep cycle. player_chunk coordinates are in UE space.
 /// Returns 1 on success, 0 if queue full.
 #[no_mangle]

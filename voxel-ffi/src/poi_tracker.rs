@@ -40,16 +40,20 @@ use crate::store::ChunkStore;
 
 /// Chunks scored per scan tick. Higher → faster coverage of new exploration
 /// but more time spent holding read locks each tick.
-const SCAN_BUDGET_PER_TICK: usize = 16;
-/// Milliseconds between scan ticks. 2s = budget covers 8 chunks/sec.
-const TICK_DURATION_MS: u64 = 2000;
+const SCAN_BUDGET_PER_TICK: usize = 32;
+/// Milliseconds between scan ticks. 1s × 32-budget = 32 chunks/sec, so a
+/// ~374-chunk loaded region is fully scored in ~12s (was ~47s at 16/2s).
+/// Per-chunk work is cheap (stress count + topology vote walk) on this
+/// dedicated thread under a shared read lock, so 4× throughput is still
+/// negligible background cost.
+const TICK_DURATION_MS: u64 = 1000;
 /// Entries not re-scored within this many seconds get pruned. 30 minutes
 /// matches "the player is unlikely to want to revisit something they last
 /// saw half an hour ago."
 const TTL_SECS: u64 = 30 * 60;
 /// Run the TTL prune every N ticks (≈20s at default tick rate). Cheap, but
 /// not worth doing every tick.
-const PRUNE_EVERY_N_TICKS: u64 = 10;
+const PRUNE_EVERY_N_TICKS: u64 = 20;
 /// Score must reach this to ADD a fresh entry or REFRESH an existing one
 /// at full strength. Filters noise.
 const MIN_REGISTRABLE_SCORE: f32 = 30.0;
@@ -64,7 +68,7 @@ const SCORE_DECAY_PER_TICK: f32 = 0.6;
 /// Fluid snapshots cost a Clone of the entire fluid state on the fluid
 /// thread. Refresh every N ticks instead of every tick — fluid is slow
 /// enough that staleness of 6s is fine, and this cuts pressure 3×.
-const FLUID_SNAPSHOT_EVERY_N_TICKS: u64 = 3;
+const FLUID_SNAPSHOT_EVERY_N_TICKS: u64 = 6;
 /// Max time the tracker is willing to wait for the fluid thread to reply
 /// with a snapshot. If fluid is overwhelmed, we reuse the stale cached
 /// snapshot (stress scoring still happens against fresh data).

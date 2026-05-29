@@ -987,6 +987,18 @@ impl VoxelEngine {
         }
     }
 
+    /// Set the tagged top-POI chunks to simulate regardless of chunk_radius
+    /// (Rust chunk coords). UE sets these before start_sleep (after ensuring
+    /// they're streamed/generated) so distant points of interest get REAL
+    /// per-voxel reveal data in the morph manifest. Must be set AFTER
+    /// update_sleep_config (which resets the config) — same ordering rule as
+    /// nests/corpses.
+    pub fn set_sleep_extra_chunks(&self, positions: Vec<(i32, i32, i32)>) {
+        if let Ok(mut sc) = self.sleep_config.write() {
+            sc.extra_sim_chunks = positions;
+        }
+    }
+
     /// Start a deep sleep cycle. Sends request through the mine channel
     /// (which has exclusive write-lock priority).
     /// Returns 1 on success, 0 if queue full.
@@ -3927,6 +3939,7 @@ pub fn ffi_config_to_sleep(c: &FfiEngineConfig) -> voxel_sleep::SleepConfig {
         lava_solidification_enabled: c.sleep_lava_solidification_enabled != 0,
         nest_positions: Vec::new(),
         corpse_positions: Vec::new(),
+        extra_sim_chunks: Vec::new(), // set later via voxel_set_sleep_poi_chunks
         phase1_enabled: c.sleep_phase1_enabled != 0,
         phase2_enabled: c.sleep_phase2_enabled != 0,
         phase3_enabled: c.sleep_phase3_enabled != 0,

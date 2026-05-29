@@ -237,6 +237,76 @@ impl ChangeManifest {
         });
     }
 
+    /// Mirror boundary-face voxel changes into neighbor chunks so the montage
+    /// morph can rewind BOTH sides of a chunk seam.
+    ///
+    /// During sleep, a voxel on a chunk boundary has its DENSITY written into
+    /// both adjacent chunks (via `set_voxel_synced`), but the manifest
+    /// VoxelChange is recorded on only the owning chunk. The morph reveal
+    /// rewinds from the final (post-sleep) state per recorded change, so the
+    /// un-recorded mirror side stays at its final value — and the seam, which
+    /// stitches DC vertices across that boundary, reads fully-transformed from
+    /// step 0. This pass copies each boundary change into the neighbor chunk(s)
+    /// at the mirror local coord (faces → 1 neighbor, edges → 3, corners → 7),
+    /// matching `set_voxel_synced` semantics. Call BEFORE `compact()` so any
+    /// duplicate (lx,ly,lz) runs in the neighbor coalesce.
+    pub fn mirror_boundary_changes(&mut self, chunk_size: usize) {
+        let cs = chunk_size;
+        // Collect first — can't mutate chunk_deltas while iterating it.
+        let mut mirrored: Vec<((i32, i32, i32), VoxelChange)> = Vec::new();
+        for (&chunk, delta) in self.chunk_deltas.iter() {
+            // Synthesize-growth chunks animate procedurally (no per-voxel diff);
+            // don't seed them with mirrored changes (would flip them off that path).
+            if delta.synthesize_growth {
+                continue;
+            }
+            for vc in &delta.voxel_changes {
+                // Per-axis mirror: (neighbor offset, mirror local coord) or None.
+                let mx = if vc.lx == 0 { Some((-1i32, cs)) }
+                    else if vc.lx == cs { Some((1i32, 0usize)) } else { None };
+                let my = if vc.ly == 0 { Some((-1i32, cs)) }
+                    else if vc.ly == cs { Some((1i32, 0usize)) } else { None };
+                let mz = if vc.lz == 0 { Some((-1i32, cs)) }
+                    else if vc.lz == cs { Some((1i32, 0usize)) } else { None };
+                if mx.is_none() && my.is_none() && mz.is_none() {
+                    continue; // interior voxel — no seam involvement
+                }
+                // 2^3 combinations of (primary, mirror) per axis; skip all-primary.
+                for xm in 0..2u8 {
+                    for ym in 0..2u8 {
+                        for zm in 0..2u8 {
+                            if xm == 0 && ym == 0 && zm == 0 {
+                                continue;
+                            }
+                            let (ox, nlx) = if xm == 1 {
+                                match mx { Some(v) => v, None => continue }
+                            } else { (0i32, vc.lx) };
+                            let (oy, nly) = if ym == 1 {
+                                match my { Some(v) => v, None => continue }
+                            } else { (0i32, vc.ly) };
+                            let (oz, nlz) = if zm == 1 {
+                                match mz { Some(v) => v, None => continue }
+                            } else { (0i32, vc.lz) };
+                            let nkey = (chunk.0 + ox, chunk.1 + oy, chunk.2 + oz);
+                            let mut nvc = vc.clone();
+                            nvc.lx = nlx;
+                            nvc.ly = nly;
+                            nvc.lz = nlz;
+                            mirrored.push((nkey, nvc));
+                        }
+                    }
+                }
+            }
+        }
+        for (nkey, vc) in mirrored {
+            let delta = self.chunk_deltas.entry(nkey).or_default();
+            if delta.synthesize_growth {
+                continue;
+            }
+            delta.voxel_changes.push(vc);
+        }
+    }
+
     /// Merge another manifest's changes (from a sleep result) into this one.
     pub fn merge_sleep_changes(&mut self, other: &ChangeManifest) {
         for (chunk, delta) in &other.chunk_deltas {

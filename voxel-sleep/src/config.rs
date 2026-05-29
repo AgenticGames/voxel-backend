@@ -83,6 +83,15 @@ pub struct SleepConfig {
     /// Spider corpse world positions (set by FFI before sleep starts)
     #[serde(skip)]
     pub corpse_positions: Vec<(i32, i32, i32)>,
+    /// Extra chunk coords to simulate REGARDLESS of chunk_radius distance —
+    /// the tagged top-ranked POIs from poi_tracker. Set by the sleep worker
+    /// before execute_sleep (after generating any that weren't loaded). This
+    /// is what lets a distant lava spot / bridge get real per-voxel reveal
+    /// data: the sim covers (within-radius ∪ these), so the morph manifest
+    /// records their actual changes instead of the montage synthesizing a
+    /// fake reveal. Empty = legacy radius-only behavior.
+    #[serde(skip)]
+    pub extra_sim_chunks: Vec<(i32, i32, i32)>,
 
     // --- Legacy fields (kept for FFI backward compat during transition) ---
     #[serde(skip)]
@@ -120,6 +129,7 @@ impl Default for SleepConfig {
             lava_solidification_enabled: true,
             nest_positions: Vec::new(),
             corpse_positions: Vec::new(),
+            extra_sim_chunks: Vec::new(),
             // Legacy defaults
             metamorphism: MetamorphismConfig::default(),
             minerals: MineralConfig::default(),

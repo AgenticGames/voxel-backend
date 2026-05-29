@@ -408,6 +408,27 @@ pub fn execute_sleep(
             dx.max(dy).max(dz) <= radius
         })
         .collect();
+    // Union in the tagged top-POI chunks (config.extra_sim_chunks) REGARDLESS
+    // of distance, so far-flung points of interest get simulated → real
+    // per-voxel reveal data in the manifest (not a synthesized fake). The
+    // worker already generated any that weren't loaded; we still guard on
+    // density_fields presence so a stale/ungenerated coord can't crash the
+    // phase loops. Dedupe against the radius set so a nearby POI isn't doubled.
+    if !config.extra_sim_chunks.is_empty() {
+        let mut in_set: HashSet<(i32, i32, i32)> = loaded_chunks.iter().copied().collect();
+        let mut added = 0usize;
+        for &c in &config.extra_sim_chunks {
+            if density_fields.contains_key(&c) && in_set.insert(c) {
+                loaded_chunks.push(c);
+                added += 1;
+            }
+        }
+        if added > 0 {
+            trace(&format!(
+                "execute_sleep: +{} tagged-POI chunks beyond radius (of {} requested)",
+                added, config.extra_sim_chunks.len()));
+        }
+    }
     loaded_chunks.sort();
     let t_filter_elapsed = t_filter.elapsed();
 
@@ -858,6 +879,9 @@ pub fn execute_sleep(
     }
 
     transform_log.retain(|e| e.count > 0);
+    // Mirror boundary changes into neighbors so seams rewind on both sides
+    // during the montage morph (see ChangeManifest::mirror_boundary_changes).
+    result_manifest.mirror_boundary_changes(chunk_size);
     result_manifest.compact(); // Merge multi-phase changes per voxel: first.old + last.new
     result_manifest.sleep_count = sleep_count;
     let dirty_chunks: Vec<(i32, i32, i32)> = all_dirty.into_iter().collect();
@@ -1633,7 +1657,7 @@ pub fn execute_aureole_only(
         // UE reads as "no profile, pace every step normally" (no culling).
         surface_step_activity: [0u16; SURFACE_ACTIVITY_BUCKETS],
         transform_log,
-        manifest: { result_manifest.compact(); result_manifest },
+        manifest: { result_manifest.mirror_boundary_changes(chunk_size); result_manifest.compact(); result_manifest },
         profile_report,
         timings: SleepTimings::default(),
         minerals_grown: 0,

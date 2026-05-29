@@ -4065,23 +4065,53 @@ fn handle_request(
             // Send each dirty chunk mesh through the normal ChunkMesh pipeline
             // so UE auto-remeshes existing chunk actors
             let t_mesh_send = Instant::now();
-            eprintln!("[SLEEP_REMESH] Sending {} chunk meshes (from {} dirty + neighbors)", meshes.len(), dirty_count);
-            for (chunk, mesh) in meshes {
-                let ue = crate::convert::rust_chunk_to_ue(chunk.0, chunk.1, chunk.2);
-                let vert_count = mesh.positions.len() / 3;
-                eprintln!("[SLEEP_REMESH]   Rust({},{},{}) → UE({},{},{})  verts={}",
-                    chunk.0, chunk.1, chunk.2, ue.0, ue.1, ue.2, vert_count);
+            // ROOT FIX (2026-05-29): remesh_dirty returns BASE-only meshes (it
+            // refreshes seam DATA in the store but does not append seam QUADS to
+            // the returned mesh). Sending those directly leaves EVERY sleep-
+            // touched chunk + neighbour SEAMLESS — the "seams vanish the moment
+            // the montage begins, across the whole cave, and never recover" bug
+            // (normal mining does a follow-up seam combine; the sleep path never
+            // did). remesh_dirty already updated chunk_seam_data above, so here
+            // we re-combine base + seam quads per chunk (same as the mining /
+            // force-resync seam pass) before sending, so post-sleep chunks carry
+            // their seams.
+            let dirty_keys: Vec<(i32, i32, i32)> = meshes.iter().map(|(k, _)| *k).collect();
+            let mut dbg_total_seam_tris = 0usize;
+            let mut dbg_chunks_with_seams = 0usize;
+            let mut dbg_chunks_no_seams = 0usize;
+            eprintln!("[SLEEP_SEAM] base+seam remesh: {} chunks (from {} dirty + neighbors)", dirty_keys.len(), dirty_count);
+            for chunk in dirty_keys {
+                let (converted, dbg_seam_tris) = {
+                    let s = store.read().unwrap();
+                    let base = match s.base_meshes.get(&chunk) { Some(m) => m.clone(), None => continue };
+                    let seam = region_gen::generate_chunk_seam_quads(chunk, &s.chunk_seam_data, cfg.chunk_size);
+                    let st = seam.triangles.len();
+                    let mut combined = base;
+                    if !seam.triangles.is_empty() { combined.append(seam); }
+                    if cfg.mesh_recalc_normals > 0 { combined.recalculate_normals(); }
+                    let mut c = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
+                    crate::convert::bucket_mesh_by_material(&mut c);
+                    (c, st)
+                };
+                dbg_total_seam_tris += dbg_seam_tris;
+                if dbg_seam_tris > 0 { dbg_chunks_with_seams += 1; } else if !converted.positions.is_empty() { dbg_chunks_no_seams += 1; }
                 let crystal_data = retrieve_crystal_data(store, chunk, cfg.voxel_scale(), world_scale);
                 let mushroom_data = retrieve_mushroom_data(store, chunk, cfg.voxel_scale(), world_scale);
                 let _ = result_tx.send(WorkerResult::ChunkMesh {
                     chunk,
-                    mesh,
+                    mesh: converted,
                     generation: 0, // Sleep remesh
                     crystal_data,
                     mushroom_data,
                     zone_descriptors: Vec::new(),
                 });
             }
+            // [SLEEP_SEAM DBG 2026-05-29] Verify the post-sleep remesh carries
+            // seams. If chunks_with_seams is high and seams are STILL missing
+            // in-world, the loss is downstream (UE apply); if it's ~0, the seam
+            // generation itself is failing for the sleep region.
+            eprintln!("[SLEEP_SEAM] sent base+seam: {} chunks with seams, {} solid chunks WITHOUT seams, {} total seam tris",
+                dbg_chunks_with_seams, dbg_chunks_no_seams, dbg_total_seam_tris);
             let t_mesh_send_elapsed = t_mesh_send.elapsed();
 
             // Send collapse events through the normal CollapseResult pipeline
@@ -4497,6 +4527,12 @@ fn handle_request(
             let chunks_set: std::collections::HashSet<(i32, i32, i32)> =
                 chunks.iter().copied().collect();
             let mut seam_data_map: std::collections::HashMap<(i32, i32, i32), ChunkSeamData> = {
+                // INTERIM (2026-05-29): full seams EVERY step (no holes). The
+                // boundary geometry mostly doesn't morph, so these read as
+                // already-transformed — but that beats see-through gaps. Proper
+                // reveal-timed seams pending diagnosis of the morph/seam path.
+                // Out-of-block neighbours come from the store (post-sleep t=1);
+                // in-block dc_verts are added below.
                 let s = store.read().unwrap();
                 let mut map = std::collections::HashMap::new();
                 for &c in &chunks {
@@ -4537,7 +4573,9 @@ fn handle_request(
             for (i, base_opt) in base_meshes.into_iter().enumerate() {
                 match base_opt {
                     Some(mut mesh) => {
-                        // Generate seam quads for this chunk using neighbors in the block
+                        // INTERIM: full seams every step (no holes). Boundary
+                        // geometry mostly doesn't morph so these read as
+                        // already-transformed, but solid-with-seams beats gaps.
                         let seam_mesh = region_gen::generate_chunk_seam_quads(
                             chunks[i], &seam_data_map, chunk_size);
                         if !seam_mesh.triangles.is_empty() {

@@ -28,13 +28,14 @@ use voxel_world_memory::WorldMemory;
 
 use crate::store::ChunkStore;
 
-/// Chunks scanned per tick. Matches POI tracker's `SCAN_BUDGET_PER_TICK = 16`.
-const SCAN_BUDGET_PER_TICK: usize = 16;
+/// Chunks scanned per tick. Matches POI tracker's `SCAN_BUDGET_PER_TICK = 32`.
+const SCAN_BUDGET_PER_TICK: usize = 32;
 /// Tick interval in milliseconds. Matches POI tracker's `TICK_DURATION_MS`.
-const TICK_DURATION_MS: u64 = 2000;
-/// Refresh fluid snapshot every N ticks (~6 s at 2 s tick). Matches POI
-/// tracker's `FLUID_SNAPSHOT_EVERY_N_TICKS = 3`.
-const FLUID_SNAPSHOT_EVERY_N_TICKS: u64 = 3;
+/// 1s × 32-budget = 32 chunks/sec → a ~374-chunk region fully scored in ~12s.
+const TICK_DURATION_MS: u64 = 1000;
+/// Refresh fluid snapshot every N ticks (~6 s at 1 s tick). Matches POI
+/// tracker's `FLUID_SNAPSHOT_EVERY_N_TICKS = 6`.
+const FLUID_SNAPSHOT_EVERY_N_TICKS: u64 = 6;
 const FLUID_SNAPSHOT_TIMEOUT_MS: u64 = 200;
 /// Drain at most this many events from the WorldMemory event queue per tick.
 /// Prevents a brush burst from monopolizing the scan budget.
