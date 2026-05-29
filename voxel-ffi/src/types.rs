@@ -1729,6 +1729,11 @@ pub struct FfiSleepResult {
     // APPENDED AT END — UE's FVoxelSleepResult must mirror this exact order.
     pub surface_changed_cells: *mut FfiChunkCoord,
     pub surface_changed_cell_count: u32,
+    // Per-t surface-activity histogram (fixed 64 buckets, no alloc/free).
+    // bucket b ≈ reveal time t = b/64. The montage culls dead reveal steps
+    // (steps whose t-window holds <1% of total activity). UE mirrors this as
+    // uint16 SurfaceActivity[64] — same fixed length, same position at END.
+    pub surface_activity: [u16; voxel_sleep::SURFACE_ACTIVITY_BUCKETS],
 }
 
 /// Morph step result: 8 meshes (one per showcase chunk) for progressive morphing.
@@ -2113,6 +2118,7 @@ pub enum WorkerResult {
         manifest_json: String,
         lava_cells: Vec<(i32, i32, i32)>,
         surface_changed_cells: Vec<(i32, i32, i32)>,
+        surface_step_activity: [u16; voxel_sleep::SURFACE_ACTIVITY_BUCKETS],
     },
     MorphMeshes {
         step: u32,

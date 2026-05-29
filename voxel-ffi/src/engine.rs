@@ -76,6 +76,7 @@ pub struct SleepCompleteData {
     pub manifest_json: String,
     pub lava_cells: Vec<(i32, i32, i32)>,
     pub surface_changed_cells: Vec<(i32, i32, i32)>,
+    pub surface_step_activity: [u16; voxel_sleep::SURFACE_ACTIVITY_BUCKETS],
 }
 
 /// Internal morph step result (Rust side, before FFI conversion).
@@ -774,6 +775,7 @@ impl VoxelEngine {
                 manifest_json,
                 lava_cells,
                 surface_changed_cells,
+                surface_step_activity,
             }) => {
                 // ─── Block 1: invalidate predictor cache + record event ───
                 // Real sleep result is authoritative; prediction is now stale.
@@ -816,6 +818,7 @@ impl VoxelEngine {
                         manifest_json,
                         lava_cells,
                         surface_changed_cells,
+                        surface_step_activity,
                     });
                 }
                 // Don't expose to the FfiResult pipeline; UE polls via voxel_poll_sleep_result

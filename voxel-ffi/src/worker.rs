@@ -4162,6 +4162,7 @@ fn handle_request(
                 manifest_json,
                 lava_cells: sleep_result.lava_cells,
                 surface_changed_cells: sleep_result.surface_changed_cells,
+                surface_step_activity: sleep_result.surface_step_activity,
             });
         }
         WorkerRequest::AureoleOnly { player_chunk, sleep_config: sc } => {
@@ -4268,6 +4269,7 @@ fn handle_request(
                 manifest_json: String::new(), // Aureole-only doesn't need morph
                 lava_cells: sleep_result.lava_cells,
                 surface_changed_cells: sleep_result.surface_changed_cells,
+                surface_step_activity: sleep_result.surface_step_activity,
             });
         }
         WorkerRequest::MorphStep { chunks, step, total_steps } => {

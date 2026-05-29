@@ -1418,6 +1418,7 @@ pub unsafe extern "C" fn voxel_poll_sleep_result(engine: *mut c_void) -> FfiSlee
         lava_cell_count: 0,
         surface_changed_cells: ptr::null_mut(),
         surface_changed_cell_count: 0,
+        surface_activity: [0u16; voxel_sleep::SURFACE_ACTIVITY_BUCKETS],
     };
     if engine.is_null() {
         return empty;
@@ -1505,6 +1506,7 @@ pub unsafe extern "C" fn voxel_poll_sleep_result(engine: *mut c_void) -> FfiSlee
                     ptr
                 },
                 surface_changed_cell_count: data.surface_changed_cells.len() as u32,
+                surface_activity: data.surface_step_activity,
             }
         },
         None => empty,

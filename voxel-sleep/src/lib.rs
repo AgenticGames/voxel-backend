@@ -88,6 +88,12 @@ pub struct SleepTimings {
     pub cosmetic_chunks: u32,
 }
 
+/// Resolution of the per-t surface-activity histogram (see
+/// SleepResult::surface_step_activity). The montage uses it to skip dead
+/// reveal steps. MUST match the UE-side FVoxelSleepResult::SurfaceActivity
+/// array length.
+pub const SURFACE_ACTIVITY_BUCKETS: usize = 64;
+
 /// Results of a deep sleep cycle.
 #[derive(Debug, Clone)]
 pub struct SleepResult {
@@ -122,6 +128,12 @@ pub struct SleepResult {
     /// what the player can SEE, not invisible internal transformation.
     /// Stride-capped to keep FFI transport + UE per-voxel LOS cheap.
     pub surface_changed_cells: Vec<(i32, i32, i32)>,
+    /// Per-t histogram of when SURFACE voxels visibly "pop" during the morph
+    /// (bucket b ≈ reveal time t = b / SURFACE_ACTIVITY_BUCKETS). The montage
+    /// reads this to cull dead reveal steps — steps whose t-window holds
+    /// <1% of total surface activity play as unmoving rock and get their
+    /// pacing skipped. Empty for the aureole-only / synthesize-growth path.
+    pub surface_step_activity: [u16; SURFACE_ACTIVITY_BUCKETS],
     pub dirty_chunks: Vec<(i32, i32, i32)>,
     pub collapse_events: Vec<voxel_core::stress::CollapseEvent>,
     /// Exact world voxel position of the most intense aureole zone centroid (for montage camera)
@@ -937,6 +949,15 @@ pub fn execute_sleep(
     // store — those are the ones the mesher renders, i.e. the change the
     // player actually sees. Stride-cap to ~512 so FFI transport + UE per-voxel
     // LOS stay cheap; a representative sample is plenty for centroid/coverage.
+    //
+    // While we have every surface voxel + its spread_distance in hand, also
+    // bucket a per-t SURFACE-ACTIVITY histogram: the morph reveals each voxel
+    // over t∈[0,1] and its material "pops" at t ≈ 0.5 + 0.3·spread_distance.
+    // Bucketing those pop-times tells the montage WHICH steps actually show
+    // visible (surface) change — so it can skip pacing on the dead steps that
+    // would otherwise play as unmoving rock. Built over the FULL surface set
+    // (not the stride-capped sample) for an accurate profile.
+    let mut surface_step_activity = [0u16; SURFACE_ACTIVITY_BUCKETS];
     let surface_changed_cells: Vec<(i32, i32, i32)> = {
         let cs = chunk_size as i32;
         // Post-sleep solidity at a WORLD voxel coord (cross-chunk). Unloaded
@@ -973,6 +994,13 @@ pub fn execute_sleep(
                     }
                 }
                 if is_surface {
+                    // Pop-time bucket (matches the morph's per-voxel timing in
+                    // voxel-ffi/src/worker.rs: voxel material flips at
+                    // voxel_t=0.5 → t = 0.5 + 0.3·spread_distance).
+                    let pop_t = (0.5 + 0.3 * vc.spread_distance).clamp(0.0, 1.0);
+                    let b = ((pop_t * SURFACE_ACTIVITY_BUCKETS as f32) as usize)
+                        .min(SURFACE_ACTIVITY_BUCKETS - 1);
+                    surface_step_activity[b] = surface_step_activity[b].saturating_add(1);
                     all.push((wx, wy, wz));
                 }
             }
@@ -1014,6 +1042,7 @@ pub fn execute_sleep(
         lava_solidified: total_lava_solidified,
         lava_cells,
         surface_changed_cells,
+        surface_step_activity,
         dirty_chunks,
         collapse_events: all_collapse_events,
         aureole_glimpse_pos,
@@ -1600,6 +1629,9 @@ pub fn execute_aureole_only(
         // feeds POI/aureole replay, not the main showcase camera). Left empty;
         // the camera falls back to chunk-set coverage when this is empty.
         surface_changed_cells: Vec::new(),
+        // No per-voxel reveal timing on this path → all-zero activity, which
+        // UE reads as "no profile, pace every step normally" (no culling).
+        surface_step_activity: [0u16; SURFACE_ACTIVITY_BUCKETS],
         transform_log,
         manifest: { result_manifest.compact(); result_manifest },
         profile_report,
