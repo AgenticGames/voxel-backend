@@ -228,24 +228,51 @@ fn determine_aureole_type(
 // Water Boost
 // ──────────────────────────────────────────────────────────────
 
-/// Look up a fluid cell at world voxel coords. Returns the cell if present
-/// in the snapshot (i.e. the chunk is loaded), None otherwise.
-#[inline]
-fn fluid_cell_at(
-    snapshot: &FluidSnapshot,
-    wx: i32,
-    wy: i32,
-    wz: i32,
-) -> Option<&voxel_fluid::cell::FluidCell> {
-    let cs = snapshot.chunk_size as i32;
-    let key = (wx.div_euclid(cs), wy.div_euclid(cs), wz.div_euclid(cs));
-    let lx = wx.rem_euclid(cs) as usize;
-    let ly = wy.rem_euclid(cs) as usize;
-    let lz = wz.rem_euclid(cs) as usize;
-    let cells = snapshot.chunks.get(&key)?;
-    let cs_u = snapshot.chunk_size;
-    let idx = lz * cs_u * cs_u + ly * cs_u + lx;
-    cells.get(idx)
+/// Single-slot chunk-pointer cache for `FluidSnapshot` cell lookups,
+/// mirroring `ChunkSampleCache` for density fields. Inside the Phase-1 /
+/// Phase-2 BFS in `compute_water_boost` the same FluidSnapshot chunk is
+/// probed dozens of times in a row — 6 face neighbors per frontier cell,
+/// plus consecutive frontier cells that share a chunk. This collapses every
+/// same-chunk probe after the first into a `(i32,i32,i32)` equality +
+/// pointer deref instead of a SipHash + HashMap probe.
+///
+/// Negative-result caching (None) is intentional: an unloaded chunk probed
+/// repeatedly (BFS hitting the world edge) should also short-circuit.
+struct FluidChunkCache<'a> {
+    last_key: Option<(i32, i32, i32)>,
+    last_cells: Option<&'a Vec<voxel_fluid::cell::FluidCell>>,
+}
+
+impl<'a> FluidChunkCache<'a> {
+    #[inline]
+    fn new() -> Self { Self { last_key: None, last_cells: None } }
+
+    #[inline]
+    fn cell(
+        &mut self,
+        snapshot: &'a FluidSnapshot,
+        wx: i32,
+        wy: i32,
+        wz: i32,
+    ) -> Option<&'a voxel_fluid::cell::FluidCell> {
+        let cs_i = snapshot.chunk_size as i32;
+        let key = (wx.div_euclid(cs_i), wy.div_euclid(cs_i), wz.div_euclid(cs_i));
+        let cells = if self.last_key == Some(key) {
+            self.last_cells
+        } else {
+            let r = snapshot.chunks.get(&key);
+            self.last_key = Some(key);
+            self.last_cells = r;
+            r
+        };
+        let cells = cells?;
+        let cs = snapshot.chunk_size;
+        let lx = wx.rem_euclid(cs_i) as usize;
+        let ly = wy.rem_euclid(cs_i) as usize;
+        let lz = wz.rem_euclid(cs_i) as usize;
+        let idx = lz * cs * cs + ly * cs + lx;
+        cells.get(idx)
+    }
 }
 
 /// Detailed water-boost computation for a single lava zone using the
@@ -285,6 +312,10 @@ fn compute_water_boost(
     let mut visited: HashSet<(i32, i32, i32)> = lava_set.clone();
     let mut frontier: Vec<(i32, i32, i32)> = zone.cells.clone();
     let mut phase1_water: Vec<(i32, i32, i32)> = Vec::new();
+    // Single cache hoisted across every BFS shell — face neighbors of a
+    // frontier cell, and consecutive frontier cells inside one shell, mostly
+    // share a chunk. Collapses ~6N HashMap probes into ~N + chunk-transitions.
+    let mut fluid_cache = FluidChunkCache::new();
     for _depth in 0..search_r {
         let mut next: Vec<(i32, i32, i32)> = Vec::new();
         for pos in frontier.drain(..) {
@@ -292,7 +323,7 @@ fn compute_water_boost(
                 let n = (pos.0 + dx, pos.1 + dy, pos.2 + dz);
                 if !visited.insert(n) { continue; }
                 if lava_set.contains(&n) { continue; }
-                if let Some(cell) = fluid_cell_at(fluid_snapshot, n.0, n.1, n.2) {
+                if let Some(cell) = fluid_cache.cell(fluid_snapshot, n.0, n.1, n.2) {
                     if cell.level > 0.001 && cell.fluid_type.is_water() {
                         phase1_water.push(n);
                     }
@@ -312,13 +343,16 @@ fn compute_water_boost(
     let mut phase2_visited: HashSet<(i32, i32, i32)> = phase1_water.iter().copied().collect();
     let mut phase2_count: u32 = 0;
     let mut p2_frontier: Vec<(i32, i32, i32)> = phase1_water.clone();
+    // Reuse the cache across Phase 2 BFS — water network cells stay clustered
+    // along rivers/aquifers so same-chunk runs are even longer here.
+    let mut fluid_cache_p2 = FluidChunkCache::new();
     for _hops in 0..net_max_hops {
         let mut next: Vec<(i32, i32, i32)> = Vec::new();
         for pos in p2_frontier.drain(..) {
             for &(dx, dy, dz) in &FACE_OFFSETS {
                 let n = (pos.0 + dx, pos.1 + dy, pos.2 + dz);
                 if !phase2_visited.insert(n) { continue; }
-                if let Some(cell) = fluid_cell_at(fluid_snapshot, n.0, n.1, n.2) {
+                if let Some(cell) = fluid_cache_p2.cell(fluid_snapshot, n.0, n.1, n.2) {
                     if cell.level > 0.001 && cell.fluid_type.is_water() {
                         phase2_count += 1;
                         next.push(n);
