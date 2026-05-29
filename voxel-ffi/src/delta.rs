@@ -993,7 +993,13 @@ mod tests {
     fn make_test_density(size: usize) -> DensityField {
         let mut df = DensityField::new(size);
         for (i, sample) in df.samples.iter_mut().enumerate() {
-            sample.density = i as f32 * 0.01;
+            // Densities MUST stay within [-1.0, 1.0]: ChunkSnapshot::apply_to
+            // clamps to that band (the valid voxel-density range). The old
+            // `i as f32 * 0.01` reached >1.0 (e.g. 1.01 at i=101, up to 3.42
+            // at size=31) and clamped to 1.0 on round-trip, failing the
+            // exact-equality check. Cycle i through [-1.00, 1.00] instead so
+            // the f32 round-trip is exact while still exercising varied values.
+            sample.density = ((i % 201) as i32 - 100) as f32 * 0.01;
             sample.material = if i % 3 == 0 {
                 Material::Granite
             } else if i % 3 == 1 {
