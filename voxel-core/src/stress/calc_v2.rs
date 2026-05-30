@@ -239,11 +239,18 @@ pub fn recalc_stress_region_v2_filtered(
             None => continue,
         };
 
+        // Hoist the per-chunk map lookups out of the gs³ voxel loop: the chunk
+        // key is constant for the whole triple loop, so re-hashing it (SipHash
+        // over a 12-byte tuple) ~30k× per chunk was pure overhead. Fetch the
+        // mutable stress field + the support-score field once; reborrow inside.
+        let chunk_support = support_scores.get(&(cx, cy, cz));
+        let mut chunk_sf = stress_fields.get_mut(&(cx, cy, cz));
+
         for z in 0..grid_size {
             for y in 0..grid_size {
                 for x in 0..grid_size {
                     if !df.get(x, y, z).material.is_solid() {
-                        if let Some(sf) = stress_fields.get_mut(&(cx, cy, cz)) {
+                        if let Some(sf) = chunk_sf.as_deref_mut() {
                             sf.set(x, y, z, 0.0);
                             sf.set_class(x, y, z, 0); // Air = no classification
                         }
@@ -261,8 +268,7 @@ pub fn recalc_stress_region_v2_filtered(
                     }
 
                     // Interior skip: fully grounded voxels get 0 stress but still classified.
-                    let my_support = support_scores
-                        .get(&(cx, cy, cz))
+                    let my_support = chunk_support
                         .map(|sf| sf.get(x, y, z))
                         .unwrap_or(1.0);
                     if my_support >= config.ground_threshold {
@@ -279,7 +285,7 @@ pub fn recalc_stress_region_v2_filtered(
                         let stype = if air_n == 0 { SURFACE_INTERIOR }
                             else if below_solid { SURFACE_FLOOR }
                             else { SURFACE_WALL };
-                        if let Some(sf) = stress_fields.get_mut(&(cx, cy, cz)) {
+                        if let Some(sf) = chunk_sf.as_deref_mut() {
                             sf.set(x, y, z, 0.0);
                             sf.set_class(x, y, z, pack_classification(stype, SOURCE_NONE));
                         }
@@ -293,11 +299,11 @@ pub fn recalc_stress_region_v2_filtered(
 
                     // Painted overlay (creative-mode PaintStress brush) is
                     // captured BEFORE the set, since set() doesn't touch it.
-                    let painted = stress_fields
-                        .get(&(cx, cy, cz))
+                    let painted = chunk_sf
+                        .as_deref()
                         .map(|sf| sf.painted(x, y, z))
                         .unwrap_or(0.0);
-                    if let Some(sf) = stress_fields.get_mut(&(cx, cy, cz)) {
+                    if let Some(sf) = chunk_sf.as_deref_mut() {
                         sf.set(x, y, z, stress);
                         sf.set_class(x, y, z, classification);
                         affected_chunks.insert((cx, cy, cz));
@@ -352,11 +358,17 @@ pub fn recalc_stress_region_v2_with_load_decay(
             None => continue,
         };
 
+        // Hoist the per-chunk map lookups out of the gs³ voxel loop (see
+        // recalc_stress_region_v2_filtered for the rationale). The chunk key is
+        // loop-invariant; re-hashing it per voxel was pure overhead.
+        let chunk_support = support_scores.get(&(cx, cy, cz));
+        let mut chunk_sf = stress_fields.get_mut(&(cx, cy, cz));
+
         for z in 0..grid_size {
             for y in 0..grid_size {
                 for x in 0..grid_size {
                     if !df.get(x, y, z).material.is_solid() {
-                        if let Some(sf) = stress_fields.get_mut(&(cx, cy, cz)) {
+                        if let Some(sf) = chunk_sf.as_deref_mut() {
                             sf.set(x, y, z, 0.0);
                             sf.set_class(x, y, z, 0);
                         }
@@ -369,8 +381,7 @@ pub fn recalc_stress_region_v2_with_load_decay(
 
                     if use_filter && !in_any_event(events, wx, wy, wz) { continue; }
 
-                    let my_support = support_scores
-                        .get(&(cx, cy, cz))
+                    let my_support = chunk_support
                         .map(|sf| sf.get(x, y, z))
                         .unwrap_or(1.0);
                     if my_support >= config.ground_threshold {
@@ -385,7 +396,7 @@ pub fn recalc_stress_region_v2_with_load_decay(
                         let stype = if air_n == 0 { SURFACE_INTERIOR }
                             else if below_solid { SURFACE_FLOOR }
                             else { SURFACE_WALL };
-                        if let Some(sf) = stress_fields.get_mut(&(cx, cy, cz)) {
+                        if let Some(sf) = chunk_sf.as_deref_mut() {
                             sf.set(x, y, z, 0.0);
                             sf.set_class(x, y, z, pack_classification(stype, SOURCE_NONE));
                         }
@@ -404,19 +415,15 @@ pub fn recalc_stress_region_v2_with_load_decay(
                     // grounded rock with no span) shouldn't wear down just
                     // by existing. Painted stress also counts so creative
                     // brushes can burn struts down deliberately.
-                    let painted_now = stress_fields
-                        .get(&(cx, cy, cz))
+                    let painted = chunk_sf
+                        .as_deref()
                         .map(|sf| sf.painted(x, y, z))
                         .unwrap_or(0.0);
-                    if stress > 0.001 || painted_now > 0.001 {
+                    if stress > 0.001 || painted > 0.001 {
                         accumulate_strut_load_at_voxel(support_fields, &mut loads, wx, wy, wz, cs);
                     }
 
-                    let painted = stress_fields
-                        .get(&(cx, cy, cz))
-                        .map(|sf| sf.painted(x, y, z))
-                        .unwrap_or(0.0);
-                    if let Some(sf) = stress_fields.get_mut(&(cx, cy, cz)) {
+                    if let Some(sf) = chunk_sf.as_deref_mut() {
                         sf.set(x, y, z, stress);
                         sf.set_class(x, y, z, classification);
                         affected_chunks.insert((cx, cy, cz));
