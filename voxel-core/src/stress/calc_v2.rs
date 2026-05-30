@@ -23,6 +23,38 @@ use super::calc::{
     sample_strut_alive, sample_support, sample_world, world_to_chunk_local,
 };
 
+/// Same-chunk fast path for a face/below neighbor solidity sample inside the
+/// Pass-2 classification loop.
+///
+/// When the neighbor's local coords all fall STRICTLY inside the current
+/// chunk's `[0, cs-1]` grid, `world_to_chunk_local` resolves them right back to
+/// `(cx,cy,cz)` — i.e. the `df` we already hold — so reading `df` directly is
+/// bit-identical to `sample_world` while skipping the per-voxel chunk-key
+/// re-hash (SipHash over a 12-byte tuple) + `density_fields` HashMap probe. Only
+/// genuine cross-chunk neighbors (a voxel on a chunk face stepping out of
+/// `[0, cs-1]`, including the shared `cs` overlap row on an unchanged axis) fall
+/// through to `sample_world`. Returns `None` for an unloaded chunk exactly as
+/// `sample_world` does, so callers' `None` handling is unchanged.
+///
+/// Interior voxels are the common case during the initial-load / zone-stream /
+/// save-load storm (recalc runs over every solid voxel), so this elides ~7
+/// HashMap probes per grounded voxel almost everywhere but the chunk shell.
+#[inline]
+fn neighbor_solid_same_chunk(
+    df: &DensityField,
+    density_fields: &HashMap<(i32, i32, i32), DensityField>,
+    cs: usize,
+    nlx: i32, nly: i32, nlz: i32, // neighbor local coords in the current chunk
+    wnx: i32, wny: i32, wnz: i32, // neighbor world coords (for the fallback)
+) -> Option<bool> {
+    let cs_i = cs as i32;
+    if nlx >= 0 && nlx < cs_i && nly >= 0 && nly < cs_i && nlz >= 0 && nlz < cs_i {
+        Some(df.get(nlx as usize, nly as usize, nlz as usize).material.is_solid())
+    } else {
+        sample_world(density_fields, wnx, wny, wnz, cs).map(|(_, m)| m.is_solid())
+    }
+}
+
 /// V2 stress calculation for a single voxel using precomputed ground connectivity.
 pub fn calc_voxel_stress_v2(
     density_fields: &HashMap<(i32, i32, i32), DensityField>,
@@ -56,13 +88,14 @@ pub fn calc_voxel_stress_v2(
     // Floor protection: solid below AND well-supported by the flood = stable floor.
     // Thick ceiling rock has solid below but LOW flood score (air gap broke chain) → NOT protected.
     // Floor rock has solid below AND HIGH flood score (connected to surface) → protected.
-    {
-        let below_solid = sample_world(density_fields, wx, wy - 1, wz, chunk_size)
-            .map(|(_, m)| m.is_solid())
-            .unwrap_or(true);
-        if below_solid && support_score >= 0.2 {
-            return (0.0, pack_classification(SURFACE_FLOOR, SOURCE_NONE));
-        }
+    // `below_solid` is reused by the surface classification below — computing the
+    // `(wx, wy-1, wz)` sample once saves a redundant chunk-key resolve + HashMap
+    // probe per voxel that reaches the span-stress path.
+    let below_solid = sample_world(density_fields, wx, wy - 1, wz, chunk_size)
+        .map(|(_, m)| m.is_solid())
+        .unwrap_or(true);
+    if below_solid && support_score >= 0.2 {
+        return (0.0, pack_classification(SURFACE_FLOOR, SOURCE_NONE));
     }
 
     // Distance-to-air decay: stress attenuates as we go deeper into rock.
@@ -159,9 +192,8 @@ pub fn calc_voxel_stress_v2(
 
     // Classify surface type using BOTH local air neighbors AND air_dist.
     // A voxel with air_neighbors==0 but air_dist<=4 is near the surface and may have
-    // stress — classify by geometry (below_solid) rather than defaulting to INTERIOR.
-    let below_solid = sample_world(density_fields, wx, wy - 1, wz, chunk_size)
-        .map(|(_, m)| m.is_solid()).unwrap_or(true);
+    // stress — classify by geometry (below_solid, computed once above) rather
+    // than defaulting to INTERIOR.
     let surface_type = if air_neighbors >= 4 {
         SURFACE_THIN       // Stalactite/thin column (4+ air faces)
     } else if !below_solid {
@@ -272,14 +304,19 @@ pub fn recalc_stress_region_v2_filtered(
                         .map(|sf| sf.get(x, y, z))
                         .unwrap_or(1.0);
                     if my_support >= config.ground_threshold {
-                        // Classify: is this a floor or deep interior?
-                        let below_solid = sample_world(density_fields, wx, wy - 1, wz, cs)
-                            .map(|(_, m)| m.is_solid()).unwrap_or(true);
+                        // Classify: is this a floor or deep interior? Same-chunk
+                        // neighbors read `df` directly (see neighbor_solid_same_chunk).
+                        let (xi, yi, zi) = (x as i32, y as i32, z as i32);
+                        let below_solid = neighbor_solid_same_chunk(
+                            df, density_fields, cs, xi, yi - 1, zi, wx, wy - 1, wz,
+                        ).unwrap_or(true);
                         // Count air neighbors for wall detection
                         let mut air_n = 0u8;
                         for &(dx, dy, dz) in &[(1i32,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)] {
-                            if let Some((_, m)) = sample_world(density_fields, wx+dx, wy+dy, wz+dz, cs) {
-                                if !m.is_solid() { air_n += 1; }
+                            if neighbor_solid_same_chunk(
+                                df, density_fields, cs, xi+dx, yi+dy, zi+dz, wx+dx, wy+dy, wz+dz,
+                            ) == Some(false) {
+                                air_n += 1;
                             }
                         }
                         let stype = if air_n == 0 { SURFACE_INTERIOR }
@@ -385,12 +422,19 @@ pub fn recalc_stress_region_v2_with_load_decay(
                         .map(|sf| sf.get(x, y, z))
                         .unwrap_or(1.0);
                     if my_support >= config.ground_threshold {
-                        let below_solid = sample_world(density_fields, wx, wy - 1, wz, cs)
-                            .map(|(_, m)| m.is_solid()).unwrap_or(true);
+                        // Same-chunk neighbors read `df` directly (see
+                        // neighbor_solid_same_chunk) — skips ~7 HashMap probes
+                        // per grounded voxel away from the chunk shell.
+                        let (xi, yi, zi) = (x as i32, y as i32, z as i32);
+                        let below_solid = neighbor_solid_same_chunk(
+                            df, density_fields, cs, xi, yi - 1, zi, wx, wy - 1, wz,
+                        ).unwrap_or(true);
                         let mut air_n = 0u8;
                         for &(dx, dy, dz) in &[(1i32,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)] {
-                            if let Some((_, m)) = sample_world(density_fields, wx+dx, wy+dy, wz+dz, cs) {
-                                if !m.is_solid() { air_n += 1; }
+                            if neighbor_solid_same_chunk(
+                                df, density_fields, cs, xi+dx, yi+dy, zi+dz, wx+dx, wy+dy, wz+dz,
+                            ) == Some(false) {
+                                air_n += 1;
                             }
                         }
                         let stype = if air_n == 0 { SURFACE_INTERIOR }
