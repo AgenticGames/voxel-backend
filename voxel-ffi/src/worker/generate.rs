@@ -1052,11 +1052,6 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
             {
                 use voxel_core::stress::{recalc_stress_region_v2, StressField};
                 let stress_cfg = ctx.stress_config.read().unwrap().clone();
-                let gs = cfg.chunk_size + 1;
-                let mut dbg_solid = 0u32;
-                let mut dbg_ge10 = 0u32;
-                let mut dbg_ge15 = 0u32;
-                let mut dbg_max = 0.0f32;
                 let computed: Option<StressField> = {
                     let s = store.read().unwrap();
                     if let Some(existing) = s.stress_fields.get(&chunk) {
@@ -1076,19 +1071,6 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
                             &[chunk],
                             cfg.chunk_size,
                         );
-                        // TEMP VFX diagnostic — distribution over the fresh field.
-                        if let (Some(df), Some(lf)) =
-                            (s.density_fields.get(&chunk), local.get(&chunk))
-                        {
-                            for z in 0..gs { for y in 0..gs { for x in 0..gs {
-                                if !df.get(x, y, z).material.is_solid() { continue; }
-                                dbg_solid += 1;
-                                let e = lf.effective(x, y, z);
-                                if e > dbg_max { dbg_max = e; }
-                                if e >= 1.0 { dbg_ge10 += 1; }
-                                if e >= 1.5 { dbg_ge15 += 1; }
-                            }}}
-                        }
                         local.remove(&chunk)
                     } else {
                         None
@@ -1097,16 +1079,6 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
                 if let Some(sf) = computed {
                     let mut s = store.write().unwrap();
                     s.stress_fields.insert(chunk, sf);
-                }
-                // TEMP VFX diagnostic — one line per generated chunk with solids.
-                if dbg_solid > 0 {
-                    use std::io::Write;
-                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-                        .open("D:/Unreal Projects/Mithril2026/Saved/stress_vfx_gen.txt")
-                    {
-                        let _ = writeln!(f, "[VFXGEN] rust_chunk=({},{},{}) solid={} max={:.2} ge1.0={} ge1.5={}",
-                            chunk.0, chunk.1, chunk.2, dbg_solid, dbg_max, dbg_ge10, dbg_ge15);
-                    }
                 }
             }
 

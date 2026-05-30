@@ -449,24 +449,12 @@ impl VoxelEngine {
         };
         let sf = match store.stress_fields.get(&chunk_rust) {
             Some(sf) => sf,
-            None => {
-                // TEMP VFX diagnostic — field absent for the resolved key.
-                use std::io::Write;
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-                    .open("D:/Unreal Projects/Mithril2026/Saved/stress_vfx_qry.txt")
-                {
-                    let _ = writeln!(f, "[VFXQRY] rust_key=({},{},{}) field=MISSING",
-                        chunk_rust.0, chunk_rust.1, chunk_rust.2);
-                }
-                return (Vec::new(), true);  // store OK, just no field for this chunk
-            }
+            None => return (Vec::new(), true),  // store OK, just no field for this chunk
         };
 
         let cs = chunk_size as i32;
         let (cx, cy, cz) = chunk_rust;
         let mut out = Vec::new();
-        let mut dbg_ge15 = 0u32;   // TEMP VFX diagnostic
-        let mut dbg_interior = 0u32; // TEMP: ge1.5 but classified interior (skipped)
 
         for lz in 0..chunk_size {
             for ly in 0..chunk_size {
@@ -475,10 +463,8 @@ impl VoxelEngine {
                     if eff < COLLAPSE_IMMINENT_STRESS {
                         continue;
                     }
-                    dbg_ge15 += 1; // TEMP VFX diagnostic
                     let surface_kind = unpack_surface(sf.get_class(lx, ly, lz));
                     if surface_kind == SURFACE_INTERIOR {
-                        dbg_interior += 1; // TEMP: over-threshold but interior-classified
                         continue;
                     }
 
@@ -513,16 +499,6 @@ impl VoxelEngine {
                         _padding: [0; 3],
                     });
                 }
-            }
-        }
-        // TEMP VFX diagnostic — what the query resolved + how many cells pass.
-        {
-            use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-                .open("D:/Unreal Projects/Mithril2026/Saved/stress_vfx_qry.txt")
-            {
-                let _ = writeln!(f, "[VFXQRY] rust_key=({},{},{}) field=ok ge1.5={} interior_skip={} out={}",
-                    chunk_rust.0, chunk_rust.1, chunk_rust.2, dbg_ge15, dbg_interior, out.len());
             }
         }
         (out, true)
