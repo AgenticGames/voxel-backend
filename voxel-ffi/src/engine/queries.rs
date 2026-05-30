@@ -343,8 +343,51 @@ impl VoxelEngine {
         let rust_pos = from_ue_world_pos(ue_x, ue_y, ue_z, world_scale);
         let normal_hint_rust = from_ue_normal(hint_ue_x, hint_ue_y, hint_ue_z);
 
-        let store = self.store.try_read().ok()?;
+        // Bounded spin-retry (2026-05-30). A bare `try_read().ok()?` fails the
+        // INSTANT a worker holds the write lock — and the sleep-montage camera
+        // planner fires QuerySurface in tight bursts (the rock-vs-air ray clamp)
+        // that race the generation workers' density-insert writes. Losing that
+        // race returned None → the caller read "unloaded"(=solid) and the clamp
+        // went blind even though the density was right there. Spin briefly so a
+        // short writer doesn't blind us, but cap the wait (~1ms) so a pathological
+        // long hold can never stall the game thread — on timeout fall back to the
+        // original "treat as unavailable" behavior.
+        let store = {
+            let mut guard = None;
+            for _ in 0..6 {
+                if let Ok(s) = self.store.try_read() {
+                    guard = Some(s);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_micros(100));
+            }
+            guard?
+        };
         Some(probe_surface(&store, rust_pos, chunk_size, normal_hint_rust))
+    }
+
+    /// Cheap TRI-STATE solidity for the camera planner: 0=air, 1=loaded-solid,
+    /// 2=unloaded. ~1000× cheaper than `query_surface`. Lock-busy → 2 (unknown ≈
+    /// unloaded): the clamp then treats it as rock (safe), the exposure check as
+    /// void — both conservative, and it's rare (the spin-retry usually wins).
+    pub fn is_solid_at_ue(&self, ue_x: f32, ue_y: f32, ue_z: f32) -> u32 {
+        let chunk_size = self.chunk_size();
+        let world_scale = self.get_world_scale();
+        let store = {
+            let mut guard = None;
+            for _ in 0..6 {
+                if let Ok(s) = self.store.try_read() {
+                    guard = Some(s);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_micros(100));
+            }
+            match guard {
+                Some(g) => g,
+                None => return 2,
+            }
+        };
+        crate::surface_probe::solidity_at_ue(&store, chunk_size, world_scale, ue_x, ue_y, ue_z) as u32
     }
 
     /// Enumerate cells in a single chunk whose effective stress is high enough
@@ -406,12 +449,24 @@ impl VoxelEngine {
         };
         let sf = match store.stress_fields.get(&chunk_rust) {
             Some(sf) => sf,
-            None => return (Vec::new(), true),  // store OK, just no field for this chunk
+            None => {
+                // TEMP VFX diagnostic — field absent for the resolved key.
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+                    .open("D:/Unreal Projects/Mithril2026/Saved/stress_vfx_qry.txt")
+                {
+                    let _ = writeln!(f, "[VFXQRY] rust_key=({},{},{}) field=MISSING",
+                        chunk_rust.0, chunk_rust.1, chunk_rust.2);
+                }
+                return (Vec::new(), true);  // store OK, just no field for this chunk
+            }
         };
 
         let cs = chunk_size as i32;
         let (cx, cy, cz) = chunk_rust;
         let mut out = Vec::new();
+        let mut dbg_ge15 = 0u32;   // TEMP VFX diagnostic
+        let mut dbg_interior = 0u32; // TEMP: ge1.5 but classified interior (skipped)
 
         for lz in 0..chunk_size {
             for ly in 0..chunk_size {
@@ -420,8 +475,10 @@ impl VoxelEngine {
                     if eff < COLLAPSE_IMMINENT_STRESS {
                         continue;
                     }
+                    dbg_ge15 += 1; // TEMP VFX diagnostic
                     let surface_kind = unpack_surface(sf.get_class(lx, ly, lz));
                     if surface_kind == SURFACE_INTERIOR {
+                        dbg_interior += 1; // TEMP: over-threshold but interior-classified
                         continue;
                     }
 
@@ -456,6 +513,16 @@ impl VoxelEngine {
                         _padding: [0; 3],
                     });
                 }
+            }
+        }
+        // TEMP VFX diagnostic — what the query resolved + how many cells pass.
+        {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+                .open("D:/Unreal Projects/Mithril2026/Saved/stress_vfx_qry.txt")
+            {
+                let _ = writeln!(f, "[VFXQRY] rust_key=({},{},{}) field=ok ge1.5={} interior_skip={} out={}",
+                    chunk_rust.0, chunk_rust.1, chunk_rust.2, dbg_ge15, dbg_interior, out.len());
             }
         }
         (out, true)

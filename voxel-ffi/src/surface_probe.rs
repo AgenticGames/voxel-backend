@@ -101,6 +101,44 @@ impl<'a> Sampler<'a> {
     }
 }
 
+/// Cheap TRI-STATE solidity at a UE-world point: `0`=air, `1`=loaded-solid,
+/// `2`=unloaded. ~1000× cheaper than `probe_surface` (one chunk lookup + one
+/// voxel read) — this is what removed the ~3s/play camera-planner lag.
+///
+/// Tri-state because the two camera checks need OPPOSITE biases for unloaded:
+///   - the rock-vs-air ray clamp treats unloaded as ROCK (don't let the camera
+///     drift out into not-yet-streamed space), while
+///   - the camera-EXPOSURE check treats unloaded as VOID (a camera out there IS
+///     outside the cave).
+/// A single bool couldn't serve both — collapsing unloaded into "solid" made the
+/// exposure check think the void was enclosed (the "play 2 filmed from outside"
+/// regression).
+pub fn solidity_at_ue(
+    store: &ChunkStore,
+    chunk_size: usize,
+    world_scale: f32,
+    ue_x: f32,
+    ue_y: f32,
+    ue_z: f32,
+) -> u8 {
+    use crate::convert::from_ue_world_pos;
+    let p = from_ue_world_pos(ue_x, ue_y, ue_z, world_scale);
+    let cs = chunk_size as i32;
+    let wx = p.x.floor() as i32;
+    let wy = p.y.floor() as i32;
+    let wz = p.z.floor() as i32;
+    let key = (wx.div_euclid(cs), wy.div_euclid(cs), wz.div_euclid(cs));
+    match store.density_fields.get(&key) {
+        None => 2, // unloaded
+        Some(df) => {
+            let lx = wx.rem_euclid(cs) as usize;
+            let ly = wy.rem_euclid(cs) as usize;
+            let lz = wz.rem_euclid(cs) as usize;
+            if df.get(lx, ly, lz).material.is_solid() { 1 } else { 0 }
+        }
+    }
+}
+
 /// Step from `origin` in the given integer direction, returning the
 /// Euclidean distance (in voxels) at which the first solid voxel was hit,
 /// capped at `MAX_PROBE_VOXELS` worth of steps.

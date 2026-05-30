@@ -236,6 +236,25 @@ pub unsafe extern "C" fn voxel_query_surface(
     1
 }
 
+/// Cheap TRI-STATE solidity at a UE-world point: 0=air, 1=loaded-solid,
+/// 2=unloaded (lock-busy → 2). For the sleep-montage camera planner — ~1000×
+/// cheaper than `voxel_query_surface`. The ray clamp treats {1,2} as rock; the
+/// camera-exposure check treats only 1 as enclosure (so unloaded void reads as
+/// exposed).
+#[no_mangle]
+pub unsafe extern "C" fn voxel_is_solid_at(
+    engine: *mut c_void,
+    ue_x: f32,
+    ue_y: f32,
+    ue_z: f32,
+) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.is_solid_at_ue(ue_x, ue_y, ue_z)
+}
+
 /// List all surface-exposed cells in a chunk whose effective stress has
 /// crossed the collapse threshold (>= 1.0). UE uses the result to drive
 /// per-chunk stress-crack decals and warning dust puffs at primed cells.

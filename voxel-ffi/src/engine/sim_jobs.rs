@@ -65,8 +65,43 @@ impl VoxelEngine {
             sleep_count,
             sleep_config: sc,
         }) {
-            Ok(()) => 1,
-            Err(_) => 0,
+            Ok(()) => {
+                // Trace dispatch so a stall is bracketed: this line (+ mine-queue
+                // depth) vs the worker's "[SLEEP_TRACE] enter Sleep handler" bound
+                // the dequeue latency. If the latter never appears, the stall
+                // monitor's [WORKER_STALL] snapshots show which workers wedged.
+                crate::panic_log::note(&format!(
+                    "[SLEEP_TRACE] dispatched Sleep to mine channel (player_chunk={:?}, mine_q_after={})",
+                    player_chunk,
+                    self.mine_tx.len()
+                ));
+                1
+            }
+            Err(_) => {
+                crate::panic_log::note(
+                    "[SLEEP_TRACE] StartSleep REJECTED — mine channel full (try_send failed)",
+                );
+                0
+            }
+        }
+    }
+
+    /// Replace the set of chunks the sleep-montage cinematic is actively
+    /// filming. While populated, `ChunkStore::unload` refuses to evict their
+    /// density, so the camera planner's voxel queries (rock-vs-air ray clamp)
+    /// always have real data instead of "unloaded"(=solid) garbage. Coords are
+    /// Rust chunk coords. Replaces any prior set.
+    pub fn set_montage_protected(&self, chunks: Vec<(i32, i32, i32)>) {
+        if let Ok(mut s) = self.store.write() {
+            s.montage_protected = chunks.into_iter().collect();
+        }
+    }
+
+    /// Clear the montage-protected set (call at montage end so normal streaming
+    /// eviction resumes).
+    pub fn clear_montage_protected(&self) {
+        if let Ok(mut s) = self.store.write() {
+            s.montage_protected.clear();
         }
     }
 

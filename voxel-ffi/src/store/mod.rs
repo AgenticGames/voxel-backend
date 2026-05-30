@@ -44,6 +44,13 @@ pub struct ChunkStore {
     pub hermite_data: HashMap<(i32, i32, i32), HermiteData>,
     /// Tracks which regions have had their densities generated (with global worms).
     generated_regions: HashSet<(i32, i32, i32)>,
+    /// Chunks the sleep-montage cinematic is actively filming. `unload()` refuses
+    /// to drop these so the camera planner's voxel queries (rock-vs-air ray
+    /// clamp) always have density to read — UE pins the UE-side chunk, but
+    /// nothing stopped Rust from evicting the density underneath it, which left
+    /// QuerySurface reporting "unloaded" (=solid) and the planner blind. Set via
+    /// `voxel_montage_set_protected_chunks`, cleared at montage end. Rust coords.
+    pub montage_protected: HashSet<(i32, i32, i32)>,
     /// Per-chunk seam data (DC vertices + boundary edges) for seam stitching.
     pub chunk_seam_data: HashMap<(i32, i32, i32), ChunkSeamData>,
     /// Cached base meshes (pre-seam) for fast seam pass reuse.
@@ -115,6 +122,7 @@ impl ChunkStore {
             density_fields: HashMap::new(),
             hermite_data: HashMap::new(),
             generated_regions: HashSet::new(),
+            montage_protected: HashSet::new(),
             chunk_seam_data: HashMap::new(),
             base_meshes: HashMap::new(),
             stress_fields: HashMap::new(),
@@ -205,6 +213,15 @@ impl ChunkStore {
     }
 
     pub fn unload(&mut self, key: (i32, i32, i32)) {
+        // Montage guarantee: never evict a chunk the cinematic is filming. The
+        // camera planner samples voxel density for these chunks (rock-vs-air ray
+        // clamp); dropping it mid-montage made QuerySurface report "unloaded"
+        // (=solid) and blinded the planner (the false-open / outside-the-walls
+        // shots). UE pins the UE-side actor, but only this guard keeps the Rust
+        // density alive. Cleared at montage end via voxel_montage_clear_protected.
+        if self.montage_protected.contains(&key) {
+            return;
+        }
         // Preserve density+painted-stress+support snapshot if this chunk was
         // modified (mining/flatten/sleep/PaintStress brush/strut placement).
         // Capturing all three overlays here means everything round-trips

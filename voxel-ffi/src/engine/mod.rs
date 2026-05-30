@@ -310,6 +310,15 @@ impl VoxelEngine {
         let occupied_cells: Arc<RwLock<HashSet<(i32, i32, i32)>>> =
             Arc::new(RwLock::new(HashSet::new()));
 
+        // Per-worker activity heartbeats — one slot per worker. Workers stamp
+        // what they're handling; the stall monitor (spawned below) reads them to
+        // pinpoint a wedged worker when a priority sleep request never dequeues.
+        let heartbeats: Arc<Vec<crate::worker::heartbeat::WorkerHeartbeat>> = Arc::new(
+            (0..num_workers)
+                .map(|_| crate::worker::heartbeat::WorkerHeartbeat::new())
+                .collect(),
+        );
+
         let mut workers = Vec::with_capacity(num_workers);
         for worker_id in 0..num_workers {
             let shutdown = Arc::clone(&shutdown);
@@ -325,6 +334,7 @@ impl VoxelEngine {
             let morph_man = Arc::clone(&morph_manifest);
             let rif = Arc::clone(&regions_in_flight);
             let anchors = Arc::clone(&crystal_anchors);
+            let heartbeats = Arc::clone(&heartbeats);
 
             let builder = thread::Builder::new().name(format!("voxel-worker-{}", worker_id));
             let handle = builder
@@ -353,6 +363,7 @@ impl VoxelEngine {
                             let morph_man = Arc::clone(&morph_man);
                             let rif = Arc::clone(&rif);
                             let anchors = Arc::clone(&anchors);
+                            let heartbeats = Arc::clone(&heartbeats);
                             std::panic::catch_unwind(AssertUnwindSafe(move || {
                                 worker_loop(
                                     shutdown,
@@ -370,6 +381,7 @@ impl VoxelEngine {
                                     morph_man,
                                     rif,
                                     anchors,
+                                    heartbeats,
                                 );
                             }))
                         };
@@ -402,6 +414,17 @@ impl VoxelEngine {
                 .expect("failed to spawn voxel worker thread");
             workers.push(handle);
         }
+
+        // Stall monitor — watches the heartbeats + mine/generate queue depths and
+        // dumps a `[WORKER_STALL]` snapshot to voxel_panic.log when a priority
+        // (sleep/mine) request starves or a worker wedges. `len()`-only receiver
+        // clones, so it never steals work. Silent until something actually hangs.
+        crate::worker::heartbeat::spawn_stall_monitor(
+            Arc::clone(&shutdown),
+            Arc::clone(&heartbeats),
+            mine_rx.clone(),
+            generate_rx.clone(),
+        );
 
         // ─── Path workers — multiple dedicated threads share `path_rx` (crossbeam
         // receivers are clonable; each spawned thread holds its own handle and

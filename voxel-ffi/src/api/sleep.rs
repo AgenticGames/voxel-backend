@@ -105,6 +105,47 @@ pub unsafe extern "C" fn voxel_set_sleep_poi_chunks(
     1
 }
 
+/// Mark the chunks the sleep-montage is filming as protected from eviction.
+/// While set, the worker's `unload()` refuses to drop these chunks' density, so
+/// the camera planner's QuerySurface calls (rock-vs-air ray clamp) always have
+/// real voxel data. UE pins the UE-side chunk actor, but only this stops Rust
+/// from evicting the density underneath. Chunk coords are UE space; replaces any
+/// prior set. Call `voxel_montage_clear_protected` at montage end.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_montage_set_protected_chunks(
+    engine: *mut c_void,
+    chunk_xs: *const i32,
+    chunk_ys: *const i32,
+    chunk_zs: *const i32,
+    count: u32,
+) -> u32 {
+    if engine.is_null() || (count > 0 && (chunk_xs.is_null() || chunk_ys.is_null() || chunk_zs.is_null())) {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let chunks: Vec<(i32, i32, i32)> = (0..count as usize)
+        .map(|i| {
+            let ux = *chunk_xs.add(i);
+            let uy = *chunk_ys.add(i);
+            let uz = *chunk_zs.add(i);
+            crate::convert::ue_chunk_to_rust(ux, uy, uz)
+        })
+        .collect();
+    engine.set_montage_protected(chunks);
+    1
+}
+
+/// Release the montage-protected chunk set so normal streaming eviction resumes.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_montage_clear_protected(engine: *mut c_void) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.clear_montage_protected();
+    1
+}
+
 /// Start a deep sleep cycle. player_chunk coordinates are in UE space.
 /// Returns 1 on success, 0 if queue full.
 #[no_mangle]

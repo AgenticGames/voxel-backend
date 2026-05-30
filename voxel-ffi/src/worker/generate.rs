@@ -1020,6 +1020,96 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
                 }
             }
 
+            // ── Isolated VFX-only stress compute (no collapse) ──
+            //
+            // Worldgen builds density / mesh / crystals but never computes a
+            // stress field, so a freshly streamed or loaded chunk has all-zero
+            // stress. The crack-decal + warning-dust overlay reads that field
+            // via `enumerate_overstressed_in_chunk`, so it shows NOTHING until
+            // the player mines nearby and the position-based queue finally
+            // recalculates — the "cracks only appear once I hit the area" bug.
+            //
+            // Compute this chunk's stress now so the overlay can light up the
+            // already-stressed (large-span / thin-feature) parts of the cave
+            // the instant the chunk appears — on initial load, zone stream-in,
+            // and save-load alike (all bring-in paths funnel through here).
+            //
+            // CRITICAL — this stays VFX-only and must NEVER collapse on load:
+            // `recalc_stress_region_v2` only WRITES stress numbers (it takes
+            // support_fields read-only, so it cannot decay strut HP) and
+            // returns an overstressed list we deliberately DISCARD. It does not
+            // call detect_and_execute_collapses_*. Collapse remains exclusive
+            // to the mining stress queue, which only ever falls cells it
+            // freshly recomputes inside the mine radius — pre-populating the
+            // field here cannot trigger a spurious cave-in.
+            //
+            // Computed under a READ lock into a local one-chunk map (cloning
+            // the existing field preserves any save-restored painted-stress
+            // overlay, which `set()` never touches), then committed with a
+            // brief WRITE lock — so the span-search pass doesn't hold the store
+            // write lock and serialize every other worker during the
+            // initial-load storm.
+            {
+                use voxel_core::stress::{recalc_stress_region_v2, StressField};
+                let stress_cfg = ctx.stress_config.read().unwrap().clone();
+                let gs = cfg.chunk_size + 1;
+                let mut dbg_solid = 0u32;
+                let mut dbg_ge10 = 0u32;
+                let mut dbg_ge15 = 0u32;
+                let mut dbg_max = 0.0f32;
+                let computed: Option<StressField> = {
+                    let s = store.read().unwrap();
+                    if let Some(existing) = s.stress_fields.get(&chunk) {
+                        let mut local: std::collections::HashMap<(i32, i32, i32), StressField> =
+                            std::collections::HashMap::new();
+                        local.insert(chunk, existing.clone());
+                        // dirty=[chunk], events=[] → unfiltered full recompute
+                        // of this one chunk's surface voxels. Neighbour density
+                        // is read where loaded (the whole region is present);
+                        // cross-region edges refine when the adjacent region
+                        // streams in and runs its own compute.
+                        recalc_stress_region_v2(
+                            &s.density_fields,
+                            &mut local,
+                            &s.support_fields,
+                            &stress_cfg,
+                            &[chunk],
+                            cfg.chunk_size,
+                        );
+                        // TEMP VFX diagnostic — distribution over the fresh field.
+                        if let (Some(df), Some(lf)) =
+                            (s.density_fields.get(&chunk), local.get(&chunk))
+                        {
+                            for z in 0..gs { for y in 0..gs { for x in 0..gs {
+                                if !df.get(x, y, z).material.is_solid() { continue; }
+                                dbg_solid += 1;
+                                let e = lf.effective(x, y, z);
+                                if e > dbg_max { dbg_max = e; }
+                                if e >= 1.0 { dbg_ge10 += 1; }
+                                if e >= 1.5 { dbg_ge15 += 1; }
+                            }}}
+                        }
+                        local.remove(&chunk)
+                    } else {
+                        None
+                    }
+                };
+                if let Some(sf) = computed {
+                    let mut s = store.write().unwrap();
+                    s.stress_fields.insert(chunk, sf);
+                }
+                // TEMP VFX diagnostic — one line per generated chunk with solids.
+                if dbg_solid > 0 {
+                    use std::io::Write;
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+                        .open("D:/Unreal Projects/Mithril2026/Saved/stress_vfx_gen.txt")
+                    {
+                        let _ = writeln!(f, "[VFXGEN] rust_chunk=({},{},{}) solid={} max={:.2} ge1.0={} ge1.5={}",
+                            chunk.0, chunk.1, chunk.2, dbg_solid, dbg_max, dbg_ge10, dbg_ge15);
+                    }
+                }
+            }
+
             let t_send_start = Instant::now();
             let _ = result_tx.send(WorkerResult::ChunkMesh {
                 chunk,

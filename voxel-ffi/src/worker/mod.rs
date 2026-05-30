@@ -19,6 +19,7 @@ use crate::types::{WorkerRequest, WorkerResult};
 
 mod brush;
 mod generate;
+pub mod heartbeat;
 mod pathing;
 mod scan_support;
 mod seam;
@@ -69,21 +70,33 @@ pub fn worker_loop(
     morph_manifest: Arc<Mutex<Option<voxel_sleep::ChangeManifest>>>,
     regions_in_flight: Arc<DashMap<(i32, i32, i32), Arc<Mutex<()>>>>,
     crystal_anchors: Arc<Mutex<crate::crystal_anchors::CrystalAnchorManager>>,
+    // Per-worker activity heartbeat (this worker writes only `heartbeats[worker_id]`).
+    // Read by the stall monitor to pinpoint a wedged worker when a sleep request
+    // never gets dequeued. See `heartbeat.rs`.
+    heartbeats: Arc<Vec<heartbeat::WorkerHeartbeat>>,
 ) {
+    let hb = &heartbeats[worker_id];
     while !shutdown.load(Ordering::Relaxed) {
-        // Priority 1: mine requests (non-blocking)
+        // Priority 1: mine requests (non-blocking). Stamp the heartbeat around
+        // the handler so a stall snapshot names exactly what wedged us here.
         if let Ok(req) = mine_rx.try_recv() {
+            let (act, coord) = heartbeat::classify(&req);
+            hb.enter(act, coord);
             handle_request(
                 req, &result_tx, &store, &config, &stress_config, &generation_counters,
                 world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &mine_rx, &morph_manifest,
                 &regions_in_flight, &crystal_anchors,
             );
+            hb.idle();
             continue;
         }
 
         // Priority 1.5: deferred stress recalculation (only worker 0 handles this)
         if worker_id == 0 {
-            if try_process_stress_queue(&store, &stress_config, &config, &result_tx, &fluid_event_tx, world_scale) {
+            hb.enter(heartbeat::activity::STRESS, (0, 0, 0));
+            let did_stress = try_process_stress_queue(&store, &stress_config, &config, &result_tx, &fluid_event_tx, world_scale);
+            hb.idle();
+            if did_stress {
                 continue;
             }
         }
@@ -93,11 +106,14 @@ pub fn worker_loop(
         match generate_rx.recv_timeout(Duration::from_millis(50)) {
             Ok(req) => {
                 profiler.record_worker_idle(worker_id, idle_start.elapsed());
+                let (act, coord) = heartbeat::classify(&req);
+                hb.enter(act, coord);
                 handle_request(
                     req, &result_tx, &store, &config, &stress_config, &generation_counters,
                     world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &mine_rx, &morph_manifest,
                     &regions_in_flight, &crystal_anchors,
                 );
+                hb.idle();
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                 profiler.record_worker_idle(worker_id, idle_start.elapsed());
