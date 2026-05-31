@@ -126,24 +126,39 @@ pub fn bucket_mesh_by_material(mesh: &mut ConvertedMesh) {
     let mut new_indices = Vec::with_capacity(mesh.indices.len());
     let mut submeshes = Vec::with_capacity(buckets.len());
 
+    // Per-bucket vertex remap. Original indices are dense (0..vert_count), so we
+    // dedup with a flat array instead of a fresh SipHash `HashMap` per material
+    // bucket. An `epoch` tag per slot records which bucket last wrote it, so the
+    // table is "reset" for each bucket by bumping `epoch` — no per-bucket
+    // allocation and no clearing pass. `epoch` starts at 0 and the tags are
+    // 0-initialised, so the first bucket (epoch 1) sees every slot as absent.
+    // (At most ~256 material buckets, so `epoch` never wraps.)
+    let vert_count = mesh.positions.len();
+    let mut remap_idx: Vec<u32> = vec![0u32; vert_count];
+    let mut remap_epoch: Vec<u32> = vec![0u32; vert_count];
+    let mut epoch: u32 = 0;
+
     for (mat_id, triangles) in &buckets {
         let vertex_offset = new_positions.len() as u32;
         let index_offset = new_indices.len() as u32;
 
-        // Remap vertices for this material section
-        let mut remap: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        // Remap vertices for this material section. Bump the epoch so all slots
+        // from previous buckets read as absent.
+        epoch += 1;
 
         for &tri_idx in triangles {
             for corner in 0..3 {
                 let orig_idx = mesh.indices[tri_idx as usize * 3 + corner];
-                let new_idx = if let Some(&mapped) = remap.get(&orig_idx) {
-                    mapped
+                let oi = orig_idx as usize;
+                let new_idx = if remap_epoch[oi] == epoch {
+                    remap_idx[oi]
                 } else {
                     let idx = new_positions.len() as u32;
-                    remap.insert(orig_idx, idx);
-                    new_positions.push(mesh.positions[orig_idx as usize]);
-                    new_normals.push(mesh.normals[orig_idx as usize]);
-                    new_material_ids.push(mesh.material_ids[orig_idx as usize]);
+                    remap_epoch[oi] = epoch;
+                    remap_idx[oi] = idx;
+                    new_positions.push(mesh.positions[oi]);
+                    new_normals.push(mesh.normals[oi]);
+                    new_material_ids.push(mesh.material_ids[oi]);
                     idx
                 };
                 new_indices.push(new_idx);
@@ -305,6 +320,93 @@ mod tests {
         // UE -> Rust
         let back = from_ue_normal(ue_n.x, ue_n.y, ue_n.z);
         assert!((back - original).length() < 1e-5);
+    }
+
+    // Build a small multi-material mesh whose vertices are shared across
+    // material boundaries (the case that forces the same original index to be
+    // remapped in more than one bucket).
+    fn multimat_mesh() -> ConvertedMesh {
+        // 6 vertices; position.x encodes vertex identity, normal.z mirrors it.
+        let positions: Vec<FfiVec3> = (0..6)
+            .map(|i| FfiVec3 { x: i as f32, y: 0.0, z: 0.0 })
+            .collect();
+        let normals: Vec<FfiVec3> = (0..6)
+            .map(|i| FfiVec3 { x: 0.0, y: 0.0, z: i as f32 })
+            .collect();
+        let material_ids: Vec<u8> = vec![1, 1, 2, 2, 0, 0];
+        // 4 triangles; first-vertex material decides the bucket. Vertices 1,2,3
+        // appear in triangles of differing first-vertex materials, so they get
+        // remapped independently per bucket.
+        let indices: Vec<u32> = vec![
+            0, 1, 2, // bucket mat=1
+            1, 2, 3, // bucket mat=1
+            2, 3, 4, // bucket mat=2
+            4, 5, 1, // bucket mat=0
+        ];
+        ConvertedMesh { positions, normals, material_ids, indices, submeshes: Vec::new() }
+    }
+
+    #[test]
+    fn bucket_preserves_triangles_and_partitions() {
+        let src = multimat_mesh();
+        // Original triangles encoded as vertex-identity triples (pos.x).
+        let orig_tris: Vec<[u32; 3]> = src
+            .indices
+            .chunks(3)
+            .map(|c| {
+                [
+                    src.positions[c[0] as usize].x as u32,
+                    src.positions[c[1] as usize].x as u32,
+                    src.positions[c[2] as usize].x as u32,
+                ]
+            })
+            .collect();
+
+        let mut out = multimat_mesh();
+        bucket_mesh_by_material(&mut out);
+
+        // Decoded output triangles must reproduce the original triangle set.
+        let decoded: Vec<[u32; 3]> = out
+            .indices
+            .chunks(3)
+            .map(|c| {
+                [
+                    out.positions[c[0] as usize].x as u32,
+                    out.positions[c[1] as usize].x as u32,
+                    out.positions[c[2] as usize].x as u32,
+                ]
+            })
+            .collect();
+        let mut a = orig_tris.clone();
+        let mut b = decoded.clone();
+        a.sort();
+        b.sort();
+        assert_eq!(a, b, "bucketing must preserve the triangle set exactly");
+
+        // Each output vertex keeps its paired attributes through the remap.
+        for (i, p) in out.positions.iter().enumerate() {
+            assert_eq!(
+                p.x as u32, out.normals[i].z as u32,
+                "vertex attrs must stay paired through the remap"
+            );
+        }
+
+        // Submeshes partition the index buffer contiguously and completely,
+        // and every index points inside its submesh's own vertex span.
+        assert!(!out.submeshes.is_empty());
+        let mut covered = 0u32;
+        for sm in &out.submeshes {
+            assert_eq!(sm.index_offset, covered, "submesh ranges must be contiguous");
+            covered += sm.index_count;
+            let vlo = sm.vertex_offset;
+            let vhi = sm.vertex_offset + sm.vertex_count;
+            for &ix in &out.indices
+                [sm.index_offset as usize..(sm.index_offset + sm.index_count) as usize]
+            {
+                assert!(ix >= vlo && ix < vhi, "index must stay within its submesh vertex span");
+            }
+        }
+        assert_eq!(covered as usize, out.indices.len(), "submeshes must cover all indices");
     }
 
     #[test]
