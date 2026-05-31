@@ -191,6 +191,28 @@ pub(super) fn tick_chunk(
         Vec<(f32, f32, usize, bool, (i32, i32, i32), usize, usize, usize)> =
         Vec::with_capacity(4);
 
+    // ---- Neighbor-chunk references, hoisted out of the per-voxel loop ----
+    // Cross-chunk flow only ever READS the 5 neighbour chunks (the one below +
+    // the 4 lateral). Every cross-chunk *write* is deferred into
+    // `cross_transfers`, and every within-chunk write targets the owned
+    // `new_cells` scratch — so `chunks` is never mutated inside the loop. The
+    // neighbour keys are invariant for the whole chunk-tick, yet the old code
+    // re-probed `chunks.get(&neighbour_key)` (std HashMap = SipHash on a 12-byte
+    // key) for *every boundary fluid voxel*. Probe each once here; the per-voxel
+    // sites below then pick the right cached reference with a few cheap tuple
+    // comparisons instead. Same hoist the stress passes applied to per-cell
+    // HashMap probes (see PERF_REVIEW history).
+    let key_below = (key.0, key.1 - 1, key.2);
+    let key_xp = (key.0 + 1, key.1, key.2);
+    let key_xn = (key.0 - 1, key.1, key.2);
+    let key_zp = (key.0, key.1, key.2 + 1);
+    let key_zn = (key.0, key.1, key.2 - 1);
+    let nbr_below = chunks.get(&key_below);
+    let nbr_xp = chunks.get(&key_xp);
+    let nbr_xn = chunks.get(&key_xn);
+    let nbr_zp = chunks.get(&key_zp);
+    let nbr_zn = chunks.get(&key_zn);
+
     // Pre-compute column fluid weight for pressure equalization (Phase 4).
     // fluid_weight[idx] = total fluid in this cell plus all cells above in the same column.
     // A taller column has higher weight at its base, driving upward pressure in shorter neighbors.
@@ -306,8 +328,8 @@ pub(super) fn tick_chunk(
                 }
                 // Cross-chunk downward flow: y==0 means neighbor chunk below
                 else {
-                    let below_key = (key.0, key.1 - 1, key.2);
-                    if let Some(below_grid) = chunks.get(&below_key) {
+                    let below_key = key_below;
+                    if let Some(below_grid) = nbr_below {
                         if !bounded_blocks_transfer(cell.hops_from_source, cell.max_flow_dist) {
                             let by = size - 1;
                             let below_idx = z * size * size + by * size + x;
@@ -349,8 +371,7 @@ pub(super) fn tick_chunk(
                         cell_cap[below_idx] < MIN_LEVEL
                     } else {
                         // y==0: check chunk below
-                        let below_key = (key.0, key.1 - 1, key.2);
-                        if let Some(below_grid) = chunks.get(&below_key) {
+                        if let Some(below_grid) = nbr_below {
                             below_grid.cell_capacity(x, size - 1, z) < MIN_LEVEL
                         } else {
                             true // no chunk below = treat as solid
@@ -397,7 +418,13 @@ pub(super) fn tick_chunk(
                             if nx < 0 || nx >= size as i32 || nz < 0 || nz >= size as i32 {
                                 // Cross-chunk slope flow for X/Z boundary
                                 if let Some((dest_key, tx, ty, tz)) = resolve_neighbor(key, nx, ny, nz, size) {
-                                    if let Some(nbr_grid) = chunks.get(&dest_key) {
+                                    // Single-axis ±X/±Z crossing here → use the hoisted
+                                    // neighbour ref instead of re-probing the HashMap.
+                                    let nbr = if dest_key == key_xp { nbr_xp }
+                                        else if dest_key == key_xn { nbr_xn }
+                                        else if dest_key == key_zp { nbr_zp }
+                                        else { debug_assert_eq!(dest_key, key_zn); nbr_zn };
+                                    if let Some(nbr_grid) = nbr {
                                         let cap = nbr_grid.cell_capacity(tx, ty, tz);
                                         if cap >= MIN_LEVEL {
                                             let bi = tz * size * size + ty * size + tx;
@@ -432,8 +459,8 @@ pub(super) fn tick_chunk(
                                 }
                             } else if ny < 0 {
                                 // Cross-chunk: target is in chunk below at y=size-1
-                                let below_key = (key.0, key.1 - 1, key.2);
-                                if let Some(below_grid) = chunks.get(&below_key) {
+                                let below_key = key_below;
+                                if let Some(below_grid) = nbr_below {
                                     let tx = nx as usize;
                                     let ty = size - 1;
                                     let tz = nz as usize;
@@ -528,7 +555,13 @@ pub(super) fn tick_chunk(
                         if nx < 0 || nx >= size as i32 || ny < 0 || ny >= size as i32 || nz < 0 || nz >= size as i32 {
                             // Cross-chunk horizontal flow
                             if let Some((dest_key, tx, ty, tz)) = resolve_neighbor(key, nx, ny, nz, size) {
-                                if let Some(nbr_grid) = chunks.get(&dest_key) {
+                                // Horizontal spread is same-Y → single-axis ±X/±Z crossing;
+                                // use the hoisted neighbour ref, no HashMap probe.
+                                let nbr = if dest_key == key_xp { nbr_xp }
+                                    else if dest_key == key_xn { nbr_xn }
+                                    else if dest_key == key_zp { nbr_zp }
+                                    else { debug_assert_eq!(dest_key, key_zn); nbr_zn };
+                                if let Some(nbr_grid) = nbr {
                                     let cap = nbr_grid.cell_capacity(tx, ty, tz);
                                     if cap >= MIN_LEVEL {
                                         let bi = tz * size * size + ty * size + tx;
