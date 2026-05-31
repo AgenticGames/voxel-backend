@@ -483,9 +483,14 @@ pub fn ground_connectivity_pass(
     // the same chunk (only `cy` changes when crossing a chunk boundary). Cache
     // the chunk_y and the looked-up DensityField/in_expanded flags so we only
     // re-fetch from `density_fields`/`expanded_keys` when `cy` changes. The
-    // `scores.get_mut` write still happens per solid cell — keeping it lifted
-    // would force unsafe (mutable + immutable map borrow simultaneously) and
-    // the per-cell write path is the same cost it was before.
+    // `scores.get_mut` write target ALSO only changes when `cy` does (its key is
+    // the same `cached_key`), so cache it alongside `cached_df`: `scores` and
+    // `density_fields` are DISTINCT maps, so holding a `&mut SupportScoreField`
+    // from one while holding a `&DensityField` from the other is sound (no
+    // aliasing, no unsafe). This elides the per-solid-cell SipHash probe of
+    // `scores` (a 12-byte key re-hashed ~cs times per chunk-column segment)
+    // down to one probe per `cy` crossing — the flood's write path was the last
+    // per-cell HashMap probe left after the relaxation `scores.get` was hoisted.
     let cs_i32 = cs as i32;
     for &(wx, wz) in &columns {
         let mut current_score = 1.0f32;
@@ -493,7 +498,7 @@ pub fn ground_connectivity_pass(
 
         let mut cached_cy: Option<i32> = None;
         let mut cached_df: Option<&DensityField> = None;
-        let mut cached_in_expanded = false;
+        let mut cached_sf: Option<&mut SupportScoreField> = None;
         let mut cached_key = (0i32, 0i32, 0i32);
 
         for wy in (min_wy..=max_wy).rev() {
@@ -508,7 +513,10 @@ pub fn ground_connectivity_pass(
                 cached_cy = Some(cy);
                 cached_key = (cx, cy, cz);
                 cached_df = density_fields.get(&cached_key);
-                cached_in_expanded = expanded_keys.contains(&cached_key);
+                // Only `expanded_keys` chunks get a `SupportScoreField`; for
+                // others this is `None` and the write below is skipped, exactly
+                // as the old `cached_in_expanded` guard did.
+                cached_sf = scores.get_mut(&cached_key);
             }
 
             let is_solid = cached_df
@@ -526,10 +534,8 @@ pub fn ground_connectivity_pass(
                 in_air_gap = false;
             }
 
-            if cached_in_expanded {
-                if let Some(sf) = scores.get_mut(&cached_key) {
-                    sf.set(lx, ly, lz, current_score);
-                }
+            if let Some(sf) = cached_sf.as_deref_mut() {
+                sf.set(lx, ly, lz, current_score);
             }
 
             current_score *= vert_decay;
