@@ -198,6 +198,17 @@ impl VoxelEngine {
     }
 
     /// Request a morph step. Uses the cached manifest (set via set_morph_manifest).
+    ///
+    /// Sent through the MINE (priority) channel, not generate_tx. The montage's
+    /// morph reveal is latency-critical — on generate_tx the step queued behind
+    /// the chunk-generation backlog (P2, FIFO), and that backlog grows as the
+    /// montage pins/streams every POI volume, so the per-step wait climbed (the
+    /// ~1.3s -> 3.7s morph-step-0 growth). Morph only runs while the player is
+    /// asleep, so nothing else uses mine_tx then (no mining / brushes; the sleep
+    /// request that started the montage already completed) — zero new contention.
+    /// Matches how Sleep / WorldScan are already routed for immediate processing.
+    /// The morph's chunks are guaranteed resident before this is called, so
+    /// jumping ahead of queued Generate jobs has no ordering hazard.
     /// Returns 1 on success, 0 if queue full.
     pub fn request_morph_step(
         &self,
@@ -205,7 +216,7 @@ impl VoxelEngine {
         step: u32,
         total_steps: u32,
     ) -> u32 {
-        match self.generate_tx.try_send(WorkerRequest::MorphStep {
+        match self.mine_tx.try_send(WorkerRequest::MorphStep {
             chunks,
             step,
             total_steps,
