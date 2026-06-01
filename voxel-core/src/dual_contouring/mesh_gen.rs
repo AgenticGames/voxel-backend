@@ -1,6 +1,6 @@
 use glam::Vec3;
 use crate::mesh::{Mesh, Vertex, Triangle};
-use crate::hermite::{HermiteData, FastHashMap};
+use crate::hermite::HermiteData;
 
 /// Generate mesh from dual contouring vertices and hermite data.
 ///
@@ -13,7 +13,13 @@ use crate::hermite::{HermiteData, FastHashMap};
 /// `grid_size`: number of cells along each axis (the density grid is grid_size+1 on each axis)
 pub fn generate_mesh(hermite: &HermiteData, dc_vertices: &[glam::Vec3], grid_size: usize) -> Mesh {
     let mut mesh = Mesh::new();
-    let mut vertex_map: FastHashMap<usize, u32> = FastHashMap::default();
+    // Per-cell vertex dedup. `cell_idx` is a DENSE linearized cell index in
+    // `0..dc_vertices.len()` (== grid_size^3 from `solve_dc_vertices`), so a flat sentinel
+    // array is the right structure — was a `FastHashMap<usize,u32>` that hash-probed once
+    // per quad corner (~4 * edge_count probes/chunk, plus per-call alloc + growth/rehash)
+    // over a dense key. `u32::MAX` = "no vertex assigned yet for this cell"; a real index
+    // can never reach u32::MAX (would need 4e9 verts/chunk). One alloc, raw array indexing.
+    let mut vertex_map = vec![u32::MAX; dc_vertices.len()];
 
     for (edge_key, intersection) in hermite.edges.iter() {
         let x = edge_key.x() as usize;
@@ -62,15 +68,16 @@ pub fn generate_mesh(hermite: &HermiteData, dc_vertices: &[glam::Vec3], grid_siz
             if pos.x.is_nan() {
                 continue;
             }
-            let vi = *vertex_map.entry(cell_idx).or_insert_with(|| {
-                let idx = mesh.vertices.len() as u32;
+            let mut vi = vertex_map[cell_idx];
+            if vi == u32::MAX {
+                vi = mesh.vertices.len() as u32;
                 mesh.vertices.push(Vertex {
                     position: pos,
                     normal: intersection.normal,
                     material: intersection.material,
                 });
-                idx
-            });
+                vertex_map[cell_idx] = vi;
+            }
             quad_verts[i] = vi;
             valid_mask[i] = true;
             valid_count += 1;
@@ -233,6 +240,42 @@ mod tests {
         let mesh = generate_mesh(&hermite, &dc_vertices, grid_size);
         assert_eq!(mesh.triangle_count(), 2, "One quad = 2 triangles");
         assert!(mesh.vertex_count() <= 4, "At most 4 vertices for one quad");
+    }
+
+    #[test]
+    fn dedup_shares_vertices_across_edges() {
+        // Two Z-axis edges whose quads overlap in two cells. The flat-array vertex map
+        // must collapse the 8 corner references (2 edges x 4 corners) to the 6 DISTINCT
+        // cells — i.e. a cell touched by both edges yields exactly one shared vertex.
+        let grid_size = 4;
+        let mut hermite = HermiteData::default();
+        for &ex in &[1u8, 2u8] {
+            hermite.edges.insert(EdgeKey::new(ex, 1, 1, 2), EdgeIntersection {
+                t: 0.5,
+                normal: Vec3::Z,
+                material: Material::Limestone,
+            });
+        }
+        // All cells valid (non-NaN) so every referenced corner produces a vertex.
+        let total = grid_size * grid_size * grid_size;
+        let mut dc_vertices = vec![Vec3::ZERO; total];
+        for z in 0..grid_size { for y in 0..grid_size { for x in 0..grid_size {
+            dc_vertices[cell_index(x, y, z, grid_size)] =
+                Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+        }}}
+
+        let mesh = generate_mesh(&hermite, &dc_vertices, grid_size);
+
+        // Edge (1,1,1) cells: (0,0,1)(1,0,1)(1,1,1)(0,1,1); edge (2,1,1) cells:
+        // (1,0,1)(2,0,1)(2,1,1)(1,1,1). Shared: (1,0,1),(1,1,1) -> 6 distinct cells.
+        assert_eq!(mesh.vertex_count(), 6,
+            "8 corner refs across 2 edges must dedup to 6 distinct cells, got {}", mesh.vertex_count());
+        // Every triangle index is in-range (no dangling/duplicate vertex).
+        for tri in &mesh.triangles {
+            for &i in &tri.indices {
+                assert!((i as usize) < mesh.vertex_count(), "index {i} out of range");
+            }
+        }
     }
 
     #[test]
