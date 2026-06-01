@@ -1,5 +1,5 @@
 use glam::Vec3;
-use crate::hermite::{HermiteData, FastHashMap};
+use crate::hermite::HermiteData;
 use crate::dual_contouring::qef::QefData;
 
 /// Solve per-cell QEF vertices from hermite data on a flat grid.
@@ -9,11 +9,18 @@ use crate::dual_contouring::qef::QefData;
 /// Cells with no sign-changing edges get a NAN sentinel (skipped by mesh_gen).
 pub fn solve_dc_vertices(hermite: &HermiteData, grid_size: usize) -> Vec<Vec3> {
     let total = grid_size * grid_size * grid_size;
-    // Use sparse map with identity hasher for fast integer key lookup
-    let mut qefs: FastHashMap<usize, QefData> = FastHashMap::with_capacity_and_hasher(
-        hermite.edges.len() / 2,
-        Default::default(),
-    );
+    // The old structure was a `FastHashMap<usize, QefData>` keyed by the dense linear
+    // cell index (0..total). The key space is dense, so we want raw array indexing
+    // instead of hash probes -- but the surface is *sparse* (only ~10% of cells are
+    // touched) and QefData is large (~56 B), so a full `vec![QefData; total]` would pay
+    // a ~1.5 MB memset per call and lose to the (pre-sized) map. Instead we use a small
+    // u32 indirection map (cell index -> compact pool slot) plus a contiguous pool
+    // holding only the touched cells' accumulators. u32::MAX = "no slot yet"; a real slot
+    // index can never reach it. This pays only a ~108 KB memset (u32, not QefData) and
+    // does zero hashing. `touched_cells[slot]` is the cell index for `qef_pool[slot]`.
+    let mut cell_to_slot = vec![u32::MAX; total];
+    let mut qef_pool: Vec<QefData> = Vec::with_capacity(hermite.edges.len());
+    let mut touched_cells: Vec<usize> = Vec::with_capacity(hermite.edges.len());
 
     for (edge_key, intersection) in hermite.edges.iter() {
         let ex = edge_key.x() as usize;
@@ -38,24 +45,31 @@ pub fn solve_dc_vertices(hermite: &HermiteData, grid_size: usize) -> Vec<Vec3> {
         };
 
         for i in 0..adj.count {
-            qefs.entry(adj.cells[i])
-                .or_default()
-                .add(intersection_pos, intersection.normal);
+            let cell = adj.cells[i];
+            let mut slot = cell_to_slot[cell];
+            // First intersection into this cell -> allocate it a compact pool slot.
+            if slot == u32::MAX {
+                slot = qef_pool.len() as u32;
+                cell_to_slot[cell] = slot;
+                qef_pool.push(QefData::default());
+                touched_cells.push(cell);
+            }
+            qef_pool[slot as usize].add(intersection_pos, intersection.normal);
         }
     }
 
-    // Solve each cell's QEF, clamping to cell bounds.
-    // Cells with no intersections get NAN sentinel (skipped by mesh_gen).
+    // Solve each touched cell's QEF, clamping to cell bounds.
+    // Cells with no intersections keep the NAN sentinel (skipped by mesh_gen).
     let sentinel = Vec3::new(f32::NAN, f32::NAN, f32::NAN);
     let mut vertices = vec![sentinel; total];
     let gs2 = grid_size * grid_size;
-    for (&idx, qef) in &qefs {
+    for (slot, &idx) in touched_cells.iter().enumerate() {
         let x = idx % grid_size;
         let y = (idx / grid_size) % grid_size;
         let z = idx / gs2;
         let min_bound = Vec3::new(x as f32, y as f32, z as f32);
         let max_bound = min_bound + Vec3::ONE;
-        vertices[idx] = qef.solve_clamped(min_bound, max_bound);
+        vertices[idx] = qef_pool[slot].solve_clamped(min_bound, max_bound);
     }
 
     vertices
@@ -150,6 +164,34 @@ mod tests {
         // Cell (0,1,1) should have a non-zero vertex
         let idx = 1 * grid_size * grid_size + 1 * grid_size + 0;
         assert_ne!(verts[idx], Vec3::ZERO, "Cell (0,1,1) should have a DC vertex");
+    }
+
+    #[test]
+    fn shared_cell_accumulates_into_one_slot() {
+        // Two edges of DIFFERENT axes that both border cell (1,1,1) must map to the
+        // SAME compact pool slot (regression for the cell_to_slot indirection): the
+        // result is exactly one DC vertex in that cell, reflecting both intersections.
+        let mut hermite = HermiteData::default();
+        // X-edge at (1,1,1) — adjacent to cells including (1,1,1).
+        hermite.edges.insert(
+            EdgeKey::new(1, 1, 1, 0),
+            EdgeIntersection { t: 0.5, normal: Vec3::X, material: Material::Limestone },
+        );
+        // Y-edge at (1,1,1) — also adjacent to cell (1,1,1).
+        hermite.edges.insert(
+            EdgeKey::new(1, 1, 1, 1),
+            EdgeIntersection { t: 0.5, normal: Vec3::Y, material: Material::Limestone },
+        );
+
+        let grid_size = 4;
+        let verts = solve_dc_vertices(&hermite, grid_size);
+        let idx = 1 * grid_size * grid_size + 1 * grid_size + 1;
+        assert!(!verts[idx].x.is_nan(), "shared cell (1,1,1) should have a DC vertex");
+        // The shared cell saw two perpendicular normals, so its solved vertex must be
+        // pulled in both x and y (proof the second edge merged into the same slot, not
+        // a fresh one that overwrote the first).
+        assert!(verts[idx].x > 0.0 && verts[idx].y > 0.0,
+            "vertex should reflect both intersections, got {:?}", verts[idx]);
     }
 
     #[test]
