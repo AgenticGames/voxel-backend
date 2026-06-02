@@ -792,11 +792,17 @@ pub fn sync_region_boundary_densities(
     ];
 
     for &(cx, cy, cz) in &keys {
+        // `f_a` is invariant across all 13 offsets for this key — resolve it once
+        // instead of re-hashing `(cx,cy,cz)` inside the boundary-pair loop.
+        let f_a = &density_fields[&(cx, cy, cz)];
         for &(dx, dy, dz) in &offsets {
             let neighbor = (cx + dx, cy + dy, cz + dz);
-            if !density_fields.contains_key(&neighbor) {
+            // One `.get` replaces the old `contains_key` + `[&neighbor]` (which
+            // hashed the same 12-byte key twice); resolved once per neighbor here
+            // rather than re-hashed per boundary pair below.
+            let Some(f_b) = density_fields.get(&neighbor) else {
                 continue;
-            }
+            };
 
             let x_pairs = axis_boundary_pairs(dx, gs);
             let y_pairs = axis_boundary_pairs(dy, gs);
@@ -805,8 +811,8 @@ pub fn sync_region_boundary_densities(
             for &(az, bz) in &z_pairs {
                 for &(ay, by) in &y_pairs {
                     for &(ax, bx) in &x_pairs {
-                        let sample_a = density_fields[&(cx, cy, cz)].get(ax, ay, az);
-                        let sample_b = density_fields[&neighbor].get(bx, by, bz);
+                        let sample_a = f_a.get(ax, ay, az);
+                        let sample_b = f_b.get(bx, by, bz);
                         let (d, m) = avg_boundary(sample_a, sample_b);
                         updates.push(((cx, cy, cz), ax, ay, az, d, m));
                         updates.push((neighbor, bx, by, bz, d, m));
@@ -849,16 +855,18 @@ pub fn sync_region_boundary_densities(
     let mut grad_updates: Vec<((i32, i32, i32), usize, usize, usize, f32)> = Vec::new();
 
     for &(cx, cy, cz) in &keys {
+        // `f_a` is invariant across the 3 face offsets; resolve once per key.
+        let f_a = &density_fields[&(cx, cy, cz)];
         for &(dx, dy, dz) in &face_offsets {
             let neighbor = (cx + dx, cy + dy, cz + dz);
-            if !density_fields.contains_key(&neighbor) {
+            // Resolve the neighbor field once per face instead of re-hashing the
+            // key inside the (gs+1)^2 (u,v) scan below.
+            let Some(f_b) = density_fields.get(&neighbor) else {
                 continue;
-            }
+            };
             for u in 0..=gs {
                 for v in 0..=gs {
                     let (a_int_d, a_bnd_d, b_int_d, b_bnd_d, a_int_xyz, b_int_xyz) = if dx == 1 {
-                        let f_a = &density_fields[&(cx, cy, cz)];
-                        let f_b = &density_fields[&neighbor];
                         (
                             f_a.get(gs - 1, u, v).density,
                             f_a.get(gs, u, v).density,
@@ -868,8 +876,6 @@ pub fn sync_region_boundary_densities(
                             (1, u, v),
                         )
                     } else if dy == 1 {
-                        let f_a = &density_fields[&(cx, cy, cz)];
-                        let f_b = &density_fields[&neighbor];
                         (
                             f_a.get(u, gs - 1, v).density,
                             f_a.get(u, gs, v).density,
@@ -879,8 +885,6 @@ pub fn sync_region_boundary_densities(
                             (u, 1, v),
                         )
                     } else {
-                        let f_a = &density_fields[&(cx, cy, cz)];
-                        let f_b = &density_fields[&neighbor];
                         (
                             f_a.get(u, v, gs - 1).density,
                             f_a.get(u, v, gs).density,
@@ -1162,6 +1166,168 @@ mod tests {
         assert!(chunks.contains(&(0, 0, 0)));
         assert!(chunks.contains(&(2, 2, 2)));
         assert!(!chunks.contains(&(3, 0, 0)));
+    }
+
+    /// Inlined replica of the PRE-hoist `sync_region_boundary_densities` body
+    /// (the per-cell `density_fields[&key]` / `density_fields[&neighbor]` lookup
+    /// form), used to prove the hoisted version is bit-identical. Kept byte-for-byte
+    /// equivalent to the shipped function except that every inner lookup re-hashes
+    /// the key, as the original did.
+    fn sync_region_boundary_densities_prehoist(
+        density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
+        chunk_size: usize,
+    ) {
+        let gs = chunk_size;
+        let keys: Vec<_> = density_fields.keys().copied().collect();
+        let mut updates: Vec<((i32, i32, i32), usize, usize, usize, f32, Material)> = Vec::new();
+        let offsets: [(i32, i32, i32); 13] = [
+            (1, 0, 0), (0, 1, 0), (0, 0, 1),
+            (1, 1, 0), (1, -1, 0), (1, 0, 1), (1, 0, -1), (0, 1, 1), (0, 1, -1),
+            (1, 1, 1), (1, 1, -1), (1, -1, 1), (1, -1, -1),
+        ];
+        for &(cx, cy, cz) in &keys {
+            for &(dx, dy, dz) in &offsets {
+                let neighbor = (cx + dx, cy + dy, cz + dz);
+                if !density_fields.contains_key(&neighbor) {
+                    continue;
+                }
+                let x_pairs = axis_boundary_pairs(dx, gs);
+                let y_pairs = axis_boundary_pairs(dy, gs);
+                let z_pairs = axis_boundary_pairs(dz, gs);
+                for &(az, bz) in &z_pairs {
+                    for &(ay, by) in &y_pairs {
+                        for &(ax, bx) in &x_pairs {
+                            let sample_a = density_fields[&(cx, cy, cz)].get(ax, ay, az);
+                            let sample_b = density_fields[&neighbor].get(bx, by, bz);
+                            let (d, m) = avg_boundary(sample_a, sample_b);
+                            updates.push(((cx, cy, cz), ax, ay, az, d, m));
+                            updates.push((neighbor, bx, by, bz, d, m));
+                        }
+                    }
+                }
+            }
+        }
+        for (key, x, y, z, d, m) in updates {
+            if let Some(field) = density_fields.get_mut(&key) {
+                let sample = field.get_mut(x, y, z);
+                sample.density = d;
+                sample.material = m;
+            }
+        }
+        let cliff_interior_min: f32 = 0.5;
+        let cliff_boundary_max: f32 = 0.0;
+        let cliff_delta_min: f32 = 0.7;
+        let blend_factor: f32 = 0.5;
+        let face_offsets: [(i32, i32, i32); 3] = [(1, 0, 0), (0, 1, 0), (0, 0, 1)];
+        let mut grad_updates: Vec<((i32, i32, i32), usize, usize, usize, f32)> = Vec::new();
+        for &(cx, cy, cz) in &keys {
+            for &(dx, dy, dz) in &face_offsets {
+                let neighbor = (cx + dx, cy + dy, cz + dz);
+                if !density_fields.contains_key(&neighbor) {
+                    continue;
+                }
+                for u in 0..=gs {
+                    for v in 0..=gs {
+                        let (a_int_d, a_bnd_d, b_int_d, b_bnd_d, a_int_xyz, b_int_xyz) = if dx == 1 {
+                            let f_a = &density_fields[&(cx, cy, cz)];
+                            let f_b = &density_fields[&neighbor];
+                            (f_a.get(gs - 1, u, v).density, f_a.get(gs, u, v).density,
+                             f_b.get(1, u, v).density, f_b.get(0, u, v).density,
+                             (gs - 1, u, v), (1, u, v))
+                        } else if dy == 1 {
+                            let f_a = &density_fields[&(cx, cy, cz)];
+                            let f_b = &density_fields[&neighbor];
+                            (f_a.get(u, gs - 1, v).density, f_a.get(u, gs, v).density,
+                             f_b.get(u, 1, v).density, f_b.get(u, 0, v).density,
+                             (u, gs - 1, v), (u, 1, v))
+                        } else {
+                            let f_a = &density_fields[&(cx, cy, cz)];
+                            let f_b = &density_fields[&neighbor];
+                            (f_a.get(u, v, gs - 1).density, f_a.get(u, v, gs).density,
+                             f_b.get(u, v, 1).density, f_b.get(u, v, 0).density,
+                             (u, v, gs - 1), (u, v, 1))
+                        };
+                        if a_int_d > cliff_interior_min && a_bnd_d < cliff_boundary_max
+                            && a_int_d - a_bnd_d > cliff_delta_min
+                        {
+                            let new_d = a_int_d + (a_bnd_d - a_int_d) * blend_factor;
+                            grad_updates.push(((cx, cy, cz), a_int_xyz.0, a_int_xyz.1, a_int_xyz.2, new_d));
+                        }
+                        if b_int_d > cliff_interior_min && b_bnd_d < cliff_boundary_max
+                            && b_int_d - b_bnd_d > cliff_delta_min
+                        {
+                            let new_d = b_int_d + (b_bnd_d - b_int_d) * blend_factor;
+                            grad_updates.push((neighbor, b_int_xyz.0, b_int_xyz.1, b_int_xyz.2, new_d));
+                        }
+                    }
+                }
+            }
+        }
+        for (key, x, y, z, d) in grad_updates {
+            if let Some(field) = density_fields.get_mut(&key) {
+                field.get_mut(x, y, z).density = d;
+            }
+        }
+    }
+
+    /// The hoisted `sync_region_boundary_densities` must produce bit-identical
+    /// output to the pre-hoist replica. `HashMap::clone` preserves iteration order
+    /// within a process, so both clones below visit `keys()` in the same order —
+    /// making the (intrinsically order-dependent, at shared edge/corner cells)
+    /// output directly comparable.
+    #[test]
+    fn boundary_sync_hoist_is_bit_identical() {
+        let cs = 4usize; // size = 5
+        let mut region: HashMap<(i32, i32, i32), DensityField> = HashMap::new();
+        // 2^3 block: interior cell shares boundary faces/edges/corners with all
+        // forward neighbors, so edge/corner cells receive multiple updates.
+        for cz in 0..2 {
+            for cy in 0..2 {
+                for cx in 0..2 {
+                    let mut f = DensityField::new(cs + 1);
+                    let ox = cx * cs as i32;
+                    let oy = cy * cs as i32;
+                    let oz = cz * cs as i32;
+                    for z in 0..=cs {
+                        for y in 0..=cs {
+                            for x in 0..=cs {
+                                // A bumpy field that straddles the cliff thresholds
+                                // and varies per global coord (so neighbors differ).
+                                let gx = ox + x as i32;
+                                let gy = oy + y as i32;
+                                let gz = oz + z as i32;
+                                let d = (((gx * 7 + gy * 13 + gz * 5) % 11) as f32 / 5.0) - 1.0;
+                                let s = f.get_mut(x, y, z);
+                                s.density = d;
+                                s.material = if d > 0.0 { Material::Limestone } else { Material::Air };
+                            }
+                        }
+                    }
+                    region.insert((cx, cy, cz), f);
+                }
+            }
+        }
+
+        let mut a = region.clone();
+        let mut b = region.clone();
+        sync_region_boundary_densities(&mut a, cs); // hoisted (shipped)
+        sync_region_boundary_densities_prehoist(&mut b, cs); // original
+
+        let mut keys: Vec<_> = a.keys().copied().collect();
+        keys.sort();
+        for k in keys {
+            let fa = &a[&k];
+            let fb = &b[&k];
+            assert_eq!(fa.samples.len(), fb.samples.len());
+            for (i, (sa, sb)) in fa.samples.iter().zip(fb.samples.iter()).enumerate() {
+                assert_eq!(
+                    sa.density.to_bits(),
+                    sb.density.to_bits(),
+                    "density mismatch at chunk {k:?} sample {i}"
+                );
+                assert_eq!(sa.material, sb.material, "material mismatch at chunk {k:?} sample {i}");
+            }
+        }
     }
 
     #[test]
