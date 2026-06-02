@@ -778,7 +778,15 @@ pub fn sync_region_boundary_densities(
 ) {
     let gs = chunk_size;
     let keys: Vec<_> = density_fields.keys().copied().collect();
-    let mut updates: Vec<((i32, i32, i32), usize, usize, usize, f32, Material)> = Vec::new();
+
+    // key -> dense bucket index, built once (one hash per field). Lets every
+    // boundary write be routed to a per-field bucket so the apply pass resolves
+    // each field's HashMap slot EXACTLY ONCE, instead of one `get_mut` SipHash
+    // per individual sample write. The old flat `updates` vec re-hashed an
+    // edge/corner field's 12-byte key thousands of times per region (every pair
+    // that touched it pushed its key, and the apply loop hashed each push).
+    let key_index: HashMap<(i32, i32, i32), usize> =
+        keys.iter().enumerate().map(|(i, &k)| (k, i)).collect();
 
     // 13 "forward" neighbor offsets (first nonzero component is positive).
     // Processing only forward directions avoids syncing each pair twice.
@@ -791,7 +799,14 @@ pub fn sync_region_boundary_densities(
         (1, 1, 1), (1, 1, -1), (1, -1, 1), (1, -1, -1),
     ];
 
-    for &(cx, cy, cz) in &keys {
+    // Per-field write buckets. Pushes are appended in the SAME outer-loop
+    // traversal order that previously filled the flat `updates` vec, so for any
+    // single cell the sequence of writes — and thus the last-writer-wins result —
+    // is byte-for-byte preserved (bucketing is a stable partition by target key).
+    let mut buckets: Vec<Vec<(usize, usize, usize, f32, Material)>> =
+        vec![Vec::new(); keys.len()];
+
+    for (ki, &(cx, cy, cz)) in keys.iter().enumerate() {
         // `f_a` is invariant across all 13 offsets for this key — resolve it once
         // instead of re-hashing `(cx,cy,cz)` inside the boundary-pair loop.
         let f_a = &density_fields[&(cx, cy, cz)];
@@ -803,6 +818,8 @@ pub fn sync_region_boundary_densities(
             let Some(f_b) = density_fields.get(&neighbor) else {
                 continue;
             };
+            // Neighbor's bucket index — one hash per (key, offset), not per pair.
+            let ni = key_index[&neighbor];
 
             let x_pairs = axis_boundary_pairs(dx, gs);
             let y_pairs = axis_boundary_pairs(dy, gs);
@@ -814,16 +831,23 @@ pub fn sync_region_boundary_densities(
                         let sample_a = f_a.get(ax, ay, az);
                         let sample_b = f_b.get(bx, by, bz);
                         let (d, m) = avg_boundary(sample_a, sample_b);
-                        updates.push(((cx, cy, cz), ax, ay, az, d, m));
-                        updates.push((neighbor, bx, by, bz, d, m));
+                        buckets[ki].push((ax, ay, az, d, m));
+                        buckets[ni].push((bx, by, bz, d, m));
                     }
                 }
             }
         }
     }
 
-    for (key, x, y, z, d, m) in updates {
-        if let Some(field) = density_fields.get_mut(&key) {
+    for (ki, &key) in keys.iter().enumerate() {
+        if buckets[ki].is_empty() {
+            continue;
+        }
+        // Single HashMap probe per field; all of this field's writes follow.
+        let field = density_fields
+            .get_mut(&key)
+            .expect("key originates from density_fields.keys()");
+        for (x, y, z, d, m) in buckets[ki].drain(..) {
             let sample = field.get_mut(x, y, z);
             sample.density = d;
             sample.material = m;
@@ -852,9 +876,12 @@ pub fn sync_region_boundary_densities(
     let cliff_delta_min: f32 = 0.7;      // and delta this large
     let blend_factor: f32 = 0.5;          // pull interior 50% toward boundary
     let face_offsets: [(i32, i32, i32); 3] = [(1, 0, 0), (0, 1, 0), (0, 0, 1)];
-    let mut grad_updates: Vec<((i32, i32, i32), usize, usize, usize, f32)> = Vec::new();
+    // Same per-field bucketing as the min-rule pass: each field's slot is probed
+    // once at apply, and per-cell write order is preserved (stable partition).
+    let mut grad_buckets: Vec<Vec<(usize, usize, usize, f32)>> =
+        vec![Vec::new(); keys.len()];
 
-    for &(cx, cy, cz) in &keys {
+    for (ki, &(cx, cy, cz)) in keys.iter().enumerate() {
         // `f_a` is invariant across the 3 face offsets; resolve once per key.
         let f_a = &density_fields[&(cx, cy, cz)];
         for &(dx, dy, dz) in &face_offsets {
@@ -864,6 +891,7 @@ pub fn sync_region_boundary_densities(
             let Some(f_b) = density_fields.get(&neighbor) else {
                 continue;
             };
+            let ni = key_index[&neighbor];
             for u in 0..=gs {
                 for v in 0..=gs {
                     let (a_int_d, a_bnd_d, b_int_d, b_bnd_d, a_int_xyz, b_int_xyz) = if dx == 1 {
@@ -901,7 +929,7 @@ pub fn sync_region_boundary_densities(
                         && a_int_d - a_bnd_d > cliff_delta_min
                     {
                         let new_d = a_int_d + (a_bnd_d - a_int_d) * blend_factor;
-                        grad_updates.push(((cx, cy, cz), a_int_xyz.0, a_int_xyz.1, a_int_xyz.2, new_d));
+                        grad_buckets[ki].push((a_int_xyz.0, a_int_xyz.1, a_int_xyz.2, new_d));
                     }
                     // b-side cliff: same check from b's perspective
                     if b_int_d > cliff_interior_min
@@ -909,15 +937,21 @@ pub fn sync_region_boundary_densities(
                         && b_int_d - b_bnd_d > cliff_delta_min
                     {
                         let new_d = b_int_d + (b_bnd_d - b_int_d) * blend_factor;
-                        grad_updates.push((neighbor, b_int_xyz.0, b_int_xyz.1, b_int_xyz.2, new_d));
+                        grad_buckets[ni].push((b_int_xyz.0, b_int_xyz.1, b_int_xyz.2, new_d));
                     }
                 }
             }
         }
     }
 
-    for (key, x, y, z, d) in grad_updates {
-        if let Some(field) = density_fields.get_mut(&key) {
+    for (ki, &key) in keys.iter().enumerate() {
+        if grad_buckets[ki].is_empty() {
+            continue;
+        }
+        let field = density_fields
+            .get_mut(&key)
+            .expect("key originates from density_fields.keys()");
+        for (x, y, z, d) in grad_buckets[ki].drain(..) {
             let sample = field.get_mut(x, y, z);
             sample.density = d;
             // material left alone — only soften the density gradient.
