@@ -630,6 +630,22 @@ pub fn generate_chunk_seam_quads(
     let gs_f = gs as f32;
     let mut mesh = Mesh::new();
 
+    // Hoist the per-cell neighbor lookup out of the hot edge loop.
+    // Every quad cell resolves to `chunk_key + (dx, dy, dz)` where each delta is
+    // provably 0 or 1: cell coords range over [0, gs] (edge coords are 0..=gs,
+    // cells are coord or coord-1), so `cell >= gs` flips a delta to at most 1.
+    // That means the whole loop references only the 8 chunks in this 2^3 block —
+    // yet the original code hash-probed `all_seam_data.get(&neighbor_key)` once
+    // per cell (4x per boundary edge). Resolve those 8 references ONCE here and
+    // index them by `dx | dy<<1 | dz<<2` inside the loop. Same lookup semantics
+    // (a missing chunk yields None -> the quad is dropped), zero hashing per edge.
+    let neighbors: [Option<&ChunkSeamData>; 8] = std::array::from_fn(|i| {
+        let dx = (i & 1) as i32;
+        let dy = ((i >> 1) & 1) as i32;
+        let dz = ((i >> 2) & 1) as i32;
+        all_seam_data.get(&(chunk_key.0 + dx, chunk_key.1 + dy, chunk_key.2 + dz))
+    });
+
     for (edge_key, intersection) in &chunk_data.boundary_edges {
         let ex = edge_key.x() as i32;
         let ey = edge_key.y() as i32;
@@ -670,17 +686,12 @@ pub fn generate_chunk_seam_quads(
             let chunk_dy = if cell_y >= gs_i { 1 } else { 0 };
             let chunk_dz = if cell_z >= gs_i { 1 } else { 0 };
 
-            let neighbor_key = (
-                chunk_key.0 + chunk_dx,
-                chunk_key.1 + chunk_dy,
-                chunk_key.2 + chunk_dz,
-            );
-
             let lx = (cell_x - chunk_dx * gs_i) as usize;
             let ly = (cell_y - chunk_dy * gs_i) as usize;
             let lz = (cell_z - chunk_dz * gs_i) as usize;
 
-            if let Some(neighbor) = all_seam_data.get(&neighbor_key) {
+            let neighbor_slot = (chunk_dx | (chunk_dy << 1) | (chunk_dz << 2)) as usize;
+            if let Some(neighbor) = neighbors[neighbor_slot] {
                 let cell_idx = lz * gs * gs + ly * gs + lx;
                 if cell_idx >= neighbor.dc_vertices.len() {
                     valid = false;
