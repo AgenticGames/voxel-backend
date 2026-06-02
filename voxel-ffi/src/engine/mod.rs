@@ -130,6 +130,7 @@ pub struct VoxelEngine {
     // Morph
     morph_results: Arc<Mutex<std::collections::VecDeque<MorphStepResult>>>,
     morph_manifest: Arc<Mutex<Option<voxel_sleep::ChangeManifest>>>,
+    morph_snapshot: Arc<Mutex<crate::worker::MorphSnapshot>>,
 
     // World Scan
     scan_complete: Arc<Mutex<Option<String>>>,
@@ -275,6 +276,7 @@ impl VoxelEngine {
 
         let profiler = Arc::new(StreamingProfiler::new(num_workers));
         let morph_manifest: Arc<Mutex<Option<voxel_sleep::ChangeManifest>>> = Arc::new(Mutex::new(None));
+        let morph_snapshot: Arc<Mutex<crate::worker::MorphSnapshot>> = Arc::new(Mutex::new(crate::worker::MorphSnapshot::default()));
 
         // Per-region generation-in-flight mutexes. Prevents 2+ workers from
         // redundantly generating the same region's base_density (wasted CPU).
@@ -332,6 +334,7 @@ impl VoxelEngine {
             let fluid_tx = fluid_event_tx.clone();
             let prof = Arc::clone(&profiler);
             let morph_man = Arc::clone(&morph_manifest);
+            let morph_snap = Arc::clone(&morph_snapshot);
             let rif = Arc::clone(&regions_in_flight);
             let anchors = Arc::clone(&crystal_anchors);
             let heartbeats = Arc::clone(&heartbeats);
@@ -361,6 +364,7 @@ impl VoxelEngine {
                             let fluid_tx = fluid_tx.clone();
                             let prof = Arc::clone(&prof);
                             let morph_man = Arc::clone(&morph_man);
+                            let morph_snap = Arc::clone(&morph_snap);
                             let rif = Arc::clone(&rif);
                             let anchors = Arc::clone(&anchors);
                             let heartbeats = Arc::clone(&heartbeats);
@@ -379,6 +383,7 @@ impl VoxelEngine {
                                     prof,
                                     worker_id,
                                     morph_man,
+                                    morph_snap,
                                     rif,
                                     anchors,
                                     heartbeats,
@@ -694,6 +699,7 @@ impl VoxelEngine {
             sleep_complete: Arc::new(Mutex::new(None)),
             morph_results: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             morph_manifest,
+            morph_snapshot,
             scan_complete: Arc::new(Mutex::new(None)),
             force_spawn_complete: Arc::new(Mutex::new(None)),
             profiler,

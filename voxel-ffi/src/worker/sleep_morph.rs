@@ -391,6 +391,7 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
     let config = ctx.config;
     let world_scale = ctx.world_scale;
     let morph_manifest = ctx.morph_manifest;
+    let morph_snapshot = ctx.morph_snapshot;
             let cfg = config.read().unwrap().clone();
             // CHUNK-DBG: print on first step only to avoid log spam
             if step == 1 {
@@ -424,7 +425,41 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
             // Parallelized mesh gen (rayon) keeps this fast.
             let active: Vec<bool> = vec![true; chunks.len()];
 
-            let s = store.read().unwrap();
+            // R5 (morph-snapshot): refresh the per-play snapshot if the chunk set
+            // changed, taking the store read lock ONCE here. Every subsequent step
+            // for this play meshes from the snapshot and never touches the store
+            // lock — which would otherwise stall behind a generation slow-path write
+            // (150-380ms hold) and freeze the on-screen reveal.
+            let mut snap = morph_snapshot.lock().unwrap();
+            if snap.keys != chunks {
+                snap.densities.clear();
+                snap.neighbor_seams.clear();
+                let chunks_set: std::collections::HashSet<(i32, i32, i32)> = chunks.iter().copied().collect();
+                let s = store.read().unwrap();
+                for &key in &chunks {
+                    if let Some(d) = s.density_fields.get(&key) {
+                        snap.densities.insert(key, d.clone());
+                    }
+                }
+                for &c in &chunks {
+                    for dx in -1..=1i32 {
+                        for dy in -1..=1i32 {
+                            for dz in -1..=1i32 {
+                                let n = (c.0 + dx, c.1 + dy, c.2 + dz);
+                                if chunks_set.contains(&n) { continue; }
+                                if let Some(data) = s.chunk_seam_data.get(&n) {
+                                    snap.neighbor_seams.insert(n, data.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                drop(s);
+                snap.keys = chunks.clone();
+            }
+            // Out-of-block neighbor seams for Phase 3 (cloned once from the snapshot).
+            let neighbor_seam_snapshot: std::collections::HashMap<(i32, i32, i32), ChunkSeamData> =
+                snap.neighbor_seams.clone();
 
             // Phase 1: Clone active density fields and apply manifest interpolation
             let mut density_fields: Vec<Option<voxel_core::density::DensityField>> = Vec::with_capacity(chunks.len());
@@ -433,7 +468,7 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
                     density_fields.push(None); // Skip — existing mesh preserved
                     continue;
                 }
-                match s.density_fields.get(&key) {
+                match snap.densities.get(&key) {
                     Some(d) => {
                         let mut df = d.clone();
                         if let Some(delta) = manifest.chunk_deltas.get(&key) {
@@ -522,7 +557,7 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
                     None => density_fields.push(None),
                 }
             }
-            drop(s);
+            drop(snap);
 
             // Phase 2: Sync boundaries between adjacent chunks in the block.
             // Generalized boundary sync: for each pair of chunks that are adjacent
@@ -621,7 +656,10 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
                 // reveal-timed seams pending diagnosis of the morph/seam path.
                 // Out-of-block neighbours come from the store (post-sleep t=1);
                 // in-block dc_verts are added below.
-                let s = store.read().unwrap();
+                // R5: out-of-block neighbor seams come from the per-play snapshot
+                // (cloned once above), so this step takes NO store read lock — it
+                // can't stall behind a generation write. Behavior-preserving: the
+                // morph already treats out-of-block seams as the post-sleep t=1 state.
                 let mut map = std::collections::HashMap::new();
                 for &c in &chunks {
                     for dx in -1..=1i32 {
@@ -629,7 +667,7 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
                             for dz in -1..=1i32 {
                                 let n = (c.0 + dx, c.1 + dy, c.2 + dz);
                                 if chunks_set.contains(&n) { continue; }
-                                if let Some(data) = s.chunk_seam_data.get(&n) {
+                                if let Some(data) = neighbor_seam_snapshot.get(&n) {
                                     map.insert(n, data.clone());
                                 }
                             }

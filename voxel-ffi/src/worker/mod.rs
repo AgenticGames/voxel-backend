@@ -33,6 +33,21 @@ pub use pathing::path_worker_loop;
 use seam::batched_seam_pass_mine;
 use stress::try_process_stress_queue;
 
+/// R5 (morph-snapshot): a one-time, per-play clone of the morph block's base
+/// densities + out-of-block neighbor seam data. A morph step meshes the reveal
+/// from THIS instead of taking the store read lock on every step — otherwise the
+/// step's read acquisition stalls behind generation's slow-path write lock
+/// (150-380ms holds) and the on-screen reveal freezes. Rebuilt when the play's
+/// chunk set changes; reset to default at montage end (clear_morph_manifest). The
+/// block is montage-protected (never unloaded) and the morph already meshes from
+/// a post-sleep t=1 clone, so snapshotting is behavior-preserving.
+#[derive(Default)]
+pub struct MorphSnapshot {
+    pub keys: Vec<(i32, i32, i32)>,
+    pub densities: std::collections::HashMap<(i32, i32, i32), voxel_core::density::DensityField>,
+    pub neighbor_seams: std::collections::HashMap<(i32, i32, i32), voxel_gen::region_gen::ChunkSeamData>,
+}
+
 /// Shared context threaded into every request handler. Holds borrowed
 /// references to the worker's channels, stores, and config so each extracted
 /// handler can bind the exact locals the original match-arm body referenced.
@@ -49,6 +64,7 @@ pub(crate) struct HandlerCtx<'a> {
     pub generate_rx: &'a Receiver<WorkerRequest>,
     pub mine_rx: &'a Receiver<WorkerRequest>,
     pub morph_manifest: &'a Arc<Mutex<Option<voxel_sleep::ChangeManifest>>>,
+    pub morph_snapshot: &'a Arc<Mutex<MorphSnapshot>>,
     pub regions_in_flight: &'a Arc<DashMap<(i32, i32, i32), Arc<Mutex<()>>>>,
     pub crystal_anchors: &'a Arc<Mutex<crate::crystal_anchors::CrystalAnchorManager>>,
 }
@@ -68,6 +84,7 @@ pub fn worker_loop(
     profiler: Arc<StreamingProfiler>,
     worker_id: usize,
     morph_manifest: Arc<Mutex<Option<voxel_sleep::ChangeManifest>>>,
+    morph_snapshot: Arc<Mutex<MorphSnapshot>>,
     regions_in_flight: Arc<DashMap<(i32, i32, i32), Arc<Mutex<()>>>>,
     crystal_anchors: Arc<Mutex<crate::crystal_anchors::CrystalAnchorManager>>,
     // Per-worker activity heartbeat (this worker writes only `heartbeats[worker_id]`).
@@ -84,7 +101,7 @@ pub fn worker_loop(
             hb.enter(act, coord);
             handle_request(
                 req, &result_tx, &store, &config, &stress_config, &generation_counters,
-                world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &mine_rx, &morph_manifest,
+                world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &mine_rx, &morph_manifest, &morph_snapshot,
                 &regions_in_flight, &crystal_anchors,
             );
             hb.idle();
@@ -110,7 +127,7 @@ pub fn worker_loop(
                 hb.enter(act, coord);
                 handle_request(
                     req, &result_tx, &store, &config, &stress_config, &generation_counters,
-                    world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &mine_rx, &morph_manifest,
+                    world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &mine_rx, &morph_manifest, &morph_snapshot,
                     &regions_in_flight, &crystal_anchors,
                 );
                 hb.idle();
@@ -193,6 +210,7 @@ fn handle_request(
     generate_rx: &Receiver<WorkerRequest>,
     mine_rx: &Receiver<WorkerRequest>,
     morph_manifest: &Arc<Mutex<Option<voxel_sleep::ChangeManifest>>>,
+    morph_snapshot: &Arc<Mutex<MorphSnapshot>>,
     regions_in_flight: &Arc<DashMap<(i32, i32, i32), Arc<Mutex<()>>>>,
     crystal_anchors: &Arc<Mutex<crate::crystal_anchors::CrystalAnchorManager>>,
 ) {
@@ -209,6 +227,7 @@ fn handle_request(
         generate_rx,
         mine_rx,
         morph_manifest,
+        morph_snapshot,
         regions_in_flight,
         crystal_anchors,
     };

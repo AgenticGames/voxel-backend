@@ -128,6 +128,10 @@ impl VoxelEngine {
         match voxel_sleep::ChangeManifest::from_json(json) {
             Ok(m) => {
                 *self.morph_manifest.lock().unwrap() = Some(m);
+                // R5: a fresh manifest = a new montage; drop the prior morph snapshot
+                // so the first step of each play rebuilds it (the keys-mismatch check
+                // also handles per-play rebuilds within a montage).
+                *self.morph_snapshot.lock().unwrap() = crate::worker::MorphSnapshot::default();
                 true
             }
             Err(e) => {
@@ -140,6 +144,8 @@ impl VoxelEngine {
     /// Clear cached morph manifest.
     pub fn clear_morph_manifest(&self) {
         *self.morph_manifest.lock().unwrap() = None;
+        // R5: drop the per-play density/seam snapshot at montage end.
+        *self.morph_snapshot.lock().unwrap() = crate::worker::MorphSnapshot::default();
     }
 
     /// Add `synthesize_growth = true` stubs to the cached morph manifest
