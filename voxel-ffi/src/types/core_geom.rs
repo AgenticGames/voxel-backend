@@ -90,6 +90,11 @@ pub struct FfiMeshData {
     pub index_count: u32,
     pub submeshes: *mut FfiSubmesh,
     pub submesh_count: u32,
+    /// Per-vertex morph reveal time in [0,1] (length = `vertex_count`), or null
+    /// for normal meshes. Appended LAST so existing field offsets are unchanged
+    /// (a marshalling bug here can only garble the reveal, never positions/etc).
+    /// The UE mirror `FVoxelMeshData` must append a matching `const float*`.
+    pub reveal_t: *mut f32,
 }
 
 #[repr(C)]

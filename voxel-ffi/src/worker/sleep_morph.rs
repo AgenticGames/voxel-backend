@@ -694,7 +694,20 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
                 }
             }
 
-            // Phase 4: Generate seam quads and append to base meshes, then convert
+            // Phase 4: Generate seam quads and append to base meshes, then convert.
+            //
+            // GPU-reveal bake: per vertex we also compute reveal_t in [0,1] (0 = reveals
+            // first, 1 = last) in the SAME Rust voxel-world space as the Phase-1 growth
+            // (vertex world pos = key*chunk_size + local). The UE material dissolves the
+            // mesh in as MorphProgress sweeps 0->1, so the CPU no longer re-meshes per
+            // step. Synthesized-growth chunks bake the exact `spread` field (radial to
+            // growth_sources, or a chunk-local rising y-gradient). Recorded voxel_changes
+            // chunks bake reveal_t from PROXIMITY TO ACTUAL CHANGES: unchanged rock is
+            // reveal_t=0 (present from the start, never dissolves), only changed voxels
+            // (+1-voxel dilation to catch DC surface verts straddling them) reveal in
+            // spread_distance order — so existing geometry doesn't vanish/pop, matching
+            // the old per-step morph's behaviour for unchanged terrain.
+            let cs_f = cfg.chunk_size as f32;
             let mut meshes = Vec::with_capacity(chunks.len());
             for (i, base_opt) in base_meshes.into_iter().enumerate() {
                 match base_opt {
@@ -710,6 +723,72 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
                         if cfg.mesh_recalc_normals > 0 { mesh.recalculate_normals(); }
 
                         let mut converted = convert_mesh_to_ue_scaled(&mesh, cfg.voxel_scale(), world_scale);
+
+                        // Bake per-vertex reveal_t (aligned with converted.positions BEFORE
+                        // bucketing — convert preserves vertex order; bucket reorders both).
+                        {
+                            let key = chunks[i];
+                            let origin = glam::Vec3::new(key.0 as f32 * cs_f, key.1 as f32 * cs_f, key.2 as f32 * cs_f);
+                            let delta = manifest.chunk_deltas.get(&key);
+                            let synth = delta.map(|d| d.synthesize_growth).unwrap_or(false);
+                            let sources: &[(f32, f32, f32)] = delta.map(|d| d.growth_sources.as_slice()).unwrap_or(&[]);
+                            let inv_max = delta
+                                .map(|d| if d.growth_source_max_dist > 0.0 { 1.0 / d.growth_source_max_dist } else { 0.0 })
+                                .unwrap_or(0.0);
+
+                            // Recorded-changes chunks: per-voxel reveal field so ONLY the
+                            // changed voxels reveal (dilated 1 voxel); unchanged terrain
+                            // stays reveal_t=0. -1.0 = "unchanged / present from start".
+                            let fsize = cfg.chunk_size as usize + 1;
+                            let mut change_field: Vec<f32> = Vec::new();
+                            if !synth {
+                                if let Some(d) = delta {
+                                    change_field = vec![-1.0f32; fsize * fsize * fsize];
+                                    for ch in &d.voxel_changes {
+                                        let sd = ch.spread_distance.clamp(0.0, 1.0);
+                                        for dz in -1..=1i32 { for dy in -1..=1i32 { for dx in -1..=1i32 {
+                                            let x = ch.lx as i32 + dx;
+                                            let y = ch.ly as i32 + dy;
+                                            let z = ch.lz as i32 + dz;
+                                            if x < 0 || y < 0 || z < 0
+                                                || x >= fsize as i32 || y >= fsize as i32 || z >= fsize as i32 { continue; }
+                                            let fi = (z as usize * fsize + y as usize) * fsize + x as usize;
+                                            if change_field[fi] < 0.0 || sd < change_field[fi] { change_field[fi] = sd; }
+                                        }}}
+                                    }
+                                }
+                            }
+
+                            let mut rt = Vec::with_capacity(mesh.vertices.len());
+                            for v in &mesh.vertices {
+                                let spread = if synth && !sources.is_empty() {
+                                    // Radial: min distance to any growth source / max_dist.
+                                    let wp = origin + v.position;
+                                    let mut best = f32::MAX;
+                                    for s in sources {
+                                        let d = wp - glam::Vec3::new(s.0, s.1, s.2);
+                                        let d2 = d.length_squared();
+                                        if d2 < best { best = d2; }
+                                    }
+                                    (best.sqrt() * inv_max).clamp(0.0, 1.0)
+                                } else if synth {
+                                    // Rising y-gradient (chunk-local), mirrors Phase-1 fallback.
+                                    (v.position.y / cs_f).clamp(0.0, 1.0)
+                                } else if !change_field.is_empty() {
+                                    // Recorded: reveal only near actual changes; unchanged = 0.
+                                    let xi = (v.position.x.round() as i32).clamp(0, fsize as i32 - 1) as usize;
+                                    let yi = (v.position.y.round() as i32).clamp(0, fsize as i32 - 1) as usize;
+                                    let zi = (v.position.z.round() as i32).clamp(0, fsize as i32 - 1) as usize;
+                                    let f = change_field[(zi * fsize + yi) * fsize + xi];
+                                    if f >= 0.0 { f } else { 0.0 }
+                                } else {
+                                    0.0
+                                };
+                                rt.push(spread);
+                            }
+                            converted.reveal_t = rt;
+                        }
+
                         crate::convert::bucket_mesh_by_material(&mut converted);
                         // CHUNK-DBG: log vertex bounding box for first step
                         if step == 1 && (i < 3 || i == chunks.len() / 2 || i >= chunks.len() - 2) {
@@ -733,6 +812,7 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
                             material_ids: Vec::new(),
                             indices: Vec::new(),
                             submeshes: Vec::new(),
+                            reveal_t: Vec::new(),
                         });
                     }
                 }

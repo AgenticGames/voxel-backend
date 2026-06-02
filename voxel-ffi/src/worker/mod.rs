@@ -72,6 +72,7 @@ pub(crate) struct HandlerCtx<'a> {
 /// Worker thread main loop. Each worker pulls from shared channels.
 pub fn worker_loop(
     shutdown: Arc<AtomicBool>,
+    generation_paused: Arc<AtomicBool>,
     generate_rx: Receiver<WorkerRequest>,
     mine_rx: Receiver<WorkerRequest>,
     result_tx: Sender<WorkerResult>,
@@ -116,6 +117,17 @@ pub fn worker_loop(
             if did_stress {
                 continue;
             }
+        }
+
+        // Reveal pause: while a sleep-montage morph reveal is on screen, UE pauses
+        // generation so the morph's parallel (rayon) mesh-gen gets the full core
+        // count. The POI gen "storm" otherwise steals cores and stutters the reveal.
+        // Mine (morph/sleep) above still runs every loop — we only stop pulling
+        // generates here; queued gens stay buffered and resume the instant UE clears
+        // the flag between plays.
+        if generation_paused.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(2));
+            continue;
         }
 
         // Priority 2: generate requests (blocking with timeout)

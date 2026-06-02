@@ -217,6 +217,7 @@ fn empty_mesh() -> ConvertedMesh {
         material_ids: Vec::new(),
         indices: Vec::new(),
         submeshes: Vec::new(),
+        reveal_t: Vec::new(),
     }
 }
 

@@ -11,6 +11,12 @@ pub struct ConvertedMesh {
     pub material_ids: Vec<u8>,
     pub indices: Vec<u32>,
     pub submeshes: Vec<FfiSubmesh>,
+    /// Per-vertex morph reveal time in [0,1] (0 = revealed first, 1 = last).
+    /// Empty for normal (non-morph) meshes. Baked by the sleep-montage morph
+    /// path so the GPU material can dissolve the mesh in over MorphProgress
+    /// instead of the CPU re-meshing every step. Reordered alongside positions
+    /// in `bucket_mesh_by_material`.
+    pub reveal_t: Vec<f32>,
 }
 
 /// Converted fluid mesh data in UE coordinate space.

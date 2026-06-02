@@ -39,6 +39,17 @@ pub unsafe extern "C" fn voxel_clear_morph_manifest(engine: *mut c_void) {
     engine.clear_morph_manifest();
 }
 
+/// Sleep-montage reveal pause. Pass 1 while a morph reveal is on screen so worker
+/// threads stop pulling chunk-generation requests — the morph's parallel mesh-gen
+/// then gets the full core count instead of fighting the POI gen "storm" for rayon.
+/// Mine/morph/sleep requests still run. Pass 0 between plays to resume generation.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_set_generation_paused(engine: *mut c_void, paused: u32) {
+    if engine.is_null() { return; }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.set_generation_paused(paused != 0);
+}
+
 /// Request a morph step using the cached manifest.
 /// step: current step (0..total_steps)
 /// total_steps: total number of morph steps
@@ -90,6 +101,14 @@ pub unsafe extern "C" fn voxel_poll_morph_result(engine: *mut c_void) -> *mut Ff
                 let mut material_ids = converted.material_ids.into_boxed_slice();
                 let mut indices = converted.indices.into_boxed_slice();
                 let mut submeshes = converted.submeshes.into_boxed_slice();
+                // Per-vertex reveal_t (morph GPU reveal). Null if not baked or length
+                // mismatched — UE guards on null and falls back to no dissolve.
+                let mut reveal_t_box = converted.reveal_t.into_boxed_slice();
+                let reveal_t_ptr = if reveal_t_box.len() as u32 == vert_count && vert_count > 0 {
+                    reveal_t_box.as_mut_ptr()
+                } else {
+                    ptr::null_mut()
+                };
 
                 let mesh = FfiMeshData {
                     positions: positions.as_mut_ptr(),
@@ -100,6 +119,7 @@ pub unsafe extern "C" fn voxel_poll_morph_result(engine: *mut c_void) -> *mut Ff
                     index_count: idx_count,
                     submeshes: submeshes.as_mut_ptr(),
                     submesh_count: sub_count,
+                    reveal_t: reveal_t_ptr,
                 };
 
                 // Leak the boxes so FFI owns them
@@ -108,6 +128,8 @@ pub unsafe extern "C" fn voxel_poll_morph_result(engine: *mut c_void) -> *mut Ff
                 std::mem::forget(material_ids);
                 std::mem::forget(indices);
                 std::mem::forget(submeshes);
+                // Only leak reveal_t if we handed out its pointer; otherwise let it drop.
+                if !reveal_t_ptr.is_null() { std::mem::forget(reveal_t_box); }
 
                 mesh_array.push(mesh);
             }
@@ -153,6 +175,9 @@ pub unsafe extern "C" fn voxel_free_morph_result(result: *mut FfiMorphResult) {
             }
             if !mesh.submeshes.is_null() && mesh.submesh_count > 0 {
                 let _ = Vec::from_raw_parts(mesh.submeshes, mesh.submesh_count as usize, mesh.submesh_count as usize);
+            }
+            if !mesh.reveal_t.is_null() && mesh.vertex_count > 0 {
+                let _ = Vec::from_raw_parts(mesh.reveal_t, mesh.vertex_count as usize, mesh.vertex_count as usize);
             }
         }
         // Reclaim the mesh array itself

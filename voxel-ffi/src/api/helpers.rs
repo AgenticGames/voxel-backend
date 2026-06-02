@@ -187,6 +187,8 @@ pub(crate) fn converted_mesh_to_ffi(mesh: ConvertedMesh) -> FfiMeshData {
         index_count,
         submeshes: submeshes_ptr,
         submesh_count,
+        // Normal meshes never reveal; mesh.reveal_t is empty and drops here.
+        reveal_t: ptr::null_mut(),
     }
 }
 
@@ -200,6 +202,7 @@ pub(crate) fn empty_mesh_data() -> FfiMeshData {
         index_count: 0,
         submeshes: ptr::null_mut(),
         submesh_count: 0,
+        reveal_t: ptr::null_mut(),
     }
 }
 

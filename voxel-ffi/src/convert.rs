@@ -78,6 +78,9 @@ pub fn convert_mesh_to_ue_scaled(mesh: &Mesh, voxel_scale: f32, world_scale: f32
         material_ids,
         indices,
         submeshes: Vec::new(),
+        // Normal meshes carry no reveal data; the morph path fills this in after
+        // conversion (aligned with `positions`) before bucketing.
+        reveal_t: Vec::new(),
     }
 }
 
@@ -125,6 +128,9 @@ pub fn bucket_mesh_by_material(mesh: &mut ConvertedMesh) {
     let mut new_material_ids = Vec::with_capacity(mesh.material_ids.len());
     let mut new_indices = Vec::with_capacity(mesh.indices.len());
     let mut submeshes = Vec::with_capacity(buckets.len());
+    // Per-vertex reveal time rides along with the vertex reorder (morph path only).
+    let has_reveal = !mesh.reveal_t.is_empty();
+    let mut new_reveal_t = Vec::with_capacity(mesh.reveal_t.len());
 
     // Per-bucket vertex remap. Original indices are dense (0..vert_count), so we
     // dedup with a flat array instead of a fresh SipHash `HashMap` per material
@@ -159,6 +165,7 @@ pub fn bucket_mesh_by_material(mesh: &mut ConvertedMesh) {
                     new_positions.push(mesh.positions[oi]);
                     new_normals.push(mesh.normals[oi]);
                     new_material_ids.push(mesh.material_ids[oi]);
+                    if has_reveal { new_reveal_t.push(mesh.reveal_t[oi]); }
                     idx
                 };
                 new_indices.push(new_idx);
@@ -182,6 +189,7 @@ pub fn bucket_mesh_by_material(mesh: &mut ConvertedMesh) {
     mesh.material_ids = new_material_ids;
     mesh.indices = new_indices;
     mesh.submeshes = submeshes;
+    if has_reveal { mesh.reveal_t = new_reveal_t; }
 }
 
 /// Convert mushroom placements from Rust Y-up to UE Z-up coordinates.
@@ -343,7 +351,7 @@ mod tests {
             2, 3, 4, // bucket mat=2
             4, 5, 1, // bucket mat=0
         ];
-        ConvertedMesh { positions, normals, material_ids, indices, submeshes: Vec::new() }
+        ConvertedMesh { positions, normals, material_ids, indices, submeshes: Vec::new(), reveal_t: Vec::new() }
     }
 
     #[test]

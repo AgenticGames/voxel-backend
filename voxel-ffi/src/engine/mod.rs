@@ -123,6 +123,10 @@ pub struct VoxelEngine {
     sleep_config: Arc<RwLock<voxel_sleep::SleepConfig>>,
     generation_counters: Arc<DashMap<(i32, i32, i32), AtomicU64>>,
     shutdown: Arc<AtomicBool>,
+    // Sleep-montage reveal pause: when true, workers stop pulling chunk-generation
+    // requests (mine/morph/sleep still run) so the on-screen morph's rayon mesh-gen
+    // gets the full core count instead of fighting the POI gen "storm" for rayon.
+    generation_paused: Arc<AtomicBool>,
 
     // Sleep
     sleep_complete: Arc<Mutex<Option<SleepCompleteData>>>,
@@ -259,6 +263,7 @@ impl VoxelEngine {
         let generation_counters: Arc<DashMap<(i32, i32, i32), AtomicU64>> =
             Arc::new(DashMap::new());
         let shutdown = Arc::new(AtomicBool::new(false));
+        let generation_paused = Arc::new(AtomicBool::new(false));
 
         // Spawn fluid simulation thread
         let fluid_result_tx = result_tx.clone();
@@ -324,6 +329,7 @@ impl VoxelEngine {
         let mut workers = Vec::with_capacity(num_workers);
         for worker_id in 0..num_workers {
             let shutdown = Arc::clone(&shutdown);
+            let generation_paused = Arc::clone(&generation_paused);
             let generate_rx = generate_rx.clone();
             let mine_rx = mine_rx.clone();
             let result_tx = result_tx.clone();
@@ -354,6 +360,7 @@ impl VoxelEngine {
                     loop {
                         let outcome = {
                             let shutdown = Arc::clone(&shutdown);
+                            let generation_paused = Arc::clone(&generation_paused);
                             let generate_rx = generate_rx.clone();
                             let mine_rx = mine_rx.clone();
                             let result_tx = result_tx.clone();
@@ -371,6 +378,7 @@ impl VoxelEngine {
                             std::panic::catch_unwind(AssertUnwindSafe(move || {
                                 worker_loop(
                                     shutdown,
+                                    generation_paused,
                                     generate_rx,
                                     mine_rx,
                                     result_tx,
@@ -696,6 +704,7 @@ impl VoxelEngine {
             sleep_config,
             generation_counters,
             shutdown,
+            generation_paused,
             sleep_complete: Arc::new(Mutex::new(None)),
             morph_results: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             morph_manifest,
@@ -716,6 +725,14 @@ impl VoxelEngine {
             predict_wake_tx,
             world_scale,
         }
+    }
+
+    /// Sleep-montage reveal pause. While set, worker threads stop pulling
+    /// chunk-generation requests so the on-screen morph's parallel mesh-gen
+    /// gets the full rayon core count (no "storm" contention). Mine/morph/sleep
+    /// requests still run. Cleared at the end of each reveal.
+    pub fn set_generation_paused(&self, paused: bool) {
+        self.generation_paused.store(paused, Ordering::Relaxed);
     }
 
     pub fn shutdown(mut self) {
