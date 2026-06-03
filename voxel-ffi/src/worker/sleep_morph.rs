@@ -3,6 +3,7 @@
 //! Pure code-movement out of the former monolithic `worker.rs`; each function
 //! is one match-arm body of the old `handle_request`. Behavior is unchanged.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
@@ -16,6 +17,15 @@ use crate::convert::convert_mesh_to_ue_scaled;
 use crate::types::{FfiCollapseEvent, WorkerResult};
 
 use super::seam::{batched_seam_pass, retrieve_crystal_data, retrieve_mushroom_data};
+
+/// Morph reveal mode. `false` (default) = CPU per-step reveal: the worker re-meshes
+/// the morph block each step and the geometry itself animates, so the per-vertex
+/// `reveal_t` dissolve attribute is NEVER read by UE — baking it is pure dead work.
+/// `true` = GPU dissolve reveal: UE meshes once at the final state and the material
+/// dissolves the mesh in as `MorphProgress` sweeps, which DOES consume `reveal_t`.
+/// Set from the `r.Dormancy.GpuReveal` CVar via `voxel_set_morph_gpu_reveal`. Process-
+/// global (one engine/morph at a time) so it needs no per-worker plumbing.
+pub static MORPH_GPU_REVEAL: AtomicBool = AtomicBool::new(false);
 
 pub(super) fn handle_sleep(ctx: &super::HandlerCtx<'_>, player_chunk: (i32, i32, i32), sleep_count: u32, sc: voxel_sleep::SleepConfig) {
     let result_tx = ctx.result_tx;
@@ -625,10 +635,36 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
                     match df_opt {
                         Some(df) => {
                             let h = extract_hermite_data(df);
+                            // Empty-chunk early-out: no sign-changing edge anywhere in the
+                            // chunk (incl. the boundary faces toward neighbors) means there
+                            // is NO surface here — fully air (ahead of the reveal front) or
+                            // fully solid (behind it). The DC solve/mesh/smooth would just
+                            // produce an empty mesh after two big per-cell memsets, so skip
+                            // them. This is the SAFE form of front-only meshing: a chunk that
+                            // touches air has boundary edges → is NOT empty → still meshes, so
+                            // its seam quads are never dropped (no cracks/holes). Returning
+                            // None matches the inactive-chunk path: UE's DrainPendingMorph
+                            // preserves the prior mesh on VertexCount==0 (any stale geometry
+                            // is interior/occluded and is torn down at montage end).
+                            //
+                            // SAFETY IS COUPLED to two invariants — if either changes this
+                            // early-out can silently start dropping seams (holes):
+                            //   1. extract_hermite_data walks the apron/boundary-face edges
+                            //      (density `size` = chunk_size+1, the +face plane at size-1),
+                            //      so a chunk touching air across ANY face is non-empty here.
+                            //   2. region_gen::extract_boundary_edges uses +face-only seam
+                            //      ownership, so a skipped (surfaceless) chunk is never the
+                            //      missing `+` neighbor a meshed chunk needs.
+                            if h.edges.is_empty() {
+                                return None;
+                            }
                             let cell_size = df.size - 1;
                             let dc_verts = solve_dc_vertices(&h, cell_size);
                             let mut mesh = generate_mesh(&h, &dc_verts, cell_size);
-                            mesh.smooth(cfg.mesh_smooth_iterations, cfg.mesh_smooth_strength, cfg.mesh_boundary_smooth, Some(cell_size));
+                            // Morph-only: cap smoothing at 1 iteration. The reveal mesh is
+                            // transient (dissolving in), so a 2nd smoothing pass isn't
+                            // perceptible mid-cinematic — worldgen meshing keeps cfg's value.
+                            mesh.smooth(cfg.mesh_smooth_iterations.min(1), cfg.mesh_smooth_strength, cfg.mesh_boundary_smooth, Some(cell_size));
                             let boundary_edges = region_gen::extract_boundary_edges(&h, chunk_size);
                             Some((mesh, dc_verts, boundary_edges))
                         }
@@ -647,35 +683,20 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
             // Mid-morph the out-of-block DC vertices are the post-sleep snapshot (t=1),
             // so the seam will be slightly inconsistent until t→1 — acceptable trade-off
             // vs. fully missing quads. At t=1 it matches the dirty-chunks state exactly.
-            let chunks_set: std::collections::HashSet<(i32, i32, i32)> =
-                chunks.iter().copied().collect();
-            let mut seam_data_map: std::collections::HashMap<(i32, i32, i32), ChunkSeamData> = {
-                // INTERIM (2026-05-29): full seams EVERY step (no holes). The
-                // boundary geometry mostly doesn't morph, so these read as
-                // already-transformed — but that beats see-through gaps. Proper
-                // reveal-timed seams pending diagnosis of the morph/seam path.
-                // Out-of-block neighbours come from the store (post-sleep t=1);
-                // in-block dc_verts are added below.
-                // R5: out-of-block neighbor seams come from the per-play snapshot
-                // (cloned once above), so this step takes NO store read lock — it
-                // can't stall behind a generation write. Behavior-preserving: the
-                // morph already treats out-of-block seams as the post-sleep t=1 state.
-                let mut map = std::collections::HashMap::new();
-                for &c in &chunks {
-                    for dx in -1..=1i32 {
-                        for dy in -1..=1i32 {
-                            for dz in -1..=1i32 {
-                                let n = (c.0 + dx, c.1 + dy, c.2 + dz);
-                                if chunks_set.contains(&n) { continue; }
-                                if let Some(data) = neighbor_seam_snapshot.get(&n) {
-                                    map.insert(n, data.clone());
-                                }
-                            }
-                        }
-                    }
-                }
-                map
-            };
+            // INTERIM (2026-05-29): full seams EVERY step (no holes). The boundary
+            // geometry mostly doesn't morph, so these read as already-transformed —
+            // but that beats see-through gaps. Out-of-block neighbours come from the
+            // per-play snapshot (post-sleep t=1); in-block dc_verts are added below.
+            // R5: out-of-block neighbor seams come from the per-play snapshot, so this
+            // step takes NO store read lock — it can't stall behind a generation write.
+            // `neighbor_seam_snapshot` already IS exactly the out-of-block perimeter
+            // shell (the snapshot filtered in-block keys when it was built), so we MOVE
+            // it straight into the seam map instead of re-iterating the 26-neighborhood
+            // and per-entry-cloning every value again — that was a second full deep
+            // clone of the whole shell (every ChunkSeamData's dc_vertices + edges Vecs)
+            // every step. Behavior-identical: same keys, same data.
+            let mut seam_data_map: std::collections::HashMap<(i32, i32, i32), ChunkSeamData> =
+                neighbor_seam_snapshot;
             let mut base_meshes: Vec<Option<voxel_core::mesh::Mesh>> = Vec::with_capacity(chunks.len());
 
             for (i, result) in mesh_results.into_iter().enumerate() {
@@ -726,7 +747,14 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
 
                         // Bake per-vertex reveal_t (aligned with converted.positions BEFORE
                         // bucketing — convert preserves vertex order; bucket reorders both).
-                        {
+                        // ONLY when the GPU dissolve reveal is active: in the default CPU
+                        // per-step reveal the geometry itself animates and UE never reads
+                        // reveal_t, so this whole bake (a per-vertex pass + a ~119 KB
+                        // change_field alloc for recorded chunks) is dead work every step.
+                        // When skipped, converted.reveal_t stays empty → bucket_mesh_by_material
+                        // early-outs on it → the FFI ships a null reveal_t pointer → UE falls
+                        // back to no dissolve (exactly the CPU path's expectation).
+                        if MORPH_GPU_REVEAL.load(Ordering::Relaxed) {
                             let key = chunks[i];
                             let origin = glam::Vec3::new(key.0 as f32 * cs_f, key.1 as f32 * cs_f, key.2 as f32 * cs_f);
                             let delta = manifest.chunk_deltas.get(&key);

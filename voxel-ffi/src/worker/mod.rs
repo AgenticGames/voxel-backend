@@ -23,7 +23,7 @@ pub mod heartbeat;
 mod pathing;
 mod scan_support;
 mod seam;
-mod sleep_morph;
+pub(crate) mod sleep_morph;
 mod stress;
 
 // Re-exports so external callers (engine.rs) keep `crate::worker::worker_loop`

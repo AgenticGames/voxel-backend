@@ -50,6 +50,19 @@ pub unsafe extern "C" fn voxel_set_generation_paused(engine: *mut c_void, paused
     engine.set_generation_paused(paused != 0);
 }
 
+/// Morph reveal mode toggle. Pass 1 when the GPU dissolve reveal (`r.Dormancy.GpuReveal`)
+/// is active so the worker bakes the per-vertex `reveal_t` dissolve attribute the material
+/// needs. Pass 0 (the default) for the CPU per-step reveal, where the geometry itself
+/// animates and `reveal_t` is never read — skipping the bake removes a per-vertex pass
+/// (and a ~119 KB alloc on recorded chunks) from every morph step. Defaults to 0, so the
+/// CPU path is optimized even if UE never calls this; UE only needs to set 1 when it
+/// turns the GPU reveal on. Process-global (one morph at a time); `engine` unused.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_set_morph_gpu_reveal(_engine: *mut c_void, enabled: u32) {
+    crate::worker::sleep_morph::MORPH_GPU_REVEAL
+        .store(enabled != 0, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Request a morph step using the cached manifest.
 /// step: current step (0..total_steps)
 /// total_steps: total number of morph steps
