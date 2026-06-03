@@ -46,6 +46,31 @@ pub struct MorphSnapshot {
     pub keys: Vec<(i32, i32, i32)>,
     pub densities: std::collections::HashMap<(i32, i32, i32), voxel_core::density::DensityField>,
     pub neighbor_seams: std::collections::HashMap<(i32, i32, i32), voxel_gen::region_gen::ChunkSeamData>,
+
+    // ── Recolor fast-path cache (mesh-once + per-step recolor) ───────────────
+    // The deep-sleep montage morph is almost entirely a per-voxel MATERIAL flip
+    // (metamorphism, hydrothermal ore) — density never moves the DC surface, so
+    // the triangles are byte-identical at every reveal step. For a block where
+    // EVERY chunk is a pure recolor we mesh ONCE (capturing the base mesh below)
+    // and each subsequent step only reassigns per-vertex material + re-buckets —
+    // no dual-contouring, no seam-gen. All cleared/reset when `keys` changes.
+    /// True iff every chunk in this play is a pure recolor → fast path eligible.
+    pub block_recolor: bool,
+    /// Set once the base meshes have been captured for the current `keys`.
+    pub base_built: bool,
+    /// Per-chunk base mesh (Rust space, base + seam quads, normals recalc'd,
+    /// PRE-convert / PRE-bucket). Per step we clone it, reassign per-vertex
+    /// material by the reveal progress, then convert + bucket.
+    pub base_meshes: std::collections::HashMap<(i32, i32, i32), voxel_core::mesh::Mesh>,
+    /// Per cached vertex (aligned to `base_meshes[key].vertices`), the recorded change
+    /// that drives its recolor — `(spread_distance, old_material, new_material)` — or
+    /// None if the vertex's voxel (and its ±1 neighborhood) is unchanged. Computed once
+    /// at base build using the SAME ±1-dilated field + round/clamp as the reveal_t bake,
+    /// so material flips and the dissolve track the recolor/air boundary identically (no
+    /// stale-color rim). Per step we just pick old vs new from the cached change by `t`.
+    pub vertex_change: std::collections::HashMap<(i32, i32, i32), Vec<Option<(f32, u8, u8)>>>,
+    /// Per-vertex reveal_t (spread-only, t-independent), baked once at base build.
+    pub base_reveal_t: std::collections::HashMap<(i32, i32, i32), Vec<f32>>,
 }
 
 /// Shared context threaded into every request handler. Holds borrowed

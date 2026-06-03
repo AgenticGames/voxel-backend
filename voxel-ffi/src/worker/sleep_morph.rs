@@ -456,10 +456,37 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
                 }
                 drop(s);
                 snap.keys = chunks.clone();
+                // Recolor fast-path: reset the per-play base cache and classify
+                // whether the WHOLE block is a pure recolor (no chunk moves the DC
+                // surface). If so, we mesh once and recolor per step (see below).
+                snap.base_meshes.clear();
+                snap.vertex_change.clear();
+                snap.base_reveal_t.clear();
+                snap.base_built = false;
+                snap.block_recolor = chunks.iter().all(|key| {
+                    manifest.chunk_deltas.get(key).map_or(true, |d| d.is_pure_recolor())
+                });
             }
             // Out-of-block neighbor seams for Phase 3 (cloned once from the snapshot).
             let neighbor_seam_snapshot: std::collections::HashMap<(i32, i32, i32), ChunkSeamData> =
                 snap.neighbor_seams.clone();
+
+            // ── Recolor fast path ────────────────────────────────────────────
+            // Pure-recolor block whose base meshes are cached: skip ALL dual-
+            // contouring + seam work. Each step only reassigns per-vertex material
+            // by the reveal progress and re-buckets. The FIRST step of a recolor
+            // play falls through to the full pipeline below (which builds + caches
+            // the base via `building_base`); every step after returns here.
+            let block_recolor = snap.block_recolor;
+            let building_base = block_recolor && !snap.base_built;
+            if block_recolor && snap.base_built {
+                let meshes = recolor_cached_meshes(&snap, &chunks, &cfg, world_scale, t);
+                drop(snap);
+                drop(manifest_guard);
+                eprintln!("[MORPH] Step {}/{}: recolored {} cached chunks (no DC)", step, total_steps, meshes.len());
+                let _ = result_tx.send(WorkerResult::MorphMeshes { step, total_steps, meshes });
+                return;
+            }
 
             // Phase 1: Clone active density fields and apply manifest interpolation
             let mut density_fields: Vec<Option<voxel_core::density::DensityField>> = Vec::with_capacity(chunks.len());
@@ -709,6 +736,11 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
             // the old per-step morph's behaviour for unchanged terrain.
             let cs_f = cfg.chunk_size as f32;
             let mut meshes = Vec::with_capacity(chunks.len());
+            // When building the recolor base this step, capture per-chunk
+            // (base mesh, vertex→voxel lookup, reveal_t) to store into the
+            // snapshot after the loop so every later step can recolor from cache.
+            type BaseCapture = ((i32, i32, i32), voxel_core::mesh::Mesh, Vec<Option<(f32, u8, u8)>>, Vec<f32>);
+            let mut base_capture: Vec<BaseCapture> = Vec::new();
             for (i, base_opt) in base_meshes.into_iter().enumerate() {
                 match base_opt {
                     Some(mut mesh) => {
@@ -789,6 +821,41 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
                             converted.reveal_t = rt;
                         }
 
+                        // Capture the base for the recolor fast path (pre-bucket:
+                        // mesh + reveal_t are still aligned with mesh.vertices order).
+                        if building_base {
+                            let fsize_l = cfg.chunk_size as usize + 1;
+                            // ±1-dilated per-voxel change field (spread, old_mat, new_mat),
+                            // identical dilation + closest-change-wins rule as the reveal_t
+                            // change_field above — so a surface vertex whose nearest cell
+                            // corner is unchanged but which straddles a changed voxel still
+                            // recolors (matching the dissolve, no stale rim at recolor/air
+                            // boundaries). None = unchanged neighborhood.
+                            let mut field: Vec<Option<(f32, u8, u8)>> = vec![None; fsize_l * fsize_l * fsize_l];
+                            if let Some(d) = manifest.chunk_deltas.get(&chunks[i]) {
+                                for ch in &d.voxel_changes {
+                                    let sd = ch.spread_distance.clamp(0.0, 1.0);
+                                    for dz in -1..=1i32 { for dy in -1..=1i32 { for dx in -1..=1i32 {
+                                        let x = ch.lx as i32 + dx;
+                                        let y = ch.ly as i32 + dy;
+                                        let z = ch.lz as i32 + dz;
+                                        if x < 0 || y < 0 || z < 0
+                                            || x >= fsize_l as i32 || y >= fsize_l as i32 || z >= fsize_l as i32 { continue; }
+                                        let fi = (z as usize * fsize_l + y as usize) * fsize_l + x as usize;
+                                        let better = match field[fi] { Some((s, _, _)) => sd < s, None => true };
+                                        if better { field[fi] = Some((sd, ch.old_material, ch.new_material)); }
+                                    }}}
+                                }
+                            }
+                            let vchange: Vec<Option<(f32, u8, u8)>> = mesh.vertices.iter().map(|v| {
+                                let xi = (v.position.x.round() as i32).clamp(0, fsize_l as i32 - 1) as usize;
+                                let yi = (v.position.y.round() as i32).clamp(0, fsize_l as i32 - 1) as usize;
+                                let zi = (v.position.z.round() as i32).clamp(0, fsize_l as i32 - 1) as usize;
+                                field[(zi * fsize_l + yi) * fsize_l + xi]
+                            }).collect();
+                            base_capture.push((chunks[i], mesh.clone(), vchange, converted.reveal_t.clone()));
+                        }
+
                         crate::convert::bucket_mesh_by_material(&mut converted);
                         // CHUNK-DBG: log vertex bounding box for first step
                         if step == 1 && (i < 3 || i == chunks.len() / 2 || i >= chunks.len() - 2) {
@@ -820,7 +887,76 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
 
             eprintln!("[MORPH] Step {}/{}: meshed {} chunks", step, total_steps, meshes.len());
 
+            // Store the captured base so every subsequent step of this recolor play
+            // takes the fast path. Re-lock the snapshot (it was dropped at line ~587
+            // before Phase 3); guard on keys still matching (single morph at a time).
+            if building_base {
+                let mut snap2 = morph_snapshot.lock().unwrap();
+                if snap2.keys == chunks {
+                    for (k, m, vc, rt) in base_capture {
+                        snap2.base_meshes.insert(k, m);
+                        snap2.vertex_change.insert(k, vc);
+                        snap2.base_reveal_t.insert(k, rt);
+                    }
+                    snap2.base_built = true;
+                    eprintln!("[MORPH] Recolor base cached for {} chunks — later steps skip DC", snap2.base_meshes.len());
+                }
+            }
+
             let _ = result_tx.send(WorkerResult::MorphMeshes {
                 step, total_steps, meshes,
             });
+}
+
+/// Recolor fast path: rebuild each chunk's ConvertedMesh from the cached base
+/// (meshed ONCE) by reassigning per-vertex material to the reveal progress `t`,
+/// then converting + bucketing. NO dual-contouring, NO seam-gen — geometry is
+/// frozen (the block is a pure recolor), only material IDs (and thus the bucketed
+/// submeshes/index order) change. Mirrors the recorded-change material rule used
+/// by Phase 1 (`material = new if voxel_t>=0.5 else old`, staggered by spread).
+fn recolor_cached_meshes(
+    snap: &super::MorphSnapshot,
+    chunks: &[(i32, i32, i32)],
+    cfg: &voxel_gen::config::GenerationConfig,
+    world_scale: f32,
+    t: f32,
+) -> Vec<crate::types::ConvertedMesh> {
+    let mut meshes = Vec::with_capacity(chunks.len());
+    for &key in chunks {
+        let base = match snap.base_meshes.get(&key) {
+            Some(m) => m,
+            None => {
+                // Chunk had no surface at base build (None) → empty mesh; UE's
+                // DrainPendingMorph preserves the prior actor mesh on VertexCount==0.
+                meshes.push(crate::types::ConvertedMesh {
+                    positions: Vec::new(), normals: Vec::new(), material_ids: Vec::new(),
+                    indices: Vec::new(), submeshes: Vec::new(), reveal_t: Vec::new(),
+                });
+                continue;
+            }
+        };
+        // Clone the frozen base geometry and recolor it for this step using the
+        // per-vertex change baked at base build (±1-dilated, matches the dissolve).
+        let mut mesh = base.clone();
+        if let Some(vchange) = snap.vertex_change.get(&key) {
+            for (vi, v) in mesh.vertices.iter_mut().enumerate() {
+                if let Some(Some((spread, old_m, new_m))) = vchange.get(vi).copied() {
+                    let voxel_delay = spread * 0.6;
+                    let voxel_t = ((t - voxel_delay) / (1.0 - voxel_delay)).clamp(0.0, 1.0);
+                    let m = if voxel_t >= 0.5 { new_m } else { old_m };
+                    v.material = voxel_core::material::Material::from_u8(m);
+                }
+            }
+        }
+        let mut converted = convert_mesh_to_ue_scaled(&mesh, cfg.voxel_scale(), world_scale);
+        // Re-attach the frozen (spread-only) reveal_t baked at base build.
+        if let Some(rt) = snap.base_reveal_t.get(&key) {
+            if rt.len() == converted.positions.len() {
+                converted.reveal_t = rt.clone();
+            }
+        }
+        crate::convert::bucket_mesh_by_material(&mut converted);
+        meshes.push(converted);
+    }
+    meshes
 }

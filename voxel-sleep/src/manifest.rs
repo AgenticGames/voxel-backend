@@ -62,6 +62,39 @@ pub struct ChunkDelta {
     pub growth_source_max_dist: f32,
 }
 
+impl ChunkDelta {
+    /// True when this chunk's morph is a PURE RECOLOR — no change moves the DC
+    /// surface and there's no synthesized growth. A dual-contouring surface only
+    /// exists/moves where density crosses the 0.0 solid/air threshold, so a change
+    /// shifts geometry iff it flips a voxel's sign across 0.0. Metamorphism and
+    /// hydrothermal ore deposition leave density untouched (old_density==new_density,
+    /// both >0) → no surface movement → qualify. Erosion (solid→air) and formation
+    /// growth (air→solid) flip the sign → do NOT qualify. Synthesized "rise from air"
+    /// growth animates density up from -1.0 → never a pure recolor.
+    ///
+    /// Pure-recolor chunks can be meshed ONCE and recolored per reveal step (per-vertex
+    /// material reassign) instead of re-running dual-contouring every step, since the
+    /// triangles are byte-identical at every step.
+    ///
+    /// We require density EQUALITY (not merely same-sign): the recolor fast path freezes
+    /// the DC geometry, but a DC vertex position derives from the density-interpolated
+    /// edge crossing `t = da/(da-db)`, so even a same-sign density change (e.g. 1.0→0.8)
+    /// would shift the surface sub-voxel in the full pipeline and diverge if frozen. All
+    /// real recolor producers (metamorphism, hydrothermal ore, gypsum, deeptime non-
+    /// formation) record `new_density == old_density` exactly (set_voxel_synced material-
+    /// only, density `None`); every genuine geometry change flips the sign (Air↔solid).
+    /// So this is the same classification in practice today, but self-contained — a future
+    /// change that recorded a same-sign density delta correctly falls to the slow path
+    /// instead of silently freezing geometry that should move.
+    pub fn is_pure_recolor(&self) -> bool {
+        !self.synthesize_growth
+            && self
+                .voxel_changes
+                .iter()
+                .all(|c| (c.old_density - c.new_density).abs() < 1e-6)
+    }
+}
+
 /// Custom serde module for HashMap<(i32,i32,i32), ChunkDelta> using string keys.
 /// JSON requires string keys, so we serialize tuple keys as "x,y,z".
 mod chunk_deltas_serde {
