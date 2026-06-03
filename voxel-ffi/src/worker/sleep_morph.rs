@@ -463,9 +463,34 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
                 snap.vertex_change.clear();
                 snap.base_reveal_t.clear();
                 snap.base_built = false;
-                snap.block_recolor = chunks.iter().all(|key| {
-                    manifest.chunk_deltas.get(key).map_or(true, |d| d.is_pure_recolor())
-                });
+                // Classify the block. The fast path is gated ONLY on the absence of
+                // synthesized growth (the POI "rise from air" genuinely animates geometry
+                // from -1.0 → solid and must keep the full per-step DC path). Sparse
+                // sign-flip changes (water/acid EROSION, solid↔air) are TOLERATED: they're
+                // excluded from the recolor (see the capture below) so they freeze at the
+                // pre-reveal state and the montage-end ForceChunkResync opens them — the
+                // bulk metamorphism/hydrothermal recolor still meshes once + recolors.
+                // (Block-level "every chunk pure_recolor" was too brittle: one erosion
+                // voxel anywhere disqualified the whole 32-chunk aureole block.)
+                let mut synth_count = 0u32;
+                let mut signflip_count = 0u32;
+                let mut norecord_count = 0u32;
+                for key in &chunks {
+                    match manifest.chunk_deltas.get(key) {
+                        None => norecord_count += 1,
+                        Some(d) => {
+                            if d.synthesize_growth {
+                                synth_count += 1;
+                            } else if d.voxel_changes.iter().any(|c| (c.old_density > 0.0) != (c.new_density > 0.0)) {
+                                signflip_count += 1;
+                            }
+                        }
+                    }
+                }
+                snap.block_recolor = synth_count == 0;
+                crate::panic_log::note(&format!(
+                    "[MORPH-CLASS] chunks={} block_recolor={} synth={} signflip={} norecord={}",
+                    chunks.len(), snap.block_recolor, synth_count, signflip_count, norecord_count));
             }
             // Out-of-block neighbor seams for Phase 3 (cloned once from the snapshot).
             let neighbor_seam_snapshot: std::collections::HashMap<(i32, i32, i32), ChunkSeamData> =
@@ -834,6 +859,11 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
                             let mut field: Vec<Option<(f32, u8, u8)>> = vec![None; fsize_l * fsize_l * fsize_l];
                             if let Some(d) = manifest.chunk_deltas.get(&chunks[i]) {
                                 for ch in &d.voxel_changes {
+                                    // Sign-flip (erosion solid↔air) voxels are NOT recolored —
+                                    // their geometry is frozen at the base state, so flipping
+                                    // their material (e.g. to Air) would paint an air-material
+                                    // patch on a still-solid surface. Skip → keep base material.
+                                    if (ch.old_density > 0.0) != (ch.new_density > 0.0) { continue; }
                                     let sd = ch.spread_distance.clamp(0.0, 1.0);
                                     for dz in -1..=1i32 { for dy in -1..=1i32 { for dx in -1..=1i32 {
                                         let x = ch.lx as i32 + dx;
@@ -900,6 +930,9 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
                     }
                     snap2.base_built = true;
                     eprintln!("[MORPH] Recolor base cached for {} chunks — later steps skip DC", snap2.base_meshes.len());
+                    crate::panic_log::note(&format!(
+                        "[MORPH-FASTPATH] base cached for {} chunks at step {}/{} — later steps recolor-only (no DC)",
+                        snap2.base_meshes.len(), step, total_steps));
                 }
             }
 
