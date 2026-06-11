@@ -159,7 +159,7 @@ pub(super) fn handle_sleep(ctx: &super::HandlerCtx<'_>, player_chunk: (i32, i32,
             for chunk in dirty_keys {
                 let (converted, dbg_seam_tris) = {
                     let s = store.read().unwrap();
-                    let base = match s.base_meshes.get(&chunk) { Some(m) => m.clone(), None => continue };
+                    let base = match s.base_meshes.get(&chunk) { Some(m) => (**m).clone(), None => continue };
                     let seam = region_gen::generate_chunk_seam_quads(chunk, &s.chunk_seam_data, cfg.chunk_size);
                     let st = seam.triangles.len();
                     let mut combined = base;
@@ -614,7 +614,7 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
             // vs. fully missing quads. At t=1 it matches the dirty-chunks state exactly.
             let chunks_set: std::collections::HashSet<(i32, i32, i32)> =
                 chunks.iter().copied().collect();
-            let mut seam_data_map: std::collections::HashMap<(i32, i32, i32), ChunkSeamData> = {
+            let mut seam_data_map: std::collections::HashMap<(i32, i32, i32), std::sync::Arc<ChunkSeamData>> = {
                 // INTERIM (2026-05-29): full seams EVERY step (no holes). The
                 // boundary geometry mostly doesn't morph, so these read as
                 // already-transformed — but that beats see-through gaps. Proper
@@ -630,7 +630,8 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
                                 let n = (c.0 + dx, c.1 + dy, c.2 + dz);
                                 if chunks_set.contains(&n) { continue; }
                                 if let Some(data) = s.chunk_seam_data.get(&n) {
-                                    map.insert(n, data.clone());
+                                    // Arc clone — cheap snapshot, no deep copy.
+                                    map.insert(n, std::sync::Arc::clone(data));
                                 }
                             }
                         }
@@ -643,11 +644,11 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
             for (i, result) in mesh_results.into_iter().enumerate() {
                 match result {
                     Some((mesh, dc_verts, boundary_edges)) => {
-                        seam_data_map.insert(chunks[i], ChunkSeamData {
+                        seam_data_map.insert(chunks[i], std::sync::Arc::new(ChunkSeamData {
                             dc_vertices: dc_verts,
                             world_origin: glam::Vec3::ZERO,
                             boundary_edges,
-                        });
+                        }));
                         base_meshes.push(Some(mesh));
                     }
                     None => {

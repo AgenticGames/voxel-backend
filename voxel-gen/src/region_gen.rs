@@ -616,13 +616,17 @@ pub fn generate_seam_mesh(
 /// Only processes boundary edges owned by `chunk_key`. Vertices from neighbor
 /// chunks are offset relative to the owning chunk (e.g., a neighbor at +X has
 /// its DC vertices shifted by +gs along X).
-pub fn generate_chunk_seam_quads(
+/// Generic over the map's value type so callers can pass either owned
+/// `ChunkSeamData` or `Arc<ChunkSeamData>` (the FFI store Arc-wraps entries so
+/// seam passes can snapshot them and run quad-gen without holding the store
+/// read lock).
+pub fn generate_chunk_seam_quads<S: std::borrow::Borrow<ChunkSeamData>>(
     chunk_key: (i32, i32, i32),
-    all_seam_data: &HashMap<(i32, i32, i32), ChunkSeamData>,
+    all_seam_data: &HashMap<(i32, i32, i32), S>,
     gs: usize,
 ) -> Mesh {
-    let chunk_data = match all_seam_data.get(&chunk_key) {
-        Some(data) => data,
+    let chunk_data: &ChunkSeamData = match all_seam_data.get(&chunk_key) {
+        Some(data) => data.borrow(),
         None => return Mesh::new(),
     };
 
@@ -643,7 +647,9 @@ pub fn generate_chunk_seam_quads(
         let dx = (i & 1) as i32;
         let dy = ((i >> 1) & 1) as i32;
         let dz = ((i >> 2) & 1) as i32;
-        all_seam_data.get(&(chunk_key.0 + dx, chunk_key.1 + dy, chunk_key.2 + dz))
+        all_seam_data
+            .get(&(chunk_key.0 + dx, chunk_key.1 + dy, chunk_key.2 + dz))
+            .map(|s| s.borrow())
     });
 
     for (edge_key, intersection) in &chunk_data.boundary_edges {
