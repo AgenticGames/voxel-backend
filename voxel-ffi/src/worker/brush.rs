@@ -692,7 +692,7 @@ pub(super) fn handle_force_chunk_resync(ctx: &super::HandlerCtx<'_>, chunk: (i32
                 {
                     let mut s = store.write().unwrap();
                     s.hermite_data.insert(target, hermite);
-                    s.base_meshes.insert(target, mesh);
+                    s.base_meshes.insert(target, std::sync::Arc::new(mesh));
                     s.add_seam_data(target, ChunkSeamData {
                         dc_vertices,
                         world_origin: glam::Vec3::ZERO,
@@ -710,7 +710,7 @@ pub(super) fn handle_force_chunk_resync(ctx: &super::HandlerCtx<'_>, chunk: (i32
             for &target in &targets {
                 let combined: Option<voxel_core::mesh::Mesh> = {
                     let s = store.read().unwrap();
-                    let base = match s.base_meshes.get(&target) { Some(m) => m.clone(), None => { continue; } };
+                    let base = match s.base_meshes.get(&target) { Some(m) => (**m).clone(), None => { continue; } };
                     let seam = voxel_gen::region_gen::generate_chunk_seam_quads(target, &s.chunk_seam_data, cfg.chunk_size);
                     let seam_tris = seam.triangles.len();
                     let mut combined = base;

@@ -45,7 +45,7 @@ use stress::try_process_stress_queue;
 pub struct MorphSnapshot {
     pub keys: Vec<(i32, i32, i32)>,
     pub densities: std::collections::HashMap<(i32, i32, i32), voxel_core::density::DensityField>,
-    pub neighbor_seams: std::collections::HashMap<(i32, i32, i32), voxel_gen::region_gen::ChunkSeamData>,
+    pub neighbor_seams: std::collections::HashMap<(i32, i32, i32), std::sync::Arc<voxel_gen::region_gen::ChunkSeamData>>,
 
     // ── Recolor fast-path cache (mesh-once + per-step recolor) ───────────────
     // The deep-sleep montage morph is almost entirely a per-voxel MATERIAL flip

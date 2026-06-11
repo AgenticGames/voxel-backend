@@ -101,9 +101,15 @@ pub(super) fn handle_world_scan(ctx: &super::HandlerCtx<'_>) {
                     })
                 }).collect();
 
+            // scan_world takes plain `Mesh` maps; materialize one from the
+            // Arc-wrapped store cache. Deep clone is fine here — world scan is
+            // a rare manual diagnostic, not a hot path.
+            let scan_base_meshes: std::collections::HashMap<(i32, i32, i32), voxel_core::mesh::Mesh> =
+                s.base_meshes.iter().map(|(&k, v)| (k, (**v).clone())).collect();
+
             let result = voxel_core::world_scan::scan_world(
                 &s.density_fields,
-                &s.base_meshes,
+                &scan_base_meshes,
                 &scan_seam_data,
                 &scan_worm_paths,
                 cfg.chunk_size,
@@ -139,9 +145,13 @@ pub(super) fn handle_world_scan_with_config(ctx: &super::HandlerCtx<'_>, scan_co
                     })
                 }).collect();
 
+            // Plain-Mesh map for scan_world_with_config (see handle_world_scan).
+            let scan_base_meshes: std::collections::HashMap<(i32, i32, i32), voxel_core::mesh::Mesh> =
+                s.base_meshes.iter().map(|(&k, v)| (k, (**v).clone())).collect();
+
             let result = voxel_core::world_scan::scan_world_with_config(
                 &s.density_fields,
-                &s.base_meshes,
+                &scan_base_meshes,
                 Some(&s.hermite_data),
                 &scan_seam_data,
                 &scan_worm_paths,

@@ -7,12 +7,12 @@
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crossbeam_channel::Sender;
 use rayon::prelude::*;
 use voxel_gen::config::GenerationConfig;
-use voxel_gen::region_gen;
+use voxel_gen::region_gen::{self, ChunkSeamData};
 use voxel_fluid::FluidEvent;
 
 use crate::convert::convert_mesh_to_ue_scaled;
@@ -239,6 +239,31 @@ pub(crate) fn retrieve_mushroom_data(
     }
 }
 
+/// Snapshot (Arc-clone) every seam-data entry `generate_chunk_seam_quads` can
+/// touch for `target`: the target itself plus its 7 positive-offset neighbors
+/// (deltas in {0,1}^3 — quad cells only ever resolve forward). Called under the
+/// store read lock; the snapshot lets quad generation run after the lock is
+/// dropped. Entries already snapshotted are skipped so overlapping target
+/// neighborhoods don't re-probe the store map.
+fn snapshot_seam_data_for_target(
+    s: &ChunkStore,
+    target: (i32, i32, i32),
+    snapshot: &mut HashMap<(i32, i32, i32), Arc<ChunkSeamData>>,
+) {
+    for i in 0..8usize {
+        let k = (
+            target.0 + (i & 1) as i32,
+            target.1 + ((i >> 1) & 1) as i32,
+            target.2 + ((i >> 2) & 1) as i32,
+        );
+        if !snapshot.contains_key(&k) {
+            if let Some(e) = s.chunk_seam_data.get(&k) {
+                snapshot.insert(k, Arc::clone(e));
+            }
+        }
+    }
+}
+
 /// Timing breakdown from the seam pass.
 pub(crate) struct SeamPassTimings {
     pub total: Duration,
@@ -279,8 +304,14 @@ pub(crate) fn incremental_seam_pass(
         }
     }
 
-    // Batch: acquire ONE read lock, generate all seam quads + clone base meshes
-    let mut to_send: Vec<((i32, i32, i32), voxel_core::mesh::Mesh)> = Vec::new();
+    // Phase A (brief read lock): snapshot the seam-data Arcs quad-gen can touch
+    // plus each sendable candidate's base-mesh Arc. Quad generation, the base
+    // deep clone, seam append, and normal recalc all run AFTER the lock drops —
+    // holding the read lock across that work serialized against generation
+    // write locks during the initial-load flood (the measured reason raising
+    // worker count didn't scale throughput).
+    let mut seam_snapshot: HashMap<(i32, i32, i32), Arc<ChunkSeamData>> = HashMap::new();
+    let mut work: Vec<((i32, i32, i32), Arc<voxel_core::mesh::Mesh>)> = Vec::new();
     {
         let t0 = Instant::now();
         let s = store.read().unwrap();
@@ -291,29 +322,38 @@ pub(crate) fn incremental_seam_pass(
             if !s.chunk_seam_data.contains_key(&target) {
                 continue;
             }
-
-            let tq = Instant::now();
-            let seam_mesh = region_gen::generate_chunk_seam_quads(target, &s.chunk_seam_data, cfg.chunk_size);
-            t_quad_gen += tq.elapsed();
-            candidates_tried += 1;
-
-            if seam_mesh.triangles.is_empty() {
-                continue;
-            }
-
-            let tm = Instant::now();
+            // No base mesh -> nothing could be sent for this target (same as
+            // the old flow, which bailed after quad-gen); skip quad-gen too.
             let base = match s.base_meshes.get(&target) {
-                Some(m) => m.clone(),
+                Some(m) => Arc::clone(m),
                 None => continue,
             };
-            let mut mesh = base;
-            mesh.append(seam_mesh);
-            if cfg.mesh_recalc_normals > 0 { mesh.recalculate_normals(); }
-            t_mesh_retrieve += tm.elapsed();
-
-            to_send.push((target, mesh));
+            snapshot_seam_data_for_target(&s, target, &mut seam_snapshot);
+            work.push((target, base));
         }
     } // read lock released
+
+    // Phase A2 (no lock): generate seam quads against the snapshot and combine
+    // with the base mesh.
+    let mut to_send: Vec<((i32, i32, i32), voxel_core::mesh::Mesh)> = Vec::new();
+    for (target, base) in work {
+        let tq = Instant::now();
+        let seam_mesh = region_gen::generate_chunk_seam_quads(target, &seam_snapshot, cfg.chunk_size);
+        t_quad_gen += tq.elapsed();
+        candidates_tried += 1;
+
+        if seam_mesh.triangles.is_empty() {
+            continue;
+        }
+
+        let tm = Instant::now();
+        let mut mesh = (*base).clone();
+        mesh.append(seam_mesh);
+        if cfg.mesh_recalc_normals > 0 { mesh.recalculate_normals(); }
+        t_mesh_retrieve += tm.elapsed();
+
+        to_send.push((target, mesh));
+    }
 
     // Hash + filter: skip sends whose combined mesh matches last-sent.
     // Without this, every neighbor seam pass resends unchanged meshes on
@@ -564,53 +604,69 @@ pub(crate) fn batched_seam_pass_inner(
         }
     }
 
-    let mut to_send: Vec<((i32, i32, i32), voxel_core::mesh::Mesh)> = Vec::new();
-    let mut sent_keys: HashSet<(i32, i32, i32)> = HashSet::new();
+    // Phase A (brief read lock): snapshot seam-data Arcs + base-mesh Arcs.
+    // Quad generation, base deep clones, seam appends, and normal recalc all
+    // run AFTER the lock drops — long read holds here serialized against
+    // generation write locks during the initial-load flood.
+    let mut seam_snapshot: HashMap<(i32, i32, i32), Arc<ChunkSeamData>> = HashMap::new();
+    // (target, base mesh, try_seam): try_seam=false marks the dirty-chunk
+    // fallback entries that have a base mesh but no seam-data entry at all.
+    let mut work: Vec<((i32, i32, i32), Arc<voxel_core::mesh::Mesh>, bool)> = Vec::new();
     {
         let s = store.read().unwrap();
         for &target in &candidates {
             if !s.chunk_seam_data.contains_key(&target) {
                 continue;
             }
-            let seam_mesh = region_gen::generate_chunk_seam_quads(target, &s.chunk_seam_data, cfg.chunk_size);
             let base = match s.base_meshes.get(&target) {
-                Some(m) => m.clone(),
+                Some(m) => Arc::clone(m),
                 None => continue,
             };
+            snapshot_seam_data_for_target(&s, target, &mut seam_snapshot);
+            work.push((target, base, true));
+        }
+
+        // Fallback: dirty chunks that have a base mesh but no seam data entry at all
+        let seam_capable: HashSet<(i32, i32, i32)> = work.iter().map(|w| w.0).collect();
+        for &key in dirty_keys {
+            if seam_capable.contains(&key) {
+                continue;
+            }
+            if let Some(base) = s.base_meshes.get(&key) {
+                work.push((key, Arc::clone(base), false));
+            }
+        }
+    } // read lock released
+
+    // Phase A2 (no lock): combine each target's base mesh with its seam quads.
+    let mut to_send: Vec<((i32, i32, i32), voxel_core::mesh::Mesh)> = Vec::new();
+    for (target, base, try_seam) in work {
+        if try_seam {
+            let seam_mesh = region_gen::generate_chunk_seam_quads(target, &seam_snapshot, cfg.chunk_size);
             if seam_mesh.triangles.is_empty() {
                 // No seam quads — only send the base mesh if this is a dirty chunk
                 // (must still receive its updated mesh after mine/flatten)
                 if dirty_set.contains(&target) {
-                    let mut mesh = base;
+                    let mut mesh = (*base).clone();
                     if cfg.mesh_recalc_normals > 0 {
                         mesh.recalculate_normals();
                     }
                     to_send.push((target, mesh));
-                    sent_keys.insert(target);
                 }
                 continue;
             }
-            let mut mesh = base;
+            let mut mesh = (*base).clone();
             mesh.append(seam_mesh);
             if cfg.mesh_recalc_normals > 0 {
                 mesh.recalculate_normals();
             }
             to_send.push((target, mesh));
-            sent_keys.insert(target);
-        }
-
-        // Fallback: dirty chunks that have a base mesh but no seam data entry at all
-        for &key in dirty_keys {
-            if sent_keys.contains(&key) {
-                continue;
+        } else {
+            let mut mesh = (*base).clone();
+            if cfg.mesh_recalc_normals > 0 {
+                mesh.recalculate_normals();
             }
-            if let Some(base) = s.base_meshes.get(&key) {
-                let mut mesh = base.clone();
-                if cfg.mesh_recalc_normals > 0 {
-                    mesh.recalculate_normals();
-                }
-                to_send.push((key, mesh));
-            }
+            to_send.push((target, mesh));
         }
     }
 
@@ -689,6 +745,470 @@ pub(crate) fn batched_seam_pass_inner(
                 chunk: target, mesh: converted, generation: 0, crystal_data, mushroom_data,
                 zone_descriptors: Vec::new(),
             });
+        }
+    }
+}
+
+#[cfg(test)]
+mod seam_lock_tests {
+    //! Bit-identity + lock-contention coverage for the 2026-06-12 seam-pass
+    //! restructure (snapshot Arcs under a brief read lock; run quad-gen /
+    //! base-mesh clone / append / normal-recalc with NO store lock held).
+    //!
+    //! `baseline_*` functions are faithful replicas of the PRE-restructure
+    //! implementations (all heavy work under one long read lock) so the suite
+    //! can prove the new flow produces byte-identical WorkerResults, and the
+    //! ignored benchmark can measure how long a competing writer waits to
+    //! acquire the store write lock under each implementation:
+    //!
+    //! cargo test --release -p voxel-ffi --lib -- --ignored bench_seam_lock --nocapture
+
+    use super::*;
+    use crate::types::FfiVec3;
+    use glam::Vec3;
+    use voxel_core::dual_contouring::mesh_gen::generate_mesh;
+    use voxel_core::dual_contouring::solve::solve_dc_vertices;
+    use voxel_core::hermite::{EdgeIntersection, EdgeKey, HermiteData};
+    use voxel_core::material::Material;
+    use voxel_core::mesh::Mesh;
+    use voxel_gen::region_gen::extract_boundary_edges;
+
+    /// Sinusoidal terrain SDF in WORLD space; negative (solid) below the surface.
+    /// Mirrors voxel-gen/examples/bench_seam_quads.rs so the workload is the
+    /// same realistic surface sheet.
+    fn terrain_sdf(x: f32, y: f32, z: f32) -> f32 {
+        let h = 15.0
+            + 4.0 * (x * 0.45).sin()
+            + 3.0 * (z * 0.37).cos()
+            + 2.0 * ((x + z) * 0.21).sin();
+        y - h
+    }
+
+    fn material_at(x: i32, y: i32, z: i32) -> Material {
+        match (x + y * 2 + z).rem_euclid(4) {
+            0 => Material::Limestone,
+            1 => Material::Granite,
+            2 => Material::Sandstone,
+            _ => Material::Basalt,
+        }
+    }
+
+    /// Build hermite + DC mesh + seam data for one chunk of the terrain sheet.
+    fn build_chunk(cx: i32, cy: i32, cz: i32, gs: usize) -> (Mesh, ChunkSeamData) {
+        let ox = cx * gs as i32;
+        let oy = cy * gs as i32;
+        let oz = cz * gs as i32;
+        let s = |lx: usize, ly: usize, lz: usize| {
+            terrain_sdf((ox + lx as i32) as f32, (oy + ly as i32) as f32, (oz + lz as i32) as f32)
+        };
+
+        let mut hermite = HermiteData::default();
+        for z in 0..=gs { for y in 0..=gs { for x in 0..gs {
+            let (a, b) = (s(x, y, z), s(x + 1, y, z));
+            if (a > 0.0) != (b > 0.0) {
+                let t = a / (a - b);
+                hermite.edges.insert(EdgeKey::new(x as u8, y as u8, z as u8, 0),
+                    EdgeIntersection { t, normal: Vec3::X * if a < b { 1.0 } else { -1.0 }, material: material_at(ox + x as i32, oy + y as i32, oz + z as i32) });
+            }
+        }}}
+        for z in 0..=gs { for y in 0..gs { for x in 0..=gs {
+            let (a, b) = (s(x, y, z), s(x, y + 1, z));
+            if (a > 0.0) != (b > 0.0) {
+                let t = a / (a - b);
+                hermite.edges.insert(EdgeKey::new(x as u8, y as u8, z as u8, 1),
+                    EdgeIntersection { t, normal: Vec3::Y * if a < b { 1.0 } else { -1.0 }, material: material_at(ox + x as i32, oy + y as i32, oz + z as i32) });
+            }
+        }}}
+        for z in 0..gs { for y in 0..=gs { for x in 0..=gs {
+            let (a, b) = (s(x, y, z), s(x, y, z + 1));
+            if (a > 0.0) != (b > 0.0) {
+                let t = a / (a - b);
+                hermite.edges.insert(EdgeKey::new(x as u8, y as u8, z as u8, 2),
+                    EdgeIntersection { t, normal: Vec3::Z * if a < b { 1.0 } else { -1.0 }, material: material_at(ox + x as i32, oy + y as i32, oz + z as i32) });
+            }
+        }}}
+
+        let dc_vertices = solve_dc_vertices(&hermite, gs);
+        let mesh = generate_mesh(&hermite, &dc_vertices, gs);
+        let boundary_edges = extract_boundary_edges(&hermite, gs);
+        (mesh, ChunkSeamData {
+            dc_vertices,
+            world_origin: Vec3::new(ox as f32, oy as f32, oz as f32),
+            boundary_edges,
+        })
+    }
+
+    /// 5x1x5 sheet of surface chunks at cy=0 (the terrain surface y~9..24 sits
+    /// inside the cs=30 chunk), fully populated seam data + base meshes.
+    fn build_store(gs: usize) -> Arc<RwLock<ChunkStore>> {
+        let store = Arc::new(RwLock::new(ChunkStore::new(4)));
+        {
+            let mut s = store.write().unwrap();
+            for cz in 0..5 { for cx in 0..5 {
+                let (mesh, seam) = build_chunk(cx, 0, cz, gs);
+                s.base_meshes.insert((cx, 0, cz), Arc::new(mesh));
+                s.add_seam_data((cx, 0, cz), seam);
+            }}
+        }
+        store
+    }
+
+    fn test_cfg(gs: usize) -> GenerationConfig {
+        let mut cfg = GenerationConfig::default();
+        cfg.chunk_size = gs;
+        cfg
+    }
+
+    // ---- Faithful replicas of the PRE-restructure implementations ----------
+
+    fn baseline_incremental_seam_pass(
+        chunk: (i32, i32, i32),
+        cfg: &GenerationConfig,
+        store: &Arc<RwLock<ChunkStore>>,
+        result_tx: &Sender<WorkerResult>,
+        world_scale: f32,
+    ) {
+        let mut candidates = Vec::with_capacity(27);
+        for dx in -1..=1 { for dy in -1..=1 { for dz in -1..=1 {
+            candidates.push((chunk.0 + dx, chunk.1 + dy, chunk.2 + dz));
+        }}}
+
+        let mut to_send: Vec<((i32, i32, i32), voxel_core::mesh::Mesh)> = Vec::new();
+        {
+            let s = store.read().unwrap();
+            for &target in &candidates {
+                if !s.chunk_seam_data.contains_key(&target) { continue; }
+                let seam_mesh = region_gen::generate_chunk_seam_quads(target, &s.chunk_seam_data, cfg.chunk_size);
+                if seam_mesh.triangles.is_empty() { continue; }
+                let base = match s.base_meshes.get(&target) {
+                    Some(m) => (**m).clone(),
+                    None => continue,
+                };
+                let mut mesh = base;
+                mesh.append(seam_mesh);
+                if cfg.mesh_recalc_normals > 0 { mesh.recalculate_normals(); }
+                to_send.push((target, mesh));
+            }
+        }
+
+        let hashed: Vec<((i32, i32, i32), voxel_core::mesh::Mesh, u64)> =
+            to_send.into_iter().map(|(k, m)| { let h = hash_mesh(&m); (k, m, h) }).collect();
+
+        let mut kept: Vec<((i32, i32, i32), voxel_core::mesh::Mesh, u64, Vec<FfiCrystalPlacement>, Vec<crate::types::FfiMushroomInstance>)> =
+            Vec::with_capacity(hashed.len());
+        {
+            let s = store.read().unwrap();
+            for (target, mesh, new_hash) in hashed {
+                if target != chunk {
+                    if let Some(&prev) = s.last_sent_mesh_hash.get(&target) {
+                        if prev == new_hash { continue; }
+                    }
+                }
+                let crystal_data = match s.crystal_placements.get(&target) {
+                    Some(p) if !p.is_empty() => crate::convert::convert_crystals_to_ue(p, cfg.voxel_scale(), world_scale),
+                    _ => Vec::new(),
+                };
+                let mushroom_data = match s.mushroom_placements.get(&target) {
+                    Some(p) if !p.is_empty() => crate::convert::convert_mushrooms_to_ue(p, cfg.voxel_scale(), world_scale),
+                    _ => Vec::new(),
+                };
+                kept.push((target, mesh, new_hash, crystal_data, mushroom_data));
+            }
+        }
+
+        let mut to_record: Vec<((i32, i32, i32), u64)> = Vec::with_capacity(kept.len());
+        for (target, combined, new_hash, crystal_data, mushroom_data) in kept {
+            let mut converted = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
+            crate::convert::bucket_mesh_by_material(&mut converted);
+            if converted.indices.is_empty() { continue; }
+            let _ = result_tx.send(WorkerResult::ChunkMesh {
+                chunk: target, mesh: converted, generation: 0, crystal_data, mushroom_data,
+                zone_descriptors: Vec::new(),
+            });
+            to_record.push((target, new_hash));
+        }
+        if !to_record.is_empty() {
+            let mut s = store.write().unwrap();
+            for (k, h) in to_record { s.last_sent_mesh_hash.insert(k, h); }
+        }
+    }
+
+    fn baseline_batched_seam_pass(
+        dirty_keys: &[(i32, i32, i32)],
+        cfg: &GenerationConfig,
+        store: &Arc<RwLock<ChunkStore>>,
+        result_tx: &Sender<WorkerResult>,
+        fluid_event_tx: &Sender<FluidEvent>,
+        world_scale: f32,
+    ) {
+        if !dirty_keys.is_empty() {
+            let s = store.read().unwrap();
+            for &key in dirty_keys {
+                if let Some(density) = s.density_fields.get(&key) {
+                    let densities: Vec<f32> = density.samples.iter().map(|s| s.density).collect();
+                    let _ = fluid_event_tx.send(FluidEvent::TerrainModified { chunk: key, densities });
+                }
+            }
+        }
+        prune_destroyed_mushrooms_for_chunks(store, dirty_keys);
+
+        let dirty_set: HashSet<(i32, i32, i32)> = dirty_keys.iter().copied().collect();
+        let mut candidates: HashSet<(i32, i32, i32)> = HashSet::new();
+        for &key in dirty_keys {
+            for dx in -1..=1i32 { for dy in -1..=1i32 { for dz in -1..=1i32 {
+                candidates.insert((key.0 + dx, key.1 + dy, key.2 + dz));
+            }}}
+        }
+
+        let mut to_send: Vec<((i32, i32, i32), voxel_core::mesh::Mesh)> = Vec::new();
+        let mut sent_keys: HashSet<(i32, i32, i32)> = HashSet::new();
+        {
+            let s = store.read().unwrap();
+            for &target in &candidates {
+                if !s.chunk_seam_data.contains_key(&target) { continue; }
+                let seam_mesh = region_gen::generate_chunk_seam_quads(target, &s.chunk_seam_data, cfg.chunk_size);
+                let base = match s.base_meshes.get(&target) {
+                    Some(m) => (**m).clone(),
+                    None => continue,
+                };
+                if seam_mesh.triangles.is_empty() {
+                    if dirty_set.contains(&target) {
+                        let mut mesh = base;
+                        if cfg.mesh_recalc_normals > 0 { mesh.recalculate_normals(); }
+                        to_send.push((target, mesh));
+                        sent_keys.insert(target);
+                    }
+                    continue;
+                }
+                let mut mesh = base;
+                mesh.append(seam_mesh);
+                if cfg.mesh_recalc_normals > 0 { mesh.recalculate_normals(); }
+                to_send.push((target, mesh));
+                sent_keys.insert(target);
+            }
+
+            for &key in dirty_keys {
+                if sent_keys.contains(&key) { continue; }
+                if let Some(base) = s.base_meshes.get(&key) {
+                    let mut mesh = (**base).clone();
+                    if cfg.mesh_recalc_normals > 0 { mesh.recalculate_normals(); }
+                    to_send.push((key, mesh));
+                }
+            }
+        }
+
+        let hashed: Vec<((i32, i32, i32), voxel_core::mesh::Mesh, u64)> =
+            to_send.into_iter().map(|(k, m)| { let h = hash_mesh(&m); (k, m, h) }).collect();
+
+        let mut kept: Vec<((i32, i32, i32), voxel_core::mesh::Mesh, u64, Vec<FfiCrystalPlacement>, Vec<crate::types::FfiMushroomInstance>, bool)> =
+            Vec::with_capacity(hashed.len());
+        {
+            let s = store.read().unwrap();
+            for (target, mesh, new_hash) in hashed {
+                let prev_entry = s.last_sent_mesh_hash.get(&target).copied();
+                if let Some(prev) = prev_entry {
+                    if prev == new_hash { continue; }
+                }
+                let was_previously_sent = prev_entry.is_some();
+                let crystal_data = match s.crystal_placements.get(&target) {
+                    Some(p) if !p.is_empty() => crate::convert::convert_crystals_to_ue(p, cfg.voxel_scale(), world_scale),
+                    _ => Vec::new(),
+                };
+                let mushroom_data = match s.mushroom_placements.get(&target) {
+                    Some(p) if !p.is_empty() => crate::convert::convert_mushrooms_to_ue(p, cfg.voxel_scale(), world_scale),
+                    _ => Vec::new(),
+                };
+                kept.push((target, mesh, new_hash, crystal_data, mushroom_data, was_previously_sent));
+            }
+        }
+        if !kept.is_empty() {
+            let mut s = store.write().unwrap();
+            for (target, _mesh, new_hash, _c, _m, _w) in &kept {
+                s.last_sent_mesh_hash.insert(*target, *new_hash);
+            }
+        }
+
+        for (target, combined, _hash, crystal_data, mushroom_data, was_previously_sent) in kept {
+            let mut converted = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
+            crate::convert::bucket_mesh_by_material(&mut converted);
+            if converted.indices.is_empty() && !was_previously_sent { continue; }
+            let _ = result_tx.send(WorkerResult::ChunkMesh {
+                chunk: target, mesh: converted, generation: 0, crystal_data, mushroom_data,
+                zone_descriptors: Vec::new(),
+            });
+        }
+    }
+
+    // ---- Comparison helpers -------------------------------------------------
+
+    fn vec3_bits(v: &[FfiVec3]) -> Vec<(u32, u32, u32)> {
+        v.iter().map(|p| (p.x.to_bits(), p.y.to_bits(), p.z.to_bits())).collect()
+    }
+
+    /// Drain ChunkMesh results into a key-sorted, bit-comparable form.
+    fn drain_results(rx: &crossbeam_channel::Receiver<WorkerResult>)
+        -> Vec<((i32, i32, i32), Vec<(u32, u32, u32)>, Vec<(u32, u32, u32)>, Vec<u8>, Vec<u32>, Vec<(u8, u32, u32, u32, u32)>)>
+    {
+        let mut out = Vec::new();
+        while let Ok(r) = rx.try_recv() {
+            if let WorkerResult::ChunkMesh { chunk, mesh, .. } = r {
+                out.push((
+                    chunk,
+                    vec3_bits(&mesh.positions),
+                    vec3_bits(&mesh.normals),
+                    mesh.material_ids.clone(),
+                    mesh.indices.clone(),
+                    mesh.submeshes.iter().map(|sm| (sm.material_id, sm.vertex_offset, sm.vertex_count, sm.index_offset, sm.index_count)).collect(),
+                ));
+            }
+        }
+        out.sort_by_key(|e| e.0);
+        out
+    }
+
+    #[test]
+    fn batched_seam_pass_is_bit_identical_to_pre_restructure() {
+        let gs = 30usize;
+        let cfg = test_cfg(gs);
+        let dirty: Vec<(i32, i32, i32)> = vec![(1, 0, 1), (2, 0, 2), (3, 0, 3)];
+
+        let run = |use_baseline: bool| {
+            let store = build_store(gs);
+            let (tx, rx) = crossbeam_channel::unbounded::<WorkerResult>();
+            let (ftx, _frx) = crossbeam_channel::unbounded::<FluidEvent>();
+            if use_baseline {
+                baseline_batched_seam_pass(&dirty, &cfg, &store, &tx, &ftx, 100.0);
+            } else {
+                batched_seam_pass(&dirty, &cfg, &store, &tx, &ftx, 100.0);
+            }
+            let first = drain_results(&rx);
+            // Second pass exercises the hash-skip path on both sides.
+            if use_baseline {
+                baseline_batched_seam_pass(&dirty, &cfg, &store, &tx, &ftx, 100.0);
+            } else {
+                batched_seam_pass(&dirty, &cfg, &store, &tx, &ftx, 100.0);
+            }
+            let second = drain_results(&rx);
+            (first, second)
+        };
+
+        let (base_first, base_second) = run(true);
+        let (new_first, new_second) = run(false);
+
+        assert!(!base_first.is_empty(), "workload is vacuous - no meshes sent");
+        let total_tris: usize = base_first.iter().map(|e| e.4.len() / 3).sum();
+        assert!(total_tris > 1000, "workload too small to be meaningful: {total_tris} tris");
+        assert_eq!(base_first, new_first, "first batched pass diverged");
+        assert_eq!(base_second, new_second, "hash-skip second pass diverged");
+    }
+
+    #[test]
+    fn incremental_seam_pass_is_bit_identical_to_pre_restructure() {
+        let gs = 30usize;
+        let cfg = test_cfg(gs);
+        let chunk = (2, 0, 2);
+
+        let run = |use_baseline: bool| {
+            let store = build_store(gs);
+            let (tx, rx) = crossbeam_channel::unbounded::<WorkerResult>();
+            if use_baseline {
+                baseline_incremental_seam_pass(chunk, &cfg, &store, &tx, 100.0);
+            } else {
+                incremental_seam_pass(chunk, &cfg, &store, &tx, 100.0);
+            }
+            let first = drain_results(&rx);
+            if use_baseline {
+                baseline_incremental_seam_pass(chunk, &cfg, &store, &tx, 100.0);
+            } else {
+                incremental_seam_pass(chunk, &cfg, &store, &tx, 100.0);
+            }
+            let second = drain_results(&rx);
+            (first, second)
+        };
+
+        let (base_first, base_second) = run(true);
+        let (new_first, new_second) = run(false);
+
+        assert!(!base_first.is_empty(), "workload is vacuous - no meshes sent");
+        assert_eq!(base_first, new_first, "first incremental pass diverged");
+        assert_eq!(base_second, new_second, "hash-skip second pass diverged");
+    }
+
+    // ---- Contention benchmark (ignored; run in release) ---------------------
+
+    fn spin_for(d: Duration) {
+        let t = Instant::now();
+        while t.elapsed() < d { std::hint::spin_loop(); }
+    }
+
+    /// Run `passes` batched seam passes while a writer thread repeatedly
+    /// acquires the store write lock (simulating generation inserts). Returns
+    /// (mean pass ms, writer wait mean us, writer wait p95 us, writer wait max us).
+    fn contention_run(use_baseline: bool, passes: usize) -> (f64, f64, f64, f64) {
+        let gs = 30usize;
+        let cfg = test_cfg(gs);
+        let dirty: Vec<(i32, i32, i32)> = vec![(1, 0, 1), (2, 0, 2), (3, 0, 3)];
+        let store = build_store(gs);
+        let (tx, rx) = crossbeam_channel::unbounded::<WorkerResult>();
+        let (ftx, _frx) = crossbeam_channel::unbounded::<FluidEvent>();
+
+        // Warm pass fills last_sent_mesh_hash so measured passes exercise the
+        // steady-state flow (full quad-gen + combine, sends hash-skipped).
+        if use_baseline {
+            baseline_batched_seam_pass(&dirty, &cfg, &store, &tx, &ftx, 100.0);
+        } else {
+            batched_seam_pass(&dirty, &cfg, &store, &tx, &ftx, 100.0);
+        }
+        while rx.try_recv().is_ok() {}
+
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer_store = Arc::clone(&store);
+        let writer_stop = Arc::clone(&stop);
+        let writer = std::thread::spawn(move || {
+            let mut waits_us: Vec<f64> = Vec::with_capacity(1 << 16);
+            while !writer_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let t0 = Instant::now();
+                let g = writer_store.write().unwrap();
+                waits_us.push(t0.elapsed().as_secs_f64() * 1e6);
+                // Hold briefly - stand-in for a generation insert write.
+                spin_for(Duration::from_micros(200));
+                drop(g);
+                spin_for(Duration::from_micros(100));
+            }
+            waits_us
+        });
+
+        let t = Instant::now();
+        for _ in 0..passes {
+            if use_baseline {
+                baseline_batched_seam_pass(&dirty, &cfg, &store, &tx, &ftx, 100.0);
+            } else {
+                batched_seam_pass(&dirty, &cfg, &store, &tx, &ftx, 100.0);
+            }
+            while rx.try_recv().is_ok() {}
+        }
+        let pass_ms = t.elapsed().as_secs_f64() * 1e3 / passes as f64;
+
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let mut waits = writer.join().unwrap();
+        waits.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mean = waits.iter().sum::<f64>() / waits.len().max(1) as f64;
+        let p95 = waits.get(waits.len() * 95 / 100).copied().unwrap_or(0.0);
+        let max = waits.last().copied().unwrap_or(0.0);
+        (pass_ms, mean, p95, max)
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_seam_lock_contention() {
+        let passes = 60usize;
+        let rounds = 3usize;
+        println!("batched seam pass under writer contention ({passes} passes/round, {rounds} rounds)");
+        for r in 0..rounds {
+            let (b_pass, b_mean, b_p95, b_max) = contention_run(true, passes);
+            let (n_pass, n_mean, n_p95, n_max) = contention_run(false, passes);
+            println!("round {r} BASELINE: pass {b_pass:.2} ms | writer wait mean {b_mean:.0} us  p95 {b_p95:.0} us  max {b_max:.0} us");
+            println!("round {r} NEW     : pass {n_pass:.2} ms | writer wait mean {n_mean:.0} us  p95 {n_p95:.0} us  max {n_max:.0} us");
         }
     }
 }

@@ -367,7 +367,7 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
                                     if cfg.mesh_recalc_normals > 0 { mesh.recalculate_normals(); }
                                     let b_edges = region_gen::extract_boundary_edges(&new_hermite, cfg.chunk_size);
                                     s.hermite_data.insert(key, new_hermite);
-                                    s.base_meshes.insert(key, mesh);
+                                    s.base_meshes.insert(key, std::sync::Arc::new(mesh));
                                     s.add_seam_data(key, ChunkSeamData {
                                         dc_vertices: dc_verts,
                                         world_origin: glam::Vec3::ZERO,
@@ -508,7 +508,7 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
                                 world_origin: glam::Vec3::ZERO,
                                 boundary_edges: _b_edges,
                             });
-                            s.base_meshes.insert(key, mesh);
+                            s.base_meshes.insert(key, std::sync::Arc::new(mesh));
                         }
                     }
                     if profiling { t_worm_backward_remesh = t_bwd_remesh.elapsed(); }
@@ -579,7 +579,7 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
                                     world_origin: glam::Vec3::ZERO,
                                     boundary_edges: b_edges,
                                 });
-                                s.base_meshes.insert(key, mesh);
+                                s.base_meshes.insert(key, std::sync::Arc::new(mesh));
                             }
                         }
                     }
@@ -774,7 +774,7 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
                         boundary_edges,
                     },
                 );
-                s.base_meshes.insert(chunk, mesh.clone());
+                s.base_meshes.insert(chunk, std::sync::Arc::new(mesh.clone()));
             }
 
             // Extract density values and send to fluid thread

@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 use glam::Vec3;
 use rayon::prelude::*;
@@ -52,9 +53,16 @@ pub struct ChunkStore {
     /// `voxel_montage_set_protected_chunks`, cleared at montage end. Rust coords.
     pub montage_protected: HashSet<(i32, i32, i32)>,
     /// Per-chunk seam data (DC vertices + boundary edges) for seam stitching.
-    pub chunk_seam_data: HashMap<(i32, i32, i32), ChunkSeamData>,
-    /// Cached base meshes (pre-seam) for fast seam pass reuse.
-    pub base_meshes: HashMap<(i32, i32, i32), Mesh>,
+    /// Arc-wrapped so seam passes can snapshot the entries they need under a
+    /// brief read lock and run quad generation WITHOUT holding the store lock
+    /// (long read holds were serializing against generation write locks during
+    /// the initial-load flood). Entries are immutable once inserted — updates
+    /// replace the whole Arc.
+    pub chunk_seam_data: HashMap<(i32, i32, i32), Arc<ChunkSeamData>>,
+    /// Cached base meshes (pre-seam) for fast seam pass reuse. Arc-wrapped for
+    /// the same reason: seam passes grab the Arc under the read lock and do the
+    /// deep clone + seam append + normal recalc outside it.
+    pub base_meshes: HashMap<(i32, i32, i32), Arc<Mesh>>,
     /// Per-chunk stress data for the collapse system.
     pub stress_fields: HashMap<(i32, i32, i32), StressField>,
     /// Per-chunk support structure data.
@@ -348,7 +356,7 @@ impl ChunkStore {
         chunk: (i32, i32, i32),
         seam_data: ChunkSeamData,
     ) {
-        self.chunk_seam_data.insert(chunk, seam_data);
+        self.chunk_seam_data.insert(chunk, Arc::new(seam_data));
     }
 
     /// Re-mesh dirty chunks using full hermite re-extraction.
@@ -404,14 +412,14 @@ impl ChunkStore {
         let mut results = Vec::with_capacity(outputs.len());
         for (key, hermite, mesh, dc_vertices, boundary_edges, converted) in outputs {
             self.hermite_data.insert(key, hermite);
-            self.base_meshes.insert(key, mesh);
+            self.base_meshes.insert(key, Arc::new(mesh));
             self.chunk_seam_data.insert(
                 key,
-                ChunkSeamData {
+                Arc::new(ChunkSeamData {
                     dc_vertices,
                     world_origin: Vec3::ZERO,
                     boundary_edges,
-                },
+                }),
             );
             results.push((key, converted));
         }

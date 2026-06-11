@@ -303,9 +303,42 @@ fn mesh_fluid_mc(grid: &ChunkFluidGrid, boundary: &BoundaryLevels) -> FluidMeshD
     mesh
 }
 
+/// Neighbor-cell offsets to probe along one axis during vertex welding.
+///
+/// Always includes `0`; includes `-1` only when the query vertex lies within
+/// `margin` of the cell's lower face and `+1` only when within `margin` of the
+/// upper face, emitting them in ascending order (`-1, 0, +1`) so the welding
+/// search visits cells in the same order as the old fixed `-1..=1` triple loop.
+/// Returns the offsets plus the count of valid entries.
+#[inline]
+fn axis_deltas(dist_lower: f32, cell_size: f32, margin: f32) -> ([i32; 3], usize) {
+    let mut deltas = [0i32; 3];
+    let mut n = 0;
+    if dist_lower < margin {
+        deltas[n] = -1;
+        n += 1;
+    }
+    deltas[n] = 0;
+    n += 1;
+    if cell_size - dist_lower < margin {
+        deltas[n] = 1;
+        n += 1;
+    }
+    (deltas, n)
+}
+
 /// Weld coincident vertices (MC emits 3 fresh vertices per triangle with no sharing).
 /// Uses spatial hashing (grid cell 0.01) to find coincident positions within epsilon=1e-5,
 /// remaps indices, and compacts all parallel arrays.
+///
+/// A vertex is only ever inserted into its own home cell, so a neighbor cell can
+/// hold a within-epsilon match only when the query vertex is within `epsilon` of
+/// the face shared with that cell. The per-axis neighbor probe is therefore gated
+/// on the vertex's distance to each cell face (see `axis_deltas`): cells beyond
+/// the gate provably contain no point within epsilon, so skipping them cannot
+/// change which vertex is welded — the result is bit-identical to the full
+/// 27-cell scan. The typical interior vertex (>1e-3 from every face) now does a
+/// single home-cell probe instead of 27.
 fn weld_vertices(mesh: &mut FluidMeshData) {
     if mesh.positions.is_empty() {
         return;
@@ -314,6 +347,12 @@ fn weld_vertices(mesh: &mut FluidMeshData) {
     let cell_size: f32 = 0.01;
     let epsilon: f32 = 1e-5;
     let inv_cell = 1.0 / cell_size;
+    // A neighbor cell is probed only when the vertex lies within `margin` of the
+    // face shared with it. `margin` (1e-3 = 100x epsilon) sits far above both
+    // epsilon and the worst-case f32 rounding error (~1e-5) in the face-distance
+    // computation, so a live cell is never wrongly skipped; over-including a cell
+    // is harmless because the exact per-vertex distance test below is unchanged.
+    let margin: f32 = 1e-3;
 
     // Spatial hash: grid cell -> list of (new_index, position)
     let mut spatial: HashMap<(i32, i32, i32), Vec<(u32, [f32; 3])>> = HashMap::new();
@@ -330,11 +369,17 @@ fn weld_vertices(mesh: &mut FluidMeshData) {
         let gy = (pos[1] * inv_cell).floor() as i32;
         let gz = (pos[2] * inv_cell).floor() as i32;
 
-        // Search this cell and 26 neighbors for a match
+        // Probe the home cell plus only the neighbor cells whose shared face the
+        // vertex is within `margin` of (the rest provably hold no match). Same
+        // visit order as the old fixed -1..=1 triple loop -> bit-identical result.
+        let (xds, xn) = axis_deltas(pos[0] - gx as f32 * cell_size, cell_size, margin);
+        let (yds, yn) = axis_deltas(pos[1] - gy as f32 * cell_size, cell_size, margin);
+        let (zds, zn) = axis_deltas(pos[2] - gz as f32 * cell_size, cell_size, margin);
+
         let mut found = None;
-        'search: for dz in -1..=1 {
-            for dy in -1..=1 {
-                for dx in -1..=1 {
+        'search: for &dz in &zds[..zn] {
+            for &dy in &yds[..yn] {
+                for &dx in &xds[..xn] {
                     let key = (gx + dx, gy + dy, gz + dz);
                     if let Some(bucket) = spatial.get(&key) {
                         for &(idx, ref p) in bucket {
@@ -981,6 +1026,163 @@ mod tests {
         // Indices should still be valid
         for &idx in &welded.indices {
             assert!((idx as usize) < welded.positions.len(), "Index out of range after weld");
+        }
+    }
+
+    /// Reference implementation: the original fixed 27-cell (`-1..=1`³) weld scan,
+    /// inlined here so the shipped epsilon-bounded `weld_vertices` can be proven
+    /// byte-for-byte identical to the pre-optimization baseline.
+    fn weld_vertices_ref(mesh: &mut FluidMeshData) {
+        if mesh.positions.is_empty() {
+            return;
+        }
+        let cell_size: f32 = 0.01;
+        let epsilon: f32 = 1e-5;
+        let inv_cell = 1.0 / cell_size;
+        let mut spatial: HashMap<(i32, i32, i32), Vec<(u32, [f32; 3])>> = HashMap::new();
+        let mut remap: Vec<u32> = Vec::with_capacity(mesh.positions.len());
+        let mut new_positions: Vec<[f32; 3]> = Vec::new();
+        let mut new_normals: Vec<[f32; 3]> = Vec::new();
+        let mut new_fluid_types: Vec<u8> = Vec::new();
+        let mut new_uvs: Vec<[f32; 2]> = Vec::new();
+        let mut new_flow_directions: Vec<[f32; 3]> = Vec::new();
+        for i in 0..mesh.positions.len() {
+            let pos = mesh.positions[i];
+            let gx = (pos[0] * inv_cell).floor() as i32;
+            let gy = (pos[1] * inv_cell).floor() as i32;
+            let gz = (pos[2] * inv_cell).floor() as i32;
+            let mut found = None;
+            'search: for dz in -1..=1 {
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        let key = (gx + dx, gy + dy, gz + dz);
+                        if let Some(bucket) = spatial.get(&key) {
+                            for &(idx, ref p) in bucket {
+                                let d0 = pos[0] - p[0];
+                                let d1 = pos[1] - p[1];
+                                let d2 = pos[2] - p[2];
+                                if d0 * d0 + d1 * d1 + d2 * d2 < epsilon * epsilon {
+                                    found = Some(idx);
+                                    break 'search;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let new_idx = if let Some(idx) = found {
+                idx
+            } else {
+                let idx = new_positions.len() as u32;
+                new_positions.push(pos);
+                new_normals.push(mesh.normals[i]);
+                new_fluid_types.push(mesh.fluid_types[i]);
+                new_uvs.push(mesh.uvs[i]);
+                new_flow_directions.push(mesh.flow_directions[i]);
+                spatial.entry((gx, gy, gz)).or_default().push((idx, pos));
+                idx
+            };
+            remap.push(new_idx);
+        }
+        for idx in &mut mesh.indices {
+            *idx = remap[*idx as usize];
+        }
+        mesh.positions = new_positions;
+        mesh.normals = new_normals;
+        mesh.fluid_types = new_fluid_types;
+        mesh.uvs = new_uvs;
+        mesh.flow_directions = new_flow_directions;
+    }
+
+    #[test]
+    fn test_weld_bounded_search_is_bit_identical() {
+        // Build a real, sizeable MC mesh so the weld has many coincident verts and
+        // near-face cases to resolve, then assert the shipped epsilon-bounded weld
+        // produces byte-for-byte the same result as the full 27-cell scan.
+        let grid = make_fluid_grid(&[(2..14, 2..14, 2..14, 1.0)]);
+        let raw = mesh_fluid_mc(&grid, &no_boundary());
+        assert!(raw.positions.len() > 500, "want a non-trivial mesh to exercise the search");
+
+        let mut a = clone_mesh(&raw);
+        let mut b = clone_mesh(&raw);
+        weld_vertices(&mut a); // shipped (bounded)
+        weld_vertices_ref(&mut b); // reference (full 27-cell)
+
+        assert_eq!(a.positions.len(), b.positions.len(), "vertex count differs");
+        assert_eq!(a.indices, b.indices, "remapped indices differ");
+        for (va, vb) in a.positions.iter().zip(&b.positions) {
+            for k in 0..3 {
+                assert_eq!(va[k].to_bits(), vb[k].to_bits(), "position bits differ");
+            }
+        }
+        for (na, nb) in a.normals.iter().zip(&b.normals) {
+            for k in 0..3 {
+                assert_eq!(na[k].to_bits(), nb[k].to_bits(), "normal bits differ");
+            }
+        }
+        assert_eq!(a.fluid_types, b.fluid_types, "fluid_types differ");
+    }
+
+    /// A/B microbench (release): `cargo test -p voxel-fluid --release weld_ab -- --ignored --nocapture`.
+    /// Times the shipped epsilon-bounded weld against the original 27-cell scan on
+    /// an identical real MC mesh, in the same binary so the comparison is fair.
+    #[test]
+    #[ignore]
+    fn bench_weld_ab() {
+        use std::time::Instant;
+        let grid = make_fluid_grid(&[(1..15, 1..15, 1..15, 1.0)]);
+        let raw = mesh_fluid_mc(&grid, &no_boundary());
+        println!("raw MC verts: {}", raw.positions.len());
+
+        let rounds = 6;
+        let iters = 2000;
+        let mut best_new = f64::MAX;
+        let mut best_ref = f64::MAX;
+        let mut sink = 0u64;
+        for _ in 0..rounds {
+            let t = Instant::now();
+            for _ in 0..iters {
+                let mut m = clone_mesh(&raw);
+                weld_vertices(&mut m);
+                sink = sink.wrapping_add(m.positions.len() as u64);
+            }
+            best_new = best_new.min(t.elapsed().as_secs_f64() / iters as f64 * 1e6);
+
+            let t = Instant::now();
+            for _ in 0..iters {
+                let mut m = clone_mesh(&raw);
+                weld_vertices_ref(&mut m);
+                sink = sink.wrapping_add(m.positions.len() as u64);
+            }
+            best_ref = best_ref.min(t.elapsed().as_secs_f64() / iters as f64 * 1e6);
+        }
+        // Subtract clone+push overhead (run the loop body with no search work).
+        let mut best_clone = f64::MAX;
+        for _ in 0..rounds {
+            let t = Instant::now();
+            for _ in 0..iters {
+                let m = clone_mesh(&raw);
+                sink = sink.wrapping_add(m.positions.len() as u64);
+            }
+            best_clone = best_clone.min(t.elapsed().as_secs_f64() / iters as f64 * 1e6);
+        }
+        let net_ref = best_ref - best_clone;
+        let net_new = best_new - best_clone;
+        println!(
+            "weld A/B: ref(27-cell)={:.3}us new(bounded)={:.3}us clone={:.3}us | NET ref={:.3} new={:.3} -> {:.1}% ({:.2}x) sink={}",
+            best_ref, best_new, best_clone, net_ref, net_new,
+            (1.0 - net_new / net_ref) * 100.0, net_ref / net_new, sink
+        );
+    }
+
+    fn clone_mesh(m: &FluidMeshData) -> FluidMeshData {
+        FluidMeshData {
+            positions: m.positions.clone(),
+            normals: m.normals.clone(),
+            fluid_types: m.fluid_types.clone(),
+            indices: m.indices.clone(),
+            uvs: m.uvs.clone(),
+            flow_directions: m.flow_directions.clone(),
         }
     }
 
