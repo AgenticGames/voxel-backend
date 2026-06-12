@@ -263,6 +263,7 @@ fn edge_crossing_t(
     v1: f32,
     d0: f32,
     d1: f32,
+    grad_mag: f32,
 ) -> f32 {
     let solid0 = d0 > 0.0;
     let solid1 = d1 > 0.0;
@@ -287,11 +288,21 @@ fn edge_crossing_t(
             }
         }
 
-        // Rim seam: terrain density zero-crossing, recessed into the rock.
+        // Rim seam: terrain density zero-crossing, recessed into the rock by a
+        // constant PERPENDICULAR depth. grad_mag/|denom| >= 1 is the grazing
+        // factor (1 when the edge is normal to the surface); on edges that
+        // cross the rock at grazing angles a fixed parametric offset buries
+        // almost nothing and jagged DC detail pokes the film out as orphaned
+        // water bits. Dividing by the SIGNED denom would point toward the
+        // solid end automatically; signum() keeps that property explicit.
+        // Clamping to the solid sample point (t=0/1) is always safe: DC only
+        // places surface between sign-changing samples, so a positive-density
+        // lattice sample is inside the terrain by construction.
         let denom = d1 - d0;
         if denom.abs() > 1e-6 {
             let t_rock = -d0 / denom;
-            let recess = if solid1 { ROCK_RECESS_T } else { -ROCK_RECESS_T };
+            let scale = (grad_mag / denom.abs()).max(1.0);
+            let recess = ROCK_RECESS_T * scale * denom.signum();
             return (t_rock + recess).clamp(0.0, 1.0);
         }
         return 0.5;
@@ -374,6 +385,19 @@ fn mesh_fluid_mc(grid: &ChunkFluidGrid, boundary: &BoundaryLevels) -> FluidMeshD
                     corner_density[i] = grid.grid_point_density(x + off[0], y + off[1], z + off[2]);
                 }
 
+                // Cube-local density gradient magnitude (4 corner-pair deltas
+                // per axis, averaged). Lets the rim recess hold a constant
+                // *perpendicular* burial depth on edges that cross the rock at
+                // grazing angles — see edge_crossing_t.
+                let (mut gx, mut gy, mut gz) = (0.0f32, 0.0f32, 0.0f32);
+                for (i, off) in CORNER_OFFSETS.iter().enumerate() {
+                    let d = corner_density[i];
+                    gx += if off[0] == 1 { d } else { -d };
+                    gy += if off[1] == 1 { d } else { -d };
+                    gz += if off[2] == 1 { d } else { -d };
+                }
+                let grad_mag = (gx * gx + gy * gy + gz * gz).sqrt() * 0.25;
+
                 // Build cube index: bit i set if corner i >= ISO_LEVEL
                 let mut cube_index: usize = 0;
                 for i in 0..8 {
@@ -398,6 +422,7 @@ fn mesh_fluid_mc(grid: &ChunkFluidGrid, boundary: &BoundaryLevels) -> FluidMeshD
                             grid, boundary, x, y, z,
                             c0, c1, v0, v1,
                             corner_density[c0], corner_density[c1],
+                            grad_mag,
                         );
                         let p0 = CORNER_OFFSETS[c0];
                         let p1 = CORNER_OFFSETS[c1];
@@ -1591,6 +1616,52 @@ mod tests {
             shoreline_verts > 0,
             "sheet never reached the shoreline band (x >= 9.5) — gate still cutting it early"
         );
+    }
+
+    #[test]
+    fn test_grazing_rock_contact_buried_or_snapped() {
+        // A near-horizontal rock shelf just above the water line: its underside
+        // crosses horizontal lattice edges at a grazing angle (edge density
+        // delta 0.04 vs gradient magnitude ~0.5). With a fixed parametric
+        // recess the contact ring lands <0.01 cells under the surface and
+        // jagged DC detail pokes it out as orphaned water bits. The
+        // gradient-aware recess must either bury contact vertices at real
+        // perpendicular depth or snap them onto a solid lattice sample
+        // (provably inside the DC terrain).
+        let size = 16;
+        let mut grid = ChunkFluidGrid::new(size);
+        // Solid above the plane y = 6.3 - 0.08x; gradient (0.04, 0.5, 0).
+        let d = density_field_from_fn(size, |x, y, _z| (y - 6.3 + 0.08 * x) * 0.5);
+        grid.update_density(&d);
+        for z in 2..=13 {
+            for y in 3..=5 {
+                for x in 2..=12 {
+                    let cell = grid.get_mut(x, y, z);
+                    cell.level = 1.0;
+                    cell.fluid_type = FluidType::Water;
+                }
+            }
+        }
+        let mesh = mesh_fluid_mc(&grid, &no_boundary());
+        assert!(!mesh.positions.is_empty());
+        let grad_mag = (0.04f32 * 0.04 + 0.5 * 0.5).sqrt();
+        let mut contact_verts = 0;
+        for p in &mesh.positions {
+            // Above the water surface (5.85) in the shelf-contact region.
+            if p[1] >= 5.95 && p[0] >= 2.0 && p[0] <= 6.0 && p[2] >= 4.0 && p[2] <= 11.0 {
+                contact_verts += 1;
+                let depth = terrain_density_at(&grid, *p) / grad_mag;
+                let near_lattice = (p[0] - p[0].round()).abs() < 1e-3
+                    && (p[1] - p[1].round()).abs() < 1e-3
+                    && (p[2] - p[2].round()).abs() < 1e-3;
+                assert!(
+                    depth >= 0.05 || near_lattice,
+                    "grazing contact vertex [{:.3},{:.3},{:.3}] sits only {:.3} cells under the rock — pokes out as an orphaned water bit",
+                    p[0], p[1], p[2], depth
+                );
+            }
+        }
+        assert!(contact_verts > 0, "expected contact vertices under the rock shelf");
     }
 
     #[test]
