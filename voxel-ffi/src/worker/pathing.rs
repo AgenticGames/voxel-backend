@@ -30,7 +30,7 @@ pub fn path_worker_loop(
     result_tx: Sender<WorkerResult>,
     store: Arc<RwLock<ChunkStore>>,
     config: Arc<RwLock<GenerationConfig>>,
-    occupied_cells: Arc<RwLock<std::collections::HashSet<(i32, i32, i32)>>>,
+    occupied_cells: Arc<RwLock<Arc<std::collections::HashSet<(i32, i32, i32)>>>>,
     world_scale: f32,
 ) {
     while !shutdown.load(Ordering::Relaxed) {
@@ -53,7 +53,7 @@ fn handle_path_request(
     result_tx: &Sender<WorkerResult>,
     store: &Arc<RwLock<ChunkStore>>,
     config: &Arc<RwLock<GenerationConfig>>,
-    occupied_cells: &Arc<RwLock<std::collections::HashSet<(i32, i32, i32)>>>,
+    occupied_cells: &Arc<RwLock<Arc<std::collections::HashSet<(i32, i32, i32)>>>>,
     world_scale: f32,
 ) {
     let request_id = request.request_id;
@@ -86,13 +86,15 @@ fn handle_path_request(
         }
     };
 
-    // Snapshot the occupancy set for this request. Hold the lock across A*
-    // (cheap read lock; multiple path workers can read concurrently). The
-    // alternative — cloning the set to drop the lock — would marshal up to
-    // 50 (i32,i32,i32) tuples per request which is more expensive than the
-    // tiny contention from a held read lock.
-    let occupied_guard = occupied_cells.read().ok();
-    let occupied_ref = occupied_guard.as_deref();
+    // Snapshot the occupancy set for this request via Arc clone — the lock is
+    // held only for the refcount bump, never across A*. Holding a read guard
+    // across the solve (the previous design) blocked UE's 10Hz
+    // `voxel_path_set_obstacle_cells` write on the game thread for the full
+    // duration of any in-flight solve: 45-51ms GT hitches every couple of
+    // seconds in the 2026-06-13 idle trace.
+    let occupied_snapshot: Option<std::sync::Arc<std::collections::HashSet<(i32, i32, i32)>>> =
+        occupied_cells.read().ok().map(|g| std::sync::Arc::clone(&*g));
+    let occupied_ref = occupied_snapshot.as_deref();
 
     // Compute the requester's pathing cell so the grid can self-exclude.
     // Same math as `to_path_request` below but inline so we don't run it
@@ -115,12 +117,10 @@ fn handle_path_request(
     let (path_req, _mode) = crate::pathing::to_path_request(&request, PATH_CELL_FACTOR);
     let outcome = voxel_path::compute_path(&grid, path_req);
 
-    // Drop the occupancy guard alongside the store guard below.
-    drop(occupied_guard);
-
     // Drop the store guard before doing the UE conversion — keeps the read
     // lock window as short as possible.
     drop(store_guard);
+    drop(occupied_snapshot);
 
     let nodes_ue = crate::pathing::nodes_to_ue(&outcome.nodes, PATH_CELL_FACTOR, world_scale);
 

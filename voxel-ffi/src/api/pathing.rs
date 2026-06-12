@@ -118,10 +118,12 @@ pub unsafe extern "C" fn voxel_path_set_obstacle_cells(
         }
     }
 
-    // Replace the whole set under a write lock. Write lock window is brief
-    // — only the assignment itself, no allocation while held.
+    // Swap in the new snapshot as a fresh Arc. The write lock window is one
+    // pointer assignment; in-flight path solves keep their own Arc clone, so
+    // this call (on the UE game thread, ~10Hz) never waits on a solve and
+    // never blocks one.
     if let Ok(mut guard) = engine.occupied_cells.write() {
-        *guard = new_set;
+        *guard = std::sync::Arc::new(new_set);
     }
 }
 

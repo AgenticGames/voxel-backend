@@ -171,7 +171,11 @@ pub struct VoxelEngine {
     /// The requester's own cell is excluded at grid-construction time so the
     /// agent can start its search from inside the (temporarily marked-occupied)
     /// cell it currently stands in.
-    pub occupied_cells: Arc<RwLock<HashSet<(i32, i32, i32)>>>,
+    /// Lock holds are O(1) on both sides: the writer swaps in a freshly built
+    /// `Arc` (see `voxel_path_set_obstacle_cells`), path workers clone the
+    /// `Arc` and solve lock-free — so the UE game thread never waits on an
+    /// in-flight A* solve.
+    pub occupied_cells: Arc<RwLock<Arc<HashSet<(i32, i32, i32)>>>>,
 
     // ─── Crystal Anchors (Crystal Growth Bridge feature) ─────
     /// Pending and grown crystal-anchor pairs. Mutex is fine: anchor ops
@@ -314,8 +318,8 @@ impl VoxelEngine {
 
         // Cross-species avoidance — shared occupancy set the path workers
         // read at grid-construction time. UE pushes fresh snapshots ~10Hz.
-        let occupied_cells: Arc<RwLock<HashSet<(i32, i32, i32)>>> =
-            Arc::new(RwLock::new(HashSet::new()));
+        let occupied_cells: Arc<RwLock<Arc<HashSet<(i32, i32, i32)>>>> =
+            Arc::new(RwLock::new(Arc::new(HashSet::new())));
 
         // Per-worker activity heartbeats — one slot per worker. Workers stamp
         // what they're handling; the stall monitor (spawned below) reads them to
