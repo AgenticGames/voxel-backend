@@ -327,6 +327,11 @@ impl VoxelEngine {
         );
 
         let mut workers = Vec::with_capacity(num_workers);
+        // Shared by all workers: freshly generated regions whose VFX stress
+        // pre-population is pending. Pushed by handle_generate's slow path,
+        // drained when the generate queue idles (see worker_loop).
+        let deferred_region_stress = Arc::new(crate::worker::DeferredRegionStress::new());
+
         for worker_id in 0..num_workers {
             let shutdown = Arc::clone(&shutdown);
             let generation_paused = Arc::clone(&generation_paused);
@@ -344,6 +349,7 @@ impl VoxelEngine {
             let rif = Arc::clone(&regions_in_flight);
             let anchors = Arc::clone(&crystal_anchors);
             let heartbeats = Arc::clone(&heartbeats);
+            let deferred_stress = Arc::clone(&deferred_region_stress);
 
             let builder = thread::Builder::new().name(format!("voxel-worker-{}", worker_id));
             let handle = builder
@@ -375,6 +381,7 @@ impl VoxelEngine {
                             let rif = Arc::clone(&rif);
                             let anchors = Arc::clone(&anchors);
                             let heartbeats = Arc::clone(&heartbeats);
+                            let deferred_stress = Arc::clone(&deferred_stress);
                             std::panic::catch_unwind(AssertUnwindSafe(move || {
                                 worker_loop(
                                     shutdown,
@@ -395,6 +402,7 @@ impl VoxelEngine {
                                     rif,
                                     anchors,
                                     heartbeats,
+                                    deferred_stress,
                                 );
                             }))
                         };

@@ -253,107 +253,30 @@ pub fn recalc_stress_region_v2_filtered(
     events: &[StressDirtyEvent],
     chunk_size: usize,
 ) -> StressResult {
-    let use_filter = !events.is_empty();
-
     // Pass 1: ground connectivity on dirty chunks + neighbors
     let support_scores = ground_connectivity_pass(density_fields, dirty_chunks, chunk_size, config);
 
-    let cs = chunk_size;
-    let grid_size = cs + 1;
     let mut overstressed = Vec::new();
     let mut affected_chunks = HashSet::new();
 
     // Pass 2: calculate stress for voxels near surfaces in dirty chunks.
-    // Deep interior voxels (fully surrounded by grounded solid) are skipped for performance.
-    for &(cx, cy, cz) in dirty_chunks {
-        let df = match density_fields.get(&(cx, cy, cz)) {
-            Some(d) => d,
-            None => continue,
-        };
-
-        // Hoist the per-chunk map lookups out of the gs³ voxel loop: the chunk
-        // key is constant for the whole triple loop, so re-hashing it (SipHash
-        // over a 12-byte tuple) ~30k× per chunk was pure overhead. Fetch the
-        // mutable stress field + the support-score field once; reborrow inside.
-        let chunk_support = support_scores.get(&(cx, cy, cz));
-        let mut chunk_sf = stress_fields.get_mut(&(cx, cy, cz));
-
-        for z in 0..grid_size {
-            for y in 0..grid_size {
-                for x in 0..grid_size {
-                    if !df.get(x, y, z).material.is_solid() {
-                        if let Some(sf) = chunk_sf.as_deref_mut() {
-                            sf.set(x, y, z, 0.0);
-                            sf.set_class(x, y, z, 0); // Air = no classification
-                        }
-                        continue;
-                    }
-
-                    let wx = cx * cs as i32 + x as i32;
-                    let wy = cy * cs as i32 + y as i32;
-                    let wz = cz * cs as i32 + z as i32;
-
-                    // Position filter: skip voxels outside all mine event radii.
-                    // Their existing stress stays untouched — no phantom collapses.
-                    if use_filter && !in_any_event(events, wx, wy, wz) {
-                        continue;
-                    }
-
-                    // Interior skip: fully grounded voxels get 0 stress but still classified.
-                    let my_support = chunk_support
-                        .map(|sf| sf.get(x, y, z))
-                        .unwrap_or(1.0);
-                    if my_support >= config.ground_threshold {
-                        // Classify: is this a floor or deep interior? Same-chunk
-                        // neighbors read `df` directly (see neighbor_solid_same_chunk).
-                        let (xi, yi, zi) = (x as i32, y as i32, z as i32);
-                        let below_solid = neighbor_solid_same_chunk(
-                            df, density_fields, cs, xi, yi - 1, zi, wx, wy - 1, wz,
-                        ).unwrap_or(true);
-                        // Count air neighbors for wall detection
-                        let mut air_n = 0u8;
-                        for &(dx, dy, dz) in &[(1i32,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)] {
-                            if neighbor_solid_same_chunk(
-                                df, density_fields, cs, xi+dx, yi+dy, zi+dz, wx+dx, wy+dy, wz+dz,
-                            ) == Some(false) {
-                                air_n += 1;
-                            }
-                        }
-                        let stype = if air_n == 0 { SURFACE_INTERIOR }
-                            else if below_solid { SURFACE_FLOOR }
-                            else { SURFACE_WALL };
-                        if let Some(sf) = chunk_sf.as_deref_mut() {
-                            sf.set(x, y, z, 0.0);
-                            sf.set_class(x, y, z, pack_classification(stype, SOURCE_NONE));
-                        }
-                        continue;
-                    }
-
-                    let (stress, classification) = calc_voxel_stress_v2(
-                        density_fields, support_fields, &support_scores,
-                        config, wx, wy, wz, cs,
-                    );
-
-                    // Painted overlay (creative-mode PaintStress brush) is
-                    // captured BEFORE the set, since set() doesn't touch it.
-                    let painted = chunk_sf
-                        .as_deref()
-                        .map(|sf| sf.painted(x, y, z))
-                        .unwrap_or(0.0);
-                    if let Some(sf) = chunk_sf.as_deref_mut() {
-                        sf.set(x, y, z, stress);
-                        sf.set_class(x, y, z, classification);
-                        affected_chunks.insert((cx, cy, cz));
-                    }
-
-                    let eff = stress + painted;
-                    if eff >= 1.0 {
-                        overstressed.push(OverstressedVoxel {
-                            world_x: wx, world_y: wy, world_z: wz, stress: eff,
-                        });
-                    }
-                }
-            }
+    // Deep interior voxels (fully surrounded by grounded solid) are skipped
+    // for performance. Body extracted to `recalc_chunk_stress_voxels` so the
+    // FFI's region-level VFX pre-population can run chunks in parallel.
+    for &key in dirty_chunks {
+        let wrote = recalc_chunk_stress_voxels(
+            density_fields,
+            support_fields,
+            &support_scores,
+            config,
+            key,
+            chunk_size,
+            stress_fields.get_mut(&key),
+            events,
+            &mut overstressed,
+        );
+        if wrote {
+            affected_chunks.insert(key);
         }
     }
 
@@ -362,6 +285,125 @@ pub fn recalc_stress_region_v2_filtered(
         affected_chunks: affected_chunks.into_iter().collect(),
         broken_struts: Vec::new(), // read-only entry — no HP damage tracked
     }
+}
+
+/// Full (optionally event-filtered) stress recompute of ONE chunk's voxels —
+/// the extracted per-chunk body of [`recalc_stress_region_v2_filtered`].
+///
+/// Extracted so the FFI's region-level VFX stress pre-population can run the
+/// per-chunk pass for many chunks IN PARALLEL: every map input is read-only
+/// and each call writes only its own `chunk_sf` + `overstressed`, so calls
+/// for distinct chunks are data-race-free. `support_scores` must come from a
+/// [`ground_connectivity_pass`] whose dirty set included `chunk`.
+///
+/// Returns true if any stress voxel was written (the caller's
+/// "affected chunk" signal).
+pub fn recalc_chunk_stress_voxels(
+    density_fields: &HashMap<(i32, i32, i32), DensityField>,
+    support_fields: &HashMap<(i32, i32, i32), SupportField>,
+    support_scores: &HashMap<(i32, i32, i32), SupportScoreField>,
+    config: &StressConfig,
+    chunk: (i32, i32, i32),
+    chunk_size: usize,
+    mut chunk_sf: Option<&mut StressField>,
+    events: &[StressDirtyEvent],
+    overstressed: &mut Vec<OverstressedVoxel>,
+) -> bool {
+    let (cx, cy, cz) = chunk;
+    let df = match density_fields.get(&chunk) {
+        Some(d) => d,
+        None => return false,
+    };
+    let use_filter = !events.is_empty();
+    let cs = chunk_size;
+    let grid_size = cs + 1;
+
+    // Hoist the per-chunk map lookups out of the gs³ voxel loop: the chunk
+    // key is constant for the whole triple loop, so re-hashing it (SipHash
+    // over a 12-byte tuple) ~30k× per chunk was pure overhead. Fetch the
+    // support-score field once; the stress field arrives pre-fetched.
+    let chunk_support = support_scores.get(&chunk);
+    let mut wrote = false;
+
+    for z in 0..grid_size {
+        for y in 0..grid_size {
+            for x in 0..grid_size {
+                if !df.get(x, y, z).material.is_solid() {
+                    if let Some(sf) = chunk_sf.as_deref_mut() {
+                        sf.set(x, y, z, 0.0);
+                        sf.set_class(x, y, z, 0); // Air = no classification
+                    }
+                    continue;
+                }
+
+                let wx = cx * cs as i32 + x as i32;
+                let wy = cy * cs as i32 + y as i32;
+                let wz = cz * cs as i32 + z as i32;
+
+                // Position filter: skip voxels outside all mine event radii.
+                // Their existing stress stays untouched — no phantom collapses.
+                if use_filter && !in_any_event(events, wx, wy, wz) {
+                    continue;
+                }
+
+                // Interior skip: fully grounded voxels get 0 stress but still classified.
+                let my_support = chunk_support
+                    .map(|sf| sf.get(x, y, z))
+                    .unwrap_or(1.0);
+                if my_support >= config.ground_threshold {
+                    // Classify: is this a floor or deep interior? Same-chunk
+                    // neighbors read `df` directly (see neighbor_solid_same_chunk).
+                    let (xi, yi, zi) = (x as i32, y as i32, z as i32);
+                    let below_solid = neighbor_solid_same_chunk(
+                        df, density_fields, cs, xi, yi - 1, zi, wx, wy - 1, wz,
+                    ).unwrap_or(true);
+                    // Count air neighbors for wall detection
+                    let mut air_n = 0u8;
+                    for &(dx, dy, dz) in &[(1i32,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)] {
+                        if neighbor_solid_same_chunk(
+                            df, density_fields, cs, xi+dx, yi+dy, zi+dz, wx+dx, wy+dy, wz+dz,
+                        ) == Some(false) {
+                            air_n += 1;
+                        }
+                    }
+                    let stype = if air_n == 0 { SURFACE_INTERIOR }
+                        else if below_solid { SURFACE_FLOOR }
+                        else { SURFACE_WALL };
+                    if let Some(sf) = chunk_sf.as_deref_mut() {
+                        sf.set(x, y, z, 0.0);
+                        sf.set_class(x, y, z, pack_classification(stype, SOURCE_NONE));
+                    }
+                    continue;
+                }
+
+                let (stress, classification) = calc_voxel_stress_v2(
+                    density_fields, support_fields, support_scores,
+                    config, wx, wy, wz, cs,
+                );
+
+                // Painted overlay (creative-mode PaintStress brush) is
+                // captured BEFORE the set, since set() doesn't touch it.
+                let painted = chunk_sf
+                    .as_deref()
+                    .map(|sf| sf.painted(x, y, z))
+                    .unwrap_or(0.0);
+                if let Some(sf) = chunk_sf.as_deref_mut() {
+                    sf.set(x, y, z, stress);
+                    sf.set_class(x, y, z, classification);
+                    wrote = true;
+                }
+
+                let eff = stress + painted;
+                if eff >= 1.0 {
+                    overstressed.push(OverstressedVoxel {
+                        world_x: wx, world_y: wy, world_z: wz, stress: eff,
+                    });
+                }
+            }
+        }
+    }
+
+    wrote
 }
 
 /// V2 recalc that ALSO tracks per-strut load and damages HP / clears
