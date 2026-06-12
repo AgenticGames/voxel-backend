@@ -119,6 +119,10 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
             let mut pool_fluid_seeds: Vec<voxel_gen::pools::FluidSeed> = Vec::new();
             let mut region_river_springs: Vec<((i32, i32, i32), voxel_gen::springs::SpringDescriptor)> = Vec::new();
             let mut region_zone_descriptors: Vec<FfiZoneDescriptor> = Vec::new();
+            // Set by the slow path when this worker actually inserted a fresh
+            // region — triggers the region-level VFX stress pre-population
+            // after the mesh send (see the block past `result_tx.send`).
+            let mut stress_region_coords: Vec<(i32, i32, i32)> = Vec::new();
 
             let (mesh, dc_vertices, boundary_edges) = if let Some(result) = mesh_result {
                 result
@@ -279,6 +283,10 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
                             }
                         }
                         s.mark_region_generated(rk);
+                        // Fresh region landed — schedule the region-level VFX
+                        // stress pre-population (runs after this chunk's mesh
+                        // send, outside this write lock).
+                        stress_region_coords = coords.clone();
 
                         // ── CRITICAL: re-sync ALL region chunks after insert ──
                         //
@@ -1020,68 +1028,6 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
                 }
             }
 
-            // ── Isolated VFX-only stress compute (no collapse) ──
-            //
-            // Worldgen builds density / mesh / crystals but never computes a
-            // stress field, so a freshly streamed or loaded chunk has all-zero
-            // stress. The crack-decal + warning-dust overlay reads that field
-            // via `enumerate_overstressed_in_chunk`, so it shows NOTHING until
-            // the player mines nearby and the position-based queue finally
-            // recalculates — the "cracks only appear once I hit the area" bug.
-            //
-            // Compute this chunk's stress now so the overlay can light up the
-            // already-stressed (large-span / thin-feature) parts of the cave
-            // the instant the chunk appears — on initial load, zone stream-in,
-            // and save-load alike (all bring-in paths funnel through here).
-            //
-            // CRITICAL — this stays VFX-only and must NEVER collapse on load:
-            // `recalc_stress_region_v2` only WRITES stress numbers (it takes
-            // support_fields read-only, so it cannot decay strut HP) and
-            // returns an overstressed list we deliberately DISCARD. It does not
-            // call detect_and_execute_collapses_*. Collapse remains exclusive
-            // to the mining stress queue, which only ever falls cells it
-            // freshly recomputes inside the mine radius — pre-populating the
-            // field here cannot trigger a spurious cave-in.
-            //
-            // Computed under a READ lock into a local one-chunk map (cloning
-            // the existing field preserves any save-restored painted-stress
-            // overlay, which `set()` never touches), then committed with a
-            // brief WRITE lock — so the span-search pass doesn't hold the store
-            // write lock and serialize every other worker during the
-            // initial-load storm.
-            {
-                use voxel_core::stress::{recalc_stress_region_v2, StressField};
-                let stress_cfg = ctx.stress_config.read().unwrap().clone();
-                let computed: Option<StressField> = {
-                    let s = store.read().unwrap();
-                    if let Some(existing) = s.stress_fields.get(&chunk) {
-                        let mut local: std::collections::HashMap<(i32, i32, i32), StressField> =
-                            std::collections::HashMap::new();
-                        local.insert(chunk, existing.clone());
-                        // dirty=[chunk], events=[] → unfiltered full recompute
-                        // of this one chunk's surface voxels. Neighbour density
-                        // is read where loaded (the whole region is present);
-                        // cross-region edges refine when the adjacent region
-                        // streams in and runs its own compute.
-                        recalc_stress_region_v2(
-                            &s.density_fields,
-                            &mut local,
-                            &s.support_fields,
-                            &stress_cfg,
-                            &[chunk],
-                            cfg.chunk_size,
-                        );
-                        local.remove(&chunk)
-                    } else {
-                        None
-                    }
-                };
-                if let Some(sf) = computed {
-                    let mut s = store.write().unwrap();
-                    s.stress_fields.insert(chunk, sf);
-                }
-            }
-
             let t_send_start = Instant::now();
             let _ = result_tx.send(WorkerResult::ChunkMesh {
                 chunk,
@@ -1092,6 +1038,156 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
                 zone_descriptors: std::mem::take(&mut region_zone_descriptors),
             });
             let t_send_block = if profiling { t_send_start.elapsed() } else { Duration::ZERO };
+
+            // ── Region-level VFX-only stress pre-population (no collapse) ──
+            //
+            // Worldgen builds density / mesh / crystals but never computes a
+            // stress field, so freshly generated chunks have all-zero stress.
+            // The crack-decal + warning-dust overlay reads that field via
+            // `enumerate_overstressed_in_chunk`, so without this it shows
+            // NOTHING until the player mines nearby — the "cracks only appear
+            // once I hit the area" bug.
+            //
+            // GRANULARITY MATTERS: the first fix (2026-05-31) recalced each
+            // chunk in isolation (dirty=[chunk]). `ground_connectivity_pass`
+            // seeds every column "grounded" at the TOP of its analysis volume,
+            // and a 1-chunk dirty set gives a 3-chunk-tall volume — so cavern
+            // roofs connected to the assumed-grounded rock one chunk up and
+            // the whole field computed ~0. Load-time cracks never appeared.
+            // Recalcing the entire region at once (6³ chunks = ~180-voxel-tall
+            // volume) gives the flood real overburden context, matching what
+            // the V-overlay (all loaded chunks) and the mining queue produce.
+            //
+            // Runs ONCE per freshly generated region, after this chunk's mesh
+            // send so first-chunk latency isn't taxed. UE-side crack refreshes
+            // are queue-deferred (held behind the asset preload), so the
+            // stress lands long before any overlay queries it; stragglers
+            // self-heal via the mining/support zone refreshes.
+            //
+            // CRITICAL — this stays VFX-only and must NEVER collapse on load:
+            // `recalc_stress_region_v2` only WRITES stress numbers (it takes
+            // support_fields read-only, so it cannot decay strut HP) and
+            // returns an overstressed list we deliberately DISCARD. It does
+            // not call detect_and_execute_collapses_*. Collapse remains
+            // exclusive to the mining stress queue, which only ever falls
+            // cells it freshly recomputes inside the mine radius — pre-
+            // populating the field here cannot trigger a spurious cave-in.
+            //
+            // Lock pattern: SNAPSHOT the inputs under a short read lock (the
+            // region's chunks + a 1-chunk ring of density/support context —
+            // span search reaches 20 voxels, air_dist 2, strut radius 5, all
+            // under one 30-voxel chunk), then run the multi-second span
+            // search with NO lock held, then commit with a brief write lock.
+            // The first cut computed under the read lock and its 4-8s hold
+            // would have serialized every writer (region inserts hold-wait
+            // was already the top contention lever) — never do that.
+            //
+            // Commit race: a mine during the unlocked compute could write
+            // fresher stress we then overwrite with load-time values. Same
+            // accepted race as the old per-chunk block — the mining queue
+            // recalcs the area on the next strike and zone refreshes self-
+            // heal; not worth a version stamp.
+            if !stress_region_coords.is_empty() {
+                use voxel_core::stress::{recalc_stress_region_v2, StressField};
+                use std::collections::HashMap as StdHashMap;
+                let t_stress = Instant::now();
+                let stress_cfg = ctx.stress_config.read().unwrap().clone();
+
+                // Ring = region bounding box expanded by 1 chunk.
+                let (mut min_c, mut max_c) = (stress_region_coords[0], stress_region_coords[0]);
+                for k in &stress_region_coords {
+                    min_c = (min_c.0.min(k.0), min_c.1.min(k.1), min_c.2.min(k.2));
+                    max_c = (max_c.0.max(k.0), max_c.1.max(k.1), max_c.2.max(k.2));
+                }
+
+                // Snapshot under a short read hold (clones only).
+                let (density_snap, support_snap, mut local, present) = {
+                    let t_lock = Instant::now();
+                    let s = store.read().unwrap();
+                    if profiling { t_store_read_wait += t_lock.elapsed(); }
+
+                    let present: Vec<(i32, i32, i32)> = stress_region_coords
+                        .iter()
+                        .copied()
+                        .filter(|k| s.density_fields.contains_key(k))
+                        .collect();
+
+                    let mut density_snap = StdHashMap::new();
+                    let mut support_snap = StdHashMap::new();
+                    for cz in (min_c.2 - 1)..=(max_c.2 + 1) {
+                        for cy in (min_c.1 - 1)..=(max_c.1 + 1) {
+                            for cx in (min_c.0 - 1)..=(max_c.0 + 1) {
+                                let k = (cx, cy, cz);
+                                if let Some(df) = s.density_fields.get(&k) {
+                                    density_snap.insert(k, df.clone());
+                                }
+                                if let Some(sf) = s.support_fields.get(&k) {
+                                    support_snap.insert(k, sf.clone());
+                                }
+                            }
+                        }
+                    }
+                    let mut local: StdHashMap<(i32, i32, i32), StressField> = StdHashMap::new();
+                    for k in &present {
+                        match s.stress_fields.get(k) {
+                            // Clone preserves save-restored painted-stress
+                            // (set() never touches the painted layer).
+                            Some(existing) => { local.insert(*k, existing.clone()); }
+                            // store.insert() creates blanks, but stay robust.
+                            None => { local.insert(*k, StressField::new(cfg.chunk_size + 1)); }
+                        }
+                    }
+                    (density_snap, support_snap, local, present)
+                };
+
+                if !present.is_empty() {
+                    // Multi-second span search — NO store lock held.
+                    recalc_stress_region_v2(
+                        &density_snap,
+                        &mut local,
+                        &support_snap,
+                        &stress_cfg,
+                        &present,
+                        cfg.chunk_size,
+                    );
+
+                    // Env-gated diagnostic: one line per region with the
+                    // effective-stress distribution, so "why are there no
+                    // cracks here at load" is answerable from a file. Zero
+                    // cost unless VOXEL_STRESS_VFX_DIAG is set to a path.
+                    if let Ok(diag_path) = std::env::var("VOXEL_STRESS_VFX_DIAG") {
+                        let gs = cfg.chunk_size + 1;
+                        let mut ge10 = 0u32;
+                        let mut ge15 = 0u32;
+                        let mut max_eff = 0.0f32;
+                        for sf in local.values() {
+                            for z in 0..gs { for y in 0..gs { for x in 0..gs {
+                                let e = sf.effective(x, y, z);
+                                if e > max_eff { max_eff = e; }
+                                if e >= 1.0 { ge10 += 1; }
+                                if e >= 1.5 { ge15 += 1; }
+                            }}}
+                        }
+                        use std::io::Write;
+                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                            .create(true).append(true).open(&diag_path)
+                        {
+                            let _ = writeln!(f,
+                                "[STRESS-VFX] region=({},{},{}) chunks={} ge1.0={} ge1.5={} max_eff={:.2} compute_ms={:.1}",
+                                rk.0, rk.1, rk.2, present.len(), ge10, ge15, max_eff,
+                                t_stress.elapsed().as_secs_f64() * 1000.0);
+                        }
+                    }
+
+                    // Brief write hold: commit the region's fields.
+                    let t_lock = Instant::now();
+                    let mut s = store.write().unwrap();
+                    if profiling { t_store_write_wait += t_lock.elapsed(); }
+                    for (k, sf) in local {
+                        s.stress_fields.insert(k, sf);
+                    }
+                }
+            }
 
             // Try to generate seams for this chunk and its neighbors
             // Gate 3: skip seam pass entirely
