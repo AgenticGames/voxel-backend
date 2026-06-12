@@ -7,6 +7,12 @@ use crate::FluidConfig;
 
 /// Isosurface threshold for fluid meshing.
 const ISO_LEVEL: f32 = 0.15;
+/// How far past the terrain's density zero-crossing (in cell units) the fluid
+/// rim is pushed INTO rock on mixed solid/non-solid edges. The terrain mesh
+/// then occludes the seam — without this the rim lands at a fixed t=0.15 from
+/// the air point and can stop up to 0.85 cells short of the DC wall (visible
+/// gap slits around pool rims). 0.1 cells = 4 UE units at world scale 40.
+const ROCK_RECESS_T: f32 = 0.1;
 /// Tiny SDF value for out-of-bounds samples — places boundary faces near chunk edge.
 const BOUNDARY_SDF: f32 = 0.001;
 /// Field value for out-of-bounds samples — just below ISO_LEVEL so MC places face at edge.
@@ -89,11 +95,15 @@ pub fn mesh_fluid(grid: &ChunkFluidGrid, boundary: &BoundaryLevels, config: &Flu
 
     let mut mesh = mesh_fluid_mc(grid, boundary);
     weld_vertices(&mut mesh);
+    // Vertices at/inside the terrain surface are rim-contact vertices placed by
+    // the rock-crossing override in mesh_fluid_mc. QEF and smoothing must not
+    // move them or the seam re-opens.
+    let pinned = compute_rock_pins(&mesh, grid);
     if config.mesh_qef_refinement {
-        qef_refine_vertices(&mut mesh, size);
+        qef_refine_vertices(&mut mesh, size, &pinned);
     }
     if config.mesh_smooth_iterations > 0 {
-        smooth_fluid_mesh(&mut mesh, config.mesh_smooth_iterations, config.mesh_smooth_strength, size);
+        smooth_fluid_mesh(&mut mesh, config.mesh_smooth_iterations, config.mesh_smooth_strength, size, &pinned);
     }
     if config.mesh_recalc_normals {
         recalculate_fluid_normals(&mut mesh);
@@ -145,11 +155,13 @@ fn sample_field(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary: &
     }
 }
 
-/// Returns true if any in-bounds corner of the unit cube at (x,y,z) has real fluid,
-/// or if any corner is a floor extension cell (non-solid, low fluid, on solid rock
-/// with fluid above). Used to skip cubes in pure rock/air regions — without this,
-/// treating solid as "inside" would generate phantom water surfaces on every cave wall.
-/// Out-of-bounds corners are treated as having no fluid.
+/// Returns true if any corner of the unit cube at (x,y,z) has real fluid:
+/// non-solid corners with level >= MIN_LEVEL, floor-extension cells (non-solid,
+/// low fluid, on solid rock with fluid above), or SOLID corners whose cell holds
+/// level >= ISO_LEVEL (water lapping over barely-submerged rock). Used to skip
+/// cubes in pure rock/air regions — without this, treating solid as "inside"
+/// would generate phantom water surfaces on every cave wall.
+/// Out-of-bounds corners use neighbor boundary levels when available.
 #[inline]
 fn cube_has_fluid(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary: &BoundaryLevels) -> bool {
     let size = grid.size;
@@ -166,16 +178,33 @@ fn cube_has_fluid(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary:
                         continue;
                     }
                     // Single-axis: check density + boundary level
-                    if !(grid.grid_point_density(cx, cy, cz) > 0.0) {
+                    if grid.grid_point_density(cx, cy, cz) > 0.0 {
+                        // Solid corner whose neighbor cell still holds real
+                        // fluid (lapping/rim) — see in-bounds case below.
                         if let Some(level) = boundary.get_level(cx, cy, cz) {
-                            if level >= MIN_LEVEL {
+                            if level >= ISO_LEVEL {
                                 return true;
                             }
+                        }
+                    } else if let Some(level) = boundary.get_level(cx, cy, cz) {
+                        if level >= MIN_LEVEL {
+                            return true;
                         }
                     }
                     continue;
                 }
-                if !(grid.grid_point_density(cx, cy, cz) > 0.0) {
+                if grid.grid_point_density(cx, cy, cz) > 0.0 {
+                    // Solid lattice point whose CELL still holds real water:
+                    // water lapping over barely-submerged rock (shorelines, pool
+                    // rim cells straddling the basin wall). Without this the
+                    // cube is skipped, the sheet is cut a cell early, and its
+                    // open edge floats in mid-air over the terrain.
+                    if grid.get(cx, cy, cz).level >= ISO_LEVEL {
+                        return true;
+                    }
+                    continue;
+                }
+                {
                     let level = grid.get(cx, cy, cz).level;
                     if level >= MIN_LEVEL {
                         return true;
@@ -189,6 +218,130 @@ fn cube_has_fluid(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary:
         }
     }
     false
+}
+
+/// Fluid level of the cell at lattice coords, falling back to neighbor-chunk
+/// boundary data for single-axis out-of-bounds coords. 0.0 when unknown.
+#[inline]
+fn cell_level_at(grid: &ChunkFluidGrid, boundary: &BoundaryLevels, cx: usize, cy: usize, cz: usize) -> f32 {
+    let size = grid.size;
+    if cx < size && cy < size && cz < size {
+        grid.get(cx, cy, cz).level
+    } else {
+        boundary.get_level(cx, cy, cz).unwrap_or(0.0)
+    }
+}
+
+/// Compute the interpolation parameter t for an MC edge crossing.
+///
+/// Three cases:
+/// 1. Both endpoints on the same side of the rock surface — plain fluid-field
+///    interpolation (top surface, floor extension, chunk-edge sealing).
+/// 2. Mixed rock/non-rock edge (the pool rim seam): place the crossing at the
+///    terrain's own density zero-crossing — the same linear estimate dual
+///    contouring uses for the terrain mesh — recessed ROCK_RECESS_T into the
+///    rock so the terrain mesh occludes the seam. The fluid field can't do
+///    this itself: solid points sample a constant 1.0, which lands the rim at
+///    a fixed t=0.15 from the air point regardless of where the wall actually
+///    is (up to 0.85 cells of visible gap).
+/// 3. Lapping edge — a vertical mixed edge whose solid end is BELOW and whose
+///    cell still holds real fluid: water sitting on top of barely-submerged
+///    rock (shorelines). The visible surface there is the water level, not the
+///    rock face, so interpolate from the cell's level instead of snapping down
+///    to the rock and denting the surface.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn edge_crossing_t(
+    grid: &ChunkFluidGrid,
+    boundary: &BoundaryLevels,
+    x: usize,
+    y: usize,
+    z: usize,
+    c0: usize,
+    c1: usize,
+    v0: f32,
+    v1: f32,
+    d0: f32,
+    d1: f32,
+) -> f32 {
+    let solid0 = d0 > 0.0;
+    let solid1 = d1 > 0.0;
+
+    if solid0 != solid1 {
+        let (sc, ac) = if solid0 { (c0, c1) } else { (c1, c0) };
+        let off_s = CORNER_OFFSETS[sc];
+        let off_a = CORNER_OFFSETS[ac];
+        let vertical = off_s[0] == off_a[0] && off_s[2] == off_a[2];
+
+        if vertical && off_s[1] < off_a[1] {
+            let level = cell_level_at(grid, boundary, x + off_s[0], y + off_s[1], z + off_s[2]);
+            if level >= ISO_LEVEL {
+                // Lapping: solid-below, dry-above, but the solid point's cell
+                // holds water — surface at the cell's fluid level.
+                let (lv0, lv1) = if solid0 { (level, v1) } else { (v0, level) };
+                return if (lv1 - lv0).abs() > 1e-6 {
+                    ((ISO_LEVEL - lv0) / (lv1 - lv0)).clamp(0.0, 1.0)
+                } else {
+                    0.5
+                };
+            }
+        }
+
+        // Rim seam: terrain density zero-crossing, recessed into the rock.
+        let denom = d1 - d0;
+        if denom.abs() > 1e-6 {
+            let t_rock = -d0 / denom;
+            let recess = if solid1 { ROCK_RECESS_T } else { -ROCK_RECESS_T };
+            return (t_rock + recess).clamp(0.0, 1.0);
+        }
+        return 0.5;
+    }
+
+    if (v1 - v0).abs() > 1e-6 {
+        ((ISO_LEVEL - v0) / (v1 - v0)).clamp(0.0, 1.0)
+    } else {
+        0.5
+    }
+}
+
+/// Trilinear terrain density at an arbitrary position in chunk-local lattice
+/// coordinates (the space mesh vertices live in, [0, size]^3).
+fn terrain_density_at(grid: &ChunkFluidGrid, p: [f32; 3]) -> f32 {
+    let max_base = (grid.size - 1) as f32;
+    let bx = p[0].floor().clamp(0.0, max_base);
+    let by = p[1].floor().clamp(0.0, max_base);
+    let bz = p[2].floor().clamp(0.0, max_base);
+    let fx = (p[0] - bx).clamp(0.0, 1.0);
+    let fy = (p[1] - by).clamp(0.0, 1.0);
+    let fz = (p[2] - bz).clamp(0.0, 1.0);
+    let (bx, by, bz) = (bx as usize, by as usize, bz as usize);
+
+    let mut result = 0.0f32;
+    for dz in 0..=1usize {
+        for dy in 0..=1usize {
+            for dx in 0..=1usize {
+                let w = (if dx == 1 { fx } else { 1.0 - fx })
+                    * (if dy == 1 { fy } else { 1.0 - fy })
+                    * (if dz == 1 { fz } else { 1.0 - fz });
+                if w > 0.0 {
+                    result += w * grid.grid_point_density(bx + dx, by + dy, bz + dz);
+                }
+            }
+        }
+    }
+    result
+}
+
+/// Flag vertices that sit at or inside the terrain surface — the rim-contact
+/// vertices placed by the rock-crossing override (plus anything else already
+/// buried in rock). QEF refinement and Laplacian smoothing must leave these in
+/// place: smoothing in particular shrinks open boundaries and would drag the
+/// rim back out of the wall, re-opening the seam.
+fn compute_rock_pins(mesh: &FluidMeshData, grid: &ChunkFluidGrid) -> Vec<bool> {
+    mesh.positions
+        .iter()
+        .map(|p| terrain_density_at(grid, *p) >= 0.0)
+        .collect()
 }
 
 /// Marching Cubes fluid mesher.
@@ -215,8 +368,10 @@ fn mesh_fluid_mc(grid: &ChunkFluidGrid, boundary: &BoundaryLevels) -> FluidMeshD
 
                 // Sample 8 corners using Paul Bourke ordering (CORNER_OFFSETS)
                 let mut corner_vals = [0.0f32; 8];
+                let mut corner_density = [0.0f32; 8];
                 for (i, off) in CORNER_OFFSETS.iter().enumerate() {
                     corner_vals[i] = sample_field(grid, x + off[0], y + off[1], z + off[2], boundary);
+                    corner_density[i] = grid.grid_point_density(x + off[0], y + off[1], z + off[2]);
                 }
 
                 // Build cube index: bit i set if corner i >= ISO_LEVEL
@@ -239,12 +394,11 @@ fn mesh_fluid_mc(grid: &ChunkFluidGrid, boundary: &BoundaryLevels) -> FluidMeshD
                         let [c0, c1] = EDGE_VERTICES[e];
                         let v0 = corner_vals[c0];
                         let v1 = corner_vals[c1];
-                        let t = if (v1 - v0).abs() > 1e-6 {
-                            (ISO_LEVEL - v0) / (v1 - v0)
-                        } else {
-                            0.5
-                        };
-                        let t = t.clamp(0.0, 1.0);
+                        let t = edge_crossing_t(
+                            grid, boundary, x, y, z,
+                            c0, c1, v0, v1,
+                            corner_density[c0], corner_density[c1],
+                        );
                         let p0 = CORNER_OFFSETS[c0];
                         let p1 = CORNER_OFFSETS[c1];
                         edge_verts[e] = [
@@ -425,8 +579,9 @@ fn weld_vertices(mesh: &mut FluidMeshData) {
 
 /// QEF vertex refinement: for each welded vertex, collect adjacent triangle normals,
 /// build a QEF, and solve for optimal position. Clamps displacement to 0.4 max.
-/// Pins chunk-edge vertices (coords < 0.5 or > size-0.5).
-fn qef_refine_vertices(mesh: &mut FluidMeshData, grid_size: usize) {
+/// Pins chunk-edge vertices (coords < 0.5 or > size-0.5) and rock-contact
+/// vertices (`pinned`), which must stay buried in the terrain.
+fn qef_refine_vertices(mesh: &mut FluidMeshData, grid_size: usize, pinned: &[bool]) {
     if mesh.positions.is_empty() || mesh.indices.is_empty() {
         return;
     }
@@ -471,8 +626,9 @@ fn qef_refine_vertices(mesh: &mut FluidMeshData, grid_size: usize) {
     // Solve QEF per vertex and apply clamped displacement
     for vi in 0..num_verts {
         let pos = mesh.positions[vi];
-        // Pin chunk-edge vertices
-        if pos[0] < lo || pos[1] < lo || pos[2] < lo
+        // Pin chunk-edge and rock-contact vertices
+        if pinned[vi]
+            || pos[0] < lo || pos[1] < lo || pos[2] < lo
             || pos[0] > hi || pos[1] > hi || pos[2] > hi
         {
             continue;
@@ -497,9 +653,9 @@ fn qef_refine_vertices(mesh: &mut FluidMeshData, grid_size: usize) {
 }
 
 /// Laplacian smoothing for fluid mesh. Builds adjacency from welded index buffer,
-/// pins chunk-edge vertices, iteratively blends toward neighbor average.
-/// Regenerates UVs from smoothed positions (xz planar projection).
-fn smooth_fluid_mesh(mesh: &mut FluidMeshData, iterations: u32, strength: f32, grid_size: usize) {
+/// pins chunk-edge and rock-contact vertices, iteratively blends toward
+/// neighbor average. Regenerates UVs from smoothed positions (xz planar projection).
+fn smooth_fluid_mesh(mesh: &mut FluidMeshData, iterations: u32, strength: f32, grid_size: usize, pinned: &[bool]) {
     if iterations == 0 || mesh.positions.is_empty() || mesh.indices.is_empty() {
         return;
     }
@@ -526,9 +682,9 @@ fn smooth_fluid_mesh(mesh: &mut FluidMeshData, iterations: u32, strength: f32, g
         }
     }
 
-    // Identify chunk-edge vertices to pin
-    let is_edge: Vec<bool> = mesh.positions.iter().map(|p| {
-        p[0] < lo || p[1] < lo || p[2] < lo || p[0] > hi || p[1] > hi || p[2] > hi
+    // Identify chunk-edge vertices to pin (rock-contact pins come in via `pinned`)
+    let is_edge: Vec<bool> = mesh.positions.iter().enumerate().map(|(vi, p)| {
+        pinned[vi] || p[0] < lo || p[1] < lo || p[2] < lo || p[0] > hi || p[1] > hi || p[2] > hi
     }).collect();
 
     // Iterative smoothing
@@ -1237,6 +1393,204 @@ mod tests {
                 len
             );
         }
+    }
+
+    /// Build a (size+1)^3 density field from a function of lattice coords.
+    fn density_field_from_fn(size: usize, f: impl Fn(f32, f32, f32) -> f32) -> Vec<f32> {
+        let stride = size + 1;
+        let mut d = vec![-1.0f32; stride * stride * stride];
+        for gz in 0..stride {
+            for gy in 0..stride {
+                for gx in 0..stride {
+                    d[gz * stride * stride + gy * stride + gx] =
+                        f(gx as f32, gy as f32, gz as f32);
+                }
+            }
+        }
+        d
+    }
+
+    /// Indices of vertices on open mesh edges (exactly one adjacent triangle).
+    /// Only meaningful on a welded mesh.
+    fn open_boundary_vertices(mesh: &FluidMeshData) -> Vec<usize> {
+        let mut counts: HashMap<(u32, u32), u32> = HashMap::new();
+        for t in 0..mesh.indices.len() / 3 {
+            let i0 = mesh.indices[t * 3];
+            let i1 = mesh.indices[t * 3 + 1];
+            let i2 = mesh.indices[t * 3 + 2];
+            for &(a, b) in &[(i0, i1), (i1, i2), (i2, i0)] {
+                *counts.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+            }
+        }
+        let mut verts: Vec<usize> = counts
+            .iter()
+            .filter(|&(_, &c)| c == 1)
+            .flat_map(|(&(a, b), _)| [a as usize, b as usize])
+            .collect();
+        verts.sort_unstable();
+        verts.dedup();
+        verts
+    }
+
+    /// Basin with a vertical rock wall whose DC surface sits at x=8.7 — deep
+    /// inside the boundary cell, where the old fixed-t rim crossing (t=0.15
+    /// from the air point, x=8.15) left a 0.55-cell visible gap.
+    fn make_walled_basin() -> ChunkFluidGrid {
+        let size = 16;
+        let mut grid = ChunkFluidGrid::new(size);
+        let d = density_field_from_fn(size, |x, y, _z| ((x - 8.7) * 0.5).max((2.3 - y) * 0.5));
+        grid.update_density(&d);
+        for z in 2..=13 {
+            for y in 3..=5 {
+                for x in 2..=8 {
+                    let cell = grid.get_mut(x, y, z);
+                    cell.level = 1.0;
+                    cell.fluid_type = FluidType::Water;
+                }
+            }
+        }
+        grid
+    }
+
+    /// Gently rising rock floor (shoreline): floor surface at y = 3 + 0.35x.
+    /// Water surface at y = 6.625 meets the floor near x = 10.4. Cells at x=9
+    /// have their min-corner lattice point inside rock but still hold water
+    /// (the lapping configuration).
+    fn make_shoreline() -> ChunkFluidGrid {
+        let size = 16;
+        let mut grid = ChunkFluidGrid::new(size);
+        let d = density_field_from_fn(size, |x, y, _z| ((3.0 + 0.35 * x) - y) * 0.4);
+        grid.update_density(&d);
+        for z in 3..=12 {
+            for x in 2..=9 {
+                for y in 3..=5 {
+                    let cell = grid.get_mut(x, y, z);
+                    cell.level = 1.0;
+                    cell.fluid_type = FluidType::Water;
+                }
+                let cell = grid.get_mut(x, 6, z);
+                cell.level = 0.4;
+                cell.fluid_type = FluidType::Water;
+            }
+        }
+        grid
+    }
+
+    #[test]
+    fn test_rim_reaches_recessed_rock_wall() {
+        // The water rim must reach the DC wall at x=8.7 and tuck slightly
+        // inside it — not stop at the old fixed crossing x=8.15.
+        let grid = make_walled_basin();
+        let mesh = mesh_fluid_mc(&grid, &no_boundary());
+        assert!(!mesh.positions.is_empty(), "basin should produce a mesh");
+        let max_x = mesh.positions.iter().map(|p| p[0]).fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            max_x >= 8.69,
+            "water rim stops {:.2} cells short of the rock wall at x=8.7 (max_x={:.2})",
+            8.7 - max_x, max_x
+        );
+        assert!(max_x <= 9.01, "water rim blew through the rock wall (max_x={:.2})", max_x);
+    }
+
+    #[test]
+    fn test_rim_open_boundary_buried_in_rock() {
+        // Full pipeline (QEF + smoothing enabled by default): every open mesh
+        // edge that is not on a chunk face must lie at/inside the terrain
+        // surface. This is the literal "no visible gap slit" property, and it
+        // also proves the rock pins survive the post passes.
+        let grid = make_walled_basin();
+        let mesh = mesh_fluid(&grid, &no_boundary(), &default_config());
+        assert!(!mesh.positions.is_empty());
+        let open = open_boundary_vertices(&mesh);
+        assert!(!open.is_empty(), "expected an open contact ring at the wall");
+        let size_f = 16.0f32;
+        let mut checked = 0;
+        for vi in open {
+            let p = mesh.positions[vi];
+            // Chunk-face vertices are sealed/pinned by the chunk-edge rules.
+            if p[0] < 0.5 || p[1] < 0.5 || p[2] < 0.5
+                || p[0] > size_f - 0.5 || p[1] > size_f - 0.5 || p[2] > size_f - 0.5
+            {
+                continue;
+            }
+            checked += 1;
+            let d = terrain_density_at(&grid, p);
+            assert!(
+                d >= -1e-3,
+                "open-boundary vertex [{:.2},{:.2},{:.2}] floats in air (density {:.3}) — visible gap",
+                p[0], p[1], p[2], d
+            );
+        }
+        assert!(checked > 0, "no interior open-boundary vertices were checked");
+    }
+
+    #[test]
+    fn test_top_surface_height_unchanged_by_rim_fix() {
+        // Away from walls the top surface must stay where the fluid field puts
+        // it: full cells at y=3..=5, dry above -> crossing at y = 5 + 0.85.
+        let grid = make_walled_basin();
+        let mesh = mesh_fluid_mc(&grid, &no_boundary());
+        let mut top = f32::NEG_INFINITY;
+        for p in &mesh.positions {
+            if p[0] > 3.0 && p[0] < 7.0 && p[2] > 5.0 && p[2] < 10.0 {
+                top = top.max(p[1]);
+            }
+        }
+        assert!(
+            (top - 5.85).abs() < 0.02,
+            "interior top surface moved: y={:.3}, expected 5.85",
+            top
+        );
+    }
+
+    #[test]
+    fn test_lapping_water_keeps_level_over_submerged_rock() {
+        // At x=9 the floor (y=6.15) pokes just above the lattice plane y=6, so
+        // the lattice point is solid but the cell holds 0.4 water — the surface
+        // there must stay at the water level (y = 6 + 0.625), not snap down to
+        // the rock face and dent the sheet.
+        let grid = make_shoreline();
+        let mesh = mesh_fluid_mc(&grid, &no_boundary());
+        assert!(!mesh.positions.is_empty());
+        let at_level = mesh.positions.iter().any(|p| {
+            p[0] > 8.6 && p[0] < 9.4 && p[1] > 6.5 && p[1] < 6.72
+        });
+        assert!(
+            at_level,
+            "no water-surface vertex near x=9 at the fluid level (~6.625) — lapping rule broken"
+        );
+        // And no divot down at the rock face under the lapping zone — checked
+        // only in the watered z-interior; at the body's z-ends the sheet
+        // correctly seals downward into the floor.
+        let dented = mesh.positions.iter().any(|p| {
+            p[0] > 8.9 && p[0] < 9.1 && p[1] > 5.95 && p[1] < 6.15 && p[2] > 5.0 && p[2] < 11.0
+        });
+        assert!(!dented, "water surface dented down to the rock face in the lapping zone");
+    }
+
+    #[test]
+    fn test_shoreline_tucks_under_floor() {
+        // Past the last watered column the sheet must dive under the rising
+        // floor (buried contact ring), never float above it in open air.
+        let grid = make_shoreline();
+        let mesh = mesh_fluid(&grid, &no_boundary(), &default_config());
+        assert!(!mesh.positions.is_empty());
+        let mut shoreline_verts = 0;
+        for p in &mesh.positions {
+            if p[0] >= 9.5 && p[0] <= 12.0 {
+                shoreline_verts += 1;
+                let d = terrain_density_at(&grid, *p);
+                assert!(
+                    d >= -0.05 || p[1] <= 6.66,
+                    "shoreline vertex [{:.2},{:.2},{:.2}] floats above the floor (density {:.3})",
+                    p[0], p[1], p[2], d
+                );
+            }
+        }
+        assert!(
+            shoreline_verts > 0,
+            "sheet never reached the shoreline band (x >= 9.5) — gate still cutting it early"
+        );
     }
 
     #[test]
