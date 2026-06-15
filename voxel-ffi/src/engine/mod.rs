@@ -6,21 +6,12 @@ use std::thread::{self, JoinHandle};
 
 use crossbeam_channel::{bounded, Receiver, Sender};
 use dashmap::DashMap;
-use voxel_fluid::FluidConfig;
 use voxel_fluid::FluidEvent;
-use voxel_core::stress::StressField;
-use voxel_core::world_scan::ScanConfig;
 use voxel_gen::config::{
-    BandedIronConfig, CrystalConfig, FormationConfig, GenerationConfig, GeodeConfig, HostRockConfig,
-    KimberlitePipeConfig, MineConfig, NoiseConfig, OreConfig, OreCrystalConfig, OreVeinParams,
-    PoolConfig, StressConfig, SulfideBlobConfig, WormConfig,
+    GenerationConfig, StressConfig,
 };
 
-use crate::convert::ue_chunk_to_rust;
-use crate::pathing::{
-    build_request_from_ue, FfiPathNode, FfiPathRequest, FfiPathResult, PathResultStore,
-    StashedPathResult,
-};
+use crate::pathing::PathResultStore;
 use crate::profiler::StreamingProfiler;
 use crate::store::ChunkStore;
 use crate::types::*;

@@ -1,6 +1,6 @@
 use super::*;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use voxel_core::density::DensityField;
 use voxel_core::material::Material;
 use voxel_core::octree::node::VoxelSample;
@@ -10,9 +10,6 @@ use rand::SeedableRng;
 use rand::seq::SliceRandom;
 use rand_chacha::ChaCha8Rng;
 
-use crate::config::SleepConfig;
-use crate::execute_sleep;
-use crate::util::{sleep_vein_size, default_vein_size};
 
 // ─── Helper: Realistic world (3×3×3 via region gen) ────────────────────────
 

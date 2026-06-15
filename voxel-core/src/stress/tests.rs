@@ -296,7 +296,7 @@ fn world_to_chunk_local_works() {
 fn collapse_converts_to_air() {
     let mut density_fields = HashMap::new();
     let mut stress_fields = HashMap::new();
-    let mut support_fields = HashMap::new();
+    let support_fields = HashMap::new();
     let config = default_config();
 
     let df = make_density_field(17, true);

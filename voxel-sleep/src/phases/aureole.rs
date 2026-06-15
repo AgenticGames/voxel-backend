@@ -738,14 +738,6 @@ fn apply_vein_to_world(
     count
 }
 
-/// Compute vein size bounds scaled by heat level.
-fn scaled_vein_size(base: u32, heat_level: f32, large: bool) -> (u32, u32) {
-    let heat_scale = heat_level.sqrt() / 5.0; // 25 cells → 1.0×
-    let scale_factor = if large { 0.5 } else { 0.3 };
-    let max = base + (base as f32 * heat_scale * scale_factor) as u32;
-    (base, max.max(base + 1))
-}
-
 /// Place ore veins for a Slate-hosted aureole zone.
 fn place_slate_veins(
     converted: &HashSet<(i32, i32, i32)>,

@@ -274,7 +274,7 @@ impl MegaVaultBlueprint {
         let sample_resolution = 1.0f32; // one sample per world unit along Z
 
         // Vault dimensions in chunks
-        let mut vault_cx = 12i32;
+        let vault_cx = 12i32;
         let vault_cy = 9i32;
         let vault_cz = 17i32;  // +110% longer (was 8, now 17)
 
@@ -787,7 +787,7 @@ impl MegaVaultBlueprint {
 
         // Bridge underside icicles
         for bridge in &bridges {
-            for (i, bwp) in bridge.waypoints.iter().enumerate() {
+            for (_i, bwp) in bridge.waypoints.iter().enumerate() {
                 if rng.gen::<f32>() < 0.9 { // 3x denser
                     let length = rng.gen_range(4.0..8.0); // min 4
                     let radius = rng.gen_range(0.3..0.8);

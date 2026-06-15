@@ -444,7 +444,7 @@ pub fn generate(
     let mut pit_count = 0u32;
 
     // Find BlackIce floor positions far enough from zone edges
-    let pit_margin = extent.length() * 0.15;
+    let _pit_margin = extent.length() * 0.15;
     let mut pit_candidates: Vec<Vec3> = Vec::new();
     for &key in &volume.chunk_keys {
         if let Some(density) = density_fields.get(&key) {

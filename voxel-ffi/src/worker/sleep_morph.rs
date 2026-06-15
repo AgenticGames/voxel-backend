@@ -8,7 +8,6 @@ use std::time::{Duration, Instant};
 use rayon::prelude::*;
 use voxel_core::dual_contouring::mesh_gen::generate_mesh;
 use voxel_core::dual_contouring::solve::solve_dc_vertices;
-use voxel_fluid::FluidEvent;
 use voxel_gen::hermite_extract::extract_hermite_data;
 use voxel_gen::region_gen::{self, ChunkSeamData};
 

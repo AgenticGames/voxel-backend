@@ -600,7 +600,7 @@ pub fn build_chunk_diagnostic_with_ue(
         let _ = writeln!(out, "  ⚠ Seam mismatches detected — may explain mesh holes / cliffs");
         for (k, mdelta, count) in max_delta_per_neighbor.iter().take(8) {
             let dir = (k.0 - chunk.0, k.1 - chunk.1, k.2 - chunk.2);
-            let kind = match (dir.0.abs() + dir.1.abs() + dir.2.abs()) {
+            let kind = match dir.0.abs() + dir.1.abs() + dir.2.abs() {
                 1 => "face",
                 2 => "edge",
                 3 => "corner",

@@ -19,7 +19,6 @@ use crate::types::WorkerResult;
 use super::seam::{
     batched_seam_pass, batched_seam_pass_mine, hash_mesh,
     prune_destroyed_mushrooms_for_chunks, recompute_crystals_for_chunks,
-    retrieve_crystal_data,
 };
 
 pub(super) fn handle_flatten(ctx: &super::HandlerCtx<'_>, base_x: i32, base_y: i32, base_z: i32, host_material: u8) {

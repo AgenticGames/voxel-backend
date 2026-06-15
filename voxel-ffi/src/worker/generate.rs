@@ -25,8 +25,10 @@ use crate::profiler::ChunkTimings;
 use crate::types::{FfiZoneDescriptor, WorkerResult};
 
 use super::seam::{
-    batched_seam_pass, hash_mesh, incremental_seam_pass, spring_type_to_fluid_u8, SeamPassTimings,
+    batched_seam_pass, hash_mesh, incremental_seam_pass, spring_type_to_fluid_u8,
 };
+#[cfg(feature = "diag-gate-3")]
+use super::seam::SeamPassTimings;
 use super::try_handle_mine;
 
 pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32), generation: u64) {

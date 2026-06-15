@@ -292,16 +292,6 @@ mod tests {
         ChunkStore::new(8)
     }
 
-    fn fill_chunk(store: &mut ChunkStore, key: (i32, i32, i32), size: usize, material: Material) {
-        let mut df = DensityField::new(size);
-        for s in df.samples.iter_mut() {
-            s.material = material;
-            s.density = -1.0;
-        }
-        df.compute_metadata();
-        store.density_fields.insert(key, df);
-    }
-
     fn fill_air(store: &mut ChunkStore, key: (i32, i32, i32), size: usize) {
         let mut df = DensityField::new(size);
         for s in df.samples.iter_mut() {

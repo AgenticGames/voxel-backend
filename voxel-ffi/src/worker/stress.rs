@@ -4,7 +4,6 @@
 //! unchanged. Visibility widened to `pub(crate)` so the worker loop can call it.
 
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
 use voxel_fluid::FluidEvent;
@@ -38,7 +37,7 @@ pub(crate) fn try_process_stress_queue(
     use std::collections::HashSet;
 
     let debug_path = "D:/Unreal Projects/Mithril2026/Saved/stress_debug.txt";
-    let mut dbg = |msg: String| {
+    let dbg = |msg: String| {
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(debug_path) {
             let _ = writeln!(f, "[{:.2}] {}", std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64() % 10000.0, msg);
@@ -98,7 +97,7 @@ pub(crate) fn try_process_stress_queue(
     // struts are accumulated into `result.broken_struts` and forwarded as a
     // `StrutsBroken` worker result so UE can play breaking VFX + refresh the
     // crack overlay around each broken strut's world position.
-    let mut result = {
+    let result = {
         let mut s = store.write().unwrap();
         let (density, stress, support) = s.sleep_fields_mut();
         recalc_stress_region_v2_with_load_decay(
@@ -140,7 +139,6 @@ pub(crate) fn try_process_stress_queue(
     // Count stress distribution for DIRTY CHUNKS ONLY (what we just recalculated)
     {
         let s = store.read().unwrap();
-        let mut air = 0u32;
         let mut stress_zero = 0u32;
         let mut stress_dust = 0u32;   // 0.01 .. 0.4
         let mut stress_creak = 0u32;  // 0.4 .. 0.6
@@ -153,7 +151,7 @@ pub(crate) fn try_process_stress_queue(
                 for z in 0..grid_size {
                     for y in 0..grid_size {
                         for x in 0..grid_size {
-                            if !df.get(x, y, z).material.is_solid() { air += 1; continue; }
+                            if !df.get(x, y, z).material.is_solid() { continue; }
                             let stress = ssf.get(x, y, z);
                             if stress <= 0.001 { stress_zero += 1; }
                             else if stress < 0.4 { stress_dust += 1; }

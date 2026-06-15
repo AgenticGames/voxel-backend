@@ -5,9 +5,7 @@ use rand_chacha::ChaCha8Rng;
 use voxel_core::density::DensityField;
 use voxel_core::material::Material;
 use voxel_core::stress::{
-    StressField, SupportField, SupportType, StressConfig, CollapseEvent,
-    CollapseEventV2, recalc_stress_region_v2_with_load_decay,
-    detect_and_execute_collapses_v2, detect_and_execute_collapses_v2_with_force_deadline,
+    StressField, SupportField, SupportType, StressConfig, CollapseEvent, recalc_stress_region_v2_with_load_decay, detect_and_execute_collapses_v2_with_force_deadline,
     BrokenStrutEvent, world_to_chunk_local,
 };
 use crate::config::CollapseConfig;

@@ -1,18 +1,8 @@
 use super::*;
 
-use std::collections::{BTreeMap, HashMap};
-use voxel_core::density::DensityField;
 use voxel_core::material::Material;
-use voxel_core::octree::node::VoxelSample;
-use voxel_core::stress::{StressField, SupportField};
-use voxel_fluid::{FluidSnapshot, cell::{FluidCell, FluidType}};
-use rand::SeedableRng;
-use rand::seq::SliceRandom;
-use rand_chacha::ChaCha8Rng;
 
-use crate::config::SleepConfig;
 use crate::execute_sleep;
-use crate::util::{sleep_vein_size, default_vein_size};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Test 5: Limestone dramatic sleep (15 iterations × 3 cycles)

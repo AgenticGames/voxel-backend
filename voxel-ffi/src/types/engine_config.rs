@@ -1,6 +1,5 @@
 //! `FfiEngineConfig` — the master worldgen config struct (ABI-critical).
 
-use super::*;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]

@@ -339,50 +339,6 @@ pub fn count_air_below(
     count
 }
 
-/// Find minimum lateral distance to a "grounded" voxel (support_score >= threshold).
-/// Searches in 4 cardinal directions (X+, X−, Z+, Z−) up to max_dist.
-/// Returns the minimum distance found, or max_dist if none found.
-fn min_lateral_distance_to_grounded(
-    density_fields: &HashMap<(i32, i32, i32), DensityField>,
-    support_scores: &HashMap<(i32, i32, i32), SupportScoreField>,
-    wx: i32, wy: i32, wz: i32,
-    chunk_size: usize,
-    ground_threshold: f32,
-    max_dist: u32,
-) -> u32 {
-    let directions: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
-    let mut min_dist = max_dist;
-
-    for &(dx, dz) in &directions {
-        for d in 1..=max_dist as i32 {
-            let nx = wx + dx * d;
-            let nz = wz + dz * d;
-            // Must be solid to be a grounded support
-            match sample_world(density_fields, nx, wy, nz, chunk_size) {
-                Some((_, mat)) if mat.is_solid() => {
-                    // Check support score
-                    let (key, lx, ly, lz) = world_to_chunk_local(nx, wy, nz, chunk_size);
-                    let score = support_scores
-                        .get(&key)
-                        .map(|sf| sf.get(lx, ly, lz))
-                        .unwrap_or(1.0); // Unloaded = assume grounded
-                    if score >= ground_threshold {
-                        min_dist = min_dist.min(d as u32);
-                        break;
-                    }
-                }
-                Some(_) => break, // Hit air, stop this direction
-                None => {
-                    // Unloaded = assume grounded at this distance
-                    min_dist = min_dist.min(d as u32);
-                    break;
-                }
-            }
-        }
-    }
-    min_dist
-}
-
 /// Measure the unsupported span for a solid surface voxel.
 ///
 /// For each air face-neighbor, searches laterally from that air position through air
@@ -608,9 +564,9 @@ pub fn ground_connectivity_pass(
                             continue; // Already fully grounded
                         }
 
-                        let wx = chunk_origin_x + x as i32;
-                        let wy = chunk_origin_y + y as i32;
-                        let wz = chunk_origin_z + z as i32;
+                        let _wx = chunk_origin_x + x as i32;
+                        let _wy = chunk_origin_y + y as i32;
+                        let _wz = chunk_origin_z + z as i32;
 
                         let mut best = current_score;
 

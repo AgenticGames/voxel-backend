@@ -1,6 +1,5 @@
 //! World-scan result + config FFI types.
 
-use super::*;
 
 /// FFI result for world scan. JSON report is passed as a heap-allocated string.
 #[repr(C)]

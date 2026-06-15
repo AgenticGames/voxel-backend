@@ -50,7 +50,7 @@ pub(crate) fn convert_mesh_to_ffi_result(
 pub(crate) fn compute_crystal_hash(placements: &[FfiCrystalPlacement]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     let prime: u64 = 0x100000001b3;
-    let mut mix = |x: u64, h: &mut u64| {
+    let mix = |x: u64, h: &mut u64| {
         *h ^= x;
         *h = h.wrapping_mul(prime);
     };
@@ -100,7 +100,7 @@ pub(crate) fn empty_crystal_data() -> FfiCrystalData {
 pub(crate) fn compute_mushroom_hash(instances: &[FfiMushroomInstance]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     let prime: u64 = 0x100000001b3;
-    let mut mix = |x: u64, h: &mut u64| {
+    let mix = |x: u64, h: &mut u64| {
         *h ^= x;
         *h = h.wrapping_mul(prime);
     };

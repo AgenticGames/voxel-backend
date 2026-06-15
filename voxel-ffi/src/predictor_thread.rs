@@ -11,7 +11,6 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
-use std::thread;
 use std::time::Duration;
 
 use crossbeam_channel::{select, Receiver, Sender};

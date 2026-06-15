@@ -41,7 +41,7 @@ pub fn generate(
     let chunk_size = density_fields.values().next().map(|d| d.size - 1).unwrap_or(16);
     let max_anchors = config.bio_max_anchors as usize;
 
-    let center = volume.world_center;
+    let _center = volume.world_center;
     let extent = volume.world_bbox_max - volume.world_bbox_min;
 
     // ── Step 1: Pick 3-6 seed points on the floor for Mycelium growth centers ──

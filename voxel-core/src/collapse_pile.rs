@@ -874,7 +874,7 @@ mod tests {
                 voxels.push(CollapsedVoxel { world_x: x, world_y: 5, world_z: z, material: Material::Granite });
             }
         }
-        let mut fields: HashMap<(i32, i32, i32), DensityField> = HashMap::new();
+        let fields: HashMap<(i32, i32, i32), DensityField> = HashMap::new();
         let frags = fragment_slab(
             &voxels, (0, 5, 0), (9, 5, 9), &fields, 16, 5, Material::Granite,
         );

@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 use std::collections::{HashMap, HashSet};
 
 use crossbeam_channel::Sender;
-use rayon::prelude::*;
 use voxel_gen::config::GenerationConfig;
 use voxel_gen::region_gen::{self, ChunkSeamData};
 use voxel_fluid::FluidEvent;

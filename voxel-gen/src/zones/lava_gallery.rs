@@ -39,8 +39,8 @@ pub fn generate(
         for &key in &volume.chunk_keys {
             if let Some(density) = density_fields.get_mut(&key) {
                 let size = density.size;
-                let vs = eb / (size - 1) as f32;
-                let origin = Vec3::new(key.0 as f32 * eb, key.1 as f32 * eb, key.2 as f32 * eb);
+                let _vs = eb / (size - 1) as f32;
+                let _origin = Vec3::new(key.0 as f32 * eb, key.1 as f32 * eb, key.2 as f32 * eb);
 
                 for z in 0..size {
                     for y in 0..size {

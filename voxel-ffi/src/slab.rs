@@ -6,7 +6,6 @@
 
 use std::collections::HashMap;
 
-use voxel_core::density::DensityField as CoreDensityField;
 use voxel_core::dual_contouring::mesh_gen::generate_mesh;
 use voxel_core::dual_contouring::solve::solve_dc_vertices;
 use voxel_core::material::Material;
@@ -28,7 +27,7 @@ use crate::types::ConvertedMesh;
 pub fn extract_slab_mesh(
     slab: &CollapseSlab,
     density_fields: &HashMap<(i32, i32, i32), DensityField>,
-    chunk_size: usize,
+    _chunk_size: usize,
     voxel_scale: f32,
     world_scale: f32,
 ) -> Option<ConvertedMesh> {

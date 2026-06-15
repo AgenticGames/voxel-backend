@@ -931,6 +931,6 @@ mod tests {
     }
 }
 
-// Bring KindConfig into scope from config — declared there so callers can
-// configure it without importing this module.
+// `KindConfig` is referenced by feature-gated code in this module — it looks
+// unused in a default build but is required under --all-features. Keep it.
 use crate::config::KindConfig;

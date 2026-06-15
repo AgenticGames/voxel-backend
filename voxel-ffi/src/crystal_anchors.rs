@@ -937,7 +937,7 @@ mod tests {
     #[test]
     fn json_roundtrip_preserves_state() {
         let mut mgr = CrystalAnchorManager::default();
-        let r1 = mgr.place_anchor(v(0.0, 0.0, 0.0), v(0.0, 1.0, 0.0));
+        let _r1 = mgr.place_anchor(v(0.0, 0.0, 0.0), v(0.0, 1.0, 0.0));
         let r2 = mgr.place_anchor(v(30.0, 0.0, 0.0), v(0.0, 1.0, 0.0));
         assert!(r2.pair_completed);
         // Add a solo too

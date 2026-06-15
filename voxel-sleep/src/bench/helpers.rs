@@ -3,16 +3,9 @@ use super::*;
 use std::collections::{BTreeMap, HashMap};
 use voxel_core::density::DensityField;
 use voxel_core::material::Material;
-use voxel_core::octree::node::VoxelSample;
-use voxel_core::stress::{StressField, SupportField};
 use voxel_fluid::{FluidSnapshot, cell::{FluidCell, FluidType}};
-use rand::SeedableRng;
-use rand::seq::SliceRandom;
-use rand_chacha::ChaCha8Rng;
 
 use crate::config::SleepConfig;
-use crate::execute_sleep;
-use crate::util::{sleep_vein_size, default_vein_size};
 
 pub(crate) fn mat_id(m: Material) -> u8 { m as u8 }
 pub(crate) fn mat_name(id: u8) -> &'static str {
