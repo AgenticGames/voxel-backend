@@ -98,12 +98,18 @@ pub unsafe extern "C" fn voxel_path_set_obstacle_cells(
     }
     let engine = &*(engine as *const VoxelEngine);
 
-    let mut new_set: std::collections::HashSet<(i32, i32, i32)> = std::collections::HashSet::with_capacity(count as usize);
+    // Widen to usize before any arithmetic so `count * 3` cannot wrap a u32
+    // (a wrapped length would build an undersized slice and the loop below
+    // would index past it). Cap the eager reservation so a bogus `count`
+    // cannot force a multi-GB allocation; the set still grows as needed.
+    let count = count as usize;
+    let mut new_set: std::collections::HashSet<(i32, i32, i32)> =
+        std::collections::HashSet::with_capacity(count.min(65_536));
     if !cells.is_null() && count > 0 {
         let cf = crate::pathing::PATH_CELL_FACTOR as f32;
         let world_scale = engine.get_world_scale();
-        let slice = std::slice::from_raw_parts(cells, (count * 3) as usize);
-        for i in 0..count as usize {
+        let slice = std::slice::from_raw_parts(cells, count * 3);
+        for i in 0..count {
             let ue_x = slice[i * 3];
             let ue_y = slice[i * 3 + 1];
             let ue_z = slice[i * 3 + 2];
