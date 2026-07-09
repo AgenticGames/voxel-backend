@@ -14,13 +14,13 @@ use super::events::{
     SURFACE_THIN, SURFACE_WALL,
 };
 use super::types::{
-    any_supports_in_radius_box, OverstressedVoxel, StressField, StressResult,
-    SupportField, SupportScoreField, SupportType, MAX_STRUT_RADIUS, STRUT_TUNING,
+    OverstressedVoxel, StressField, StressResult,
+    SupportField, SupportScoreField, SupportType,
 };
 use super::calc::{
     accumulate_strut_load_at_voxel, apply_strut_load_damage, calc_voxel_stress,
     ground_connectivity_pass, measure_span_from_air, min_distance_to_air,
-    sample_strut_alive, sample_support, sample_world, world_to_chunk_local,
+    sample_world, strut_relief_final_legacy, strut_relief_raw, world_to_chunk_local,
 };
 
 /// Same-chunk fast path for a face/below neighbor solidity sample inside the
@@ -58,7 +58,6 @@ fn neighbor_solid_same_chunk(
 /// V2 stress calculation for a single voxel using precomputed ground connectivity.
 pub fn calc_voxel_stress_v2(
     density_fields: &HashMap<(i32, i32, i32), DensityField>,
-    support_fields: &HashMap<(i32, i32, i32), SupportField>,
     support_scores: &HashMap<(i32, i32, i32), SupportScoreField>,
     config: &StressConfig,
     wx: i32, wy: i32, wz: i32,
@@ -147,40 +146,14 @@ pub fn calc_voxel_stress_v2(
     } else { 0.0 };
     raw_stress += xsec_stress;
 
-    // Support structure bonus: nearby ALIVE struts reduce stress.
-    //
-    // Per-tier sphere of influence: each strut samples its own
-    // `STRUT_TUNING[type].radius` (Copper=2 .. Mithril=5). Walk the MAX
-    // radius bounding box; per-cell distance check filters by tier radius.
-    //
-    // Fast skip: if no chunk in the box has any non-None supports, the
-    // entire sweep is pure waste. Cheap O(<=8) chunk lookups guard the
-    // per-voxel HashMap walk. For early-game (0 struts placed in the
-    // world) this short-circuits ~100% of stressed voxels in this hot loop.
-    let sr = MAX_STRUT_RADIUS as i32;
-    if any_supports_in_radius_box(support_fields, wx, wy, wz, sr, chunk_size) {
-        for dz in -sr..=sr {
-            for dy in -sr..=sr {
-                for dx in -sr..=sr {
-                    if dx == 0 && dy == 0 && dz == 0 {
-                        continue;
-                    }
-                    let support = sample_support(support_fields, wx + dx, wy + dy, wz + dz, chunk_size);
-                    if support == SupportType::None { continue; }
-                    let tuning = STRUT_TUNING[support as u8 as usize];
-                    let r2 = (tuning.radius as i32) * (tuning.radius as i32);
-                    let d2 = dx * dx + dy * dy + dz * dz;
-                    if d2 > r2 { continue; }
-                    // Broken strut (HP=0, awaiting cleanup) contributes nothing.
-                    if !sample_strut_alive(support_fields, wx + dx, wy + dy, wz + dz, chunk_size) {
-                        continue;
-                    }
-                    let dist = (d2 as f32).sqrt();
-                    raw_stress -= tuning.hardness / dist;
-                }
-            }
-        }
-    }
+    // NOTE: strut relief is no longer subtracted here. The recalc loops
+    // subtract `strut_relief_final_v2()` from this function's result so that
+    // (a) relief surplus survives past the zero-clamp below as negative
+    // stored stress, offsetting the painted overlay at `effective()` read
+    // time, and (b) relief also reaches voxels this function early-returns
+    // for (grounded floors, deep interior) — exactly where map-authored
+    // painted stress usually lives. `stored - relief` distributes to the
+    // same value the old inline subtraction produced wherever both applied.
 
     // Depth pressure: deeper rock is under more overburden compression.
     // At surface: 1.0x. At depth 100: 2.0x. At depth 200: 3.0x.
@@ -216,6 +189,40 @@ pub fn calc_voxel_stress_v2(
     };
 
     (final_stress, pack_classification(surface_type, dominant_source))
+}
+
+/// Strut relief at a voxel in FINAL v2 stress units — the raw sweep run
+/// through the same depth-pressure × material-hardness transform as span
+/// stress, so `calc_voxel_stress_v2() - strut_relief_final_v2()` equals the
+/// old inline-subtraction result wherever both applied (distributivity).
+/// Returns 0 for air / zero-hardness voxels.
+///
+/// The difference `stress - relief` may go NEGATIVE: that surplus is stored
+/// in the stress field on purpose so `effective = stress + painted` lets
+/// struts offset map-authored painted stress. Every effective-stress read
+/// clamps the SUM at zero (`StressField::effective`), never the parts.
+pub(crate) fn strut_relief_final_v2(
+    density_fields: &HashMap<(i32, i32, i32), DensityField>,
+    support_fields: &HashMap<(i32, i32, i32), SupportField>,
+    config: &StressConfig,
+    wx: i32, wy: i32, wz: i32,
+    chunk_size: usize,
+) -> f32 {
+    let mat = match sample_world(density_fields, wx, wy, wz, chunk_size) {
+        Some((_, m)) if m.is_solid() => m,
+        _ => return 0.0,
+    };
+    let hardness = config.material_hardness[mat as u8 as usize];
+    if hardness <= 0.0 {
+        return 0.0;
+    }
+    let raw = strut_relief_raw(support_fields, wx, wy, wz, chunk_size);
+    if raw <= 0.0 {
+        return 0.0;
+    }
+    let depth = (config.surface_y - wy).max(0) as f32;
+    let depth_factor = 1.0 + depth / config.depth_pressure_scale;
+    (raw * depth_factor) / hardness
 }
 
 /// V2 stress recalculation: runs ground connectivity pass then per-voxel stress.
@@ -369,15 +376,30 @@ pub fn recalc_chunk_stress_voxels(
                     let stype = if air_n == 0 { SURFACE_INTERIOR }
                         else if below_solid { SURFACE_FLOOR }
                         else { SURFACE_WALL };
+                    // Grounded rock has zero organic stress, but the map
+                    // editor may have painted stress onto it — store the
+                    // strut relief surplus (negative) so nearby struts
+                    // offset that painted load at effective() read time.
+                    let painted = chunk_sf
+                        .as_deref()
+                        .map(|sf| sf.painted(x, y, z))
+                        .unwrap_or(0.0);
+                    let grounded_stress = if painted > 0.001 {
+                        -strut_relief_final_v2(
+                            density_fields, support_fields, config, wx, wy, wz, cs,
+                        )
+                    } else {
+                        0.0
+                    };
                     if let Some(sf) = chunk_sf.as_deref_mut() {
-                        sf.set(x, y, z, 0.0);
+                        sf.set(x, y, z, grounded_stress);
                         sf.set_class(x, y, z, pack_classification(stype, SOURCE_NONE));
                     }
                     continue;
                 }
 
                 let (stress, classification) = calc_voxel_stress_v2(
-                    density_fields, support_fields, support_scores,
+                    density_fields, support_scores,
                     config, wx, wy, wz, cs,
                 );
 
@@ -387,6 +409,17 @@ pub fn recalc_chunk_stress_voxels(
                     .as_deref()
                     .map(|sf| sf.painted(x, y, z))
                     .unwrap_or(0.0);
+                // Strut relief applies after the calc's zero-clamp; the
+                // surplus (negative stored stress) is what lets struts
+                // offset painted stress. Skip the sweep when there is
+                // nothing to relieve.
+                let stress = if stress > 0.001 || painted > 0.001 {
+                    stress - strut_relief_final_v2(
+                        density_fields, support_fields, config, wx, wy, wz, cs,
+                    )
+                } else {
+                    stress
+                };
                 if let Some(sf) = chunk_sf.as_deref_mut() {
                     sf.set(x, y, z, stress);
                     sf.set_class(x, y, z, classification);
@@ -482,17 +515,53 @@ pub fn recalc_stress_region_v2_with_load_decay(
                         let stype = if air_n == 0 { SURFACE_INTERIOR }
                             else if below_solid { SURFACE_FLOOR }
                             else { SURFACE_WALL };
+                        // Grounded rock: store the strut relief surplus
+                        // (negative) when painted stress is present so struts
+                        // offset the painted load at effective() read time.
+                        let painted = chunk_sf
+                            .as_deref()
+                            .map(|sf| sf.painted(x, y, z))
+                            .unwrap_or(0.0);
+                        let grounded_stress = if painted > 0.001 {
+                            -strut_relief_final_v2(
+                                density_fields, support_fields, config, wx, wy, wz, cs,
+                            )
+                        } else {
+                            0.0
+                        };
                         if let Some(sf) = chunk_sf.as_deref_mut() {
-                            sf.set(x, y, z, 0.0);
+                            sf.set(x, y, z, grounded_stress);
                             sf.set_class(x, y, z, pack_classification(stype, SOURCE_NONE));
+                        }
+                        // Struts bracing a painted grounded region are bearing
+                        // that painted load — they decay for it, same as the
+                        // span path below.
+                        if painted > 0.001 {
+                            accumulate_strut_load_at_voxel(support_fields, &mut loads, wx, wy, wz, cs);
                         }
                         continue;
                     }
 
                     let (stress, classification) = calc_voxel_stress_v2(
-                        density_fields, support_fields, &support_scores,
+                        density_fields, &support_scores,
                         config, wx, wy, wz, cs,
                     );
+
+                    // Painted overlay read BEFORE relief: both decide whether
+                    // the strut sweep below has anything to do.
+                    let painted = chunk_sf
+                        .as_deref()
+                        .map(|sf| sf.painted(x, y, z))
+                        .unwrap_or(0.0);
+                    // Strut relief applies after the calc's zero-clamp; the
+                    // surplus (negative stored stress) offsets painted stress.
+                    let stress = if stress > 0.001 || painted > 0.001 {
+                        stress - strut_relief_final_v2(
+                            density_fields, support_fields, config, wx, wy, wz, cs,
+                        )
+                    } else {
+                        stress
+                    };
 
                     // Record this voxel's incoming strut load so the post-pass
                     // HP-decay step knows which struts bore the weight. Only
@@ -500,11 +569,9 @@ pub fn recalc_stress_region_v2_with_load_decay(
                     // a strut sitting in a stable region (test fixtures,
                     // grounded rock with no span) shouldn't wear down just
                     // by existing. Painted stress also counts so creative
-                    // brushes can burn struts down deliberately.
-                    let painted = chunk_sf
-                        .as_deref()
-                        .map(|sf| sf.painted(x, y, z))
-                        .unwrap_or(0.0);
+                    // brushes can burn struts down deliberately. `stress` here
+                    // is post-relief, matching the stored value the old code
+                    // tested.
                     if stress > 0.001 || painted > 0.001 {
                         accumulate_strut_load_at_voxel(support_fields, &mut loads, wx, wy, wz, cs);
                     }
@@ -568,7 +635,7 @@ pub fn recalc_stress_region(
                 let wz = cwz + dz;
 
                 let stress = calc_voxel_stress(
-                    density_fields, support_fields, config, wx, wy, wz, chunk_size,
+                    density_fields, config, wx, wy, wz, chunk_size,
                 );
 
                 // Store stress value and fold in the painted overlay before the
@@ -579,6 +646,15 @@ pub fn recalc_stress_region(
                     .get(&key)
                     .map(|sf| sf.painted(lx, ly, lz))
                     .unwrap_or(0.0);
+                // Strut relief after the calc's zero-clamp — surplus goes
+                // negative and offsets painted stress at effective() reads.
+                let stress = if stress > 0.001 || painted > 0.001 {
+                    stress - strut_relief_final_legacy(
+                        density_fields, support_fields, config, wx, wy, wz, chunk_size,
+                    )
+                } else {
+                    stress
+                };
                 if let Some(sf) = stress_fields.get_mut(&key) {
                     sf.set(lx, ly, lz, stress);
                     affected_chunks.insert(key);

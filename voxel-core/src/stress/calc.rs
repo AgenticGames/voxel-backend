@@ -186,9 +186,12 @@ fn column_weight_above(
 }
 
 /// Calculate stress for a single voxel at world coordinates.
+///
+/// Strut relief is NOT applied here — callers subtract
+/// `strut_relief_final_legacy()` from the (zero-clamped) result so relief
+/// surplus survives as negative stored stress and offsets painted stress.
 pub fn calc_voxel_stress(
     density_fields: &HashMap<(i32, i32, i32), DensityField>,
-    support_fields: &HashMap<(i32, i32, i32), SupportField>,
     config: &StressConfig,
     wx: i32, wy: i32, wz: i32,
     chunk_size: usize,
@@ -243,49 +246,86 @@ pub fn calc_voxel_stress(
         }
     }
 
-    // 3. Support structure bonus: nearby ALIVE struts reduce stress.
-    //
-    // Per-tier sphere of influence: each strut samples its own
-    // `STRUT_TUNING[type].radius` (Copper=2 .. Mithril=5). We walk the MAX
-    // radius bounding box and let the inner check filter out cells that
-    // sit outside any individual strut's radius.
-    //
-    // Fast skip: if no chunk in the bounding box has any non-None supports,
-    // the entire sweep below is pure waste. Cheap O(<=8) chunk lookups guard
-    // the per-voxel HashMap walk. For early-game (0 struts placed in the
-    // world) this short-circuits ~100% of stressed voxels.
+    // Clamp to non-negative before normalization. NOTE: strut relief is no
+    // longer applied here — callers subtract `strut_relief_final_legacy()`
+    // AFTER this clamp so relief surplus survives as negative stored stress
+    // and can offset the painted overlay (`effective = stress + painted`).
+    // The old inline subtraction died at this clamp, which made struts
+    // powerless against map-authored painted stress.
+    raw_stress = raw_stress.max(0.0);
+
+    // 3. Normalize by material hardness
+    raw_stress / hardness
+}
+
+/// Total strut stress relief at a voxel, in RAW stress units (the scale of
+/// span/cross-section stress before hardness normalization).
+///
+/// Sums `hardness / dist` over every ALIVE strut whose per-tier radius
+/// (`STRUT_TUNING[type].radius`, Copper=2 .. Mithril=5) reaches the voxel.
+/// The `any_supports_in_radius_box` guard keeps this near-free when no
+/// struts are nearby — the overwhelmingly common case.
+pub(crate) fn strut_relief_raw(
+    support_fields: &HashMap<(i32, i32, i32), SupportField>,
+    wx: i32,
+    wy: i32,
+    wz: i32,
+    chunk_size: usize,
+) -> f32 {
     let sr = MAX_STRUT_RADIUS as i32;
-    if any_supports_in_radius_box(support_fields, wx, wy, wz, sr, chunk_size) {
-        for dz in -sr..=sr {
-            for dy in -sr..=sr {
-                for dx in -sr..=sr {
-                    if dx == 0 && dy == 0 && dz == 0 {
-                        continue;
-                    }
-                    let support = sample_support(support_fields, wx + dx, wy + dy, wz + dz, chunk_size);
-                    if support == SupportType::None { continue; }
-                    let tuning = STRUT_TUNING[support as u8 as usize];
-                    let r2 = (tuning.radius as i32) * (tuning.radius as i32);
-                    let d2 = dx * dx + dy * dy + dz * dz;
-                    if d2 > r2 { continue; }
-                    // Broken struts (HP=0) contribute nothing — the worker
-                    // tick will clear them, but until it does we must not
-                    // pretend they're still holding the rock up.
-                    if !sample_strut_alive(support_fields, wx + dx, wy + dy, wz + dz, chunk_size) {
-                        continue;
-                    }
-                    let dist = (d2 as f32).sqrt();
-                    raw_stress -= tuning.hardness / dist;
+    if !any_supports_in_radius_box(support_fields, wx, wy, wz, sr, chunk_size) {
+        return 0.0;
+    }
+    let mut relief = 0.0f32;
+    for dz in -sr..=sr {
+        for dy in -sr..=sr {
+            for dx in -sr..=sr {
+                if dx == 0 && dy == 0 && dz == 0 {
+                    continue;
                 }
+                let support = sample_support(support_fields, wx + dx, wy + dy, wz + dz, chunk_size);
+                if support == SupportType::None { continue; }
+                let tuning = STRUT_TUNING[support as u8 as usize];
+                let r2 = (tuning.radius as i32) * (tuning.radius as i32);
+                let d2 = dx * dx + dy * dy + dz * dz;
+                if d2 > r2 { continue; }
+                // Broken struts (HP=0) contribute nothing — the worker
+                // tick will clear them, but until it does we must not
+                // pretend they're still holding the rock up.
+                if !sample_strut_alive(support_fields, wx + dx, wy + dy, wz + dz, chunk_size) {
+                    continue;
+                }
+                let dist = (d2 as f32).sqrt();
+                relief += tuning.hardness / dist;
             }
         }
     }
+    relief
+}
 
-    // Clamp to non-negative before normalization
-    raw_stress = raw_stress.max(0.0);
-
-    // 4. Normalize by material hardness
-    raw_stress / hardness
+/// Strut relief in the legacy calc's FINAL stress units (raw / material
+/// hardness — the legacy path has no depth-pressure factor). Returns 0 for
+/// air or zero-hardness voxels. Callers subtract this from the clamped
+/// `calc_voxel_stress` result; the difference can go negative, which is the
+/// relief surplus that offsets painted stress at `effective()` read time.
+pub(crate) fn strut_relief_final_legacy(
+    density_fields: &HashMap<(i32, i32, i32), DensityField>,
+    support_fields: &HashMap<(i32, i32, i32), SupportField>,
+    config: &StressConfig,
+    wx: i32,
+    wy: i32,
+    wz: i32,
+    chunk_size: usize,
+) -> f32 {
+    let mat = match sample_world(density_fields, wx, wy, wz, chunk_size) {
+        Some((_, m)) if m.is_solid() => m,
+        _ => return 0.0,
+    };
+    let hardness = config.material_hardness[mat as u8 as usize];
+    if hardness <= 0.0 {
+        return 0.0;
+    }
+    strut_relief_raw(support_fields, wx, wy, wz, chunk_size) / hardness
 }
 
 // ── V2 stress algorithm: two-pass ground connectivity + load accumulation ──

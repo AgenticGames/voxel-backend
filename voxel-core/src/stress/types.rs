@@ -75,9 +75,14 @@ impl StressField {
         }
     }
 
-    /// Effective stress = base + painted overlay.
+    /// Effective stress = max(0, base + painted overlay).
     /// Use this where you want player-painted stress to influence behavior
     /// (collapse-failure rolls, overstressed test, debug viz).
+    ///
+    /// Base stress can be NEGATIVE: the recalc passes store strut relief
+    /// surplus below zero so struts can offset painted stress. The clamp
+    /// belongs on the SUM — clamping the parts would reintroduce the
+    /// painted floor struts used to be powerless against.
     #[inline]
     pub fn effective(&self, x: usize, y: usize, z: usize) -> f32 {
         let i = self.index(x, y, z);
@@ -87,7 +92,7 @@ impl StressField {
         } else {
             self.painted_stress[i]
         };
-        base + painted
+        (base + painted).max(0.0)
     }
 
     /// Lazy-allocate the painted overlay. No-op if already allocated.

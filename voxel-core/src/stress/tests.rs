@@ -164,11 +164,11 @@ fn air_voxel_has_zero_stress() {
 
 #[test]
 fn supported_voxel_low_stress() {
-    let (density_fields, _, support_fields) = make_solid_world();
+    let (density_fields, _, _) = make_solid_world();
     let config = default_config();
 
     let stress = calc_voxel_stress(
-        &density_fields, &support_fields, &config, 8, 8, 8, 16,
+        &density_fields, &config, 8, 8, 8, 16,
     );
 
     // With retuned gravity_weight=0.05, a fully-supported deep voxel
@@ -201,7 +201,7 @@ fn surface_voxel_low_stress() {
     }
 
     let stress = calc_voxel_stress(
-        &density_fields, &support_fields, &config, 8, 9, 8, 16,
+        &density_fields, &config, 8, 9, 8, 16,
     );
 
     assert!(stress < 1.0, "Surface voxel should not be overstressed, got {}", stress);
@@ -231,7 +231,7 @@ fn unsupported_ceiling_high_stress() {
     }
 
     let stress = calc_voxel_stress(
-        &density_fields, &support_fields, &config, 8, 8, 8, 16,
+        &density_fields, &config, 8, 8, 8, 16,
     );
 
     assert!(stress > 0.0, "Ceiling voxel should have stress > 0");
@@ -269,12 +269,12 @@ fn support_structure_reduces_stress() {
         sf.set(8, 7, 8, SupportType::Steel);
     }
 
-    let stress_without = calc_voxel_stress(
-        &density_fields, &support_fields_empty, &config, 8, 8, 8, 16,
-    );
-    let stress_with = calc_voxel_stress(
-        &density_fields, &support_fields_with, &config, 8, 8, 8, 16,
-    );
+    // Relief is applied by callers now: stored = calc - relief.
+    let base = calc_voxel_stress(&density_fields, &config, 8, 8, 8, 16);
+    let stress_without =
+        base - strut_relief_final_legacy(&density_fields, &support_fields_empty, &config, 8, 8, 8, 16);
+    let stress_with =
+        base - strut_relief_final_legacy(&density_fields, &support_fields_with, &config, 8, 8, 8, 16);
 
     assert!(
         stress_with < stress_without,
@@ -577,17 +577,87 @@ fn v2_strut_reduces_stress() {
         &density_fields, &[(0, 0, 0)], 16, &config,
     );
 
-    let (stress_without, _) = calc_voxel_stress_v2(
-        &density_fields, &support_fields_empty, &scores, &config, 8, 8, 8, 16,
+    // Relief is applied by callers now: stored = calc - relief.
+    let (base, _) = calc_voxel_stress_v2(
+        &density_fields, &scores, &config, 8, 8, 8, 16,
     );
-    let (stress_with, _) = calc_voxel_stress_v2(
-        &density_fields, &support_fields_with, &scores, &config, 8, 8, 8, 16,
-    );
+    let stress_without =
+        base - strut_relief_final_v2(&density_fields, &support_fields_empty, &config, 8, 8, 8, 16);
+    let stress_with =
+        base - strut_relief_final_v2(&density_fields, &support_fields_with, &config, 8, 8, 8, 16);
 
     assert!(stress_without > 0.0,
         "Wide ceiling should have positive stress without strut, got {}", stress_without);
     assert!(stress_with < stress_without,
         "Strut should reduce v2 stress: with={}, without={}", stress_with, stress_without);
+}
+
+/// Map-editor scenario: painted stress on STABLE grounded rock (zero organic
+/// stress) must be relieved by a nearby strut. This is the case the old
+/// inline-relief code could never handle — relief died at the zero-clamp
+/// inside the calc, and grounded voxels never even reached the strut sweep.
+#[test]
+fn strut_relieves_painted_stress_on_grounded_rock() {
+    let (density_fields, mut stress_fields, _) = make_solid_world();
+    let config = default_config();
+    let key = (0, 0, 0);
+
+    // Designer paints heavy stress onto solid rock at (8,8,8).
+    stress_fields
+        .get_mut(&key)
+        .unwrap()
+        .add_painted(8, 8, 8, 3.0, 10.0);
+
+    let mut support_fields: HashMap<(i32, i32, i32), SupportField> = HashMap::new();
+    for cz in -1..=1 {
+        for cy in -2..=2 {
+            for cx in -1..=1 {
+                support_fields.insert((cx, cy, cz), SupportField::new(17));
+            }
+        }
+    }
+
+    // Without a strut: effective stress IS the painted value.
+    recalc_stress_region_v2(
+        &density_fields, &mut stress_fields, &support_fields, &config, &[key], 16,
+    );
+    let eff_no_strut = stress_fields.get(&key).unwrap().effective(8, 8, 8);
+    assert!(
+        (eff_no_strut - 3.0).abs() < 1e-3,
+        "unrelieved painted stress should read back as painted (3.0), got {}",
+        eff_no_strut
+    );
+
+    // Mithril strut adjacent: relief (35/dist, hardness-scaled) dwarfs the
+    // painted 3.0 — effective must drop, and must clamp at zero rather than
+    // going negative.
+    support_fields
+        .get_mut(&key)
+        .unwrap()
+        .set(8, 7, 8, SupportType::Mithril);
+    recalc_stress_region_v2(
+        &density_fields, &mut stress_fields, &support_fields, &config, &[key], 16,
+    );
+    let eff_with_strut = stress_fields.get(&key).unwrap().effective(8, 8, 8);
+    assert!(
+        eff_with_strut < eff_no_strut,
+        "strut must relieve painted stress: with={} without={}",
+        eff_with_strut, eff_no_strut
+    );
+    assert_eq!(
+        eff_with_strut, 0.0,
+        "full suppression should clamp effective at zero, got {}",
+        eff_with_strut
+    );
+
+    // The painted layer itself must be untouched — relief is a read-time
+    // offset, not an edit of the designer's authored data.
+    let painted_after = stress_fields.get(&key).unwrap().painted(8, 8, 8);
+    assert!(
+        (painted_after - 3.0).abs() < 1e-6,
+        "painted overlay must survive relief untouched, got {}",
+        painted_after
+    );
 }
 
 /// Sweep tunnel heights (air gap size) and measure ceiling stress.
@@ -609,7 +679,7 @@ fn sweep_ceiling_stress() {
     for air_gap in [2, 4, 6, 8, 10, 12, 14, 16] {
         // Tunnel from y=0 to y=air_gap-1, ceiling at y=air_gap
         let tunnel_y_max = (air_gap - 1).min(15);
-        let (density_fields, _, support_fields) = make_tunnel_world(0, tunnel_y_max);
+        let (density_fields, _, _) = make_tunnel_world(0, tunnel_y_max);
 
         // Run ground connectivity
         let all_keys: Vec<(i32,i32,i32)> = density_fields.keys().cloned().collect();
@@ -618,7 +688,7 @@ fn sweep_ceiling_stress() {
         // Measure stress at ceiling center (just above the tunnel)
         let ceiling_y = (tunnel_y_max + 1).min(16);
         let (stress, _) = calc_voxel_stress_v2(
-            &density_fields, &support_fields, &scores, &config,
+            &density_fields, &scores, &config,
             8, ceiling_y as i32, 8, 16,
         );
 
@@ -645,11 +715,11 @@ fn sweep_ceiling_stress() {
         cfg.surface_y = 32;
         cfg.overhang_weight = ow;
 
-        let (density_fields, _, support_fields) = make_tunnel_world(0, 11);
+        let (density_fields, _, _) = make_tunnel_world(0, 11);
         let all_keys: Vec<(i32,i32,i32)> = density_fields.keys().cloned().collect();
         let scores = ground_connectivity_pass(&density_fields, &all_keys, 16, &cfg);
         let (stress, _) = calc_voxel_stress_v2(
-            &density_fields, &support_fields, &scores, &cfg,
+            &density_fields, &scores, &cfg,
             8, 12, 8, 16,
         );
 
@@ -664,14 +734,14 @@ fn sweep_ceiling_stress() {
         "x_position", "v2_stress", "support_score");
     println!("{}", "-".repeat(36));
 
-    let (density_fields, _, support_fields) = make_tunnel_world(0, 11);
+    let (density_fields, _, _) = make_tunnel_world(0, 11);
     let all_keys: Vec<(i32,i32,i32)> = density_fields.keys().cloned().collect();
     let scores = ground_connectivity_pass(&density_fields, &all_keys, 16, &config);
 
     // Sample stress across x positions in different chunks (with corrected surface_y)
     for &(cx, x) in &[(-1,4), (-1,8), (-1,12), (0,4), (0,8), (0,12), (1,4), (1,8), (1,12)] {
         let (stress, _) = calc_voxel_stress_v2(
-            &density_fields, &support_fields, &scores, &config,
+            &density_fields, &scores, &config,
             cx * 16 + x, 12, 8, 16,
         );
         let score = scores.get(&(cx, 0, 0))
@@ -693,11 +763,11 @@ fn sweep_ceiling_stress() {
         cfg.surface_y = 32;
         cfg.span_weight = sw;
 
-        let (density_fields, _, support_fields) = make_tunnel_world(0, 11);
+        let (density_fields, _, _) = make_tunnel_world(0, 11);
         let all_keys: Vec<(i32,i32,i32)> = density_fields.keys().cloned().collect();
         let scores = ground_connectivity_pass(&density_fields, &all_keys, 16, &cfg);
         let (stress, _) = calc_voxel_stress_v2(
-            &density_fields, &support_fields, &scores, &cfg,
+            &density_fields, &scores, &cfg,
             8, 12, 8, 16,
         );
 
@@ -723,11 +793,11 @@ fn sweep_ceiling_stress() {
         cfg.surface_y = 32;
         cfg.min_safe_span = mss;
 
-        let (density_fields, _, support_fields) = make_tunnel_world(0, 11);
+        let (density_fields, _, _) = make_tunnel_world(0, 11);
         let all_keys: Vec<(i32,i32,i32)> = density_fields.keys().cloned().collect();
         let scores = ground_connectivity_pass(&density_fields, &all_keys, 16, &cfg);
         let (stress, _) = calc_voxel_stress_v2(
-            &density_fields, &support_fields, &scores, &cfg,
+            &density_fields, &scores, &cfg,
             8, 12, 8, 16,
         );
 
