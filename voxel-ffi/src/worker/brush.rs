@@ -65,16 +65,20 @@ pub(super) fn handle_building_flatten_batch(ctx: &super::HandlerCtx<'_>, buildin
     let config = ctx.config;
     let world_scale = ctx.world_scale;
     let fluid_event_tx = ctx.fluid_event_tx;
-            // Cheap path: per-tile call to the legacy ramp flatten. Each tile
-            // carries its own sub-voxel base_y_float so conveyors don't
-            // float/sink (3A density tweak applied inside apply_ramp_column).
+            // Same SDF flatten the single-placement path uses (sub-voxel iso
+            // alignment + convex-hull buttresses), applied per building under
+            // ONE write lock + ONE seam pass. The old "cheap path" here ran
+            // the legacy ramp flatten instead — belt chains got lumpy,
+            // off-center pads while furnaces looked clean. Overlapping
+            // aprons between adjacent belts converge because the SDF ramp
+            // skips columns whose surface already matches (FLAT_MATCH).
             let cfg = config.read().unwrap().clone();
             let mut s = store.write().unwrap();
             let mut all_dirty: Vec<(i32, i32, i32)> = Vec::new();
             for &(bx, by, bz, by_f, host_mat, footprint, clearance) in &buildings {
                 let mat = voxel_core::material::Material::from_u8(host_mat);
                 let bts = footprint.max(1);
-                let meshes = crate::terrain_ops::flatten_terrace(
+                let meshes = crate::flatten_sdf::flatten_terrace_sdf(
                     &mut s,
                     glam::IVec3::new(bx, by, bz),
                     by_f,
