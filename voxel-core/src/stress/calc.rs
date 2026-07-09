@@ -101,6 +101,10 @@ pub(crate) fn accumulate_strut_load_at_voxel(
         for dy in -sr..=sr {
             for dx in -sr..=sr {
                 if dx == 0 && dy == 0 && dz == 0 { continue; }
+                // Outside the max-tier sphere no strut can reach — skip
+                // before any chunk/field access (~61% of the cube).
+                let d2 = dx * dx + dy * dy + dz * dz;
+                if d2 > sr * sr { continue; }
                 let sx = wx + dx;
                 let sy = wy + dy;
                 let sz = wz + dz;
@@ -120,7 +124,6 @@ pub(crate) fn accumulate_strut_load_at_voxel(
                 if support == SupportType::None { continue; }
                 let tuning = STRUT_TUNING[support as u8 as usize];
                 let r2 = (tuning.radius as i32) * (tuning.radius as i32);
-                let d2 = dx * dx + dy * dy + dz * dz;
                 if d2 > r2 { continue; }
                 if !sf.is_strut_alive(slx, sly, slz) { continue; }
                 let dist = (d2 as f32).sqrt();
@@ -276,6 +279,15 @@ pub(crate) fn strut_relief_raw(
     if !any_supports_in_radius_box(support_fields, wx, wy, wz, sr, chunk_size) {
         return 0.0;
     }
+    let cs = chunk_size as i32;
+    // Cache the last chunk's SupportField across the strut cube — the same
+    // trick `accumulate_strut_load_at_voxel` uses. Consecutive x-innermost
+    // cells share a chunk almost always, so this replaces the per-cell
+    // sample_support + sample_strut_alive pair (each a world_to_chunk_local
+    // + HashMap probe, up to 2×1331 probes at sr=5) with one cached borrow
+    // and at most a handful of re-probes per x-row.
+    let mut cached_key: Option<(i32, i32, i32)> = None;
+    let mut cached_sf: Option<&SupportField> = None;
     let mut relief = 0.0f32;
     for dz in -sr..=sr {
         for dy in -sr..=sr {
@@ -283,16 +295,35 @@ pub(crate) fn strut_relief_raw(
                 if dx == 0 && dy == 0 && dz == 0 {
                     continue;
                 }
-                let support = sample_support(support_fields, wx + dx, wy + dy, wz + dz, chunk_size);
+                // ~61% of the (2sr+1)^3 cube lies outside the sr sphere —
+                // no tier's radius can reach from there, so skip before any
+                // chunk/field access.
+                let d2 = dx * dx + dy * dy + dz * dz;
+                if d2 > sr * sr { continue; }
+                let sx = wx + dx;
+                let sy = wy + dy;
+                let sz = wz + dz;
+                let skey = (sx.div_euclid(cs), sy.div_euclid(cs), sz.div_euclid(cs));
+                if cached_key != Some(skey) {
+                    cached_key = Some(skey);
+                    cached_sf = support_fields.get(&skey);
+                }
+                let sf = match cached_sf {
+                    Some(sf) => sf,
+                    None => continue,
+                };
+                let slx = sx.rem_euclid(cs) as usize;
+                let sly = sy.rem_euclid(cs) as usize;
+                let slz = sz.rem_euclid(cs) as usize;
+                let support = sf.get(slx, sly, slz);
                 if support == SupportType::None { continue; }
                 let tuning = STRUT_TUNING[support as u8 as usize];
                 let r2 = (tuning.radius as i32) * (tuning.radius as i32);
-                let d2 = dx * dx + dy * dy + dz * dz;
                 if d2 > r2 { continue; }
                 // Broken struts (HP=0) contribute nothing — the worker
                 // tick will clear them, but until it does we must not
                 // pretend they're still holding the rock up.
-                if !sample_strut_alive(support_fields, wx + dx, wy + dy, wz + dz, chunk_size) {
+                if !sf.is_strut_alive(slx, sly, slz) {
                     continue;
                 }
                 let dist = (d2 as f32).sqrt();

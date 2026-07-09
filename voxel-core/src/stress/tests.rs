@@ -283,6 +283,53 @@ fn support_structure_reduces_stress() {
     );
 }
 
+/// Release-only micro-bench for `strut_relief_raw`. Run with:
+/// `cargo test --release -p voxel-core bench_strut_relief_raw -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn bench_strut_relief_raw() {
+    let chunk_size = 30usize;
+    let mut support_fields: HashMap<(i32, i32, i32), SupportField> = HashMap::new();
+    for cz in -1..=1 {
+        for cy in -1..=1 {
+            for cx in -1..=1 {
+                support_fields.insert((cx, cy, cz), SupportField::new(chunk_size + 1));
+            }
+        }
+    }
+    // Scatter mixed-tier struts through the home chunk on a 5-voxel lattice.
+    let sf = support_fields.get_mut(&(0, 0, 0)).unwrap();
+    let tiers = [
+        SupportType::Copper, SupportType::Iron, SupportType::Steel,
+        SupportType::Crystal, SupportType::Mithril,
+    ];
+    let mut i = 0usize;
+    for z in (0..chunk_size).step_by(5) {
+        for y in (0..chunk_size).step_by(5) {
+            for x in (0..chunk_size).step_by(5) {
+                sf.set(x, y, z, tiers[i % tiers.len()]);
+                i += 1;
+            }
+        }
+    }
+    let n = chunk_size as i32;
+    let mut checksum = 0.0f64;
+    let t = std::time::Instant::now();
+    for wz in 0..n {
+        for wy in 0..n {
+            for wx in 0..n {
+                checksum += strut_relief_raw(&support_fields, wx, wy, wz, chunk_size) as f64;
+            }
+        }
+    }
+    let el = t.elapsed();
+    println!(
+        "bench_strut_relief_raw: {} voxels in {:?} ({:.1} ns/voxel), checksum={:.6}",
+        chunk_size.pow(3), el,
+        el.as_nanos() as f64 / chunk_size.pow(3) as f64, checksum,
+    );
+}
+
 #[test]
 fn world_to_chunk_local_works() {
     let (key, lx, ly, lz) = world_to_chunk_local(20, 5, -3, 16);
