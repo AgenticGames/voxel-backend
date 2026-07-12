@@ -72,13 +72,21 @@ pub(super) fn handle_building_flatten_batch(ctx: &super::HandlerCtx<'_>, buildin
             // off-center pads while furnaces looked clean. Overlapping
             // aprons between adjacent belts converge because the SDF ramp
             // skips columns whose surface already matches (FLAT_MATCH).
+            //
+            // Carve ALL buildings first, remesh ONCE: adjacent belts share
+            // chunks, so remeshing inside each per-building flatten redid the
+            // full hermite/DC/smooth/convert pipeline for the same chunk once
+            // per belt — only the last result survives (the seam pass below
+            // reads base_meshes, not these return values). Densities persist
+            // after each carve, so one remesh of the deduped union is
+            // bit-identical.
             let cfg = config.read().unwrap().clone();
             let mut s = store.write().unwrap();
-            let mut all_dirty: Vec<(i32, i32, i32)> = Vec::new();
+            let mut dirty_bounds: Vec<((i32, i32, i32), usize, usize, usize, usize, usize, usize)> = Vec::new();
             for &(bx, by, bz, by_f, host_mat, footprint, clearance) in &buildings {
                 let mat = voxel_core::material::Material::from_u8(host_mat);
                 let bts = footprint.max(1);
-                let meshes = crate::flatten_sdf::flatten_terrace_sdf(
+                dirty_bounds.extend(crate::flatten_sdf::flatten_terrace_sdf_carve(
                     &mut s,
                     glam::IVec3::new(bx, by, bz),
                     by_f,
@@ -87,12 +95,16 @@ pub(super) fn handle_building_flatten_batch(ctx: &super::HandlerCtx<'_>, buildin
                     world_scale,
                     bts,
                     clearance.max(2),
-                );
-                all_dirty.extend(meshes.into_iter().map(|(k, _)| k));
+                ));
             }
-            // Deduplicate dirty keys
-            all_dirty.sort();
-            all_dirty.dedup();
+            // Deduplicate by chunk key (carve always emits full-chunk bounds)
+            dirty_bounds.sort_by_key(|&(k, ..)| k);
+            dirty_bounds.dedup_by_key(|&mut (k, ..)| k);
+            let all_dirty: Vec<(i32, i32, i32)> = s
+                .remesh_dirty(&dirty_bounds, &cfg, world_scale)
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect();
             drop(s);
             // Single seam pass for all flattens combined
             recompute_crystals_for_chunks(store, &cfg, &all_dirty);

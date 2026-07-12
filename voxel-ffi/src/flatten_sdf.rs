@@ -201,6 +201,37 @@ pub fn flatten_terrace_sdf(
     terrace_size: i32,
     clearance_voxels: i32,
 ) -> Vec<((i32, i32, i32), ConvertedMesh)> {
+    let dirty_chunks = flatten_terrace_sdf_carve(
+        store, base, base_y_float, host_material, config, world_scale,
+        terrace_size, clearance_voxels,
+    );
+    store.remesh_dirty(&dirty_chunks, config, world_scale)
+}
+
+/// Carve-only variant: performs the full flatten (formation removal, SDF
+/// carve, boundary sync, written-cell restore, dirty tracking) but does NOT
+/// remesh. Returns the dirty chunk list (full-chunk bounds) for the caller
+/// to feed to `ChunkStore::remesh_dirty`.
+///
+/// Exists for batch placements (belt drags): adjacent buildings share
+/// chunks, so remeshing inside each per-building call redoes the full
+/// hermite-extract + DC-solve + smooth + convert pipeline for the same
+/// chunk once per building — with every result but the last overwritten.
+/// Carving all buildings first and remeshing the union once produces
+/// bit-identical meshes (densities are fully persistent after each carve;
+/// meshing is pure derived output of the final density state).
+// `world_scale` only feeds the debug-build diagnostic dump below.
+#[cfg_attr(not(debug_assertions), allow(unused_variables))]
+pub fn flatten_terrace_sdf_carve(
+    store: &mut ChunkStore,
+    base: glam::IVec3,
+    base_y_float: f32,
+    host_material: Material,
+    config: &GenerationConfig,
+    world_scale: f32,
+    terrace_size: i32,
+    clearance_voxels: i32,
+) -> Vec<((i32, i32, i32), usize, usize, usize, usize, usize, usize)> {
     let cs = config.chunk_size as i32;
     let clear = clearance_voxels.max(2);
     let apron_radius = apron_radius_for(terrace_size);
@@ -325,7 +356,7 @@ pub fn flatten_terrace_sdf(
     let dirty_keys: Vec<_> = dirty_chunks.iter().map(|&(k, ..)| k).collect();
     store.modification_tracker.mark_dirty_many(&dirty_keys);
 
-    store.remesh_dirty(&dirty_chunks, config, world_scale)
+    dirty_chunks
 }
 
 #[cfg(test)]
@@ -416,5 +447,125 @@ mod tests {
         // For frac=0.2, d_solid = 0.2/0.8 = 0.25.
         assert!((d10 - 0.25).abs() < 0.01,
             "force-write should set boundary to ~0.25 even though rock was 1.0, got {}", d10);
+    }
+
+    /// Run a simulated belt-drag batch two ways and return
+    /// (chunk remesh count, final store) for each:
+    ///   old — full flatten (carve + remesh) per belt, as the batch handler
+    ///         did before the carve/remesh split;
+    ///   new — carve every belt, then ONE remesh of the deduped union, as
+    ///         `handle_building_flatten_batch` does now.
+    fn run_belt_drag_both_ways(
+        n_belts: i32, ground_chunks: i32,
+    ) -> ((usize, ChunkStore), (usize, ChunkStore)) {
+        let cfg = GenerationConfig::default();
+        let ws = 40.0;
+        // Adjacent 2-voxel belts along +X at sub-voxel height, like a drag.
+        let belts: Vec<glam::IVec3> =
+            (0..n_belts).map(|i| glam::IVec3::new(i * 2, 10, 3)).collect();
+
+        let mut store_old = make_flat_ground(10, ground_chunks);
+        let mut old_remeshes = 0usize;
+        for &base in &belts {
+            old_remeshes += flatten_terrace_sdf(
+                &mut store_old, base, 10.3, Material::Granite, &cfg, ws, 2, 3,
+            ).len();
+        }
+
+        let mut store_new = make_flat_ground(10, ground_chunks);
+        let mut dirty = Vec::new();
+        for &base in &belts {
+            dirty.extend(flatten_terrace_sdf_carve(
+                &mut store_new, base, 10.3, Material::Granite, &cfg, ws, 2, 3,
+            ));
+        }
+        dirty.sort_by_key(|&(k, ..)| k);
+        dirty.dedup_by_key(|&mut (k, ..)| k);
+        let new_remeshes = store_new.remesh_dirty(&dirty, &cfg, ws).len();
+
+        ((old_remeshes, store_old), (new_remeshes, store_new))
+    }
+
+    /// The batch handler's carve-all-then-remesh-once ordering must produce
+    /// bit-identical base meshes to the old remesh-inside-every-flatten
+    /// ordering (densities persist per carve; meshing is pure output).
+    #[test]
+    fn batch_single_remesh_is_bit_identical_to_per_belt_remesh() {
+        let ((old_n, store_old), (new_n, store_new)) = run_belt_drag_both_ways(12, 1);
+        assert!(new_n < old_n,
+            "deferred remesh should mesh fewer chunks ({} old vs {} new)", old_n, new_n);
+
+        assert_eq!(store_old.base_meshes.len(), store_new.base_meshes.len(),
+            "both orderings must mesh the same chunk set");
+        for (key, old_mesh) in &store_old.base_meshes {
+            let new_mesh = store_new.base_meshes.get(key)
+                .unwrap_or_else(|| panic!("chunk {:?} missing from deferred-remesh store", key));
+            assert_eq!(old_mesh.vertices.len(), new_mesh.vertices.len(),
+                "vertex count mismatch in chunk {:?}", key);
+            assert_eq!(old_mesh.triangles.len(), new_mesh.triangles.len(),
+                "triangle count mismatch in chunk {:?}", key);
+            for (a, b) in old_mesh.vertices.iter().zip(new_mesh.vertices.iter()) {
+                assert_eq!(a.position.to_array().map(f32::to_bits),
+                           b.position.to_array().map(f32::to_bits),
+                           "vertex position differs in chunk {:?}", key);
+                assert_eq!(a.normal.to_array().map(f32::to_bits),
+                           b.normal.to_array().map(f32::to_bits),
+                           "vertex normal differs in chunk {:?}", key);
+                assert_eq!(a.material, b.material,
+                    "vertex material differs in chunk {:?}", key);
+            }
+            for (a, b) in old_mesh.triangles.iter().zip(new_mesh.triangles.iter()) {
+                assert_eq!(a.indices, b.indices, "triangle differs in chunk {:?}", key);
+            }
+        }
+    }
+
+    /// Wall-time A/B of the two orderings. Run with:
+    ///   cargo test --release -p voxel-ffi bench_batch_flatten -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn bench_batch_flatten_deferred_remesh() {
+        // Warmup pass (rayon pool spin-up, allocator, caches).
+        let t0 = std::time::Instant::now();
+        let _ = run_belt_drag_both_ways(20, 2);
+
+        // Time each ordering in isolation (setup excluded).
+        let cfg = GenerationConfig::default();
+        let ws = 40.0;
+        let belts: Vec<glam::IVec3> =
+            (0..20).map(|i| glam::IVec3::new(i * 2, 10, 3)).collect();
+
+        let mut store_old = make_flat_ground(10, 2);
+        let t_old = std::time::Instant::now();
+        let mut old_remeshes = 0usize;
+        for &base in &belts {
+            old_remeshes += flatten_terrace_sdf(
+                &mut store_old, base, 10.3, Material::Granite, &cfg, ws, 2, 3,
+            ).len();
+        }
+        let old_ms = t_old.elapsed().as_secs_f64() * 1e3;
+
+        let mut store_new = make_flat_ground(10, 2);
+        let t_new = std::time::Instant::now();
+        let mut dirty = Vec::new();
+        for &base in &belts {
+            dirty.extend(flatten_terrace_sdf_carve(
+                &mut store_new, base, 10.3, Material::Granite, &cfg, ws, 2, 3,
+            ));
+        }
+        dirty.sort_by_key(|&(k, ..)| k);
+        dirty.dedup_by_key(|&mut (k, ..)| k);
+        let new_remeshes = store_new.remesh_dirty(&dirty, &cfg, ws).len();
+        let new_ms = t_new.elapsed().as_secs_f64() * 1e3;
+
+        println!(
+            "bench_batch_flatten (20-belt drag): old {:.2} ms / {} chunk remeshes, \
+             new {:.2} ms / {} chunk remeshes ({:.0}% less wall time, total incl. carve) \
+             [warmup {:.0} ms]",
+            old_ms, old_remeshes, new_ms, new_remeshes,
+            (1.0 - new_ms / old_ms) * 100.0,
+            t0.elapsed().as_secs_f64() * 1e3,
+        );
+        assert!(new_remeshes < old_remeshes);
     }
 }
