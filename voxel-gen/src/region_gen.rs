@@ -591,11 +591,17 @@ pub fn generate_seam_mesh(
             // Emit the quad as 2 triangles. Corners take the neighbor chunk's
             // per-cell averaged normal (same value its base-mesh vertex at
             // this cell uses) so the seam shades continuously; the edge
-            // normal is only the fallback for cap-fallback corners or legacy
-            // seam data without dc_normals.
+            // normal is only the fallback for cap-fallback corners, legacy
+            // seam data without dc_normals, or thin-sheet cells whose
+            // averaged normal cancelled or leans to the wrong side (>90°
+            // from this quad's edge normal).
             let base = mesh.vertices.len() as u32;
             for (pos, n) in positions.iter().zip(&corner_normals) {
-                let normal = if n.length_squared() > 1e-6 { *n } else { intersection.normal };
+                let normal = if n.length_squared() > 1e-6 && n.dot(intersection.normal) >= 0.0 {
+                    *n
+                } else {
+                    intersection.normal
+                };
                 mesh.vertices.push(Vertex {
                     position: *pos,
                     normal,
@@ -761,10 +767,18 @@ pub fn generate_chunk_seam_quads<S: std::borrow::Borrow<ChunkSeamData>>(
         // value its base-mesh vertex at this cell uses) so the seam shades
         // continuously with the base meshes on both sides; the single edge
         // normal — which flat-shades the whole quad and reads as a black
-        // facet under off-axis light — is only the fallback.
+        // facet under off-axis light — is only the fallback. The dot guard
+        // covers thin-sheet cells: their per-cell sum either cancels (ZERO)
+        // or leans toward one arbitrary side, while the base mesh splits
+        // such vertices per side — a cell normal >90° off this quad's edge
+        // normal is the wrong side's, so the edge normal is closer.
         let base = mesh.vertices.len() as u32;
         for (pos, n) in positions.iter().zip(&corner_normals) {
-            let normal = if n.length_squared() > 1e-6 { *n } else { intersection.normal };
+            let normal = if n.length_squared() > 1e-6 && n.dot(intersection.normal) >= 0.0 {
+                *n
+            } else {
+                intersection.normal
+            };
             mesh.vertices.push(Vertex {
                 position: *pos,
                 normal,
@@ -1432,14 +1446,17 @@ mod tests {
         b_verts[idx(0, 1, 0)] = Vec3::new(0.5, 1.5, 0.5);
         b_verts[idx(0, 1, 1)] = Vec3::new(0.5, 1.5, 1.5);
 
+        // Corner normals lean the same side as the edge normal (NEG_X) —
+        // like real seam data; normals >90° off the edge normal are treated
+        // as the wrong side of a thin sheet and fall back to the edge normal.
         let (mut a_normals, mut b_normals) = (Vec::new(), Vec::new());
         if with_normals {
             a_normals = vec![Vec3::ZERO; gs * gs * gs];
             b_normals = vec![Vec3::ZERO; gs * gs * gs];
-            a_normals[idx(gs - 1, 1, 0)] = Vec3::X;
-            a_normals[idx(gs - 1, 1, 1)] = Vec3::Y;
-            b_normals[idx(0, 1, 0)] = Vec3::Z;
-            b_normals[idx(0, 1, 1)] = Vec3::new(1.0, 1.0, 0.0).normalize();
+            a_normals[idx(gs - 1, 1, 0)] = Vec3::NEG_X;
+            a_normals[idx(gs - 1, 1, 1)] = Vec3::new(-1.0, 1.0, 0.0).normalize();
+            b_normals[idx(0, 1, 0)] = Vec3::new(-1.0, 0.0, 1.0).normalize();
+            b_normals[idx(0, 1, 1)] = Vec3::new(-1.0, 1.0, 1.0).normalize();
         }
 
         let edge = (
@@ -1472,7 +1489,12 @@ mod tests {
         assert!(!mesh.triangles.is_empty());
         // Corner order follows the axis-1 cell order:
         // A(gs-1,1,0), B(0,1,0), B(0,1,1), A(gs-1,1,1)
-        let expected = [Vec3::X, Vec3::Z, Vec3::new(1.0, 1.0, 0.0).normalize(), Vec3::Y];
+        let expected = [
+            Vec3::NEG_X,
+            Vec3::new(-1.0, 0.0, 1.0).normalize(),
+            Vec3::new(-1.0, 1.0, 1.0).normalize(),
+            Vec3::new(-1.0, 1.0, 0.0).normalize(),
+        ];
         for (v, want) in mesh.vertices.iter().zip(expected) {
             assert!(
                 (v.normal - want).length() < 1e-6,

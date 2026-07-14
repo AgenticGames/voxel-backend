@@ -20,6 +20,17 @@ pub fn generate_mesh(hermite: &HermiteData, dc_vertices: &[glam::Vec3], grid_siz
     // over a dense key. `u32::MAX` = "no vertex assigned yet for this cell"; a real index
     // can never reach u32::MAX (would need 4e9 verts/chunk). One alloc, raw array indexing.
     let mut vertex_map = vec![u32::MAX; dc_vertices.len()];
+    // Thin-sheet split: a sub-cell-thin sheet or sharp saddle puts edges with
+    // OPPOSING hermite normals in the same cell. Welding them into one vertex
+    // makes the normal average cancel and the survivor face an arbitrary side
+    // — region-scale patchwork normals on shield formations (black facets
+    // under light, triplanar projection flips). Dedup is therefore keyed by
+    // (cell, hemisphere vs the cell's first-seen edge normal): single-sided
+    // cells get one vertex exactly as before; double-crossed cells get one
+    // vertex per side, each averaging only its own side's normals. The copies
+    // share the QEF position, so geometry is unchanged.
+    let mut vertex_map_b = vec![u32::MAX; dc_vertices.len()];
+    let mut side_ref: Vec<Vec3> = vec![Vec3::ZERO; dc_vertices.len()];
     // Per-vertex hermite-normal accumulator, indexed like mesh.vertices. Every
     // sign-changing edge that touches a cell contributes its normal and the
     // average is applied after the loop — the old behavior kept whichever edge
@@ -75,7 +86,17 @@ pub fn generate_mesh(hermite: &HermiteData, dc_vertices: &[glam::Vec3], grid_siz
             if pos.x.is_nan() {
                 continue;
             }
-            let mut vi = vertex_map[cell_idx];
+            let side_b = {
+                let rd = side_ref[cell_idx];
+                if rd == Vec3::ZERO {
+                    side_ref[cell_idx] = intersection.normal;
+                    false
+                } else {
+                    intersection.normal.dot(rd) < 0.0
+                }
+            };
+            let slot = if side_b { &mut vertex_map_b[cell_idx] } else { &mut vertex_map[cell_idx] };
+            let mut vi = *slot;
             if vi == u32::MAX {
                 vi = mesh.vertices.len() as u32;
                 mesh.vertices.push(Vertex {
@@ -84,7 +105,7 @@ pub fn generate_mesh(hermite: &HermiteData, dc_vertices: &[glam::Vec3], grid_siz
                     material: intersection.material,
                 });
                 normal_accum.push(Vec3::ZERO);
-                vertex_map[cell_idx] = vi;
+                *slot = vi;
             }
             normal_accum[vi as usize] += intersection.normal;
             quad_verts[i] = vi;
@@ -302,6 +323,40 @@ mod tests {
         let mesh = generate_mesh(&hermite, &dc_vertices, grid_size);
         assert_eq!(mesh.triangle_count(), 2, "One quad = 2 triangles");
         assert!(mesh.vertex_count() <= 4, "At most 4 vertices for one quad");
+    }
+
+    #[test]
+    fn opposing_edge_normals_split_vertex_per_side() {
+        // Two X-axis edges with OPPOSING hermite normals share cells
+        // (1,1,0) and (1,1,1) — a sub-cell thin sheet crossed from both
+        // sides. Each shared cell must yield TWO vertices (one per side)
+        // whose normals match their own side, instead of one welded vertex
+        // with a cancelled/arbitrary normal.
+        let grid_size = 4;
+        let mut hermite = HermiteData::default();
+        hermite.edges.insert(EdgeKey::new(1, 1, 1, 0), EdgeIntersection {
+            t: 0.3, normal: Vec3::X, material: Material::Limestone,
+        });
+        hermite.edges.insert(EdgeKey::new(1, 2, 1, 0), EdgeIntersection {
+            t: 0.7, normal: -Vec3::X, material: Material::Limestone,
+        });
+        let total = grid_size * grid_size * grid_size;
+        let mut dc_vertices = vec![Vec3::ZERO; total];
+        for z in 0..grid_size { for y in 0..grid_size { for x in 0..grid_size {
+            dc_vertices[cell_index(x, y, z, grid_size)] =
+                Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+        }}}
+
+        let mesh = generate_mesh(&hermite, &dc_vertices, grid_size);
+
+        // 4 cells per edge, 2 shared — but the shared cells split per side,
+        // so all 8 corner references stay distinct vertices.
+        assert_eq!(mesh.vertex_count(), 8,
+            "shared cells crossed from both sides must split, got {}", mesh.vertex_count());
+        let plus: usize = mesh.vertices.iter().filter(|v| v.normal.x > 0.0).count();
+        let minus: usize = mesh.vertices.iter().filter(|v| v.normal.x < 0.0).count();
+        assert_eq!((plus, minus), (4, 4),
+            "each side's quad must keep its own normals, got +x:{plus} -x:{minus}");
     }
 
     #[test]
