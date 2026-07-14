@@ -456,6 +456,13 @@ pub fn apply_external_worm_paths(
 #[derive(Clone)]
 pub struct ChunkSeamData {
     pub dc_vertices: Vec<Vec3>,
+    /// Per-cell averaged hermite normals, indexed like `dc_vertices`
+    /// (`compute_cell_normals`). Seam quads sample these per corner so they
+    /// shade continuously with the base meshes on both sides of the boundary
+    /// — a quad flat-shaded with its single edge's normal reads as a black
+    /// facet under off-axis light. May be empty (legacy producers); quad gen
+    /// then falls back to the edge normal.
+    pub dc_normals: Vec<Vec3>,
     pub world_origin: Vec3,
     pub boundary_edges: Vec<(EdgeKey, EdgeIntersection)>,
 }
@@ -533,6 +540,7 @@ pub fn generate_seam_mesh(
 
             // Look up DC vertex for each cell from the appropriate chunk
             let mut positions = [Vec3::ZERO; 4];
+            let mut corner_normals = [Vec3::ZERO; 4];
             let mut valid = true;
 
             for (i, &(cell_x, cell_y, cell_z)) in cells.iter().enumerate() {
@@ -564,6 +572,11 @@ pub fn generate_seam_mesh(
                         positions[i] = fallback + neighbor.world_origin;
                     } else {
                         positions[i] = pos + neighbor.world_origin;
+                        corner_normals[i] = neighbor
+                            .dc_normals
+                            .get(cell_idx)
+                            .copied()
+                            .unwrap_or(Vec3::ZERO);
                     }
                 } else {
                     valid = false;
@@ -575,12 +588,17 @@ pub fn generate_seam_mesh(
                 continue;
             }
 
-            // Emit the quad as 2 triangles
+            // Emit the quad as 2 triangles. Corners take the neighbor chunk's
+            // per-cell averaged normal (same value its base-mesh vertex at
+            // this cell uses) so the seam shades continuously; the edge
+            // normal is only the fallback for cap-fallback corners or legacy
+            // seam data without dc_normals.
             let base = mesh.vertices.len() as u32;
-            for pos in &positions {
+            for (pos, n) in positions.iter().zip(&corner_normals) {
+                let normal = if n.length_squared() > 1e-6 { *n } else { intersection.normal };
                 mesh.vertices.push(Vertex {
                     position: *pos,
-                    normal: intersection.normal,
+                    normal,
                     material: intersection.material,
                 });
             }
@@ -685,6 +703,7 @@ pub fn generate_chunk_seam_quads<S: std::borrow::Borrow<ChunkSeamData>>(
         }
 
         let mut positions = [Vec3::ZERO; 4];
+        let mut corner_normals = [Vec3::ZERO; 4];
         let mut valid = true;
 
         for (i, &(cell_x, cell_y, cell_z)) in cells.iter().enumerate() {
@@ -722,6 +741,11 @@ pub fn generate_chunk_seam_quads<S: std::borrow::Borrow<ChunkSeamData>>(
                     positions[i] = fallback + offset;
                 } else {
                     positions[i] = pos + offset;
+                    corner_normals[i] = neighbor
+                        .dc_normals
+                        .get(cell_idx)
+                        .copied()
+                        .unwrap_or(Vec3::ZERO);
                 }
             } else {
                 valid = false;
@@ -733,11 +757,17 @@ pub fn generate_chunk_seam_quads<S: std::borrow::Borrow<ChunkSeamData>>(
             continue;
         }
 
+        // Corners take the neighbor chunk's per-cell averaged normal (same
+        // value its base-mesh vertex at this cell uses) so the seam shades
+        // continuously with the base meshes on both sides; the single edge
+        // normal — which flat-shades the whole quad and reads as a black
+        // facet under off-axis light — is only the fallback.
         let base = mesh.vertices.len() as u32;
-        for pos in &positions {
+        for (pos, n) in positions.iter().zip(&corner_normals) {
+            let normal = if n.length_squared() > 1e-6 { *n } else { intersection.normal };
             mesh.vertices.push(Vertex {
                 position: *pos,
-                normal: intersection.normal,
+                normal,
                 material: intersection.material,
             });
         }
@@ -1381,6 +1411,89 @@ mod tests {
         assert_eq!(densities.len(), 8);
         for &c in &coords {
             assert!(densities.contains_key(&c));
+        }
+    }
+
+    /// Two adjacent chunks with one +X-face boundary edge (axis-1). The quad's
+    /// four cells carry four DISTINCT per-cell normals; each emitted seam
+    /// vertex must take its own cell's normal (base-mesh shading continuity),
+    /// not the single edge normal flat across the quad.
+    fn seam_quad_fixture(gs: usize, with_normals: bool) -> HashMap<(i32, i32, i32), ChunkSeamData> {
+        use voxel_core::material::Material;
+        let idx = |x: usize, y: usize, z: usize| z * gs * gs + y * gs + x;
+        let grid = vec![Vec3::new(f32::NAN, 0.0, 0.0); gs * gs * gs];
+
+        // Chunk A owns the boundary edge at (gs, 1, 1, axis=1); its 4 cells:
+        // A(gs-1,1,0), B(0,1,0), B(0,1,1), A(gs-1,1,1)
+        let mut a_verts = grid.clone();
+        a_verts[idx(gs - 1, 1, 0)] = Vec3::new(gs as f32 - 0.5, 1.5, 0.5);
+        a_verts[idx(gs - 1, 1, 1)] = Vec3::new(gs as f32 - 0.5, 1.5, 1.5);
+        let mut b_verts = grid;
+        b_verts[idx(0, 1, 0)] = Vec3::new(0.5, 1.5, 0.5);
+        b_verts[idx(0, 1, 1)] = Vec3::new(0.5, 1.5, 1.5);
+
+        let (mut a_normals, mut b_normals) = (Vec::new(), Vec::new());
+        if with_normals {
+            a_normals = vec![Vec3::ZERO; gs * gs * gs];
+            b_normals = vec![Vec3::ZERO; gs * gs * gs];
+            a_normals[idx(gs - 1, 1, 0)] = Vec3::X;
+            a_normals[idx(gs - 1, 1, 1)] = Vec3::Y;
+            b_normals[idx(0, 1, 0)] = Vec3::Z;
+            b_normals[idx(0, 1, 1)] = Vec3::new(1.0, 1.0, 0.0).normalize();
+        }
+
+        let edge = (
+            EdgeKey::new(gs as u8, 1, 1, 1),
+            EdgeIntersection { t: 0.5, normal: Vec3::NEG_X, material: Material::Limestone },
+        );
+
+        let mut map = HashMap::new();
+        map.insert((0, 0, 0), ChunkSeamData {
+            dc_vertices: a_verts,
+            dc_normals: a_normals,
+            world_origin: Vec3::ZERO,
+            boundary_edges: vec![edge],
+        });
+        map.insert((1, 0, 0), ChunkSeamData {
+            dc_vertices: b_verts,
+            dc_normals: b_normals,
+            world_origin: Vec3::new(gs as f32, 0.0, 0.0),
+            boundary_edges: Vec::new(),
+        });
+        map
+    }
+
+    #[test]
+    fn seam_quads_use_per_cell_normals() {
+        let gs = 4;
+        let map = seam_quad_fixture(gs, true);
+        let mesh = generate_chunk_seam_quads((0, 0, 0), &map, gs);
+        assert_eq!(mesh.vertices.len(), 4, "one boundary edge should emit one quad");
+        assert!(!mesh.triangles.is_empty());
+        // Corner order follows the axis-1 cell order:
+        // A(gs-1,1,0), B(0,1,0), B(0,1,1), A(gs-1,1,1)
+        let expected = [Vec3::X, Vec3::Z, Vec3::new(1.0, 1.0, 0.0).normalize(), Vec3::Y];
+        for (v, want) in mesh.vertices.iter().zip(expected) {
+            assert!(
+                (v.normal - want).length() < 1e-6,
+                "seam corner normal {:?} should be its cell's averaged normal {:?}",
+                v.normal, want
+            );
+        }
+    }
+
+    #[test]
+    fn seam_quads_fall_back_to_edge_normal_without_dc_normals() {
+        let gs = 4;
+        let map = seam_quad_fixture(gs, false);
+        let mesh = generate_chunk_seam_quads((0, 0, 0), &map, gs);
+        assert_eq!(mesh.vertices.len(), 4);
+        for v in &mesh.vertices {
+            assert!(
+                (v.normal - Vec3::NEG_X).length() < 1e-6,
+                "legacy seam data (no dc_normals) must keep the edge normal, got {:?}",
+                v.normal
+            );
         }
     }
 }

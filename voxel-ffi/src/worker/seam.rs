@@ -766,7 +766,7 @@ mod seam_lock_tests {
     use super::*;
     use crate::types::FfiVec3;
     use glam::Vec3;
-    use voxel_core::dual_contouring::mesh_gen::generate_mesh;
+    use voxel_core::dual_contouring::mesh_gen::{compute_cell_normals, generate_mesh};
     use voxel_core::dual_contouring::solve::solve_dc_vertices;
     use voxel_core::hermite::{EdgeIntersection, EdgeKey, HermiteData};
     use voxel_core::material::Material;
@@ -831,8 +831,10 @@ mod seam_lock_tests {
         let dc_vertices = solve_dc_vertices(&hermite, gs);
         let mesh = generate_mesh(&hermite, &dc_vertices, gs);
         let boundary_edges = extract_boundary_edges(&hermite, gs);
+        let dc_normals = compute_cell_normals(&hermite, gs);
         (mesh, ChunkSeamData {
             dc_vertices,
+            dc_normals,
             world_origin: Vec3::new(ox as f32, oy as f32, oz as f32),
             boundary_edges,
         })

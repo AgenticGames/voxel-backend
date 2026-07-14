@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use std::collections::HashSet;
 
 use rayon::prelude::*;
-use voxel_core::dual_contouring::mesh_gen::generate_mesh;
+use voxel_core::dual_contouring::mesh_gen::{compute_cell_normals, generate_mesh};
 use voxel_core::dual_contouring::solve::solve_dc_vertices;
 use voxel_fluid::FluidEvent;
 use voxel_gen::hermite_extract::extract_hermite_data;
@@ -110,7 +110,7 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
                     t_mesh_smooth += t_s.elapsed();
 
                     let b_edges = region_gen::extract_boundary_edges(hermite, cfg.chunk_size);
-                    Some((m, dc_verts, b_edges))
+                    Some((m, dc_verts, b_edges, compute_cell_normals(hermite, cell_size)))
                 } else {
                     None
                 }
@@ -124,7 +124,7 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
             // after the mesh send (see the block past `result_tx.send`).
             let mut stress_region_coords: Vec<(i32, i32, i32)> = Vec::new();
 
-            let (mesh, dc_vertices, boundary_edges) = if let Some(result) = mesh_result {
+            let (mesh, dc_vertices, boundary_edges, dc_normals) = if let Some(result) = mesh_result {
                 result
             } else {
                 // Fix A: Per-region mutex — blocks if another worker is
@@ -169,7 +169,7 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
                         t_mesh_smooth += t_s.elapsed();
 
                         let b_edges = region_gen::extract_boundary_edges(hermite, cfg.chunk_size);
-                        Some((m, dc_verts, b_edges))
+                        Some((m, dc_verts, b_edges, compute_cell_normals(hermite, cell_size)))
                     } else {
                         None
                     }
@@ -374,10 +374,12 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
                                     );
                                     if cfg.mesh_recalc_normals > 0 { mesh.recalculate_normals(); }
                                     let b_edges = region_gen::extract_boundary_edges(&new_hermite, cfg.chunk_size);
+                                    let d_normals = compute_cell_normals(&new_hermite, cell_size);
                                     s.hermite_data.insert(key, new_hermite);
                                     s.base_meshes.insert(key, std::sync::Arc::new(mesh));
                                     s.add_seam_data(key, ChunkSeamData {
                                         dc_vertices: dc_verts,
+                                        dc_normals: d_normals,
                                         world_origin: glam::Vec3::ZERO,
                                         boundary_edges: b_edges,
                                     });
@@ -499,10 +501,10 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
                                          cfg.mesh_boundary_smooth, Some(cell_size));
                                 if cfg.mesh_recalc_normals > 0 { m.recalculate_normals(); }
                                 let b_edges = region_gen::extract_boundary_edges(hermite, cfg.chunk_size);
-                                Some((dc_verts, m, b_edges))
+                                Some((dc_verts, m, b_edges, compute_cell_normals(hermite, cell_size)))
                             } else { None }
                         };
-                        if let Some((dc_verts, mesh, _b_edges)) = computed {
+                        if let Some((dc_verts, mesh, _b_edges, d_normals)) = computed {
                             // Update seam data + base mesh (write lock).
                             // No base-only send — batched_seam_pass below is the sole
                             // sender. A base-only send here races with other workers'
@@ -513,6 +515,7 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
                             let mut s = store.write().unwrap();
                             s.add_seam_data(key, ChunkSeamData {
                                 dc_vertices: dc_verts,
+                                dc_normals: d_normals,
                                 world_origin: glam::Vec3::ZERO,
                                 boundary_edges: _b_edges,
                             });
@@ -576,14 +579,15 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
                                              cfg.mesh_boundary_smooth, Some(cell_size));
                                     if cfg.mesh_recalc_normals > 0 { m.recalculate_normals(); }
                                     let b_edges = region_gen::extract_boundary_edges(hermite, cfg.chunk_size);
-                                    Some((dc_verts, m, b_edges))
+                                    Some((dc_verts, m, b_edges, compute_cell_normals(hermite, cell_size)))
                                 } else { None }
                             };
-                            if let Some((dc_verts, mesh, b_edges)) = computed {
+                            if let Some((dc_verts, mesh, b_edges, d_normals)) = computed {
                                 // No base-only send — see backward-carve comment above.
                                 let mut s = store.write().unwrap();
                                 s.add_seam_data(key, ChunkSeamData {
                                     dc_vertices: dc_verts,
+                                    dc_normals: d_normals,
                                     world_origin: glam::Vec3::ZERO,
                                     boundary_edges: b_edges,
                                 });
@@ -635,7 +639,7 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
                 if profiling { t_mesh_smooth += t_s.elapsed(); }
 
                 let b_edges = region_gen::extract_boundary_edges(hermite, cfg.chunk_size);
-                (m, dc_verts, b_edges)
+                (m, dc_verts, b_edges, compute_cell_normals(hermite, cell_size))
                 }
             };
 
@@ -778,6 +782,7 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
                     chunk,
                     ChunkSeamData {
                         dc_vertices,
+                        dc_normals,
                         world_origin: glam::Vec3::ZERO,
                         boundary_edges,
                     },

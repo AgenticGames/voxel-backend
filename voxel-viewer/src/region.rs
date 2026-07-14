@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use glam::Vec3;
 use rayon::prelude::*;
 use voxel_core::chunk::ChunkCoord;
-use voxel_core::dual_contouring::mesh_gen::generate_mesh;
+use voxel_core::dual_contouring::mesh_gen::{compute_cell_normals, generate_mesh};
 use voxel_core::dual_contouring::solve::solve_dc_vertices;
 use voxel_core::export::{mesh_to_json_multi, JsonMesh};
 use voxel_core::hermite::HermiteData;
@@ -142,9 +142,11 @@ impl GeneratedRegion {
                     let boundary_edges = region_gen::extract_boundary_edges(&hermite, gs);
                     (hermite, dc_vertices, boundary_edges)
                 };
+                let seam_normals = compute_cell_normals(&seam_hermite, gs);
 
                 let seam_data = ChunkSeamData {
                     dc_vertices: seam_dc,
+                    dc_normals: seam_normals,
                     world_origin,
                     boundary_edges: seam_boundary,
                 };
@@ -629,22 +631,25 @@ impl GeneratedRegion {
             }
 
             // Seam data always at base resolution
-            let (seam_dc, seam_boundary) = if is_hires {
+            let (seam_dc, seam_normals, seam_boundary) = if is_hires {
                 let factor = cell_size / gs;
                 let base_density = density.downsample(factor);
                 let base_hermite = extract_hermite_data(&base_density);
                 let base_dc = solve_dc_vertices(&base_hermite, gs);
                 let base_boundary = region_gen::extract_boundary_edges(&base_hermite, gs);
-                (base_dc, base_boundary)
+                let base_normals = compute_cell_normals(&base_hermite, gs);
+                (base_dc, base_normals, base_boundary)
             } else {
                 let boundary_edges = region_gen::extract_boundary_edges(&hermite, gs);
-                (dc_vertices, boundary_edges)
+                let d_normals = compute_cell_normals(&hermite, gs);
+                (dc_vertices, d_normals, boundary_edges)
             };
 
             self.chunk_meshes.insert((cx, cy, cz), mesh);
             self.hermite_data.insert((cx, cy, cz), hermite);
             self.chunk_seam_data.insert((cx, cy, cz), ChunkSeamData {
                 dc_vertices: seam_dc,
+                dc_normals: seam_normals,
                 world_origin,
                 boundary_edges: seam_boundary,
             });
@@ -713,20 +718,23 @@ impl GeneratedRegion {
                 }
 
                 // Seam data always at base resolution
-                let (seam_dc, seam_boundary) = if is_hires {
+                let (seam_dc, seam_normals, seam_boundary) = if is_hires {
                     let factor = cell_size / gs;
                     let base_density = density.downsample(factor);
                     let base_hermite = extract_hermite_data(&base_density);
                     let base_dc = solve_dc_vertices(&base_hermite, gs);
                     let base_boundary = region_gen::extract_boundary_edges(&base_hermite, gs);
-                    (base_dc, base_boundary)
+                    let base_normals = compute_cell_normals(&base_hermite, gs);
+                    (base_dc, base_normals, base_boundary)
                 } else {
                     let boundary_edges = region_gen::extract_boundary_edges(&hermite, gs);
-                    (dc_vertices, boundary_edges)
+                    let d_normals = compute_cell_normals(&hermite, gs);
+                    (dc_vertices, d_normals, boundary_edges)
                 };
 
                 let seam_data = ChunkSeamData {
                     dc_vertices: seam_dc,
+                    dc_normals: seam_normals,
                     world_origin,
                     boundary_edges: seam_boundary,
                 };

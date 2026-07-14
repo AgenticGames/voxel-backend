@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 
-use voxel_core::dual_contouring::mesh_gen::generate_mesh;
+use voxel_core::dual_contouring::mesh_gen::{compute_cell_normals, generate_mesh};
 use voxel_core::dual_contouring::solve::solve_dc_vertices;
 use voxel_fluid::FluidEvent;
 use voxel_gen::hermite_extract::extract_hermite_data;
@@ -704,6 +704,7 @@ pub(super) fn handle_force_chunk_resync(ctx: &super::HandlerCtx<'_>, chunk: (i32
                 );
                 if cfg.mesh_recalc_normals > 0 { mesh.recalculate_normals(); }
                 let boundary_edges = voxel_gen::region_gen::extract_boundary_edges(&hermite, chunk_size);
+                let d_normals = compute_cell_normals(&hermite, cell_size);
                 let base_verts = mesh.vertices.len();
                 {
                     let mut s = store.write().unwrap();
@@ -711,6 +712,7 @@ pub(super) fn handle_force_chunk_resync(ctx: &super::HandlerCtx<'_>, chunk: (i32
                     s.base_meshes.insert(target, std::sync::Arc::new(mesh));
                     s.add_seam_data(target, ChunkSeamData {
                         dc_vertices,
+                        dc_normals: d_normals,
                         world_origin: glam::Vec3::ZERO,
                         boundary_edges,
                     });

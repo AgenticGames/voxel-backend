@@ -152,6 +152,48 @@ pub fn generate_mesh(hermite: &HermiteData, dc_vertices: &[glam::Vec3], grid_siz
     mesh
 }
 
+/// Per-cell averaged hermite normals, indexed like `dc_vertices` (dense
+/// linearized [z][y][x] grid of `grid_size`^3 cells).
+///
+/// Mirrors the accumulation `generate_mesh` applies to base-mesh vertex
+/// normals: every sign-changing edge touching a cell contributes its hermite
+/// normal, then the sum is normalized. Callers that emit extra geometry for
+/// the same cells — the cross-chunk seam quads — use this so their corners
+/// shade continuously with the base meshes on either side of the boundary
+/// instead of flat-shading each quad with a single edge's normal. Cells
+/// touched by no edge stay `Vec3::ZERO`; callers fall back to the edge
+/// normal there.
+pub fn compute_cell_normals(hermite: &HermiteData, grid_size: usize) -> Vec<Vec3> {
+    let mut normals = vec![Vec3::ZERO; grid_size * grid_size * grid_size];
+    for (edge_key, intersection) in hermite.edges.iter() {
+        let x = edge_key.x() as usize;
+        let y = edge_key.y() as usize;
+        let z = edge_key.z() as usize;
+        let cell_indices = match edge_key.axis() as usize {
+            0 => get_quad_cells_x(x, y, z, grid_size),
+            1 => get_quad_cells_y(x, y, z, grid_size),
+            2 => get_quad_cells_z(x, y, z, grid_size),
+            _ => continue,
+        };
+        let cell_indices = match cell_indices {
+            Some(c) => c,
+            None => continue,
+        };
+        for &cell_idx in &cell_indices {
+            if cell_idx < normals.len() {
+                normals[cell_idx] += intersection.normal;
+            }
+        }
+    }
+    for n in normals.iter_mut() {
+        let len = n.length();
+        if len > 1e-6 {
+            *n /= len;
+        }
+    }
+    normals
+}
+
 fn axis_direction(axis: usize) -> Vec3 {
     match axis {
         0 => Vec3::X,

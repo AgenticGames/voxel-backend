@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use glam::Vec3;
 use rayon::prelude::*;
-use voxel_core::dual_contouring::mesh_gen::generate_mesh;
+use voxel_core::dual_contouring::mesh_gen::{compute_cell_normals, generate_mesh};
 use voxel_core::dual_contouring::solve::solve_dc_vertices;
 use voxel_core::hermite::HermiteData;
 use voxel_core::mesh::Mesh;
@@ -383,7 +383,7 @@ impl ChunkStore {
         let smooth_boundary = config.mesh_boundary_smooth;
         let recalc_normals = config.mesh_recalc_normals;
 
-        let outputs: Vec<((i32, i32, i32), HermiteData, Mesh, Vec<Vec3>, Vec<_>, ConvertedMesh)> =
+        let outputs: Vec<((i32, i32, i32), HermiteData, Mesh, Vec<Vec3>, Vec<Vec3>, Vec<_>, ConvertedMesh)> =
             dirty_chunks
                 .par_iter()
                 .filter_map(|&(key, _min_x, _min_y, _min_z, _max_x, _max_y, _max_z)| {
@@ -399,24 +399,26 @@ impl ChunkStore {
                     if recalc_normals > 0 { mesh.recalculate_normals(); }
 
                     let boundary_edges = region_gen::extract_boundary_edges(&hermite, chunk_size);
+                    let dc_normals = compute_cell_normals(&hermite, cell_size);
 
                     let mut converted = convert_mesh_to_ue_scaled(&mesh, voxel_scale, world_scale);
                     crate::convert::bucket_mesh_by_material(&mut converted);
 
-                    Some((key, hermite, mesh, dc_vertices, boundary_edges, converted))
+                    Some((key, hermite, mesh, dc_vertices, dc_normals, boundary_edges, converted))
                 })
                 .collect();
 
         // Phase 2: serial write-back. The HashMaps aren't shared mutably across
         // threads, so apply the per-chunk results here in one pass.
         let mut results = Vec::with_capacity(outputs.len());
-        for (key, hermite, mesh, dc_vertices, boundary_edges, converted) in outputs {
+        for (key, hermite, mesh, dc_vertices, dc_normals, boundary_edges, converted) in outputs {
             self.hermite_data.insert(key, hermite);
             self.base_meshes.insert(key, Arc::new(mesh));
             self.chunk_seam_data.insert(
                 key,
                 Arc::new(ChunkSeamData {
                     dc_vertices,
+                    dc_normals,
                     world_origin: Vec3::ZERO,
                     boundary_edges,
                 }),

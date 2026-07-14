@@ -6,7 +6,7 @@
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
-use voxel_core::dual_contouring::mesh_gen::generate_mesh;
+use voxel_core::dual_contouring::mesh_gen::{compute_cell_normals, generate_mesh};
 use voxel_core::dual_contouring::solve::solve_dc_vertices;
 use voxel_fluid::FluidEvent;
 use voxel_gen::hermite_extract::extract_hermite_data;
@@ -674,7 +674,7 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
 
             // Parallel mesh generation — each chunk independently computes hermite + DC + mesh + smooth
             type BEdges = Vec<(voxel_core::hermite::EdgeKey, voxel_core::hermite::EdgeIntersection)>;
-            let mesh_results: Vec<Option<(voxel_core::mesh::Mesh, Vec<glam::Vec3>, BEdges)>> =
+            let mesh_results: Vec<Option<(voxel_core::mesh::Mesh, Vec<glam::Vec3>, Vec<glam::Vec3>, BEdges)>> =
                 density_fields.par_iter().map(|df_opt| {
                     match df_opt {
                         Some(df) => {
@@ -684,7 +684,8 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
                             let mut mesh = generate_mesh(&h, &dc_verts, cell_size);
                             mesh.smooth(cfg.mesh_smooth_iterations, cfg.mesh_smooth_strength, cfg.mesh_boundary_smooth, Some(cell_size));
                             let boundary_edges = region_gen::extract_boundary_edges(&h, chunk_size);
-                            Some((mesh, dc_verts, boundary_edges))
+                            let d_normals = compute_cell_normals(&h, cell_size);
+                            Some((mesh, dc_verts, d_normals, boundary_edges))
                         }
                         None => None,
                     }
@@ -735,9 +736,10 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
 
             for (i, result) in mesh_results.into_iter().enumerate() {
                 match result {
-                    Some((mesh, dc_verts, boundary_edges)) => {
+                    Some((mesh, dc_verts, d_normals, boundary_edges)) => {
                         seam_data_map.insert(chunks[i], std::sync::Arc::new(ChunkSeamData {
                             dc_vertices: dc_verts,
+                            dc_normals: d_normals,
                             world_origin: glam::Vec3::ZERO,
                             boundary_edges,
                         }));

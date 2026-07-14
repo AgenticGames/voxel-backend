@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 use voxel_core::hermite::{EdgeIntersection, EdgeKey, HermiteData};
 use voxel_core::material::Material;
+use voxel_core::dual_contouring::mesh_gen::compute_cell_normals;
 use voxel_core::dual_contouring::solve::solve_dc_vertices;
 use voxel_gen::region_gen::{
     extract_boundary_edges, generate_chunk_seam_quads, ChunkSeamData,
@@ -86,8 +87,10 @@ fn build_chunk(cx: i32, cy: i32, cz: i32, gs: usize) -> ChunkSeamData {
 
     let dc_vertices = solve_dc_vertices(&hermite, gs);
     let boundary_edges = extract_boundary_edges(&hermite, gs);
+    let dc_normals = compute_cell_normals(&hermite, gs);
     ChunkSeamData {
         dc_vertices,
+        dc_normals,
         world_origin: Vec3::new(ox as f32, oy as f32, oz as f32),
         boundary_edges,
     }
