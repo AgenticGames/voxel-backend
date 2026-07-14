@@ -20,6 +20,13 @@ pub fn generate_mesh(hermite: &HermiteData, dc_vertices: &[glam::Vec3], grid_siz
     // over a dense key. `u32::MAX` = "no vertex assigned yet for this cell"; a real index
     // can never reach u32::MAX (would need 4e9 verts/chunk). One alloc, raw array indexing.
     let mut vertex_map = vec![u32::MAX; dc_vertices.len()];
+    // Per-vertex hermite-normal accumulator, indexed like mesh.vertices. Every
+    // sign-changing edge that touches a cell contributes its normal and the
+    // average is applied after the loop — the old behavior kept whichever edge
+    // happened to come FIRST in hash-map iteration order (an arbitrary pick
+    // among up to 12 candidates, visibly patchy on curved walls when
+    // mesh_recalc_normals is off).
+    let mut normal_accum: Vec<Vec3> = Vec::new();
 
     for (edge_key, intersection) in hermite.edges.iter() {
         let x = edge_key.x() as usize;
@@ -76,8 +83,10 @@ pub fn generate_mesh(hermite: &HermiteData, dc_vertices: &[glam::Vec3], grid_siz
                     normal: intersection.normal,
                     material: intersection.material,
                 });
+                normal_accum.push(Vec3::ZERO);
                 vertex_map[cell_idx] = vi;
             }
+            normal_accum[vi as usize] += intersection.normal;
             quad_verts[i] = vi;
             valid_mask[i] = true;
             valid_count += 1;
@@ -127,6 +136,17 @@ pub fn generate_mesh(hermite: &HermiteData, dc_vertices: &[glam::Vec3], grid_siz
             }
         }
         // else: 2 or fewer valid vertices, skip entirely
+    }
+
+    // Apply the averaged hermite normals. A cancelled sum (thin sheet: the
+    // cell is crossed from both sides by opposing edges) keeps the first
+    // edge's normal — any consistent nonzero side is fine; the far side is
+    // lit via the two-sided material's facing flip.
+    for (v, accum) in mesh.vertices.iter_mut().zip(&normal_accum) {
+        let len = accum.length();
+        if len > 1e-6 {
+            v.normal = *accum / len;
+        }
     }
 
     mesh

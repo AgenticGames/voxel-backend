@@ -169,14 +169,37 @@ impl Mesh {
     }
 
     /// Recalculate area-weighted vertex normals from triangle geometry.
+    ///
+    /// Face normals are accumulated into POSITION buckets (bit-exact position
+    /// match), not vertex indices: seam quads duplicate boundary vertices
+    /// instead of indexing into the base mesh, and index-based accumulation
+    /// gave the coincident copies different one-sided normals — a visible
+    /// lighting crease along every chunk seam. Bucketing by position gives all
+    /// coincident copies the same full-ring average. Topology is untouched.
+    ///
+    /// A bucket whose accumulated normal cancels (thin sheet: front and back
+    /// faces share the welded vertex) KEEPS the vertex's prior hermite normal —
+    /// a zero normal ships to the renderer as unconditionally black.
     pub fn recalculate_normals(&mut self) {
         if self.vertices.is_empty() || self.triangles.is_empty() { return; }
 
-        // Zero all normals
-        for v in &mut self.vertices {
-            v.normal = Vec3::ZERO;
+        // -0.0 and +0.0 are the same position but different bits; `+ 0.0`
+        // canonicalizes -0.0 to +0.0 before taking the bit pattern.
+        #[inline]
+        fn pos_key(p: Vec3) -> (u32, u32, u32) {
+            ((p.x + 0.0).to_bits(), (p.y + 0.0).to_bits(), (p.z + 0.0).to_bits())
         }
 
+        let vert_count = self.vertices.len();
+        let mut bucket_of: Vec<u32> = Vec::with_capacity(vert_count);
+        let mut bucket_ids: std::collections::HashMap<(u32, u32, u32), u32> =
+            std::collections::HashMap::with_capacity(vert_count);
+        for v in &self.vertices {
+            let next = bucket_ids.len() as u32;
+            bucket_of.push(*bucket_ids.entry(pos_key(v.position)).or_insert(next));
+        }
+
+        let mut accum = vec![Vec3::ZERO; bucket_ids.len()];
         for tri in &self.triangles {
             let i0 = tri.indices[0] as usize;
             let i1 = tri.indices[1] as usize;
@@ -189,17 +212,18 @@ impl Mesh {
             // Cross product (un-normalized = area-weighted)
             let normal = (p1 - p0).cross(p2 - p0);
 
-            self.vertices[i0].normal += normal;
-            self.vertices[i1].normal += normal;
-            self.vertices[i2].normal += normal;
+            accum[bucket_of[i0] as usize] += normal;
+            accum[bucket_of[i1] as usize] += normal;
+            accum[bucket_of[i2] as usize] += normal;
         }
 
-        // Normalize
-        for v in &mut self.vertices {
-            let len = v.normal.length();
+        for (vi, v) in self.vertices.iter_mut().enumerate() {
+            let n = accum[bucket_of[vi] as usize];
+            let len = n.length();
             if len > 1e-10 {
-                v.normal /= len;
+                v.normal = n / len;
             }
+            // else: cancelled or unreferenced — keep the prior normal.
         }
     }
 
@@ -333,6 +357,65 @@ mod tests {
         for v in &mesh.vertices {
             let len = v.normal.length();
             assert!((len - 1.0).abs() < 1e-5, "Normal length should be ~1.0, got {len}");
+        }
+    }
+
+    #[test]
+    fn recalc_unifies_coincident_duplicate_vertices() {
+        // The seam-append pattern: the second triangle references coincident
+        // DUPLICATE copies of the shared edge's vertices instead of indexing
+        // the first triangle's. Position-bucketed accumulation must give the
+        // duplicates identical full-ring normals (index-based accumulation
+        // gave each copy a one-sided normal = lighting crease on chunk seams).
+        let mut mesh = Mesh {
+            vertices: vec![
+                Vertex { position: Vec3::new(0.0, 0.0, 0.0), normal: Vec3::Y, material: Material::Limestone }, // 0: A
+                Vertex { position: Vec3::new(1.0, 0.0, 0.0), normal: Vec3::Y, material: Material::Limestone }, // 1: B
+                Vertex { position: Vec3::new(0.0, 1.0, 0.0), normal: Vec3::Y, material: Material::Limestone }, // 2: C
+                Vertex { position: Vec3::new(1.0, 0.0, 0.0), normal: Vec3::Y, material: Material::Limestone }, // 3: B duplicate
+                Vertex { position: Vec3::new(0.0, 1.0, 0.0), normal: Vec3::Y, material: Material::Limestone }, // 4: C duplicate
+                Vertex { position: Vec3::new(1.0, 1.0, 1.0), normal: Vec3::Y, material: Material::Limestone }, // 5: D
+            ],
+            triangles: vec![
+                Triangle { indices: [0, 1, 2] }, // A-B-C
+                Triangle { indices: [3, 5, 4] }, // B'-D-C' (tilted plane)
+            ],
+        };
+        mesh.recalculate_normals();
+
+        let nb = mesh.vertices[1].normal;
+        let nb_dup = mesh.vertices[3].normal;
+        let nc = mesh.vertices[2].normal;
+        let nc_dup = mesh.vertices[4].normal;
+        assert!((nb - nb_dup).length() < 1e-6, "duplicate of B must share B's normal: {nb:?} vs {nb_dup:?}");
+        assert!((nc - nc_dup).length() < 1e-6, "duplicate of C must share C's normal: {nc:?} vs {nc_dup:?}");
+        // And the shared normal must be a blend of BOTH faces, not either face alone.
+        let face1 = Vec3::new(0.0, 0.0, 1.0);
+        assert!((nb - face1).length() > 1e-3, "shared normal must include the second face's contribution");
+        assert!(nb.length() > 0.9, "shared normal must be unit-ish, got {nb:?}");
+    }
+
+    #[test]
+    fn recalc_keeps_prior_normal_when_faces_cancel() {
+        // Thin-sheet pattern: front and back faces reference the SAME welded
+        // vertices with opposite winding, so area-weighted face normals cancel
+        // to ~zero. The prior (hermite) normal must survive — a zero normal
+        // renders unconditionally black.
+        let mut mesh = Mesh {
+            vertices: vec![
+                Vertex { position: Vec3::new(0.0, 0.0, 0.0), normal: Vec3::X, material: Material::Limestone },
+                Vertex { position: Vec3::new(1.0, 0.0, 0.0), normal: Vec3::X, material: Material::Limestone },
+                Vertex { position: Vec3::new(0.0, 1.0, 0.0), normal: Vec3::X, material: Material::Limestone },
+            ],
+            triangles: vec![
+                Triangle { indices: [0, 1, 2] },
+                Triangle { indices: [0, 2, 1] },
+            ],
+        };
+        mesh.recalculate_normals();
+        for v in &mesh.vertices {
+            assert!((v.normal - Vec3::X).length() < 1e-6,
+                "cancelled accumulation must keep the prior normal, got {:?}", v.normal);
         }
     }
 }

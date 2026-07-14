@@ -32,11 +32,17 @@ pub fn convert_mesh_to_ue_scaled(mesh: &Mesh, voxel_scale: f32, world_scale: f32
             z: p.y * combined_scale,
         });
 
+        // Rust mesh normals follow the +gradient convention (they point INTO
+        // the rock); the caves are interior-only, so UE needs them facing the
+        // air the player stands in. Negate at this boundary — the terrain
+        // material's Z-flip hack that used to compensate is retired with this.
+        // Winding is untouched: the triangle order below already puts the
+        // air side as UE's front face.
         let n = v.normal;
         normals.push(FfiVec3 {
-            x: n.x,
-            y: -n.z,
-            z: n.y,
+            x: -n.x,
+            y: n.z,
+            z: -n.y,
         });
 
         material_ids.push(v.material as u8);
@@ -415,6 +421,26 @@ mod tests {
             }
         }
         assert_eq!(covered as usize, out.indices.len(), "submeshes must cover all indices");
+    }
+
+    #[test]
+    fn exported_normals_are_negated_to_face_air() {
+        // Rust mesh normals point INTO the rock (+gradient convention); the
+        // export must hand UE air-facing normals. Rust +Y (into rock) maps to
+        // UE -(+Z) = (0,0,-1).
+        let mesh = Mesh {
+            vertices: vec![
+                Vertex { position: Vec3::ZERO, normal: Vec3::Y, material: Material::Limestone },
+                Vertex { position: Vec3::new(1.0, 0.0, 0.0), normal: Vec3::Y, material: Material::Limestone },
+                Vertex { position: Vec3::new(0.0, 0.0, 1.0), normal: Vec3::Y, material: Material::Limestone },
+            ],
+            triangles: vec![Triangle { indices: [0, 1, 2] }],
+        };
+        let converted = convert_mesh_to_ue(&mesh, 100.0);
+        for n in &converted.normals {
+            assert!(n.x.abs() < 1e-6 && n.y.abs() < 1e-6 && (n.z + 1.0).abs() < 1e-6,
+                "expected UE normal (0,0,-1), got ({}, {}, {})", n.x, n.y, n.z);
+        }
     }
 
     #[test]

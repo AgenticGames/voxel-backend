@@ -275,7 +275,23 @@ fn estimate_normal_fast(
     if len > 1e-8 {
         normal / len
     } else {
-        glam::Vec3::Y
+        // Degenerate gradient: on a 1-2 voxel sheet the through-thickness
+        // central difference cancels (air on both sides of the grid point).
+        // Orient along the edge toward its solid endpoint (+gradient
+        // convention, same as the non-degenerate path) — the old world-up
+        // fallback shaded every thin formation as ceiling-facing regardless
+        // of its actual orientation.
+        let (d0, d1) = match axis {
+            0 => (density.get(x, y, z).density, density.get(x + 1, y, z).density),
+            1 => (density.get(x, y, z).density, density.get(x, y + 1, z).density),
+            _ => (density.get(x, y, z).density, density.get(x, y, z + 1).density),
+        };
+        let dir = match axis {
+            0 => glam::Vec3::X,
+            1 => glam::Vec3::Y,
+            _ => glam::Vec3::Z,
+        };
+        if d1 >= d0 { dir } else { -dir }
     }
 }
 
@@ -303,6 +319,48 @@ mod tests {
         let data = extract_hermite_data(&field);
         // Should have sign changes on edges adjacent to (1,1,1)
         assert!(!data.edges.is_empty());
+    }
+
+    #[test]
+    fn test_thin_sheet_normal_faces_through_sheet_not_up() {
+        // A 1-voxel-thick vertical slab at x==2: the grid point inside the
+        // sheet has air on BOTH x-neighbors, so the central difference
+        // cancels and the estimator hits its degenerate fallback. The old
+        // fallback returned world-up (Y), shading every thin formation as
+        // ceiling-facing; the fix orients along the edge toward the solid
+        // endpoint (+gradient convention).
+        let mut field = DensityField::new(5);
+        for z in 0..5 {
+            for y in 0..5 {
+                for x in 0..5 {
+                    let s = field.get_mut(x, y, z);
+                    if x == 2 {
+                        s.density = 1.0;
+                        s.material = Material::Limestone;
+                    } else {
+                        s.density = -1.0;
+                        s.material = Material::Air;
+                    }
+                }
+            }
+        }
+
+        let data = extract_hermite_data(&field);
+
+        // Air(x=1) -> Solid(x=2): crossing at t=0.5 snaps to the in-sheet grid
+        // point, gradient cancels, fallback must point +X (toward solid).
+        let left = data.edges.get(&EdgeKey::new(1, 2, 2, 0))
+            .expect("expected sign change on X-edge at (1,2,2)");
+        assert!((left.normal - glam::Vec3::X).length() < 1e-5,
+            "left-side sheet normal should be +X, got {:?}", left.normal);
+        assert!(left.normal.y.abs() < 1e-5, "must not fall back to world-up");
+
+        // Solid(x=2) -> Air(x=3): the nearest grid point is one voxel into the
+        // air, central difference is non-degenerate and already points -X.
+        let right = data.edges.get(&EdgeKey::new(2, 2, 2, 0))
+            .expect("expected sign change on X-edge at (2,2,2)");
+        assert!((right.normal - glam::Vec3::NEG_X).length() < 1e-5,
+            "right-side sheet normal should be -X, got {:?}", right.normal);
     }
 
     #[test]
