@@ -175,13 +175,25 @@ impl Mesh {
     /// instead of indexing into the base mesh, and index-based accumulation
     /// gave the coincident copies different one-sided normals — a visible
     /// lighting crease along every chunk seam. Bucketing by position gives all
-    /// coincident copies the same full-ring average. Topology is untouched.
+    /// coincident copies the same full-ring average.
     ///
-    /// A bucket whose accumulated normal cancels (thin sheet: front and back
-    /// faces share the welded vertex) KEEPS the vertex's prior hermite normal —
-    /// a zero normal ships to the renderer as unconditionally black.
+    /// Thin sheets and shells (1-cell-thick rock): DC emits ONE welded vertex
+    /// layer serving BOTH faces, so a bucket's front/back contributions nearly
+    /// cancel — the residual is a small, essentially random vector that
+    /// normalizes to a full-strength garbage normal (checkered black/bright
+    /// facets under any light; verified in-game 2026-07-14). Such buckets are
+    /// SPLIT per facing side: triangles on each side get their own vertex copy
+    /// (same position/material) carrying that side's average normal. Vertex
+    /// count grows slightly on sheets; positions and triangle count are
+    /// untouched.
     pub fn recalculate_normals(&mut self) {
         if self.vertices.is_empty() || self.triangles.is_empty() { return; }
+
+        // A bucket is "two-sided" when its summed normal is much shorter than
+        // the total contributed magnitude (opposing faces eat each other).
+        // 0.35 keeps sharp creases (~90-120 degrees) smooth-shaded while
+        // catching genuine front/back cancellation.
+        const CANCEL_RATIO: f32 = 0.35;
 
         // -0.0 and +0.0 are the same position but different bits; `+ 0.0`
         // canonicalizes -0.0 to +0.0 before taking the bit pattern.
@@ -198,32 +210,105 @@ impl Mesh {
             let next = bucket_ids.len() as u32;
             bucket_of.push(*bucket_ids.entry(pos_key(v.position)).or_insert(next));
         }
+        let bucket_count = bucket_ids.len();
 
-        let mut accum = vec![Vec3::ZERO; bucket_ids.len()];
+        // Per-bucket: a reference direction (first face normal seen), plus
+        // accumulators for faces agreeing/opposing it and total magnitude.
+        let mut reference = vec![Vec3::ZERO; bucket_count];
+        let mut acc_with = vec![Vec3::ZERO; bucket_count];
+        let mut acc_against = vec![Vec3::ZERO; bucket_count];
+        let mut magnitude = vec![0.0f32; bucket_count];
+
+        let face_normal = |vertices: &[Vertex], tri: &Triangle| {
+            let p0 = vertices[tri.indices[0] as usize].position;
+            let p1 = vertices[tri.indices[1] as usize].position;
+            let p2 = vertices[tri.indices[2] as usize].position;
+            (p1 - p0).cross(p2 - p0) // un-normalized = area-weighted
+        };
+
         for tri in &self.triangles {
-            let i0 = tri.indices[0] as usize;
-            let i1 = tri.indices[1] as usize;
-            let i2 = tri.indices[2] as usize;
-
-            let p0 = self.vertices[i0].position;
-            let p1 = self.vertices[i1].position;
-            let p2 = self.vertices[i2].position;
-
-            // Cross product (un-normalized = area-weighted)
-            let normal = (p1 - p0).cross(p2 - p0);
-
-            accum[bucket_of[i0] as usize] += normal;
-            accum[bucket_of[i1] as usize] += normal;
-            accum[bucket_of[i2] as usize] += normal;
+            let n = face_normal(&self.vertices, tri);
+            for &i in &tri.indices {
+                let b = bucket_of[i as usize] as usize;
+                if reference[b] == Vec3::ZERO {
+                    reference[b] = n;
+                }
+                if n.dot(reference[b]) >= 0.0 {
+                    acc_with[b] += n;
+                } else {
+                    acc_against[b] += n;
+                }
+                magnitude[b] += n.length();
+            }
         }
 
-        for (vi, v) in self.vertices.iter_mut().enumerate() {
-            let n = accum[bucket_of[vi] as usize];
-            let len = n.length();
-            if len > 1e-10 {
-                v.normal = n / len;
+        // Resolve each bucket: a single blended normal, or a per-side split.
+        // split_normals[b] = Some((with_side, against_side)) marks a split.
+        let mut single = vec![Vec3::ZERO; bucket_count];
+        let mut split: Vec<Option<(Vec3, Vec3)>> = vec![None; bucket_count];
+        for b in 0..bucket_count {
+            let sum = acc_with[b] + acc_against[b];
+            let len = sum.length();
+            if magnitude[b] <= 1e-10 {
+                continue; // unreferenced — vertices keep their prior normal
             }
-            // else: cancelled or unreferenced — keep the prior normal.
+            if len > CANCEL_RATIO * magnitude[b] {
+                single[b] = sum / len;
+            } else {
+                let w = acc_with[b];
+                let a = acc_against[b];
+                let w_n = if w.length() > 1e-10 { w.normalize() } else { Vec3::ZERO };
+                let a_n = if a.length() > 1e-10 { a.normalize() } else { Vec3::ZERO };
+                split[b] = Some((w_n, a_n));
+            }
+        }
+
+        // Apply single-normal buckets.
+        for (vi, v) in self.vertices.iter_mut().enumerate() {
+            let b = bucket_of[vi] as usize;
+            if split[b].is_none() && single[b] != Vec3::ZERO {
+                v.normal = single[b];
+            }
+        }
+
+        // Apply splits: each (original vertex, side) pair resolves to one
+        // final vertex index — the first side encountered keeps the original
+        // index, the other side gets a duplicated vertex.
+        let mut side_map: std::collections::HashMap<(u32, bool), u32> =
+            std::collections::HashMap::new();
+        let tri_count = self.triangles.len();
+        for t in 0..tri_count {
+            let n = face_normal(&self.vertices, &self.triangles[t]);
+            for c in 0..3 {
+                let orig = self.triangles[t].indices[c];
+                let b = bucket_of[orig as usize] as usize;
+                let Some((with_n, against_n)) = split[b] else { continue };
+                let is_with = n.dot(reference[b]) >= 0.0;
+                let desired = if is_with { with_n } else { against_n };
+                if desired == Vec3::ZERO {
+                    continue; // degenerate side — leave the prior normal
+                }
+                let key = (orig, is_with);
+                let final_idx = match side_map.get(&key) {
+                    Some(&idx) => idx,
+                    None => {
+                        let idx = if side_map.contains_key(&(orig, !is_with)) {
+                            // Other side already claimed the original — duplicate.
+                            let dup = self.vertices.len() as u32;
+                            let mut v = self.vertices[orig as usize];
+                            v.normal = desired;
+                            self.vertices.push(v);
+                            dup
+                        } else {
+                            self.vertices[orig as usize].normal = desired;
+                            orig
+                        };
+                        side_map.insert(key, idx);
+                        idx
+                    }
+                };
+                self.triangles[t].indices[c] = final_idx;
+            }
         }
     }
 
@@ -396,11 +481,12 @@ mod tests {
     }
 
     #[test]
-    fn recalc_keeps_prior_normal_when_faces_cancel() {
+    fn recalc_splits_thin_sheet_vertices_per_side() {
         // Thin-sheet pattern: front and back faces reference the SAME welded
-        // vertices with opposite winding, so area-weighted face normals cancel
-        // to ~zero. The prior (hermite) normal must survive — a zero normal
-        // renders unconditionally black.
+        // vertices with opposite winding, so area-weighted face normals cancel.
+        // The bucket must SPLIT: each triangle ends up with vertices whose
+        // normals match its own facing, and no vertex ships a zero or
+        // garbage-residual normal.
         let mut mesh = Mesh {
             vertices: vec![
                 Vertex { position: Vec3::new(0.0, 0.0, 0.0), normal: Vec3::X, material: Material::Limestone },
@@ -413,9 +499,26 @@ mod tests {
             ],
         };
         mesh.recalculate_normals();
+
+        assert_eq!(mesh.vertex_count(), 6, "each side must get its own vertex copies");
+        assert_eq!(mesh.triangle_count(), 2, "triangle count must not change");
+        for tri in &mesh.triangles {
+            let p0 = mesh.vertices[tri.indices[0] as usize].position;
+            let p1 = mesh.vertices[tri.indices[1] as usize].position;
+            let p2 = mesh.vertices[tri.indices[2] as usize].position;
+            let face_n = (p1 - p0).cross(p2 - p0).normalize();
+            for &i in &tri.indices {
+                let v = &mesh.vertices[i as usize];
+                assert!((v.normal - face_n).length() < 1e-5,
+                    "split vertex normal {:?} must match its side's face normal {:?}", v.normal, face_n);
+                assert!((v.normal.length() - 1.0).abs() < 1e-5, "must be unit length");
+            }
+        }
+        // Positions must be preserved exactly (duplicates coincide).
         for v in &mesh.vertices {
-            assert!((v.normal - Vec3::X).length() < 1e-6,
-                "cancelled accumulation must keep the prior normal, got {:?}", v.normal);
+            assert!(v.position == Vec3::new(0.0, 0.0, 0.0)
+                || v.position == Vec3::new(1.0, 0.0, 0.0)
+                || v.position == Vec3::new(0.0, 1.0, 0.0));
         }
     }
 }
