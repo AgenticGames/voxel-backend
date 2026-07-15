@@ -576,13 +576,20 @@ fn ffi_to_artesian_config(c: &FfiEngineConfig) -> voxel_gen::config::ArtesianCon
 fn ffi_to_zone_config(c: &FfiEngineConfig) -> voxel_gen::config::ZoneConfig {
     voxel_gen::config::ZoneConfig {
         enabled: c.zone_enabled != 0,
-        cathedral_chance: if c.zone_cathedral_chance > 0.0 { c.zone_cathedral_chance } else { 0.15 },
-        lake_chance: if c.zone_lake_chance > 0.0 { c.zone_lake_chance } else { 0.12 },
-        canyon_chance: if c.zone_canyon_chance > 0.0 { c.zone_canyon_chance } else { 0.10 },
-        lava_gallery_chance: if c.zone_lava_gallery_chance > 0.0 { c.zone_lava_gallery_chance } else { 0.08 },
-        bioluminescent_chance: if c.zone_bioluminescent_chance > 0.0 { c.zone_bioluminescent_chance } else { 0.10 },
-        terraces_chance: if c.zone_terraces_chance > 0.0 { c.zone_terraces_chance } else { 0.08 },
-        frozen_chance: if c.zone_frozen_chance > 0.0 { c.zone_frozen_chance } else { 0.06 },
+        // Spawn chances pass through verbatim — 0.0 means "never spawn this zone",
+        // not "unset, use the default". The `> 0.0 { x } else { default }` idiom used
+        // for the tuning fields below cannot be applied here: it makes a deliberate 0
+        // indistinguishable from an unset field and silently restores the default, so
+        // disabling a zone type from the UE panel has no effect. Zero-initialised
+        // callers are unaffected — they also get zone_enabled == 0, which short-circuits
+        // place_zones() before any chance is read.
+        cathedral_chance: c.zone_cathedral_chance,
+        lake_chance: c.zone_lake_chance,
+        canyon_chance: c.zone_canyon_chance,
+        lava_gallery_chance: c.zone_lava_gallery_chance,
+        bioluminescent_chance: c.zone_bioluminescent_chance,
+        terraces_chance: c.zone_terraces_chance,
+        frozen_chance: c.zone_frozen_chance,
         cathedral_min_air: if c.zone_cathedral_min_air > 0 { c.zone_cathedral_min_air } else { 2000 },
         lake_min_air: if c.zone_lake_min_air > 0 { c.zone_lake_min_air } else { 1500 },
         canyon_min_air: if c.zone_canyon_min_air > 0 { c.zone_canyon_min_air } else { 800 },
@@ -615,7 +622,8 @@ fn ffi_to_zone_config(c: &FfiEngineConfig) -> voxel_gen::config::ZoneConfig {
         frozen_floor_depth: if c.zone_frozen_floor_depth > 0 { c.zone_frozen_floor_depth } else { 2 },
         frozen_waterfall_count: if c.zone_frozen_waterfall_count > 0 { c.zone_frozen_waterfall_count } else { 2 },
         frozen_ice_stalactite_chance: if c.zone_frozen_ice_stalactite_chance > 0.0 { c.zone_frozen_ice_stalactite_chance } else { 0.3 },
-        frozen_mega_chance: if c.zone_frozen_mega_chance > 0.0 { c.zone_frozen_mega_chance } else { 0.03 },
+        // Same as the per-type chances above: 0.0 must mean "never build a vault".
+        frozen_mega_chance: c.zone_frozen_mega_chance,
     }
 }
 

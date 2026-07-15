@@ -36,7 +36,9 @@ pub fn get_or_create_blueprint(
         // Roll chance inside the cache init
         let mut rng = ChaCha8Rng::seed_from_u64(global_seed.wrapping_add(0xAE6A_F001));
         let roll: f32 = rng.gen();
-        if roll > frozen_mega_chance {
+        // gen() samples [0, 1), so a roll of exactly 0.0 would pass `roll > 0.0`.
+        // Check the chance explicitly so 0.0 always means "no vault".
+        if frozen_mega_chance <= 0.0 || roll > frozen_mega_chance {
             // No vault this session -- store a sentinel with empty bounds
             return (global_seed, MegaVaultBlueprint::empty());
         }
