@@ -85,7 +85,27 @@ pub(crate) fn fluid_sim_loop_wrapper(
         }
     }
 
+    // Drain the internal channel until the SIM thread drops its sender.
+    // The sim can be blocked mid-`internal_tx.send()` on the bounded(128)
+    // channel at the exact moment the shutdown flag flips — this relay was
+    // the only consumer, so a plain join() here deadlocks: sim never
+    // finishes its send, join never returns, and DestroyEngine wedges the
+    // game thread (2026-07-17 PIE-exit hang #2 — all 14 workers joined,
+    // fluid join pending forever; reproduced 1-in-3 stops on fluid-heavy
+    // saves). Discard the drained results — UE is tearing down.
+    loop {
+        match internal_rx.recv_timeout(std::time::Duration::from_millis(50)) {
+            Ok(_) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                if sim_handle.is_finished() {
+                    break;
+                }
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        }
+    }
     let _ = sim_handle.join();
+    crate::panic_log::note("[FFI_SHUTDOWN] fluid relay: sim joined + internal drained");
 }
 
 /// Convert a fluid mesh from Rust local chunk space to UE local chunk space.
