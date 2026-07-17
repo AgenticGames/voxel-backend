@@ -767,6 +767,19 @@ impl VoxelEngine {
         drop(self.mine_tx);
         drop(self.fluid_event_tx);
         drop(self.predict_wake_tx);
+        // Drop the RESULT receiver too, for the send side of the same
+        // deadlock family: UE stops polling results the instant PIE tears
+        // down, so the bounded result queue (2048) fills and any thread
+        // mid-`result_tx.send()` blocks forever — it never re-checks the
+        // shutdown flag, and the join below hangs the game thread inside
+        // DestroyEngine ("Rust thread joins" was the last SHUTDOWN-TRACE
+        // breadcrumb of the 2026-07-17 infinite PIE-exit hang). The fluid
+        // thread sends FluidMesh results through the same channel, so a
+        // full result queue also stops it draining fluid events, which in
+        // turn wedges workers on fluid_event_tx — dropping the receiver
+        // fail-fasts the entire cascade (send returns SendError, loops see
+        // `shutdown` and exit).
+        drop(self.result_rx);
         for handle in self.workers {
             let _ = handle.join();
         }

@@ -966,6 +966,57 @@
         }
     }
 
+    /// Regression for the 2026-07-17 infinite PIE-exit hang: UE stops
+    /// polling results the moment PIE tears down, the bounded result queue
+    /// (2048) fills, and any worker mid-`result_tx.send()` blocked forever —
+    /// `VoxelEngine::shutdown()` then hung on `join()` inside DestroyEngine.
+    /// Fill the result queue without ever polling, then require shutdown to
+    /// complete under a watchdog. Deep-solid chunks (top-y < -200) take the
+    /// coarse bypass, so each result is near-free to produce.
+    #[test]
+    fn shutdown_completes_with_full_unpolled_result_queue() {
+        unsafe {
+            let mut cfg = test_config();
+            cfg.blank_canvas = 1; // uniform solid — skips all noise/decoration
+            let engine = voxel_create_engine(&cfg);
+            assert!(!engine.is_null());
+
+            // Push >2048 chunk gens (retrying while the bounded generate
+            // queue is full). cy=-50 with chunk_size=16 puts every chunk far
+            // below the -200 deep-solid bypass. 30s budget is generous — the
+            // fill normally finishes in a couple of seconds.
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            let mut accepted: u32 = 0;
+            let mut i: i32 = 0;
+            while accepted < 2200 && std::time::Instant::now() < deadline {
+                let chunk = FfiChunkCoord { x: i % 64, y: -50 - (i / 4096), z: (i / 64) % 64 };
+                if voxel_request_generate(engine, chunk) == 1 {
+                    accepted += 1;
+                    i += 1;
+                } else {
+                    thread::sleep(Duration::from_millis(2));
+                }
+            }
+            assert!(
+                accepted >= 2100,
+                "fixture failed to overfill the result queue (accepted={accepted})"
+            );
+            // Let workers wedge against the full result queue.
+            thread::sleep(Duration::from_millis(1500));
+
+            let addr = engine as usize;
+            let (done_tx, done_rx) = crossbeam_channel::bounded::<()>(1);
+            thread::spawn(move || {
+                voxel_destroy_engine(addr as *mut c_void);
+                let _ = done_tx.send(());
+            });
+            assert!(
+                done_rx.recv_timeout(Duration::from_secs(60)).is_ok(),
+                "voxel_destroy_engine hung with a full unpolled result queue"
+            );
+        }
+    }
+
     #[test]
     fn generate_single_chunk_and_poll() {
         unsafe {
