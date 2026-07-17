@@ -33,7 +33,12 @@ use super::seam::{
 };
 use super::try_handle_mine;
 
-pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32), generation: u64) {
+pub(super) fn handle_generate(
+    ctx: &super::HandlerCtx<'_>,
+    chunk: (i32, i32, i32),
+    generation: u64,
+    is_priority: bool,
+) {
     let result_tx = ctx.result_tx;
     let store = ctx.store;
     let config = ctx.config;
@@ -155,6 +160,16 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
                 let region_guard = match region_entry.gate.try_lock() {
                     Ok(g) => g,
                     Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) if is_priority => {
+                        // PriorityGenerate = spawn/restore ground chunks and
+                        // other latency-critical requests. Parking would make
+                        // them wait for a worker to come free (seconds when
+                        // the pool is deep in slow paths) — the async spawn
+                        // teleport ground-wait can't afford that. Keep the
+                        // pre-convoy blocking wait: we wake the instant the
+                        // owner releases and mesh via the retry fast path.
+                        region_entry.gate.lock().unwrap_or_else(|p| p.into_inner())
+                    }
                     Err(std::sync::TryLockError::WouldBlock) => {
                         let parked = {
                             let mut w = region_entry
@@ -228,6 +243,13 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
                 // that arrive meanwhile park on the entry instead of
                 // blocking (see drain after the commit write-block).
                 was_slow_path = true;
+
+                // Bound slow-path concurrency: uncapped 8-wide region gen
+                // inflates each region's wall-clock 2.5-6x (CPU
+                // oversubscription) and blows the spawn-restore teleport's
+                // ~10s ground deadline. Blocking here while holding the
+                // gate is fine — peers park rather than wait.
+                ctx.slow_path_permits.acquire();
 
                 let t0 = Instant::now();
                 let coords = region_chunks(rk, cfg.region_size);
@@ -333,6 +355,7 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
                     rk, &region_entry, regions_in_flight, ctx.parked_generates,
                 );
                 drop(region_guard);
+                ctx.slow_path_permits.release();
                 // Backward sharing: carve new worms into already-loaded chunks
                 // from other regions, then re-extract hermite and re-mesh
                 if !worm_paths.is_empty() {

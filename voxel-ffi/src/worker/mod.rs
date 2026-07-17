@@ -138,6 +138,44 @@ impl Default for ParkedGenerates {
     }
 }
 
+/// Counting semaphore bounding how many workers may run the region slow path
+/// (generate_region_densities) CONCURRENTLY. Unbounded concurrency maximizes
+/// drain throughput but inflates each region's wall-clock 2.5-6x through CPU
+/// oversubscription (8 owners x rayon inside each) — and the saved-position
+/// restore's async ground-wait teleport has a ~10s deadline that individual
+/// region latency must meet. Measured 2026-07-17: uncapped, base_density avg
+/// went 1030 -> 2436 ms and the restore reliably missed its deadline (player
+/// free-fell through absent ground into an unrecoverable generation chase);
+/// pre-convoy serial gen landed it at +8.6-9.9s, right at the edge. Capping
+/// at half the pool keeps regions near serial speed while still generating
+/// several regions in parallel, and leaves the other workers free to mesh
+/// parked fast-path chunks.
+pub struct SlowPathPermits {
+    state: Mutex<usize>,
+    cv: std::sync::Condvar,
+}
+
+impl SlowPathPermits {
+    pub fn new(max_concurrent: usize) -> Self {
+        Self { state: Mutex::new(max_concurrent), cv: std::sync::Condvar::new() }
+    }
+
+    pub(crate) fn acquire(&self) {
+        let mut avail = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        while *avail == 0 {
+            avail = self.cv.wait(avail).unwrap_or_else(|p| p.into_inner());
+        }
+        *avail -= 1;
+    }
+
+    pub(crate) fn release(&self) {
+        let mut avail = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        *avail += 1;
+        drop(avail);
+        self.cv.notify_one();
+    }
+}
+
 /// Drain a region's parked waiters into the shared re-dispatch pool and
 /// retire the map entry. Called by the region owner at density-commit time,
 /// by a gate claimant whose retry fast path hit (region committed by a
@@ -183,6 +221,7 @@ pub(crate) struct HandlerCtx<'a> {
     pub deferred_region_stress: &'a Arc<DeferredRegionStress>,
     pub pending_seams: &'a Arc<seam::PendingSeams>,
     pub parked_generates: &'a Arc<ParkedGenerates>,
+    pub slow_path_permits: &'a Arc<SlowPathPermits>,
 }
 
 /// Worker thread main loop. Each worker pulls from shared channels.
@@ -211,6 +250,7 @@ pub fn worker_loop(
     deferred_region_stress: Arc<DeferredRegionStress>,
     pending_seams: Arc<seam::PendingSeams>,
     parked_generates: Arc<ParkedGenerates>,
+    slow_path_permits: Arc<SlowPathPermits>,
 ) {
     let hb = &heartbeats[worker_id];
     while !shutdown.load(Ordering::Relaxed) {
@@ -222,7 +262,7 @@ pub fn worker_loop(
             handle_request(
                 req, &result_tx, &store, &config, &stress_config, &generation_counters,
                 world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &mine_rx, &morph_manifest, &morph_snapshot,
-                &regions_in_flight, &crystal_anchors, &deferred_region_stress, &pending_seams, &parked_generates,
+                &regions_in_flight, &crystal_anchors, &deferred_region_stress, &pending_seams, &parked_generates, &slow_path_permits,
             );
             hb.idle();
             continue;
@@ -260,7 +300,7 @@ pub fn worker_loop(
             handle_request(
                 req, &result_tx, &store, &config, &stress_config, &generation_counters,
                 world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &mine_rx, &morph_manifest, &morph_snapshot,
-                &regions_in_flight, &crystal_anchors, &deferred_region_stress, &pending_seams, &parked_generates,
+                &regions_in_flight, &crystal_anchors, &deferred_region_stress, &pending_seams, &parked_generates, &slow_path_permits,
             );
             hb.idle();
             continue;
@@ -276,7 +316,7 @@ pub fn worker_loop(
                 handle_request(
                     req, &result_tx, &store, &config, &stress_config, &generation_counters,
                     world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &mine_rx, &morph_manifest, &morph_snapshot,
-                    &regions_in_flight, &crystal_anchors, &deferred_region_stress, &pending_seams, &parked_generates,
+                    &regions_in_flight, &crystal_anchors, &deferred_region_stress, &pending_seams, &parked_generates, &slow_path_permits,
                 );
                 hb.idle();
             }
@@ -423,6 +463,7 @@ fn handle_request(
     deferred_region_stress: &Arc<DeferredRegionStress>,
     pending_seams: &Arc<seam::PendingSeams>,
     parked_generates: &Arc<ParkedGenerates>,
+    slow_path_permits: &Arc<SlowPathPermits>,
 ) {
     let ctx = HandlerCtx {
         result_tx,
@@ -443,15 +484,20 @@ fn handle_request(
         deferred_region_stress,
         pending_seams,
         parked_generates,
+        slow_path_permits,
     };
     match req {
         // ComputePath is handled exclusively by the dedicated path-worker
         // (see `path_worker_loop`). If it ever lands here it means routing
         // confusion — silently drop rather than panic.
         WorkerRequest::ComputePath { .. } => {}
-        WorkerRequest::PriorityGenerate { chunk, generation } |
+        WorkerRequest::PriorityGenerate { chunk, generation } => {
+            // Priority requests (spawn/restore ground chunks) never park —
+            // see the is_priority blocking arm in handle_generate.
+            generate::handle_generate(&ctx, chunk, generation, true);
+        }
         WorkerRequest::Generate { chunk, generation } => {
-            generate::handle_generate(&ctx, chunk, generation);
+            generate::handle_generate(&ctx, chunk, generation, false);
         }
         WorkerRequest::Flatten { base_x, base_y, base_z, host_material } => {
             brush::handle_flatten(&ctx, base_x, base_y, base_z, host_material);

@@ -348,6 +348,11 @@ impl VoxelEngine {
         // region, re-dispatched with priority once the region's densities
         // commit. See worker::ParkedGenerates (region-convoy fix).
         let parked_generates = Arc::new(crate::worker::ParkedGenerates::new());
+        // Bound concurrent region slow paths to half the pool (min 2) — see
+        // worker::SlowPathPermits for the latency-vs-throughput rationale.
+        let slow_path_permits = Arc::new(crate::worker::SlowPathPermits::new(
+            (num_workers / 2).max(2),
+        ));
 
         for worker_id in 0..num_workers {
             let shutdown = Arc::clone(&shutdown);
@@ -369,6 +374,7 @@ impl VoxelEngine {
             let deferred_stress = Arc::clone(&deferred_region_stress);
             let pending_seams = Arc::clone(&pending_seams);
             let parked_generates = Arc::clone(&parked_generates);
+            let slow_path_permits = Arc::clone(&slow_path_permits);
 
             let builder = thread::Builder::new().name(format!("voxel-worker-{}", worker_id));
             let handle = builder
@@ -403,6 +409,7 @@ impl VoxelEngine {
                             let deferred_stress = Arc::clone(&deferred_stress);
                             let pending_seams = Arc::clone(&pending_seams);
                             let parked_generates = Arc::clone(&parked_generates);
+                            let slow_path_permits = Arc::clone(&slow_path_permits);
                             std::panic::catch_unwind(AssertUnwindSafe(move || {
                                 worker_loop(
                                     shutdown,
@@ -426,6 +433,7 @@ impl VoxelEngine {
                                     deferred_stress,
                                     pending_seams,
                                     parked_generates,
+                                    slow_path_permits,
                                 );
                             }))
                         };
