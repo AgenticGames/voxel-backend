@@ -304,3 +304,41 @@ fn test_find_ore_voxels_filter_surface_sort_truncate() {
     let empty = store.find_ore_voxels(player, 100.0, 0xFF, 0, chunk_size, eb);
     assert!(empty.is_empty());
 }
+
+/// Regression: strut place/remove must queue a position-based stress recalc
+/// so relief (normal AND painted stress) lands without waiting for a mine
+/// event or sleep. Pre-2026-07-17, placement only remeshed — a strut set
+/// against a cracked wall never updated the stress field, so the crack
+/// overlay re-read stale values and nothing changed on screen.
+#[test]
+fn place_and_remove_support_queue_stress_recalc() {
+    use voxel_core::stress::{SupportType, STRUT_TUNING};
+
+    let chunk_size = 16usize;
+    let mut store = ChunkStore::new(4);
+    let config = voxel_core::stress::StressConfig::default();
+
+    let pos = (8, 8, 8);
+    let (ok, _, _) = store.place_support(pos, SupportType::Mithril, &config, chunk_size);
+    assert!(ok);
+
+    let events = store
+        .drain_stress_dirty(0.0)
+        .expect("place_support must queue a stress dirty event");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].center, pos);
+    let want = STRUT_TUNING[SupportType::Mithril as u8 as usize].radius as i32;
+    assert!(
+        events[0].radius >= want,
+        "recalc radius {} must cover the strut's relief radius {}",
+        events[0].radius, want,
+    );
+
+    let (removed, _, _) = store.remove_support(pos, &config, chunk_size);
+    assert_eq!(removed, Some(SupportType::Mithril));
+    let events = store
+        .drain_stress_dirty(0.0)
+        .expect("remove_support must queue a stress dirty event");
+    assert_eq!(events.len(), 1);
+    assert!(events[0].radius >= want);
+}

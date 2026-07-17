@@ -3,8 +3,6 @@
 //!
 //! Behavior-preserving split of the former `stress.rs` god file.
 
-use std::collections::HashMap;
-
 use crate::material::Material;
 
 #[derive(Debug, Clone)]
@@ -215,25 +213,31 @@ pub struct StrutTuning {
 /// - Steel   (T3): wide-radius specialist — covers more area per strut.
 /// - Crystal (T4): HP tank — holds the vault under brutal load.
 /// - Mithril (T5): endgame all-rounder — Spider Queen room anchor.
+/// 2026-07-17 resize: radii ~3× (coverage volume ~20×) so a strut actually
+/// spans a wall's crack cluster instead of a couple of voxels — at world
+/// scale 30 the old Copper radius 2 was 60UU, smaller than a single crack
+/// decal. `hp_decay_threshold` scaled ~5× in step: load-borne is a sum over
+/// covered stressed voxels, so wider coverage means proportionally more
+/// idle-tolerable load before HP starts ticking.
 pub const STRUT_TUNING: [StrutTuning; 6] = [
     // None
     StrutTuning { hardness: 0.0, radius: 0, max_hp: 0,    hp_decay_threshold: 0.0 },
     // Copper (T1)
-    StrutTuning { hardness:  8.0, radius: 2, max_hp:   50, hp_decay_threshold: 0.5 },
+    StrutTuning { hardness:  8.0, radius: 6, max_hp:   50, hp_decay_threshold: 2.5 },
     // Iron (T2)
-    StrutTuning { hardness: 14.0, radius: 3, max_hp:  150, hp_decay_threshold: 1.0 },
+    StrutTuning { hardness: 14.0, radius: 8, max_hp:  150, hp_decay_threshold: 5.0 },
     // Steel (T3) — wide radius for area coverage
-    StrutTuning { hardness: 18.0, radius: 4, max_hp:  300, hp_decay_threshold: 1.5 },
+    StrutTuning { hardness: 18.0, radius: 11, max_hp:  300, hp_decay_threshold: 7.5 },
     // Crystal (T4) — HP tank
-    StrutTuning { hardness: 25.0, radius: 3, max_hp:  800, hp_decay_threshold: 2.0 },
+    StrutTuning { hardness: 25.0, radius: 8, max_hp:  800, hp_decay_threshold: 10.0 },
     // Mithril (T5) — endgame
-    StrutTuning { hardness: 35.0, radius: 5, max_hp: 2000, hp_decay_threshold: 2.5 },
+    StrutTuning { hardness: 35.0, radius: 14, max_hp: 2000, hp_decay_threshold: 12.5 },
 ];
 
-/// Maximum `radius` value across all tiers — used as the bounding box for
-/// `any_supports_in_radius_box` short-circuits when the caller doesn't yet
-/// know which specific tier sits where. Recompute if STRUT_TUNING changes.
-pub const MAX_STRUT_RADIUS: u8 = 5;
+/// Maximum `radius` value across all tiers — bounds the chunk box the
+/// strut sweeps (`strut_relief_raw`, load accumulate, BFS halt) walk when
+/// gathering nearby struts. Recompute if STRUT_TUNING changes.
+pub const MAX_STRUT_RADIUS: u8 = 14;
 
 /// Per-recalc HP-damage scale applied after subtracting `hp_decay_threshold`.
 /// Tune to taste — higher = struts break faster under sustained load.
@@ -261,16 +265,51 @@ pub struct SupportField {
     /// Maintained by `set()` so callers can do an O(1) "any support here?"
     /// check before walking a per-voxel support-radius scan.
     pub non_none_count: u32,
+    /// Sparse list of non-None cells (local x,y,z), maintained by `set()`.
+    /// Lets the relief / load-decay / BFS-halt sweeps iterate actual struts
+    /// (O(struts)) instead of scanning the (2·MAX_STRUT_RADIUS+1)^3 cube per
+    /// voxel — mandatory since the 2026-07-17 radius bump (5→14 tripled the
+    /// cube to ~24k cells). Anything that writes `supports` directly instead
+    /// of via `set()` (snapshot restore) MUST call `rebuild_strut_cells()`
+    /// afterwards or the sweeps will miss/ghost struts.
+    strut_cells: Vec<(u8, u8, u8)>,
 }
 
 impl SupportField {
     pub fn new(size: usize) -> Self {
+        debug_assert!(size <= u8::MAX as usize + 1, "strut_cells stores u8 coords");
         Self {
             supports: vec![SupportType::None; size * size * size],
             support_hp: Vec::new(),
             size,
             non_none_count: 0,
+            strut_cells: Vec::new(),
         }
+    }
+
+    /// Sparse list of cells holding a strut (local coords). See field docs.
+    #[inline]
+    pub fn strut_cells(&self) -> &[(u8, u8, u8)] {
+        &self.strut_cells
+    }
+
+    /// Rebuild `strut_cells` (and `non_none_count`) by scanning `supports`.
+    /// For the callers that write the dense vec directly instead of going
+    /// through `set()` — currently only `ChunkSnapshot::apply_supports_to`.
+    pub fn rebuild_strut_cells(&mut self) {
+        self.strut_cells.clear();
+        let mut count = 0u32;
+        for z in 0..self.size {
+            for y in 0..self.size {
+                for x in 0..self.size {
+                    if self.supports[self.index(x, y, z)] != SupportType::None {
+                        self.strut_cells.push((x as u8, y as u8, z as u8));
+                        count += 1;
+                    }
+                }
+            }
+        }
+        self.non_none_count = count;
     }
 
     #[inline]
@@ -311,8 +350,17 @@ impl SupportField {
         let was_none = was == SupportType::None;
         let is_none = support_type == SupportType::None;
         match (was_none, is_none) {
-            (true, false) => self.non_none_count = self.non_none_count.saturating_add(1),
-            (false, true) => self.non_none_count = self.non_none_count.saturating_sub(1),
+            (true, false) => {
+                self.non_none_count = self.non_none_count.saturating_add(1);
+                self.strut_cells.push((x as u8, y as u8, z as u8));
+            }
+            (false, true) => {
+                self.non_none_count = self.non_none_count.saturating_sub(1);
+                let cell = (x as u8, y as u8, z as u8);
+                if let Some(i) = self.strut_cells.iter().position(|&c| c == cell) {
+                    self.strut_cells.swap_remove(i);
+                }
+            }
             _ => {}
         }
         self.supports[idx] = support_type;
@@ -380,40 +428,6 @@ impl SupportField {
     pub fn is_empty(&self) -> bool {
         self.non_none_count == 0
     }
-}
-
-/// O(1)-per-chunk check: does any chunk in the bounding box of voxel
-/// `(wx,wy,wz)` ± `sr` voxels have at least one non-None support entry?
-///
-/// Used to fast-skip the per-voxel `(2sr+1)^3` support-radius scan in
-/// `calc_voxel_stress*` when no struts have been placed near this voxel.
-/// At most 8 chunk lookups in the worst case (typically 1 when sr < cs).
-#[inline]
-pub(crate) fn any_supports_in_radius_box(
-    support_fields: &HashMap<(i32, i32, i32), SupportField>,
-    wx: i32, wy: i32, wz: i32,
-    sr: i32,
-    chunk_size: usize,
-) -> bool {
-    let cs = chunk_size as i32;
-    let cx_min = (wx - sr).div_euclid(cs);
-    let cx_max = (wx + sr).div_euclid(cs);
-    let cy_min = (wy - sr).div_euclid(cs);
-    let cy_max = (wy + sr).div_euclid(cs);
-    let cz_min = (wz - sr).div_euclid(cs);
-    let cz_max = (wz + sr).div_euclid(cs);
-    for cx in cx_min..=cx_max {
-        for cy in cy_min..=cy_max {
-            for cz in cz_min..=cz_max {
-                if let Some(sf) = support_fields.get(&(cx, cy, cz)) {
-                    if !sf.is_empty() {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
 }
 
 /// Default hardness per Material (index by Material as u8).

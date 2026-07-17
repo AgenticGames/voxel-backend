@@ -463,7 +463,13 @@ impl ChunkStore {
             self.support_fields.insert(key, sf);
         }
 
-        // Stress deferred to sleep-only — just remesh the affected chunk
+        // Queue a stress recalc over the strut's relief footprint so the
+        // relief (normal AND painted stress) lands without waiting for an
+        // unrelated mine event or sleep to touch the region. +4 margin
+        // matches the mining path (air decay + classification fringe).
+        let radius = voxel_core::stress::STRUT_TUNING[support_type as u8 as usize].radius as i32 + 4;
+        self.queue_stress_dirty(world_pos, radius);
+
         let dirty_with_bounds = vec![
             (key, (0usize, 0usize, 0usize, chunk_size, chunk_size, chunk_size))
         ];
@@ -503,7 +509,12 @@ impl ChunkStore {
             sf.set(lx, ly, lz, SupportType::None);
         }
 
-        // Stress deferred to sleep-only — just remesh the affected chunk
+        // Queue a stress recalc over the removed strut's old footprint so
+        // the relieved stress (and cracks) come BACK when the brace goes
+        // away — mirror of the place_support path above.
+        let radius = voxel_core::stress::STRUT_TUNING[old_type as u8 as usize].radius as i32 + 4;
+        self.queue_stress_dirty(world_pos, radius);
+
         let dirty_with_bounds = vec![
             (key, (0usize, 0usize, 0usize, chunk_size, chunk_size, chunk_size))
         ];

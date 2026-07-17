@@ -13,14 +13,12 @@ use crate::material::Material;
 
 use super::config::StressConfig;
 use super::types::{
-    any_supports_in_radius_box, BrokenStrutEvent, CollapseEvent, CollapseEventV2,
+    BrokenStrutEvent, CollapseEvent, CollapseEventV2,
     CollapseSlab, CollapsedVoxel, OverstressedVoxel, PendingPilePlacement,
     RubbleVoxel, StressField, SupportField, SupportType, BFS_HALT_DAMAGE_SCALE,
     MAX_STRUT_RADIUS, STRUT_TUNING,
 };
-use super::calc::{
-    sample_strut_alive, sample_support, sample_world, world_to_chunk_local,
-};
+use super::calc::{sample_world, world_to_chunk_local};
 
 /// Detect contiguous overstressed regions via flood-fill (6-connected BFS)
 /// and execute collapses: convert to Air, place rubble, mark dirty chunks.
@@ -423,34 +421,40 @@ pub fn detect_and_execute_collapses_v2_with_force_deadline(
                         // cell for post-pass HP damage. Each blocking strut
                         // in range eats one count.
                         if halt_at_struts {
+                            // Inverted sweep — iterate actual struts via each
+                            // overlapping chunk's strut_cells() list instead
+                            // of scanning the (2·sr_max+1)^3 cube per BFS
+                            // frontier voxel (see strut_relief_raw). This
+                            // path ran the old cube scan with UNCACHED
+                            // per-cell probes — at radius 14 that was ~24k
+                            // cells × 2 HashMap probes per frontier voxel.
                             let mut halted = false;
-                            if any_supports_in_radius_box(
-                                support_fields, neighbor.0, neighbor.1, neighbor.2,
-                                sr_max, chunk_size,
-                            ) {
-                                for sdz in -sr_max..=sr_max {
-                                    for sdy in -sr_max..=sr_max {
-                                        for sdx in -sr_max..=sr_max {
-                                            if sdx == 0 && sdy == 0 && sdz == 0 { continue; }
-                                            let sx = neighbor.0 + sdx;
-                                            let sy = neighbor.1 + sdy;
-                                            let sz = neighbor.2 + sdz;
-                                            let support = sample_support(
-                                                support_fields, sx, sy, sz, chunk_size,
-                                            );
-                                            if support == SupportType::None { continue; }
+                            let cs_i = chunk_size as i32;
+                            let (nx, ny, nz) = neighbor;
+                            for ckx in (nx - sr_max).div_euclid(cs_i)..=(nx + sr_max).div_euclid(cs_i) {
+                                for cky in (ny - sr_max).div_euclid(cs_i)..=(ny + sr_max).div_euclid(cs_i) {
+                                    for ckz in (nz - sr_max).div_euclid(cs_i)..=(nz + sr_max).div_euclid(cs_i) {
+                                        let skey = (ckx, cky, ckz);
+                                        let sf = match support_fields.get(&skey) {
+                                            Some(sf) if !sf.is_empty() => sf,
+                                            _ => continue,
+                                        };
+                                        for &(lx, ly, lz) in sf.strut_cells() {
+                                            let sdx = ckx * cs_i + lx as i32 - nx;
+                                            let sdy = cky * cs_i + ly as i32 - ny;
+                                            let sdz = ckz * cs_i + lz as i32 - nz;
+                                            let d2 = sdx * sdx + sdy * sdy + sdz * sdz;
+                                            if d2 == 0 { continue; }
+                                            let support = sf.get(lx as usize, ly as usize, lz as usize);
                                             let tuning = STRUT_TUNING[support as u8 as usize];
                                             let r2 = (tuning.radius as i32) * (tuning.radius as i32);
-                                            let d2 = sdx*sdx + sdy*sdy + sdz*sdz;
                                             if d2 > r2 { continue; }
-                                            if !sample_strut_alive(support_fields, sx, sy, sz, chunk_size) {
+                                            if !sf.is_strut_alive(lx as usize, ly as usize, lz as usize) {
                                                 continue;
                                             }
                                             halted = true;
-                                            let (skey, slx, sly, slz) =
-                                                world_to_chunk_local(sx, sy, sz, chunk_size);
                                             *strut_halt_counts
-                                                .entry((skey, slx, sly, slz))
+                                                .entry((skey, lx as usize, ly as usize, lz as usize))
                                                 .or_insert(0) += 1;
                                         }
                                     }

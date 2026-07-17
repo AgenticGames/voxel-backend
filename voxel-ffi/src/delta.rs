@@ -258,6 +258,9 @@ impl ChunkSnapshot {
                 supf.non_none_count = count;
             }
         }
+        // Both branches above write `supports` directly, bypassing set() —
+        // resync the sparse strut-cell list the sweeps iterate.
+        supf.rebuild_strut_cells();
     }
 
     /// Restore the painted-stress overlay on `sf` from this snapshot.

@@ -10,7 +10,7 @@ use crate::material::Material;
 
 use super::config::StressConfig;
 use super::types::{
-    any_supports_in_radius_box, SupportField, SupportScoreField, SupportType,
+    SupportField, SupportScoreField, SupportType,
     BrokenStrutEvent, MAX_STRUT_RADIUS, STRUT_TUNING, HP_DAMAGE_SCALE,
 };
 
@@ -40,95 +40,47 @@ pub fn sample_world(
     })
 }
 
-/// Sample support type from world coordinates, looking up the correct chunk.
-pub(crate) fn sample_support(
-    support_fields: &HashMap<(i32, i32, i32), SupportField>,
-    wx: i32, wy: i32, wz: i32,
-    chunk_size: usize,
-) -> SupportType {
-    let (key, lx, ly, lz) = world_to_chunk_local(wx, wy, wz, chunk_size);
-    support_fields
-        .get(&key)
-        .map(|sf| sf.get(lx, ly, lz))
-        .unwrap_or(SupportType::None)
-}
-
-/// Sample whether a strut at world coordinates is alive (HP > 0). False when
-/// the cell has no strut, the chunk isn't loaded, or HP has been ground to 0.
-/// Stress reduction and BFS halt both gate on this — broken-but-not-yet-cleared
-/// struts must not pretend to be holding rock up.
-pub(crate) fn sample_strut_alive(
-    support_fields: &HashMap<(i32, i32, i32), SupportField>,
-    wx: i32, wy: i32, wz: i32,
-    chunk_size: usize,
-) -> bool {
-    let (key, lx, ly, lz) = world_to_chunk_local(wx, wy, wz, chunk_size);
-    support_fields
-        .get(&key)
-        .map(|sf| sf.is_strut_alive(lx, ly, lz))
-        .unwrap_or(false)
-}
-
 /// Walk the same per-voxel strut neighborhood that `calc_voxel_stress_v2`
 /// walks for stress reduction, and accumulate each strut's `hardness/dist`
 /// contribution into `loads`. Keyed by (chunk, local_xyz). Only alive struts
 /// (HP > 0) and only struts inside their per-tier radius are counted.
 ///
-/// Cheap when no struts exist: the `any_supports_in_radius_box` short-circuit
-/// matches the stress calc's own guard, so the cost is ~0 for early game.
+/// Cheap when no struts exist: the chunk-box walk pays ≤8 HashMap probes
+/// and iterates empty strut lists, so the cost is ~0 for early game.
 pub(crate) fn accumulate_strut_load_at_voxel(
     support_fields: &HashMap<(i32, i32, i32), SupportField>,
     loads: &mut std::collections::HashMap<((i32, i32, i32), usize, usize, usize), f32>,
     wx: i32, wy: i32, wz: i32,
     chunk_size: usize,
 ) {
+    // Inverted sweep — iterate actual struts via strut_cells() instead of
+    // scanning the max-radius cube. See strut_relief_raw for the rationale
+    // (and keep the two loops structurally identical: every strut that
+    // relieves a voxel must also accumulate load for it).
     let sr = MAX_STRUT_RADIUS as i32;
-    if !any_supports_in_radius_box(support_fields, wx, wy, wz, sr, chunk_size) {
-        return;
-    }
     let cs = chunk_size as i32;
-    // Cache the last chunk's SupportField across the strut cube. The (2*sr+1)^3
-    // box (11^3 = 1331 cells at sr=5) overwhelmingly stays inside the home chunk
-    // plus a few neighbors, so iterating x-innermost lets consecutive cells reuse
-    // one borrow instead of re-hashing the (i32,i32,i32) chunk key per cell. We
-    // also read `get` and `is_strut_alive` off the *same* reference, so each live
-    // strut cell costs one probe instead of two. Replaces sample_support +
-    // sample_strut_alive (each a full world_to_chunk_local + HashMap probe) — the
-    // 26-of-27-miss pattern those two left on this path.
-    let mut cached_key: Option<(i32, i32, i32)> = None;
-    let mut cached_sf: Option<&SupportField> = None;
-    for dz in -sr..=sr {
-        for dy in -sr..=sr {
-            for dx in -sr..=sr {
-                if dx == 0 && dy == 0 && dz == 0 { continue; }
-                // Outside the max-tier sphere no strut can reach — skip
-                // before any chunk/field access (~61% of the cube).
-                let d2 = dx * dx + dy * dy + dz * dz;
-                if d2 > sr * sr { continue; }
-                let sx = wx + dx;
-                let sy = wy + dy;
-                let sz = wz + dz;
-                let skey = (sx.div_euclid(cs), sy.div_euclid(cs), sz.div_euclid(cs));
-                if cached_key != Some(skey) {
-                    cached_key = Some(skey);
-                    cached_sf = support_fields.get(&skey);
-                }
-                let sf = match cached_sf {
-                    Some(sf) => sf,
-                    None => continue,
+    for ckx in (wx - sr).div_euclid(cs)..=(wx + sr).div_euclid(cs) {
+        for cky in (wy - sr).div_euclid(cs)..=(wy + sr).div_euclid(cs) {
+            for ckz in (wz - sr).div_euclid(cs)..=(wz + sr).div_euclid(cs) {
+                let skey = (ckx, cky, ckz);
+                let sf = match support_fields.get(&skey) {
+                    Some(sf) if !sf.is_empty() => sf,
+                    _ => continue,
                 };
-                let slx = sx.rem_euclid(cs) as usize;
-                let sly = sy.rem_euclid(cs) as usize;
-                let slz = sz.rem_euclid(cs) as usize;
-                let support = sf.get(slx, sly, slz);
-                if support == SupportType::None { continue; }
-                let tuning = STRUT_TUNING[support as u8 as usize];
-                let r2 = (tuning.radius as i32) * (tuning.radius as i32);
-                if d2 > r2 { continue; }
-                if !sf.is_strut_alive(slx, sly, slz) { continue; }
-                let dist = (d2 as f32).sqrt();
-                let contribution = tuning.hardness / dist;
-                *loads.entry((skey, slx, sly, slz)).or_insert(0.0) += contribution;
+                for &(lx, ly, lz) in sf.strut_cells() {
+                    let dx = ckx * cs + lx as i32 - wx;
+                    let dy = cky * cs + ly as i32 - wy;
+                    let dz = ckz * cs + lz as i32 - wz;
+                    let d2 = dx * dx + dy * dy + dz * dz;
+                    if d2 == 0 { continue; }
+                    let support = sf.get(lx as usize, ly as usize, lz as usize);
+                    let tuning = STRUT_TUNING[support as u8 as usize];
+                    let r2 = (tuning.radius as i32) * (tuning.radius as i32);
+                    if d2 > r2 { continue; }
+                    if !sf.is_strut_alive(lx as usize, ly as usize, lz as usize) { continue; }
+                    let contribution = tuning.hardness / (d2 as f32).sqrt();
+                    *loads.entry((skey, lx as usize, ly as usize, lz as usize)).or_insert(0.0) += contribution;
+                }
             }
         }
     }
@@ -265,9 +217,8 @@ pub fn calc_voxel_stress(
 /// span/cross-section stress before hardness normalization).
 ///
 /// Sums `hardness / dist` over every ALIVE strut whose per-tier radius
-/// (`STRUT_TUNING[type].radius`, Copper=2 .. Mithril=5) reaches the voxel.
-/// The `any_supports_in_radius_box` guard keeps this near-free when no
-/// struts are nearby — the overwhelmingly common case.
+/// (`STRUT_TUNING[type].radius`, Copper=6 .. Mithril=14) reaches the voxel.
+/// Near-free when no struts are nearby — the overwhelmingly common case.
 pub(crate) fn strut_relief_raw(
     support_fields: &HashMap<(i32, i32, i32), SupportField>,
     wx: i32,
@@ -275,59 +226,44 @@ pub(crate) fn strut_relief_raw(
     wz: i32,
     chunk_size: usize,
 ) -> f32 {
+    // Inverted sweep (2026-07-17): iterate the ACTUAL struts in the ≤8
+    // chunks overlapping the max-radius box via each chunk's sparse
+    // `strut_cells()` list, instead of scanning the (2sr+1)^3 cube around
+    // the target voxel. The cube scan was fine at MAX_STRUT_RADIUS=5
+    // (~7.5µs/voxel near struts) but cubed into ~145µs/voxel at the new
+    // radius 14; the strut-list walk is O(nearby struts) — nanoseconds for
+    // realistic strut counts, and the no-struts common case is the same
+    // ≤8 HashMap probes the old any_supports_in_radius_box guard paid.
     let sr = MAX_STRUT_RADIUS as i32;
-    if !any_supports_in_radius_box(support_fields, wx, wy, wz, sr, chunk_size) {
-        return 0.0;
-    }
     let cs = chunk_size as i32;
-    // Cache the last chunk's SupportField across the strut cube — the same
-    // trick `accumulate_strut_load_at_voxel` uses. Consecutive x-innermost
-    // cells share a chunk almost always, so this replaces the per-cell
-    // sample_support + sample_strut_alive pair (each a world_to_chunk_local
-    // + HashMap probe, up to 2×1331 probes at sr=5) with one cached borrow
-    // and at most a handful of re-probes per x-row.
-    let mut cached_key: Option<(i32, i32, i32)> = None;
-    let mut cached_sf: Option<&SupportField> = None;
     let mut relief = 0.0f32;
-    for dz in -sr..=sr {
-        for dy in -sr..=sr {
-            for dx in -sr..=sr {
-                if dx == 0 && dy == 0 && dz == 0 {
-                    continue;
-                }
-                // ~61% of the (2sr+1)^3 cube lies outside the sr sphere —
-                // no tier's radius can reach from there, so skip before any
-                // chunk/field access.
-                let d2 = dx * dx + dy * dy + dz * dz;
-                if d2 > sr * sr { continue; }
-                let sx = wx + dx;
-                let sy = wy + dy;
-                let sz = wz + dz;
-                let skey = (sx.div_euclid(cs), sy.div_euclid(cs), sz.div_euclid(cs));
-                if cached_key != Some(skey) {
-                    cached_key = Some(skey);
-                    cached_sf = support_fields.get(&skey);
-                }
-                let sf = match cached_sf {
-                    Some(sf) => sf,
-                    None => continue,
+    for ckx in (wx - sr).div_euclid(cs)..=(wx + sr).div_euclid(cs) {
+        for cky in (wy - sr).div_euclid(cs)..=(wy + sr).div_euclid(cs) {
+            for ckz in (wz - sr).div_euclid(cs)..=(wz + sr).div_euclid(cs) {
+                let sf = match support_fields.get(&(ckx, cky, ckz)) {
+                    Some(sf) if !sf.is_empty() => sf,
+                    _ => continue,
                 };
-                let slx = sx.rem_euclid(cs) as usize;
-                let sly = sy.rem_euclid(cs) as usize;
-                let slz = sz.rem_euclid(cs) as usize;
-                let support = sf.get(slx, sly, slz);
-                if support == SupportType::None { continue; }
-                let tuning = STRUT_TUNING[support as u8 as usize];
-                let r2 = (tuning.radius as i32) * (tuning.radius as i32);
-                if d2 > r2 { continue; }
-                // Broken struts (HP=0) contribute nothing — the worker
-                // tick will clear them, but until it does we must not
-                // pretend they're still holding the rock up.
-                if !sf.is_strut_alive(slx, sly, slz) {
-                    continue;
+                for &(lx, ly, lz) in sf.strut_cells() {
+                    let dx = ckx * cs + lx as i32 - wx;
+                    let dy = cky * cs + ly as i32 - wy;
+                    let dz = ckz * cs + lz as i32 - wz;
+                    let d2 = dx * dx + dy * dy + dz * dz;
+                    // A strut occupying the target cell itself relieves
+                    // nothing there (matches the old scan's center skip).
+                    if d2 == 0 { continue; }
+                    let support = sf.get(lx as usize, ly as usize, lz as usize);
+                    let tuning = STRUT_TUNING[support as u8 as usize];
+                    let r2 = (tuning.radius as i32) * (tuning.radius as i32);
+                    if d2 > r2 { continue; }
+                    // Broken struts (HP=0) contribute nothing — the worker
+                    // tick will clear them, but until it does we must not
+                    // pretend they're still holding the rock up.
+                    if !sf.is_strut_alive(lx as usize, ly as usize, lz as usize) {
+                        continue;
+                    }
+                    relief += tuning.hardness / (d2 as f32).sqrt();
                 }
-                let dist = (d2 as f32).sqrt();
-                relief += tuning.hardness / dist;
             }
         }
     }
