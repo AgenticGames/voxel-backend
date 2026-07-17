@@ -15,12 +15,16 @@ use voxel_core::dual_contouring::mesh_gen::{compute_cell_normals, generate_mesh}
 use voxel_core::dual_contouring::solve::solve_dc_vertices;
 use voxel_fluid::FluidEvent;
 use voxel_gen::hermite_extract::extract_hermite_data;
+use voxel_core::hermite::HermiteData;
+use voxel_gen::config::GenerationConfig;
+use voxel_gen::density::DensityField;
 use voxel_gen::region_gen::{
     self, generate_region_densities, region_chunks, region_key, sync_region_boundary_densities,
     ChunkSeamData, RegionTimings,
 };
 
 use crate::convert::convert_mesh_to_ue_scaled;
+use crate::store::ChunkStore;
 use crate::profiler::ChunkTimings;
 use crate::types::{FfiZoneDescriptor, WorkerResult};
 
@@ -264,132 +268,17 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
                     if profiling { t_store_write_wait += t1.elapsed(); }
 
                     if !s.is_region_generated(&rk) || !s.has_density(&chunk) {
-                        let mut newly_inserted: Vec<(i32, i32, i32)> = Vec::new();
-                        for (key, density, hermite) in keyed_data {
-                            if !s.has_density(&key) {
-                                s.insert(key, density, hermite);
-                                newly_inserted.push(key);
-                                // Apply saved snapshot if loading a saved game
-                                if s.apply_pending_snapshot(key) {
-                                    applied_snapshots.push(key);
-                                    // Density was patched — re-extract hermite from patched data.
-                                    // (May be re-extracted again below if re-sync touches this chunk.)
-                                    if let Some(df) = s.density_fields.get(&key) {
-                                        let df_clone = df.clone();
-                                        let new_hermite = extract_hermite_data(&df_clone);
-                                        s.hermite_data.insert(key, new_hermite);
-                                    }
-                                }
-                            }
-                        }
-                        s.mark_region_generated(rk);
-                        // Fresh region landed — schedule the region-level VFX
+                        // Fresh region landing — schedule the region-level VFX
                         // stress pre-population (runs after this chunk's mesh
                         // send, outside this write lock).
                         stress_region_coords = coords.clone();
-
-                        // ── CRITICAL: re-sync ALL region chunks after insert ──
-                        //
-                        // Two bug classes covered here:
-                        //
-                        // 1) SNAPSHOT-OVERWRITE: apply_pending_snapshot rewrites
-                        //    all 29 791 cells of restored chunks — including
-                        //    boundary cells that sync_region_boundary_densities
-                        //    just made consistent in the temp HashMap. Without
-                        //    re-sync, restored chunk boundaries diverge from
-                        //    neighbors → seam holes / mesh gaps.
-                        //
-                        // 2) STALE-PRE-EXISTING: the insert loop above uses
-                        //    `if !s.has_density(&key)` so it SKIPS chunks
-                        //    already in store. If region regen runs a second
-                        //    time (e.g. region marker cleared by an unload but
-                        //    some chunks stayed loaded, OR config changed
-                        //    mid-session like BlankCanvas being toggled), the
-                        //    fresh sync'd density gets discarded for those
-                        //    pre-existing chunks. They keep their old values
-                        //    and disagree with their freshly-streamed
-                        //    neighbors → 961-cell face mismatches in the
-                        //    diagnostic.
-                        //
-                        // Fix: re-sync EVERY chunk in `coords` against its 26
-                        // neighbors using the store's current density. This
-                        // cleans up both bug classes regardless of which
-                        // chunks were freshly inserted vs already-existing,
-                        // and regardless of whether snapshots were applied.
-                        //
-                        // sync_chunk_full_boundaries is idempotent (min(a,b) =
-                        // min(min(a,b),b)) so duplicate work between adjacent
-                        // chunks in the region is harmless. Hermite
-                        // re-extraction only fires for chunks whose density
-                        // actually changed, so the cost scales with the size
-                        // of inconsistency — typically zero on a clean region.
-                        {
-                            use std::collections::HashSet;
-                            let mut hermite_dirty: HashSet<(i32, i32, i32)> = HashSet::new();
-                            for &chunk_key in coords.iter() {
-                                if !s.density_fields.contains_key(&chunk_key) {
-                                    continue;
-                                }
-                                let resync_dirty = s
-                                    .sync_chunk_full_boundaries(chunk_key, cfg.chunk_size);
-                                for k in resync_dirty {
-                                    hermite_dirty.insert(k);
-                                }
-                            }
-                            for key in hermite_dirty {
-                                // Re-extract hermite from patched density.
-                                let new_hermite_opt = s.density_fields.get(&key).map(|df| {
-                                    let df_clone = df.clone();
-                                    extract_hermite_data(&df_clone)
-                                });
-                                let Some(new_hermite) = new_hermite_opt else { continue; };
-
-                                // STALE-SEAM_DATA fix: if this chunk was previously
-                                // fully meshed (has seam_data + base_mesh from a prior
-                                // load), the dc_vertices in its seam_data were solved
-                                // against the OLD hermite. After sync touched its
-                                // boundary, the dc_vertices are now stale — neighbors
-                                // looking up cell positions from this chunk's seam_data
-                                // get coordinates that don't match the current density,
-                                // producing degenerate/missing seam quads at the shared
-                                // face. Symptom: chunks render with their base mesh but
-                                // have a black gap toward this neighbor that only
-                                // Force Resync clears.
-                                //
-                                // Re-solve DC + regen base_mesh + boundary_edges
-                                // against the fresh hermite so seam computations against
-                                // this chunk produce correct geometry. Track the keys so
-                                // a batched seam pass can re-emit downstream.
-                                let prev_meshed = s.chunk_seam_data.contains_key(&key)
-                                    && s.base_meshes.contains_key(&key);
-                                if prev_meshed {
-                                    let cell_size = cfg.chunk_size;
-                                    let dc_verts = solve_dc_vertices(&new_hermite, cell_size);
-                                    let mut mesh = generate_mesh(&new_hermite, &dc_verts, cell_size);
-                                    mesh.smooth(
-                                        cfg.mesh_smooth_iterations,
-                                        cfg.mesh_smooth_strength,
-                                        cfg.mesh_boundary_smooth,
-                                        Some(cell_size),
-                                    );
-                                    if cfg.mesh_recalc_normals > 0 { mesh.recalculate_normals(); }
-                                    let b_edges = region_gen::extract_boundary_edges(&new_hermite, cfg.chunk_size);
-                                    let d_normals = compute_cell_normals(&new_hermite, cell_size);
-                                    s.hermite_data.insert(key, new_hermite);
-                                    s.base_meshes.insert(key, std::sync::Arc::new(mesh));
-                                    s.add_seam_data(key, ChunkSeamData {
-                                        dc_vertices: dc_verts,
-                                        dc_normals: d_normals,
-                                        world_origin: glam::Vec3::ZERO,
-                                        boundary_edges: b_edges,
-                                    });
-                                    sync_remeshed.push(key);
-                                } else {
-                                    s.hermite_data.insert(key, new_hermite);
-                                }
-                            }
-                        }
                     }
+                    let outcome = insert_region_chunks_and_resync(
+                        &mut s, rk, chunk, &coords, keyed_data, &cfg,
+                    );
+                    applied_snapshots.extend(outcome.applied_snapshots);
+                    sync_remeshed.extend(outcome.sync_remeshed);
+
                     s.store_region_worms(rk, worm_paths.clone());
                 }
                 // Backward sharing: carve new worms into already-loaded chunks
@@ -1254,4 +1143,630 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
                     profiler.attach_submesh_info(submesh_details);
                 }
             }
+}
+
+/// Outcome of [`insert_region_chunks_and_resync`]: keys the generate handler
+/// needs after the write lock is released — `applied_snapshots` drives the
+/// post-seam smart re-seam hash clears, `sync_remeshed` the final batched
+/// seam pass that ships the recomputed combined meshes.
+struct RegionInsertOutcome {
+    applied_snapshots: Vec<(i32, i32, i32)>,
+    sync_remeshed: Vec<(i32, i32, i32)>,
+}
+
+/// Region slow-path store commit: insert freshly generated region chunks,
+/// apply saved snapshots, re-sync boundaries, and recompute hermite/meshes
+/// for every chunk whose density changed. MUST be called with the store
+/// write lock held (`s` is the guarded store).
+///
+/// ── CRITICAL: re-sync ALL region chunks after insert ──
+///
+/// Two bug classes covered by the re-sync:
+///
+/// 1) SNAPSHOT-OVERWRITE: apply_pending_snapshot rewrites all 29 791 cells
+///    of restored chunks — including boundary cells that
+///    sync_region_boundary_densities just made consistent in the temp
+///    HashMap. Without re-sync, restored chunk boundaries diverge from
+///    neighbors → seam holes / mesh gaps.
+///
+/// 2) STALE-PRE-EXISTING: the insert loop uses `if !s.has_density(&key)` so
+///    it SKIPS chunks already in store. If region regen runs a second time
+///    (e.g. region marker cleared by an unload but some chunks stayed
+///    loaded, OR config changed mid-session like BlankCanvas being toggled),
+///    the fresh sync'd density gets discarded for those pre-existing chunks.
+///    They keep their old values and disagree with their freshly-streamed
+///    neighbors → 961-cell face mismatches in the diagnostic.
+///
+/// Fix: re-sync EVERY chunk in `coords` against its 26 neighbors using the
+/// store's current density. This cleans up both bug classes regardless of
+/// which chunks were freshly inserted vs already-existing, and regardless of
+/// whether snapshots were applied. sync_chunk_full_boundaries is idempotent
+/// (min(a,b) = min(min(a,b),b)) so duplicate work between adjacent chunks in
+/// the region is harmless.
+///
+/// ── 2026-07-03 write-hold trim (perf-reviews/PERF_REVIEW_2026-07-03.md) ──
+///
+/// This block is the "region slow-path holds store.write() 150–380 ms per
+/// insert" serializer flagged in PERF_REVIEW_2026-06-12. The hold used to
+/// run every per-chunk recompute serially, and snapshot-restored chunks had
+/// their hermite extracted TWICE (eagerly at apply + again after re-sync
+/// dirtied them). Now:
+///   (a) deduped — snapshot chunks are seeded into the recompute set instead
+///       of being extracted eagerly at apply time;
+///   (b) clone-free — extraction reads the density in place instead of
+///       cloning ~150 KB per chunk to appease the borrow checker;
+///   (c) parallel — each dirty chunk's recompute is a pure function of its
+///       own post-sync density (densities are frozen for the whole pass), so
+///       it fans out across the rayon pool while the lock is held. Closures
+///       take no locks, so pool threads never block on the store.
+/// Atomicity vs other workers is unchanged — only the hold gets shorter.
+/// Bit-identity vs the old serial flow is proven by `region_insert_tests`.
+fn insert_region_chunks_and_resync(
+    s: &mut ChunkStore,
+    rk: (i32, i32, i32),
+    chunk: (i32, i32, i32),
+    coords: &[(i32, i32, i32)],
+    keyed_data: Vec<((i32, i32, i32), DensityField, HermiteData)>,
+    cfg: &GenerationConfig,
+) -> RegionInsertOutcome {
+    let mut applied_snapshots: Vec<(i32, i32, i32)> = Vec::new();
+    let mut sync_remeshed: Vec<(i32, i32, i32)> = Vec::new();
+
+    if s.is_region_generated(&rk) && s.has_density(&chunk) {
+        return RegionInsertOutcome { applied_snapshots, sync_remeshed };
+    }
+
+    for (key, density, hermite) in keyed_data {
+        if !s.has_density(&key) {
+            s.insert(key, density, hermite);
+            // Apply saved snapshot if loading a saved game. Hermite
+            // re-extraction for the patched density is deferred to the
+            // recompute pass below (seeded via applied_snapshots).
+            if s.apply_pending_snapshot(key) {
+                applied_snapshots.push(key);
+            }
+        }
+    }
+    s.mark_region_generated(rk);
+
+    // Re-sync every region chunk against its 26 neighbors (see doc comment).
+    let mut sync_dirty: HashSet<(i32, i32, i32)> = HashSet::new();
+    for &chunk_key in coords.iter() {
+        if !s.density_fields.contains_key(&chunk_key) {
+            continue;
+        }
+        for k in s.sync_chunk_full_boundaries(chunk_key, cfg.chunk_size) {
+            sync_dirty.insert(k);
+        }
+    }
+
+    // Recompute set = sync-dirtied chunks ∪ snapshot-restored chunks.
+    // Snapshot chunks whose boundaries already agreed with every neighbor
+    // are not in sync_dirty, but their interior density WAS patched — they
+    // still need one hermite re-extract. Sorted so downstream send order is
+    // deterministic (the old HashSet-iteration order never was).
+    let mut recompute: Vec<(i32, i32, i32)> = sync_dirty.iter().copied().collect();
+    for &k in &applied_snapshots {
+        if !sync_dirty.contains(&k) {
+            recompute.push(k);
+        }
+    }
+    recompute.sort_unstable();
+
+    // Pure per-chunk recompute, parallel while the lock is held.
+    let results: Vec<_> = {
+        let density_fields = &s.density_fields;
+        let seam_data = &s.chunk_seam_data;
+        let base_meshes = &s.base_meshes;
+        recompute
+            .par_iter()
+            .filter_map(|&key| {
+                let df = density_fields.get(&key)?;
+                let new_hermite = extract_hermite_data(df);
+
+                // STALE-SEAM_DATA fix: if this chunk was previously fully
+                // meshed (has seam_data + base_mesh from a prior load), the
+                // dc_vertices in its seam_data were solved against the OLD
+                // hermite. After sync touched its boundary, the dc_vertices
+                // are now stale — neighbors looking up cell positions from
+                // this chunk's seam_data get coordinates that don't match
+                // the current density, producing degenerate/missing seam
+                // quads at the shared face. Symptom: chunks render with
+                // their base mesh but have a black gap toward this neighbor
+                // that only Force Resync clears.
+                //
+                // Re-solve DC + regen base_mesh + boundary_edges against the
+                // fresh hermite so seam computations against this chunk
+                // produce correct geometry. Only sync-dirtied chunks take
+                // this path — snapshot-only chunks never did (extract-only
+                // in the old flow too).
+                let prev_meshed = sync_dirty.contains(&key)
+                    && seam_data.contains_key(&key)
+                    && base_meshes.contains_key(&key);
+                let remesh = if prev_meshed {
+                    let cell_size = cfg.chunk_size;
+                    let dc_verts = solve_dc_vertices(&new_hermite, cell_size);
+                    let mut mesh = generate_mesh(&new_hermite, &dc_verts, cell_size);
+                    mesh.smooth(
+                        cfg.mesh_smooth_iterations,
+                        cfg.mesh_smooth_strength,
+                        cfg.mesh_boundary_smooth,
+                        Some(cell_size),
+                    );
+                    if cfg.mesh_recalc_normals > 0 {
+                        mesh.recalculate_normals();
+                    }
+                    let b_edges =
+                        region_gen::extract_boundary_edges(&new_hermite, cfg.chunk_size);
+                    // Per-cell averaged normals for seam-quad shading
+                    // continuity (6095267) — keep in lockstep with the
+                    // handle_generate mesh path.
+                    let d_normals = compute_cell_normals(&new_hermite, cell_size);
+                    Some((dc_verts, mesh, b_edges, d_normals))
+                } else {
+                    None
+                };
+                Some((key, new_hermite, remesh))
+            })
+            .collect()
+    };
+
+    // Commit the recomputed data. Track the re-solved keys so a batched seam
+    // pass can re-emit their combined meshes downstream.
+    for (key, new_hermite, remesh) in results {
+        s.hermite_data.insert(key, new_hermite);
+        if let Some((dc_verts, mesh, b_edges, d_normals)) = remesh {
+            s.base_meshes.insert(key, std::sync::Arc::new(mesh));
+            s.add_seam_data(
+                key,
+                ChunkSeamData {
+                    dc_vertices: dc_verts,
+                    dc_normals: d_normals,
+                    world_origin: glam::Vec3::ZERO,
+                    boundary_edges: b_edges,
+                },
+            );
+            sync_remeshed.push(key);
+        }
+    }
+
+    RegionInsertOutcome { applied_snapshots, sync_remeshed }
+}
+
+#[cfg(test)]
+mod region_insert_tests {
+    //! Bit-identity + write-hold benchmark for the 2026-07-03 region
+    //! slow-path restructure (dedup of the snapshot hermite extraction +
+    //! clone-free, rayon-parallel recompute pass under the write lock).
+    //!
+    //! `baseline_insert_region_chunks_and_resync` is a faithful replica of
+    //! the PRE-restructure critical section (eager per-snapshot hermite
+    //! extract + serial clone-per-chunk dirty pass) so the suite can prove
+    //! the new flow leaves a byte-identical store, and the ignored benchmark
+    //! can measure the write-lock hold under each implementation:
+    //!
+    //! cargo test --release -p voxel-ffi --lib -- --ignored bench_region_insert --nocapture
+
+    use super::*;
+    use crate::delta::ChunkSnapshot;
+    use glam::Vec3;
+    use voxel_core::material::Material;
+    use voxel_core::mesh::Mesh;
+
+    /// Sinusoidal terrain SDF in WORLD space; negative (solid) below the
+    /// surface. Same surface sheet as `seam_lock_tests` so the workload is
+    /// a realistic meshed terrain.
+    fn terrain_sdf(x: f32, y: f32, z: f32) -> f32 {
+        let h = 15.0
+            + 4.0 * (x * 0.45).sin()
+            + 3.0 * (z * 0.37).cos()
+            + 2.0 * ((x + z) * 0.21).sin();
+        y - h
+    }
+
+    fn material_at(x: i32, y: i32, z: i32) -> Material {
+        match (x + y * 2 + z).rem_euclid(4) {
+            0 => Material::Limestone,
+            1 => Material::Granite,
+            2 => Material::Sandstone,
+            _ => Material::Basalt,
+        }
+    }
+
+    /// Build a density field for chunk (cx,cy,cz). `bias` shifts the surface
+    /// so differently-biased neighbors produce real boundary mismatches for
+    /// the re-sync to find (values pre-clamped to [-1,1] so the snapshot
+    /// apply-clamp is a no-op and round-trips are exact).
+    fn build_density(cx: i32, cy: i32, cz: i32, gs: usize, bias: f32) -> DensityField {
+        let size = gs + 1;
+        let (ox, oy, oz) = (cx * gs as i32, cy * gs as i32, cz * gs as i32);
+        let mut df = DensityField::new(size);
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..size {
+                    let (wx, wy, wz) = (ox + x as i32, oy + y as i32, oz + z as i32);
+                    let d = (terrain_sdf(wx as f32, wy as f32, wz as f32) + bias)
+                        .clamp(-1.0, 1.0);
+                    let sm = df.get_mut(x, y, z);
+                    sm.density = d;
+                    sm.material = material_at(wx, wy, wz);
+                }
+            }
+        }
+        df.compute_metadata();
+        df
+    }
+
+    /// Snapshot = base density with a sphere carved out at the chunk center
+    /// (the terrain surface runs through it, so the change is real).
+    /// `interior_only` keeps a 3-cell margin from every face so the boundary
+    /// re-sync finds nothing to fix — exercising the snapshot-only recompute
+    /// path (the dedup this change introduces). Otherwise the x=gs boundary
+    /// plane is also shifted so the chunk is guaranteed sync-dirty against
+    /// its +x neighbor.
+    fn snapshot_for(df_base: &DensityField, interior_only: bool) -> ChunkSnapshot {
+        let mut df = df_base.clone();
+        let size = df.size;
+        let c = size as f32 / 2.0;
+        let r = size as f32 * 0.35;
+        for z in 3..size - 3 {
+            for y in 3..size - 3 {
+                for x in 3..size - 3 {
+                    let (dx, dy, dz) = (x as f32 - c, y as f32 - c, z as f32 - c);
+                    if (dx * dx + dy * dy + dz * dz).sqrt() < r {
+                        let sm = df.get_mut(x, y, z);
+                        sm.density = 1.0;
+                    }
+                }
+            }
+        }
+        if !interior_only {
+            for z in 0..size {
+                for y in 0..size {
+                    let sm = df.get_mut(size - 1, y, z);
+                    sm.density = (sm.density - 0.4).max(-1.0);
+                }
+            }
+        }
+        ChunkSnapshot::from_density(&df)
+    }
+
+    /// Insert a fully meshed chunk (density + hermite + base mesh + seam
+    /// data) — a pre-existing cross-region neighbor from a prior load.
+    fn insert_meshed(s: &mut ChunkStore, key: (i32, i32, i32), gs: usize, bias: f32) {
+        let df = build_density(key.0, key.1, key.2, gs, bias);
+        let hermite = extract_hermite_data(&df);
+        let dc = solve_dc_vertices(&hermite, gs);
+        let mesh = generate_mesh(&hermite, &dc, gs);
+        let b_edges = region_gen::extract_boundary_edges(&hermite, gs);
+        let d_normals = compute_cell_normals(&hermite, gs);
+        s.insert(key, df, hermite);
+        s.base_meshes.insert(key, std::sync::Arc::new(mesh));
+        s.add_seam_data(
+            key,
+            ChunkSeamData {
+                dc_vertices: dc,
+                dc_normals: d_normals,
+                world_origin: Vec3::ZERO,
+                boundary_edges: b_edges,
+            },
+        );
+    }
+
+    struct Scenario {
+        store: ChunkStore,
+        rk: (i32, i32, i32),
+        chunk: (i32, i32, i32),
+        coords: Vec<(i32, i32, i32)>,
+        keyed_data: Vec<((i32, i32, i32), DensityField, HermiteData)>,
+        cfg: GenerationConfig,
+    }
+
+    /// A save-load-shaped slow-path scenario, fully deterministic:
+    /// - dim×1×dim region sheet at cy=0 (terrain surface inside every chunk)
+    /// - pre-existing MESHED neighbors along cx=-1 and cz=-1, built with a
+    ///   density bias → boundary mismatch → sync-dirty + prev_meshed re-solve
+    /// - one pre-existing in-region chunk (1,0,0) with a different bias
+    ///   (STALE-PRE-EXISTING path: skipped by insert, healed by re-sync)
+    /// - boundary-modifying snapshot on (0,0,0) (sync-dirty snapshot chunk)
+    /// - interior-only snapshots on every chunk with cx>=1 && cz>=1
+    ///   (snapshot-only path: patched density, boundaries untouched)
+    fn build_scenario(gs: usize, dim: i32) -> Scenario {
+        let mut cfg = GenerationConfig::default();
+        cfg.chunk_size = gs;
+
+        let mut store = ChunkStore::new(4);
+        let mut coords = Vec::new();
+        for cz in 0..dim {
+            for cx in 0..dim {
+                coords.push((cx, 0, cz));
+            }
+        }
+
+        for cz in 0..dim {
+            insert_meshed(&mut store, (-1, 0, cz), gs, 0.4);
+        }
+        for cx in 0..dim {
+            insert_meshed(&mut store, (cx, 0, -1), gs, 0.4);
+        }
+
+        {
+            let df = build_density(1, 0, 0, gs, 0.25);
+            let h = extract_hermite_data(&df);
+            store.insert((1, 0, 0), df, h);
+        }
+
+        for &(cx, cy, cz) in coords.iter() {
+            let interior_only = cx >= 1 && cz >= 1;
+            let is_boundary_snap = (cx, cy, cz) == (0, 0, 0);
+            if !interior_only && !is_boundary_snap {
+                continue;
+            }
+            let base = build_density(cx, cy, cz, gs, 0.0);
+            store
+                .preserved_snapshots
+                .insert((cx, cy, cz), snapshot_for(&base, interior_only));
+        }
+
+        let keyed_data = coords
+            .iter()
+            .map(|&(cx, cy, cz)| {
+                let df = build_density(cx, cy, cz, gs, 0.0);
+                let h = extract_hermite_data(&df);
+                ((cx, cy, cz), df, h)
+            })
+            .collect();
+
+        Scenario {
+            store,
+            rk: (0, 0, 0),
+            chunk: (0, 0, 0),
+            coords,
+            keyed_data,
+            cfg,
+        }
+    }
+
+    // ---- Faithful replica of the PRE-restructure critical section --------
+
+    fn baseline_insert_region_chunks_and_resync(
+        s: &mut ChunkStore,
+        rk: (i32, i32, i32),
+        chunk: (i32, i32, i32),
+        coords: &[(i32, i32, i32)],
+        keyed_data: Vec<((i32, i32, i32), DensityField, HermiteData)>,
+        cfg: &GenerationConfig,
+    ) -> (Vec<(i32, i32, i32)>, Vec<(i32, i32, i32)>) {
+        let mut applied_snapshots: Vec<(i32, i32, i32)> = Vec::new();
+        let mut sync_remeshed: Vec<(i32, i32, i32)> = Vec::new();
+        if !s.is_region_generated(&rk) || !s.has_density(&chunk) {
+            for (key, density, hermite) in keyed_data {
+                if !s.has_density(&key) {
+                    s.insert(key, density, hermite);
+                    if s.apply_pending_snapshot(key) {
+                        applied_snapshots.push(key);
+                        if let Some(df) = s.density_fields.get(&key) {
+                            let df_clone = df.clone();
+                            let new_hermite = extract_hermite_data(&df_clone);
+                            s.hermite_data.insert(key, new_hermite);
+                        }
+                    }
+                }
+            }
+            s.mark_region_generated(rk);
+            let mut hermite_dirty: HashSet<(i32, i32, i32)> = HashSet::new();
+            for &chunk_key in coords.iter() {
+                if !s.density_fields.contains_key(&chunk_key) {
+                    continue;
+                }
+                let resync_dirty = s.sync_chunk_full_boundaries(chunk_key, cfg.chunk_size);
+                for k in resync_dirty {
+                    hermite_dirty.insert(k);
+                }
+            }
+            for key in hermite_dirty {
+                let new_hermite_opt = s.density_fields.get(&key).map(|df| {
+                    let df_clone = df.clone();
+                    extract_hermite_data(&df_clone)
+                });
+                let Some(new_hermite) = new_hermite_opt else { continue; };
+                let prev_meshed =
+                    s.chunk_seam_data.contains_key(&key) && s.base_meshes.contains_key(&key);
+                if prev_meshed {
+                    let cell_size = cfg.chunk_size;
+                    let dc_verts = solve_dc_vertices(&new_hermite, cell_size);
+                    let mut mesh = generate_mesh(&new_hermite, &dc_verts, cell_size);
+                    mesh.smooth(
+                        cfg.mesh_smooth_iterations,
+                        cfg.mesh_smooth_strength,
+                        cfg.mesh_boundary_smooth,
+                        Some(cell_size),
+                    );
+                    if cfg.mesh_recalc_normals > 0 {
+                        mesh.recalculate_normals();
+                    }
+                    let b_edges =
+                        region_gen::extract_boundary_edges(&new_hermite, cfg.chunk_size);
+                    // Mirror of the 6095267 seam-normals fix — the replica
+                    // must match the production path for bit-identity.
+                    let d_normals = compute_cell_normals(&new_hermite, cell_size);
+                    s.hermite_data.insert(key, new_hermite);
+                    s.base_meshes.insert(key, std::sync::Arc::new(mesh));
+                    s.add_seam_data(
+                        key,
+                        ChunkSeamData {
+                            dc_vertices: dc_verts,
+                            dc_normals: d_normals,
+                            world_origin: glam::Vec3::ZERO,
+                            boundary_edges: b_edges,
+                        },
+                    );
+                    sync_remeshed.push(key);
+                } else {
+                    s.hermite_data.insert(key, new_hermite);
+                }
+            }
+        }
+        (applied_snapshots, sync_remeshed)
+    }
+
+    // ---- Bit-identity helpers ---------------------------------------------
+
+    fn vec3_bits(v: Vec3) -> [u32; 3] {
+        [v.x.to_bits(), v.y.to_bits(), v.z.to_bits()]
+    }
+
+    fn assert_hermite_eq(a: &HermiteData, b: &HermiteData, ctx: &str) {
+        assert_eq!(a.edges.len(), b.edges.len(), "edge count {ctx}");
+        for (k, ea) in a.edges.iter() {
+            let eb = b
+                .edges
+                .get(&k)
+                .unwrap_or_else(|| panic!("missing edge {:?} {ctx}", k.0));
+            assert_eq!(ea.t.to_bits(), eb.t.to_bits(), "edge t {ctx}");
+            assert_eq!(vec3_bits(ea.normal), vec3_bits(eb.normal), "edge normal {ctx}");
+            assert_eq!(ea.material, eb.material, "edge material {ctx}");
+        }
+    }
+
+    fn assert_mesh_eq(a: &Mesh, b: &Mesh, ctx: &str) {
+        assert_eq!(a.vertices.len(), b.vertices.len(), "vert count {ctx}");
+        for (va, vb) in a.vertices.iter().zip(b.vertices.iter()) {
+            assert_eq!(vec3_bits(va.position), vec3_bits(vb.position), "position {ctx}");
+            assert_eq!(vec3_bits(va.normal), vec3_bits(vb.normal), "normal {ctx}");
+            assert_eq!(va.material, vb.material, "vert material {ctx}");
+        }
+        assert_eq!(a.triangles.len(), b.triangles.len(), "tri count {ctx}");
+        for (ta, tb) in a.triangles.iter().zip(b.triangles.iter()) {
+            assert_eq!(ta.indices, tb.indices, "tri indices {ctx}");
+        }
+    }
+
+    fn assert_stores_identical(a: &ChunkStore, b: &ChunkStore) {
+        assert_eq!(a.density_fields.len(), b.density_fields.len());
+        for (k, da) in a.density_fields.iter() {
+            let db = &b.density_fields[k];
+            assert_eq!(da.size, db.size);
+            for (sa, sb) in da.samples.iter().zip(db.samples.iter()) {
+                assert_eq!(sa.density.to_bits(), sb.density.to_bits(), "density {k:?}");
+                assert_eq!(sa.material, sb.material, "material {k:?}");
+            }
+            assert_eq!(da.has_geode_material, db.has_geode_material);
+            assert_eq!(da.has_ore_material, db.has_ore_material);
+            assert_eq!(da.air_cell_count, db.air_cell_count);
+        }
+
+        assert_eq!(a.hermite_data.len(), b.hermite_data.len());
+        for (k, ha) in a.hermite_data.iter() {
+            assert_hermite_eq(ha, &b.hermite_data[k], &format!("hermite {k:?}"));
+        }
+
+        assert_eq!(a.base_meshes.len(), b.base_meshes.len());
+        for (k, ma) in a.base_meshes.iter() {
+            assert_mesh_eq(
+                ma.as_ref(),
+                b.base_meshes[k].as_ref(),
+                &format!("base mesh {k:?}"),
+            );
+        }
+
+        assert_eq!(a.chunk_seam_data.len(), b.chunk_seam_data.len());
+        for (k, sa) in a.chunk_seam_data.iter() {
+            let sb = &b.chunk_seam_data[k];
+            assert_eq!(sa.dc_vertices.len(), sb.dc_vertices.len(), "dc len {k:?}");
+            for (va, vb) in sa.dc_vertices.iter().zip(sb.dc_vertices.iter()) {
+                assert_eq!(vec3_bits(*va), vec3_bits(*vb), "dc_vertices {k:?}");
+            }
+            assert_eq!(vec3_bits(sa.world_origin), vec3_bits(sb.world_origin));
+            assert_eq!(sa.boundary_edges.len(), sb.boundary_edges.len(), "b_edges {k:?}");
+            for ((ka, ia), (kb, ib)) in sa.boundary_edges.iter().zip(sb.boundary_edges.iter()) {
+                assert_eq!(ka.0, kb.0, "boundary edge key {k:?}");
+                assert_eq!(ia.t.to_bits(), ib.t.to_bits(), "boundary t {k:?}");
+                assert_eq!(vec3_bits(ia.normal), vec3_bits(ib.normal), "boundary n {k:?}");
+                assert_eq!(ia.material, ib.material, "boundary mat {k:?}");
+            }
+        }
+
+        assert_eq!(
+            a.modification_tracker.dirty_chunks,
+            b.modification_tracker.dirty_chunks
+        );
+    }
+
+    // ---- Tests --------------------------------------------------------------
+
+    /// The restructured critical section must leave a byte-identical store.
+    /// sync_remeshed is compared as a SET: the old order was HashSet-iteration
+    /// nondeterministic; the new code sorts (strictly more deterministic).
+    #[test]
+    fn test_region_insert_bit_identical_to_serial_baseline() {
+        let gs = 30usize;
+        let a = build_scenario(gs, 3);
+        let b = build_scenario(gs, 3);
+
+        let (mut sa, mut sb) = (a.store, b.store);
+        let (applied_a, remeshed_a) =
+            baseline_insert_region_chunks_and_resync(&mut sa, a.rk, a.chunk, &a.coords, a.keyed_data, &a.cfg);
+        let outcome =
+            insert_region_chunks_and_resync(&mut sb, b.rk, b.chunk, &b.coords, b.keyed_data, &b.cfg);
+
+        // Scenario-shape guards: every path must actually be exercised.
+        assert_eq!(applied_a.len(), 5, "snapshots applied (1 boundary + 4 interior)");
+        assert!(applied_a.contains(&(2, 0, 2)), "interior snapshot applied");
+        assert!(
+            !remeshed_a.contains(&(2, 0, 2)),
+            "interior-snapshot chunk must be extract-only (not sync-dirty)"
+        );
+        assert!(
+            remeshed_a.contains(&(-1, 0, 0)),
+            "biased meshed neighbor must take the prev_meshed re-solve path"
+        );
+
+        assert_eq!(applied_a, outcome.applied_snapshots);
+        let set_a: HashSet<_> = remeshed_a.iter().copied().collect();
+        let set_b: HashSet<_> = outcome.sync_remeshed.iter().copied().collect();
+        assert_eq!(set_a, set_b, "sync_remeshed sets differ");
+
+        assert!(sa.is_region_generated(&(0, 0, 0)));
+        assert!(sb.is_region_generated(&(0, 0, 0)));
+        assert_stores_identical(&sa, &sb);
+    }
+
+    /// Write-hold A/B: the store write lock is held for exactly this span in
+    /// production, so the wall time here IS the hold other workers queue on.
+    #[test]
+    #[ignore]
+    fn bench_region_insert_write_hold() {
+        let gs = 30usize;
+        let dim = 5; // 25-chunk region sheet, 17 snapshot-restored chunks
+
+        // Warm the rayon pool so round 0 isn't paying thread spawn.
+        let warm: Vec<i32> = (0..256).collect();
+        let _: i32 = warm.par_iter().map(|&x| x + 1).sum();
+
+        for round in 0..3 {
+            let a = build_scenario(gs, dim);
+            let mut sa = a.store;
+            let t0 = Instant::now();
+            let _ = baseline_insert_region_chunks_and_resync(
+                &mut sa, a.rk, a.chunk, &a.coords, a.keyed_data, &a.cfg,
+            );
+            let t_base = t0.elapsed();
+
+            let b = build_scenario(gs, dim);
+            let mut sb = b.store;
+            let t1 = Instant::now();
+            let _ = insert_region_chunks_and_resync(
+                &mut sb, b.rk, b.chunk, &b.coords, b.keyed_data, &b.cfg,
+            );
+            let t_new = t1.elapsed();
+
+            println!(
+                "round {round}: baseline hold {:8.2} ms | optimized hold {:8.2} ms | -{:.1}%",
+                t_base.as_secs_f64() * 1000.0,
+                t_new.as_secs_f64() * 1000.0,
+                (1.0 - t_new.as_secs_f64() / t_base.as_secs_f64()) * 100.0
+            );
+        }
+    }
 }
