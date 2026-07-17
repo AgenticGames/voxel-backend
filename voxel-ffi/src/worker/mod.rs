@@ -160,12 +160,29 @@ impl SlowPathPermits {
         Self { state: Mutex::new(max_concurrent), cv: std::sync::Condvar::new() }
     }
 
-    pub(crate) fn acquire(&self) {
+    /// Returns false if `shutdown` was raised while waiting — the caller must
+    /// NOT run the slow path. A plain condvar wait here serialized teardown:
+    /// permit waiters couldn't see the shutdown flag, so each woke only when
+    /// a peer finished its whole region and then ran its OWN region before
+    /// exiting — 6-8 workers x 10-20s chase regions = the 133s PIE-exit hang
+    /// observed 2026-07-18.
+    pub(crate) fn acquire(&self, shutdown: &AtomicBool) -> bool {
         let mut avail = self.state.lock().unwrap_or_else(|p| p.into_inner());
         while *avail == 0 {
-            avail = self.cv.wait(avail).unwrap_or_else(|p| p.into_inner());
+            if shutdown.load(Ordering::Relaxed) {
+                return false;
+            }
+            let (g, _) = self
+                .cv
+                .wait_timeout(avail, Duration::from_millis(100))
+                .unwrap_or_else(|p| p.into_inner());
+            avail = g;
+        }
+        if shutdown.load(Ordering::Relaxed) {
+            return false;
         }
         *avail -= 1;
+        true
     }
 
     pub(crate) fn release(&self) {
@@ -222,6 +239,7 @@ pub(crate) struct HandlerCtx<'a> {
     pub pending_seams: &'a Arc<seam::PendingSeams>,
     pub parked_generates: &'a Arc<ParkedGenerates>,
     pub slow_path_permits: &'a Arc<SlowPathPermits>,
+    pub shutdown: &'a Arc<AtomicBool>,
 }
 
 /// Worker thread main loop. Each worker pulls from shared channels.
@@ -253,6 +271,17 @@ pub fn worker_loop(
     slow_path_permits: Arc<SlowPathPermits>,
 ) {
     let hb = &heartbeats[worker_id];
+    // Orphan-store sweep state (worker 0 only): region-grain generation
+    // commits all 216 chunk densities per region, but UE only ever unloads
+    // the chunks it made actors for — the rest linger in the store forever
+    // (observed 3327 stored vs 318 UE-loaded, multi-GB store, and the store
+    // Drop alone took ~90s of the 2026-07-18 PIE-exit hang). A stored chunk
+    // with no generation_counters entry was never UE-requested (or was
+    // already unloaded) = orphan. Two-round grace so chunks about to be
+    // requested by the advancing ring aren't evicted prematurely.
+    let mut last_orphan_sweep = Instant::now();
+    let mut orphan_candidates: std::collections::HashSet<(i32, i32, i32)> =
+        std::collections::HashSet::new();
     while !shutdown.load(Ordering::Relaxed) {
         // Priority 1: mine requests (non-blocking). Stamp the heartbeat around
         // the handler so a stall snapshot names exactly what wedged us here.
@@ -262,7 +291,7 @@ pub fn worker_loop(
             handle_request(
                 req, &result_tx, &store, &config, &stress_config, &generation_counters,
                 world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &mine_rx, &morph_manifest, &morph_snapshot,
-                &regions_in_flight, &crystal_anchors, &deferred_region_stress, &pending_seams, &parked_generates, &slow_path_permits,
+                &regions_in_flight, &crystal_anchors, &deferred_region_stress, &pending_seams, &parked_generates, &slow_path_permits, &shutdown,
             );
             hb.idle();
             continue;
@@ -300,7 +329,7 @@ pub fn worker_loop(
             handle_request(
                 req, &result_tx, &store, &config, &stress_config, &generation_counters,
                 world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &mine_rx, &morph_manifest, &morph_snapshot,
-                &regions_in_flight, &crystal_anchors, &deferred_region_stress, &pending_seams, &parked_generates, &slow_path_permits,
+                &regions_in_flight, &crystal_anchors, &deferred_region_stress, &pending_seams, &parked_generates, &slow_path_permits, &shutdown,
             );
             hb.idle();
             continue;
@@ -316,12 +345,53 @@ pub fn worker_loop(
                 handle_request(
                     req, &result_tx, &store, &config, &stress_config, &generation_counters,
                     world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &mine_rx, &morph_manifest, &morph_snapshot,
-                    &regions_in_flight, &crystal_anchors, &deferred_region_stress, &pending_seams, &parked_generates, &slow_path_permits,
+                    &regions_in_flight, &crystal_anchors, &deferred_region_stress, &pending_seams, &parked_generates, &slow_path_permits, &shutdown,
                 );
                 hb.idle();
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                 profiler.record_worker_idle(worker_id, idle_start.elapsed());
+                // Orphan-store sweep (see state above). Worker 0, queue idle,
+                // at most once per 60s. `unload()` preserves modified-chunk
+                // snapshots and no-ops on montage-protected keys, so eviction
+                // has the exact semantics of a normal UE-driven unload.
+                if worker_id == 0 && last_orphan_sweep.elapsed() >= Duration::from_secs(60) {
+                    last_orphan_sweep = Instant::now();
+                    let current: std::collections::HashSet<(i32, i32, i32)> = {
+                        let s = store.read().unwrap();
+                        s.density_fields
+                            .keys()
+                            .filter(|k| !generation_counters.contains_key(*k))
+                            .copied()
+                            .collect()
+                    };
+                    let evict: Vec<(i32, i32, i32)> =
+                        current.intersection(&orphan_candidates).copied().collect();
+                    if !evict.is_empty() {
+                        let mut evicted = 0usize;
+                        {
+                            let mut s = store.write().unwrap();
+                            for k in &evict {
+                                // Re-check under the write lock — a request
+                                // may have landed since the read snapshot.
+                                if generation_counters.contains_key(k) {
+                                    continue;
+                                }
+                                s.unload(*k);
+                                evicted += 1;
+                            }
+                        }
+                        for k in &evict {
+                            let _ = fluid_event_tx.send(FluidEvent::ChunkUnloaded { chunk: *k });
+                        }
+                        let remain = store.read().unwrap().density_fields.len();
+                        eprintln!(
+                            "[ORPHAN_SWEEP] evicted {} never-requested stored chunks ({} remain)",
+                            evicted, remain
+                        );
+                    }
+                    orphan_candidates = current;
+                }
                 // Region-convoy safety net: normal owners drain their
                 // waiters at region commit; a worker that panicked
                 // mid-region leaves them parked forever. With the queue
@@ -464,6 +534,7 @@ fn handle_request(
     pending_seams: &Arc<seam::PendingSeams>,
     parked_generates: &Arc<ParkedGenerates>,
     slow_path_permits: &Arc<SlowPathPermits>,
+    shutdown: &Arc<AtomicBool>,
 ) {
     let ctx = HandlerCtx {
         result_tx,
@@ -485,6 +556,7 @@ fn handle_request(
         pending_seams,
         parked_generates,
         slow_path_permits,
+        shutdown,
     };
     match req {
         // ComputePath is handled exclusively by the dedicated path-worker

@@ -248,8 +248,17 @@ pub(super) fn handle_generate(
                 // inflates each region's wall-clock 2.5-6x (CPU
                 // oversubscription) and blows the spawn-restore teleport's
                 // ~10s ground deadline. Blocking here while holding the
-                // gate is fine — peers park rather than wait.
-                ctx.slow_path_permits.acquire();
+                // gate is fine — peers park rather than wait. On shutdown
+                // the acquire aborts: skip the (pointless) region gen,
+                // release any parked peers, and bail so teardown never
+                // serializes through the permit queue.
+                if !ctx.slow_path_permits.acquire(ctx.shutdown) {
+                    super::drain_region_waiters(
+                        rk, &region_entry, regions_in_flight, ctx.parked_generates,
+                    );
+                    drop(region_guard);
+                    return;
+                }
 
                 let t0 = Instant::now();
                 let coords = region_chunks(rk, cfg.region_size);
