@@ -1076,6 +1076,9 @@ mod density_bench {
     fn bench_generate_density_field() {
         let mut config = GenerationConfig::default();
         config.chunk_size = 30; // live chunk size
+        if let Ok(oct) = std::env::var("BENCH_DETAIL_OCTAVES") {
+            config.noise.detail_octaves = oct.parse().unwrap();
+        }
         let origins: Vec<glam::Vec3> = (0..12)
             .map(|i| glam::Vec3::new(
                 (i % 4) as f32 * 900.0,
