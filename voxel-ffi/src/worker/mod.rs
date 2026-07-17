@@ -28,6 +28,7 @@ mod sleep_morph;
 mod stress;
 
 pub use region_stress::DeferredRegionStress;
+pub use seam::PendingSeams;
 
 // Re-exports so external callers (engine.rs) keep `crate::worker::worker_loop`
 // and `crate::worker::path_worker_loop` resolving unchanged.
@@ -96,6 +97,7 @@ pub(crate) struct HandlerCtx<'a> {
     pub regions_in_flight: &'a Arc<DashMap<(i32, i32, i32), Arc<Mutex<()>>>>,
     pub crystal_anchors: &'a Arc<Mutex<crate::crystal_anchors::CrystalAnchorManager>>,
     pub deferred_region_stress: &'a Arc<DeferredRegionStress>,
+    pub pending_seams: &'a Arc<seam::PendingSeams>,
 }
 
 /// Worker thread main loop. Each worker pulls from shared channels.
@@ -122,6 +124,7 @@ pub fn worker_loop(
     // never gets dequeued. See `heartbeat.rs`.
     heartbeats: Arc<Vec<heartbeat::WorkerHeartbeat>>,
     deferred_region_stress: Arc<DeferredRegionStress>,
+    pending_seams: Arc<seam::PendingSeams>,
 ) {
     let hb = &heartbeats[worker_id];
     while !shutdown.load(Ordering::Relaxed) {
@@ -133,7 +136,7 @@ pub fn worker_loop(
             handle_request(
                 req, &result_tx, &store, &config, &stress_config, &generation_counters,
                 world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &mine_rx, &morph_manifest, &morph_snapshot,
-                &regions_in_flight, &crystal_anchors, &deferred_region_stress,
+                &regions_in_flight, &crystal_anchors, &deferred_region_stress, &pending_seams,
             );
             hb.idle();
             continue;
@@ -170,19 +173,32 @@ pub fn worker_loop(
                 handle_request(
                     req, &result_tx, &store, &config, &stress_config, &generation_counters,
                     world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &mine_rx, &morph_manifest, &morph_snapshot,
-                    &regions_in_flight, &crystal_anchors, &deferred_region_stress,
+                    &regions_in_flight, &crystal_anchors, &deferred_region_stress, &pending_seams,
                 );
                 hb.idle();
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                 profiler.record_worker_idle(worker_id, idle_start.elapsed());
-                // Generate queue is idle — drain one deferred region-stress
-                // compute (VFX crack/dust pre-population). Capped concurrency
-                // + rayon-parallel internals keep this from starving a mine
-                // request that lands mid-compute; during the load flood the
-                // Timeout branch never fires, so the loading window is never
-                // taxed (the inline version froze the loading-screen counter
-                // for ~5s while all 8 workers chewed regions).
+                // Generate queue is idle — flush deferred bulk-load seam
+                // passes FIRST (player-visible geometry; one bounded batch
+                // per idle window so mine_rx is re-checked between batches),
+                // then fall through to deferred region stress (VFX-only).
+                if !pending_seams.is_empty() {
+                    hb.enter(heartbeat::activity::SEAM, (0, 0, 0));
+                    let cfg = config.read().unwrap().clone();
+                    seam::drain_pending_seams(
+                        &pending_seams, &cfg, &store, &result_tx, &fluid_event_tx, world_scale,
+                    );
+                    hb.idle();
+                    continue;
+                }
+                // Drain one deferred region-stress compute (VFX crack/dust
+                // pre-population). Capped concurrency + rayon-parallel
+                // internals keep this from starving a mine request that lands
+                // mid-compute; during the load flood the Timeout branch never
+                // fires, so the loading window is never taxed (the inline
+                // version froze the loading-screen counter for ~5s while all
+                // 8 workers chewed regions).
                 if !deferred_region_stress.is_empty() {
                     hb.enter(heartbeat::activity::STRESS, (0, 0, 0));
                     region_stress::try_process_deferred_region_stress(
@@ -270,6 +286,7 @@ fn handle_request(
     regions_in_flight: &Arc<DashMap<(i32, i32, i32), Arc<Mutex<()>>>>,
     crystal_anchors: &Arc<Mutex<crate::crystal_anchors::CrystalAnchorManager>>,
     deferred_region_stress: &Arc<DeferredRegionStress>,
+    pending_seams: &Arc<seam::PendingSeams>,
 ) {
     let ctx = HandlerCtx {
         result_tx,
@@ -288,6 +305,7 @@ fn handle_request(
         regions_in_flight,
         crystal_anchors,
         deferred_region_stress,
+        pending_seams,
     };
     match req {
         // ComputePath is handled exclusively by the dedicated path-worker

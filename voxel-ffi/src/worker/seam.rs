@@ -274,6 +274,121 @@ pub(crate) struct SeamPassTimings {
     pub candidates_sent: u32,
 }
 
+impl SeamPassTimings {
+    pub(crate) fn zero() -> Self {
+        Self {
+            total: Duration::ZERO,
+            quad_gen: Duration::ZERO,
+            mesh_retrieve: Duration::ZERO,
+            convert: Duration::ZERO,
+            candidates_tried: 0,
+            candidates_sent: 0,
+        }
+    }
+}
+
+// ── Bulk-load seam deferral (2026-07-17) ────────────────────────────────────
+//
+// During the initial-load flood (and sprint ring-loads), running
+// `incremental_seam_pass` after EVERY chunk mesh re-sends each chunk ~2-3×:
+// its own base + combined, then again for every later-arriving neighbor whose
+// pass sees a changed combined hash. Measured 2026-07-17 baseline: 994-1155
+// UE applies for 349-387 loaded chunks (2.85-2.98×), seam_pass 6.9s of worker
+// time per load, 355/355 candidates sent (the hash-skip never skips during a
+// flood because every neighbor arrival legitimately changes the combined).
+//
+// Fix: when the generate queue is deep (a flood is in progress), chunks skip
+// their per-chunk incremental pass and enqueue here instead. Workers drain
+// this set in batches through `batched_seam_pass_inner` ONLY when the
+// generate queue goes idle (the same recv_timeout(50ms) Timeout branch that
+// drains DeferredRegionStress — seams drain FIRST, they're player-visible).
+// The 27-neighborhood dedup inside the batched pass means each chunk is
+// hashed/sent once per drain instead of once per neighbor arrival.
+//
+// Ordering invariants preserved (eef7c97/f0760a9/404e1ac):
+// - The BASE mesh send still happens immediately at gen time (loading-screen
+//   progress + spawn gating depend on arrivals), and it records hash(base) —
+//   so the later flush always sees a hash change and sends the combined as
+//   UE's final word for the chunk.
+// - Mine/flatten during a flood still runs its own immediate
+//   batched_seam_pass_mine; the flush later hash-skips whatever it covered.
+// - The snapshot re-seam + sync_remeshed batched passes in the region slow
+//   path stay inline (correctness fixes, not throughput).
+// - Unloaded-before-flush chunks are skipped gracefully by the batched pass
+//   (no seam_data/base_mesh in store) — and unload clears last_sent hashes.
+
+/// Generate-queue depth at/above which chunks defer their seam pass into
+/// `PendingSeams` instead of running `incremental_seam_pass` inline. Deep
+/// queue = flood in progress; a trickle (walking around) stays incremental.
+pub(crate) const BULK_SEAM_DEFER_MIN_QUEUE: usize = 8;
+
+/// Max pending chunks drained per idle-branch call. Keeps each flush batch
+/// bounded so the worker returns to its loop (re-checking mine_rx) between
+/// batches; several workers can drain disjoint batches concurrently.
+pub(crate) const BULK_SEAM_DRAIN_BATCH: usize = 64;
+
+/// Shared dedup set of chunks whose seam pass was deferred during a flood.
+pub struct PendingSeams {
+    set: std::sync::Mutex<HashSet<(i32, i32, i32)>>,
+}
+
+impl PendingSeams {
+    pub fn new() -> Self {
+        Self { set: std::sync::Mutex::new(HashSet::new()) }
+    }
+
+    pub fn push(&self, key: (i32, i32, i32)) {
+        self.set.lock().unwrap().insert(key);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.set.lock().unwrap().is_empty()
+    }
+
+    /// Pop up to `max` keys (arbitrary order — the batched pass fans out to
+    /// the 27-neighborhood and hash-skips, so batch composition only affects
+    /// grouping, not correctness).
+    pub fn drain_batch(&self, max: usize) -> Vec<(i32, i32, i32)> {
+        let mut set = self.set.lock().unwrap();
+        let batch: Vec<(i32, i32, i32)> = set.iter().take(max).copied().collect();
+        for k in &batch {
+            set.remove(k);
+        }
+        batch
+    }
+}
+
+impl Default for PendingSeams {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Drain one batch of deferred seam passes. Returns true if work was done.
+/// `notify_terrain=false`: these chunks' densities are unchanged since their
+/// gen-time DensityUpdate — re-sending TerrainModified for a few hundred
+/// chunks would copy ~44MB of density to the fluid thread for nothing (and
+/// the mushroom prune is equally moot on fresh worldgen output).
+pub(crate) fn drain_pending_seams(
+    pending: &PendingSeams,
+    cfg: &GenerationConfig,
+    store: &Arc<RwLock<ChunkStore>>,
+    result_tx: &Sender<WorkerResult>,
+    fluid_event_tx: &Sender<FluidEvent>,
+    world_scale: f32,
+) -> bool {
+    let batch = pending.drain_batch(BULK_SEAM_DRAIN_BATCH);
+    if batch.is_empty() {
+        return false;
+    }
+    batched_seam_pass_inner(
+        &batch, cfg, store, result_tx, fluid_event_tx, world_scale,
+        false, /* batch_as_mine */
+        false, /* notify_terrain */
+    );
+    true
+}
+
 /// After meshing chunk C, attempt seam generation for C and its full
 /// 26-neighborhood (face, edge, and corner neighbors). Any chunk that produces
 /// non-empty seam quads gets combined with the cached base mesh and re-sent.
@@ -542,7 +657,7 @@ pub(crate) fn batched_seam_pass(
     fluid_event_tx: &Sender<FluidEvent>,
     world_scale: f32,
 ) {
-    batched_seam_pass_inner(dirty_keys, cfg, store, result_tx, fluid_event_tx, world_scale, false);
+    batched_seam_pass_inner(dirty_keys, cfg, store, result_tx, fluid_event_tx, world_scale, false, true);
 }
 
 pub(crate) fn batched_seam_pass_mine(
@@ -553,7 +668,7 @@ pub(crate) fn batched_seam_pass_mine(
     fluid_event_tx: &Sender<FluidEvent>,
     world_scale: f32,
 ) {
-    batched_seam_pass_inner(dirty_keys, cfg, store, result_tx, fluid_event_tx, world_scale, true);
+    batched_seam_pass_inner(dirty_keys, cfg, store, result_tx, fluid_event_tx, world_scale, true, true);
 }
 
 pub(crate) fn batched_seam_pass_inner(
@@ -564,6 +679,7 @@ pub(crate) fn batched_seam_pass_inner(
     fluid_event_tx: &Sender<FluidEvent>,
     world_scale: f32,
     batch_as_mine: bool,
+    notify_terrain: bool,
 ) {
     // Notify the fluid sim that these chunks' densities changed BEFORE
     // running the seam pass. This refreshes the fluid thread's density
@@ -572,7 +688,10 @@ pub(crate) fn batched_seam_pass_inner(
     // squeeze-out for cells that just became solid. Idempotent: callers
     // that already sent TerrainModified explicitly (mining, flatten,
     // sleep) just write the same densities to the cache twice.
-    if !dirty_keys.is_empty() {
+    // `notify_terrain=false` is the bulk-load seam flush: densities are
+    // unchanged since gen-time DensityUpdate, so skip the copies (and the
+    // mushroom prune — fresh worldgen placements are valid by construction).
+    if notify_terrain && !dirty_keys.is_empty() {
         let s = store.read().unwrap();
         for &key in dirty_keys {
             if let Some(density) = s.density_fields.get(&key) {
@@ -589,7 +708,9 @@ pub(crate) fn batched_seam_pass_inner(
     // flatten, etc.) funnels through this function, so pruning here means
     // we don't need per-call-site hooks. Idempotent — pruning a chunk
     // whose anchors are all still solid is a no-op.
-    prune_destroyed_mushrooms_for_chunks(store, dirty_keys);
+    if notify_terrain {
+        prune_destroyed_mushrooms_for_chunks(store, dirty_keys);
+    }
 
     let dirty_set: HashSet<(i32, i32, i32)> = dirty_keys.iter().copied().collect();
 
@@ -1134,6 +1255,119 @@ mod seam_lock_tests {
         assert!(!base_first.is_empty(), "workload is vacuous - no meshes sent");
         assert_eq!(base_first, new_first, "first incremental pass diverged");
         assert_eq!(base_second, new_second, "hash-skip second pass diverged");
+    }
+
+    /// 2026-07-17 bulk-load seam deferral: simulating a 25-chunk flood
+    /// (chunks arrive one by one), the deferred path (queue every chunk,
+    /// flush via batched passes at "queue idle") must leave UE in the SAME
+    /// final state as the per-chunk incremental flow — same last-applied
+    /// mesh per chunk, same recorded hashes — while sending strictly fewer
+    /// meshes. This is the invariant that makes the deferral safe: UE only
+    /// ever keeps the last ChunkMesh per chunk, so intermediate re-sends
+    /// are pure cost.
+    #[test]
+    fn bulk_defer_flush_matches_incremental_final_state() {
+        let gs = 30usize;
+        let cfg = test_cfg(gs);
+        let order: Vec<(i32, i32, i32)> =
+            (0..5).flat_map(|cz| (0..5).map(move |cx| (cx, 0, cz))).collect();
+
+        // One chunk "arriving" from generation: store gains its base mesh +
+        // seam data, and the base send records hash(base) — mirroring
+        // handle_generate right before its seam-pass decision. Production
+        // applies mesh_recalc_normals BEFORE storing/hashing the base, and
+        // the seam passes' re-recalc is idempotent — the fixture must match
+        // or the flush's dirty-set base re-send spuriously beats hash-skip.
+        let cfg_recalc = cfg.mesh_recalc_normals > 0;
+        let arrive = move |store: &Arc<RwLock<ChunkStore>>, key: (i32, i32, i32)| {
+            let (mut mesh, seam) = build_chunk(key.0, key.1, key.2, gs);
+            if cfg_recalc {
+                mesh.recalculate_normals();
+            }
+            let h = hash_mesh(&mesh);
+            let mut s = store.write().unwrap();
+            s.base_meshes.insert(key, Arc::new(mesh));
+            s.add_seam_data(key, seam);
+            s.last_sent_mesh_hash.insert(key, h);
+        };
+
+        type SendRow = (
+            (i32, i32, i32),
+            Vec<(u32, u32, u32)>,
+            Vec<(u32, u32, u32)>,
+            Vec<u8>,
+            Vec<u32>,
+            Vec<(u8, u32, u32, u32, u32)>,
+        );
+        let last_per_chunk = |sends: &[SendRow]| {
+            let mut last: std::collections::BTreeMap<(i32, i32, i32), SendRow> =
+                std::collections::BTreeMap::new();
+            for row in sends {
+                last.insert(row.0, row.clone()); // drain_results is stable-sorted: later send wins
+            }
+            last
+        };
+
+        // Path A — today's flow: incremental pass after every arrival.
+        let store_a = Arc::new(RwLock::new(ChunkStore::new(4)));
+        let (tx_a, rx_a) = crossbeam_channel::unbounded::<WorkerResult>();
+        for &k in &order {
+            arrive(&store_a, k);
+            incremental_seam_pass(k, &cfg, &store_a, &tx_a, 100.0);
+        }
+        let sends_a = drain_results(&rx_a);
+        let hashes_a: std::collections::BTreeMap<(i32, i32, i32), u64> = store_a
+            .read().unwrap().last_sent_mesh_hash.iter().map(|(k, v)| (*k, *v)).collect();
+
+        // Path B — bulk mode: every arrival defers; flush drains at the end.
+        let store_b = Arc::new(RwLock::new(ChunkStore::new(4)));
+        let (tx_b, rx_b) = crossbeam_channel::unbounded::<WorkerResult>();
+        let (ftx_b, frx_b) = crossbeam_channel::unbounded::<FluidEvent>();
+        let pending = PendingSeams::new();
+        for &k in &order {
+            arrive(&store_b, k);
+            pending.push(k);
+        }
+        while drain_pending_seams(&pending, &cfg, &store_b, &tx_b, &ftx_b, 100.0) {}
+        let sends_b = drain_results(&rx_b);
+        let hashes_b: std::collections::BTreeMap<(i32, i32, i32), u64> = store_b
+            .read().unwrap().last_sent_mesh_hash.iter().map(|(k, v)| (*k, *v)).collect();
+
+        assert!(!sends_a.is_empty(), "workload is vacuous - no meshes sent");
+        let la = last_per_chunk(&sends_a);
+        let lb = last_per_chunk(&sends_b);
+        for k in la.keys().chain(lb.keys()).collect::<std::collections::BTreeSet<_>>() {
+            match (la.get(k), lb.get(k)) {
+                (Some(a), Some(b)) if a != b => {
+                    println!("DIFF {:?}: A verts={} idx={} | B verts={} idx={} pos_eq={} nrm_eq={} idx_eq={} mat_eq={} sub_eq={}",
+                        k, a.1.len(), a.4.len(), b.1.len(), b.4.len(),
+                        a.1 == b.1, a.2 == b.2, a.4 == b.4, a.3 == b.3, a.5 == b.5);
+                }
+                (Some(a), None) => println!("ONLY-A {:?}: verts={} idx={}", k, a.1.len(), a.4.len()),
+                (None, Some(b)) => println!("ONLY-B {:?}: verts={} idx={}", k, b.1.len(), b.4.len()),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            la, lb,
+            "final per-chunk mesh state diverged between incremental and deferred flush"
+        );
+        assert_eq!(hashes_a, hashes_b, "recorded last-sent hashes diverged");
+        assert!(
+            sends_b.len() < sends_a.len(),
+            "deferral should send strictly fewer meshes (incremental={}, deferred={})",
+            sends_a.len(),
+            sends_b.len()
+        );
+        // The flush must not ping the fluid thread — densities are unchanged
+        // since the gen-time DensityUpdate.
+        assert!(frx_b.try_recv().is_err(), "seam flush must not emit fluid events");
+        println!(
+            "bulk_defer send reduction: incremental={} deferred={} (-{:.0}%)",
+            sends_a.len(),
+            sends_b.len(),
+            100.0 * (1.0 - sends_b.len() as f64 / sends_a.len() as f64)
+        );
     }
 
     // ---- Contention benchmark (ignored; run in release) ---------------------

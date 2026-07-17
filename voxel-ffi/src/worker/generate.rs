@@ -976,7 +976,21 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
                 candidates_sent: 0,
             };
             #[cfg(not(feature = "diag-gate-3"))]
-            let seam_timings = incremental_seam_pass(chunk, &cfg, store, result_tx, world_scale);
+            let seam_timings = {
+                // Bulk-load seam deferral: a deep generate queue means a flood
+                // is in progress — running the per-chunk incremental pass now
+                // would re-send this chunk's 27-neighborhood over and over as
+                // later neighbors land (measured 2.85-2.98x apply redundancy,
+                // 2026-07-17 baseline). Queue it; the worker idle branch
+                // drains the set through one batched pass per idle window.
+                // Trickle streaming (shallow queue) keeps the immediate pass.
+                if generate_rx.len() >= super::seam::BULK_SEAM_DEFER_MIN_QUEUE {
+                    ctx.pending_seams.push(chunk);
+                    SeamPassTimings::zero()
+                } else {
+                    incremental_seam_pass(chunk, &cfg, store, result_tx, world_scale)
+                }
+            };
             let t_seam_pass = if profiling { seam_timings.total } else { Duration::ZERO };
 
             // ── Per-snapshot smart re-seam ────────────────────────────────

@@ -37,6 +37,7 @@ pub mod activity {
     pub const STRESS: u8 = 6;
     pub const BRUSH: u8 = 7;
     pub const OTHER: u8 = 8;
+    pub const SEAM: u8 = 9;
 
     pub fn name(a: u8) -> &'static str {
         match a {
@@ -48,6 +49,7 @@ pub mod activity {
             RESYNC => "Resync",
             STRESS => "Stress",
             BRUSH => "Brush",
+            SEAM => "SeamFlush",
             _ => "Other",
         }
     }

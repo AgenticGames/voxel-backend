@@ -335,6 +335,10 @@ impl VoxelEngine {
         // pre-population is pending. Pushed by handle_generate's slow path,
         // drained when the generate queue idles (see worker_loop).
         let deferred_region_stress = Arc::new(crate::worker::DeferredRegionStress::new());
+        // Shared by all workers: chunks whose seam pass was deferred during a
+        // generate-queue flood (bulk-load seam mode). Drained in batches when
+        // the generate queue idles — see worker_loop's Timeout branch.
+        let pending_seams = Arc::new(crate::worker::PendingSeams::new());
 
         for worker_id in 0..num_workers {
             let shutdown = Arc::clone(&shutdown);
@@ -354,6 +358,7 @@ impl VoxelEngine {
             let anchors = Arc::clone(&crystal_anchors);
             let heartbeats = Arc::clone(&heartbeats);
             let deferred_stress = Arc::clone(&deferred_region_stress);
+            let pending_seams = Arc::clone(&pending_seams);
 
             let builder = thread::Builder::new().name(format!("voxel-worker-{}", worker_id));
             let handle = builder
@@ -386,6 +391,7 @@ impl VoxelEngine {
                             let anchors = Arc::clone(&anchors);
                             let heartbeats = Arc::clone(&heartbeats);
                             let deferred_stress = Arc::clone(&deferred_stress);
+                            let pending_seams = Arc::clone(&pending_seams);
                             std::panic::catch_unwind(AssertUnwindSafe(move || {
                                 worker_loop(
                                     shutdown,
@@ -407,6 +413,7 @@ impl VoxelEngine {
                                     anchors,
                                     heartbeats,
                                     deferred_stress,
+                                    pending_seams,
                                 );
                             }))
                         };
