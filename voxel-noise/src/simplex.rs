@@ -115,6 +115,94 @@ impl NoiseSource for Simplex3D {
     }
 }
 
+/// Sample THREE independently-seeded `Simplex3D` sources at the SAME point,
+/// computing the seed-independent simplex geometry (skew, cell pick,
+/// tetrahedron branch, corner offsets, falloff weights) ONCE and doing only
+/// the per-corner hash + gradient dot per channel.
+///
+/// BIT-IDENTICAL to three separate `sample()` calls by construction: each
+/// channel's contribution is accumulated with the same expression tree
+/// (`n += (t²·t²) · grad`) in the same corner order, and every shared
+/// quantity is computed with the exact operations `sample()` uses. The
+/// worldgen hot loops call 3-seed domain warps per voxel (cavern warp, ore
+/// warp) — this saves ~2/3 of the geometry work on those.
+pub fn sample3_fused(
+    a: &Simplex3D,
+    b: &Simplex3D,
+    c: &Simplex3D,
+    x: f64,
+    y: f64,
+    z: f64,
+) -> (f64, f64, f64) {
+    let s = (x + y + z) * F3;
+    let i = (x + s).floor() as i32;
+    let j = (y + s).floor() as i32;
+    let k = (z + s).floor() as i32;
+
+    let t = (i.wrapping_add(j).wrapping_add(k)) as f64 * G3;
+    let x0 = x - (i as f64 - t);
+    let y0 = y - (j as f64 - t);
+    let z0 = z - (k as f64 - t);
+
+    let (i1, j1, k1, i2, j2, k2) = if x0 >= y0 {
+        if y0 >= z0 {
+            (1, 0, 0, 1, 1, 0)
+        } else if x0 >= z0 {
+            (1, 0, 0, 1, 0, 1)
+        } else {
+            (0, 0, 1, 1, 0, 1)
+        }
+    } else {
+        if y0 < z0 {
+            (0, 0, 1, 0, 1, 1)
+        } else if x0 < z0 {
+            (0, 1, 0, 0, 1, 1)
+        } else {
+            (0, 1, 0, 1, 1, 0)
+        }
+    };
+
+    let x1 = x0 - i1 as f64 + G3;
+    let y1 = y0 - j1 as f64 + G3;
+    let z1 = z0 - k1 as f64 + G3;
+    let x2 = x0 - i2 as f64 + 2.0 * G3;
+    let y2 = y0 - j2 as f64 + 2.0 * G3;
+    let z2 = z0 - k2 as f64 + 2.0 * G3;
+    let x3 = x0 - 1.0 + 3.0 * G3;
+    let y3 = y0 - 1.0 + 3.0 * G3;
+    let z3 = z0 - 1.0 + 3.0 * G3;
+
+    // Per-corner falloff weights, shared across channels. Keep the exact
+    // `let t = t * t; t * t` shape so `w · grad` matches `sample()`'s
+    // `(t*t) * (t*t) * grad` grouping bit-for-bit... it does not: sample()
+    // computes `t0*t0` then `n += t0 * t0 * grad` which parses as
+    // `((t0sq * t0sq) * grad)`. `w = t0sq * t0sq; n += w * grad` is the
+    // same tree. Corners outside the falloff contribute exactly 0.0 (skip),
+    // matching sample()'s `if t >= 0.0` guard.
+    let corners = [
+        (x0, y0, z0, i, j, k),
+        (x1, y1, z1, i + i1, j + j1, k + k1),
+        (x2, y2, z2, i + i2, j + j2, k + k2),
+        (x3, y3, z3, i + 1, j + 1, k + 1),
+    ];
+
+    let mut na = 0.0;
+    let mut nb = 0.0;
+    let mut nc = 0.0;
+    for &(cx, cy, cz, ci, cj, ck) in &corners {
+        let t = 0.6 - cx * cx - cy * cy - cz * cz;
+        if t >= 0.0 {
+            let tsq = t * t;
+            let w = tsq * tsq;
+            na += w * a.grad(a.perm.hash3(ci, cj, ck), cx, cy, cz);
+            nb += w * b.grad(b.perm.hash3(ci, cj, ck), cx, cy, cz);
+            nc += w * c.grad(c.perm.hash3(ci, cj, ck), cx, cy, cz);
+        }
+    }
+
+    (32.0 * na, 32.0 * nb, 32.0 * nc)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,6 +264,34 @@ mod tests {
             "Mean should be near 0, was {}",
             mean
         );
+    }
+
+    /// The fused 3-channel sampler must be BIT-identical to three separate
+    /// sample() calls — worldgen substitutes it into deterministic seeded
+    /// generation, so even 1-ulp drift would change worlds.
+    #[test]
+    fn sample3_fused_bit_identical_to_three_samples() {
+        let seeds = [(42u64, 43u64, 44u64), (7, 1000003, 999), (0, 1, u64::MAX)];
+        for &(sa, sb, sc) in &seeds {
+            let a = Simplex3D::new(sa);
+            let b = Simplex3D::new(sb);
+            let c = Simplex3D::new(sc);
+            let mut checked = 0u32;
+            for i in 0..30000 {
+                // Mix of coordinate scales incl. negatives and the halved
+                // warp-frequency domain the hot path actually uses.
+                let f = i as f64;
+                let x = (f * 0.371 - 5000.0) * 0.013;
+                let y = (f * 0.533 - 3000.0) * 0.017;
+                let z = (f * 0.719 - 7000.0) * 0.011;
+                let (fa, fb, fc) = sample3_fused(&a, &b, &c, x, y, z);
+                assert_eq!(fa.to_bits(), a.sample(x, y, z).to_bits(), "ch A at {x},{y},{z}");
+                assert_eq!(fb.to_bits(), b.sample(x, y, z).to_bits(), "ch B at {x},{y},{z}");
+                assert_eq!(fc.to_bits(), c.sample(x, y, z).to_bits(), "ch C at {x},{y},{z}");
+                checked += 3;
+            }
+            assert_eq!(checked, 90000);
+        }
     }
 
     #[test]

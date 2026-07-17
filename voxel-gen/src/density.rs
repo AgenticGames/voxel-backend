@@ -112,13 +112,15 @@ pub fn try_coarse_solid_check(config: &GenerationConfig, world_origin: glam::Vec
                 let sample_y = wy * freq;
                 let sample_z = wz * freq;
 
-                // Domain warp
-                let dx = warp_x_noise.sample(sample_x * 0.5, sample_y * 0.5, sample_z * 0.5)
-                    * warp_amplitude * freq;
-                let dy = warp_y_noise.sample(sample_x * 0.5, sample_y * 0.5, sample_z * 0.5)
-                    * warp_amplitude * freq;
-                let dz = warp_z_noise.sample(sample_x * 0.5, sample_y * 0.5, sample_z * 0.5)
-                    * warp_amplitude * freq;
+                // Domain warp — fused 3-channel sample (bit-identical to the
+                // three separate calls; one simplex-geometry walk instead of 3)
+                let (wdx, wdy, wdz) = voxel_noise::simplex::sample3_fused(
+                    &warp_x_noise, &warp_y_noise, &warp_z_noise,
+                    sample_x * 0.5, sample_y * 0.5, sample_z * 0.5,
+                );
+                let dx = wdx * warp_amplitude * freq;
+                let dy = wdy * warp_amplitude * freq;
+                let dz = wdz * warp_amplitude * freq;
 
                 let cavern_raw = cavern_noise.sample(sample_x + dx, sample_y + dy, sample_z + dz);
                 let cavern_val = cavern_raw * 0.5 + 0.5;
@@ -240,16 +242,15 @@ pub fn generate_density_field(config: &GenerationConfig, world_origin: glam::Vec
                 let sy = wy * freq;
                 let sz = wz * freq;
 
-                // Domain warp for organic shapes
-                let dx = warp_x_noise.sample(sx * 0.5, sy * 0.5, sz * 0.5)
-                    * warp_amplitude
-                    * freq;
-                let dy = warp_y_noise.sample(sx * 0.5, sy * 0.5, sz * 0.5)
-                    * warp_amplitude
-                    * freq;
-                let dz = warp_z_noise.sample(sx * 0.5, sy * 0.5, sz * 0.5)
-                    * warp_amplitude
-                    * freq;
+                // Domain warp for organic shapes — fused 3-channel sample
+                // (bit-identical; one simplex-geometry walk instead of 3)
+                let (wdx, wdy, wdz) = voxel_noise::simplex::sample3_fused(
+                    &warp_x_noise, &warp_y_noise, &warp_z_noise,
+                    sx * 0.5, sy * 0.5, sz * 0.5,
+                );
+                let dx = wdx * warp_amplitude * freq;
+                let dy = wdy * warp_amplitude * freq;
+                let dz = wdz * warp_amplitude * freq;
 
                 // Primary cavern: FBM noise, range ~[-1,1], shift to [0,1]
                 let cavern_raw = cavern_noise.sample(sx + dx, sy + dy, sz + dz);
@@ -428,9 +429,14 @@ fn assign_material(
     let warp_strength = ore.ore_domain_warp_strength;
     let warp_freq = ore.ore_warp_frequency;
     let (wwx, wwy, wwz) = if warp_strength > 0.0 {
-        let dx = noise.warp_x.sample(wx * warp_freq, wy * warp_freq, wz * warp_freq) * warp_strength;
-        let dy = noise.warp_y.sample(wx * warp_freq, wy * warp_freq, wz * warp_freq) * warp_strength;
-        let dz = noise.warp_z.sample(wx * warp_freq, wy * warp_freq, wz * warp_freq) * warp_strength;
+        // Fused 3-channel warp sample — bit-identical, one geometry walk.
+        let (sx, sy, sz) = voxel_noise::simplex::sample3_fused(
+            &noise.warp_x, &noise.warp_y, &noise.warp_z,
+            wx * warp_freq, wy * warp_freq, wz * warp_freq,
+        );
+        let dx = sx * warp_strength;
+        let dy = sy * warp_strength;
+        let dz = sz * warp_strength;
         (wx + dx, wy + dy, wz + dz)
     } else {
         (wx, wy, wz)
@@ -1052,6 +1058,47 @@ mod tests {
             seen.len() >= 2,
             "Expected variety, got {:?}",
             seen
+        );
+    }
+}
+
+#[cfg(test)]
+mod density_bench {
+    use super::*;
+    use crate::config::GenerationConfig;
+
+    /// Release-only micro-bench for generate_density_field over a band of
+    /// cavern-layer origins (solid+cave mix — the worst case that pays both
+    /// the carve stack and the material chain). Run:
+    /// cargo test --release -p voxel-gen bench_generate_density_field -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn bench_generate_density_field() {
+        let mut config = GenerationConfig::default();
+        config.chunk_size = 30; // live chunk size
+        let origins: Vec<glam::Vec3> = (0..12)
+            .map(|i| glam::Vec3::new(
+                (i % 4) as f32 * 900.0,
+                ((i / 4) as f32 - 1.0) * 450.0,
+                (i % 3) as f32 * 700.0,
+            ))
+            .collect();
+        // Warm-up + checksum (also guards bit-identity across refactors:
+        // print the checksum and compare manually between runs).
+        let mut checksum = 0.0f64;
+        let t = std::time::Instant::now();
+        for &o in &origins {
+            let f = generate_density_field(&config, o);
+            for s in &f.samples {
+                checksum += s.density as f64 + (s.material as u8 as f64) * 0.001;
+            }
+        }
+        let el = t.elapsed();
+        println!(
+            "bench_generate_density_field: {} chunks in {:?} ({:.2} ms/chunk), checksum={:.6}",
+            origins.len(), el,
+            el.as_secs_f64() * 1000.0 / origins.len() as f64,
+            checksum,
         );
     }
 }
