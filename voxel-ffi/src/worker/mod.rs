@@ -77,6 +77,90 @@ pub struct MorphSnapshot {
     pub base_reveal_t: std::collections::HashMap<(i32, i32, i32), Vec<f32>>,
 }
 
+/// Per-region generation claim used by `handle_generate`'s slow path.
+///
+/// `gate` is the region-generation mutex, held by the owning worker while it
+/// runs the slow path. Non-owners do NOT block on it (blocking idled workers
+/// 3.5-5.2s per region during virgin-terrain floods, serializing region
+/// generation across the pool — measured 2026-07-17): they park their
+/// (chunk, generation) in `waiters` and return to the queue, typically
+/// becoming owners of OTHER regions. The owner re-dispatches parked waiters
+/// via [`ParkedGenerates`] the moment the region's densities are committed.
+///
+/// `done` closes the park/drain race: it is set under the `waiters` lock,
+/// exactly once, at drain time. A would-be parker that observes `done`
+/// re-dispatches itself through the pool instead of parking into a list
+/// nobody will drain again.
+#[derive(Default)]
+pub struct RegionInFlight {
+    pub(crate) gate: Mutex<()>,
+    pub(crate) waiters: Mutex<RegionWaiters>,
+}
+
+#[derive(Default)]
+pub(crate) struct RegionWaiters {
+    pub(crate) done: bool,
+    pub(crate) list: Vec<((i32, i32, i32), u64)>,
+}
+
+/// Generate requests parked because their region was mid-generation by
+/// another worker (region-convoy fix). The worker loop pops these with
+/// priority over fresh queue pulls — parked chunks are the oldest
+/// outstanding requests (nearest the player) and, post-commit, mesh via the
+/// fast path. A shared pool rather than a channel re-send on purpose: the
+/// generate channel is bounded(256) and sits full during exactly the floods
+/// that park chunks, so blocking sends from workers could deadlock the pool.
+pub struct ParkedGenerates {
+    queue: Mutex<std::collections::VecDeque<((i32, i32, i32), u64)>>,
+}
+
+impl ParkedGenerates {
+    pub fn new() -> Self {
+        Self { queue: Mutex::new(std::collections::VecDeque::new()) }
+    }
+
+    pub fn push(&self, chunk: (i32, i32, i32), generation: u64) {
+        self.queue.lock().unwrap_or_else(|p| p.into_inner()).push_back((chunk, generation));
+    }
+
+    pub fn push_batch(&self, items: Vec<((i32, i32, i32), u64)>) {
+        self.queue.lock().unwrap_or_else(|p| p.into_inner()).extend(items);
+    }
+
+    pub fn pop(&self) -> Option<((i32, i32, i32), u64)> {
+        self.queue.lock().unwrap_or_else(|p| p.into_inner()).pop_front()
+    }
+}
+
+impl Default for ParkedGenerates {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Drain a region's parked waiters into the shared re-dispatch pool and
+/// retire the map entry. Called by the region owner at density-commit time,
+/// by a gate claimant whose retry fast path hit (region committed by a
+/// predecessor while it raced for the gate), and by the idle-sweep safety
+/// net below (owner panicked mid-region). Setting `done` under the waiters
+/// lock closes the race against concurrent parkers.
+pub(crate) fn drain_region_waiters(
+    rk: (i32, i32, i32),
+    entry: &Arc<RegionInFlight>,
+    regions_in_flight: &DashMap<(i32, i32, i32), Arc<RegionInFlight>>,
+    parked_generates: &ParkedGenerates,
+) {
+    let drained = {
+        let mut w = entry.waiters.lock().unwrap_or_else(|p| p.into_inner());
+        w.done = true;
+        std::mem::take(&mut w.list)
+    };
+    regions_in_flight.remove(&rk);
+    if !drained.is_empty() {
+        parked_generates.push_batch(drained);
+    }
+}
+
 /// Shared context threaded into every request handler. Holds borrowed
 /// references to the worker's channels, stores, and config so each extracted
 /// handler can bind the exact locals the original match-arm body referenced.
@@ -94,10 +178,11 @@ pub(crate) struct HandlerCtx<'a> {
     pub mine_rx: &'a Receiver<WorkerRequest>,
     pub morph_manifest: &'a Arc<Mutex<Option<voxel_sleep::ChangeManifest>>>,
     pub morph_snapshot: &'a Arc<Mutex<MorphSnapshot>>,
-    pub regions_in_flight: &'a Arc<DashMap<(i32, i32, i32), Arc<Mutex<()>>>>,
+    pub regions_in_flight: &'a Arc<DashMap<(i32, i32, i32), Arc<RegionInFlight>>>,
     pub crystal_anchors: &'a Arc<Mutex<crate::crystal_anchors::CrystalAnchorManager>>,
     pub deferred_region_stress: &'a Arc<DeferredRegionStress>,
     pub pending_seams: &'a Arc<seam::PendingSeams>,
+    pub parked_generates: &'a Arc<ParkedGenerates>,
 }
 
 /// Worker thread main loop. Each worker pulls from shared channels.
@@ -117,7 +202,7 @@ pub fn worker_loop(
     worker_id: usize,
     morph_manifest: Arc<Mutex<Option<voxel_sleep::ChangeManifest>>>,
     morph_snapshot: Arc<Mutex<MorphSnapshot>>,
-    regions_in_flight: Arc<DashMap<(i32, i32, i32), Arc<Mutex<()>>>>,
+    regions_in_flight: Arc<DashMap<(i32, i32, i32), Arc<RegionInFlight>>>,
     crystal_anchors: Arc<Mutex<crate::crystal_anchors::CrystalAnchorManager>>,
     // Per-worker activity heartbeat (this worker writes only `heartbeats[worker_id]`).
     // Read by the stall monitor to pinpoint a wedged worker when a sleep request
@@ -125,6 +210,7 @@ pub fn worker_loop(
     heartbeats: Arc<Vec<heartbeat::WorkerHeartbeat>>,
     deferred_region_stress: Arc<DeferredRegionStress>,
     pending_seams: Arc<seam::PendingSeams>,
+    parked_generates: Arc<ParkedGenerates>,
 ) {
     let hb = &heartbeats[worker_id];
     while !shutdown.load(Ordering::Relaxed) {
@@ -136,7 +222,7 @@ pub fn worker_loop(
             handle_request(
                 req, &result_tx, &store, &config, &stress_config, &generation_counters,
                 world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &mine_rx, &morph_manifest, &morph_snapshot,
-                &regions_in_flight, &crystal_anchors, &deferred_region_stress, &pending_seams,
+                &regions_in_flight, &crystal_anchors, &deferred_region_stress, &pending_seams, &parked_generates,
             );
             hb.idle();
             continue;
@@ -163,6 +249,23 @@ pub fn worker_loop(
             continue;
         }
 
+        // Priority 1.75: re-dispatched parked generates (region-convoy fix).
+        // These are the oldest outstanding requests — their region's
+        // densities were just committed by an owner, so they mesh via the
+        // fast path. Handle them before pulling fresh queue work.
+        if let Some((chunk, generation)) = parked_generates.pop() {
+            let req = WorkerRequest::Generate { chunk, generation };
+            let (act, coord) = heartbeat::classify(&req);
+            hb.enter(act, coord);
+            handle_request(
+                req, &result_tx, &store, &config, &stress_config, &generation_counters,
+                world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &mine_rx, &morph_manifest, &morph_snapshot,
+                &regions_in_flight, &crystal_anchors, &deferred_region_stress, &pending_seams, &parked_generates,
+            );
+            hb.idle();
+            continue;
+        }
+
         // Priority 2: generate requests (blocking with timeout)
         let idle_start = Instant::now();
         match generate_rx.recv_timeout(Duration::from_millis(50)) {
@@ -173,12 +276,44 @@ pub fn worker_loop(
                 handle_request(
                     req, &result_tx, &store, &config, &stress_config, &generation_counters,
                     world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &mine_rx, &morph_manifest, &morph_snapshot,
-                    &regions_in_flight, &crystal_anchors, &deferred_region_stress, &pending_seams,
+                    &regions_in_flight, &crystal_anchors, &deferred_region_stress, &pending_seams, &parked_generates,
                 );
                 hb.idle();
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                 profiler.record_worker_idle(worker_id, idle_start.elapsed());
+                // Region-convoy safety net: normal owners drain their
+                // waiters at region commit; a worker that panicked
+                // mid-region leaves them parked forever. With the queue
+                // idle, re-dispatch the waiters of any region that has no
+                // active owner (gate free). Entries WITHOUT waiters are
+                // left alone — a freshly created entry's owner may simply
+                // not have claimed its gate yet.
+                if !regions_in_flight.is_empty() {
+                    let keys: Vec<(i32, i32, i32)> =
+                        regions_in_flight.iter().map(|e| *e.key()).collect();
+                    for rk in keys {
+                        let entry = match regions_in_flight.get(&rk) {
+                            Some(e) => Arc::clone(e.value()),
+                            None => continue,
+                        };
+                        let guard = match entry.gate.try_lock() {
+                            Ok(g) => g,
+                            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+                            Err(std::sync::TryLockError::WouldBlock) => continue,
+                        };
+                        let has_waiters = !entry
+                            .waiters
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .list
+                            .is_empty();
+                        if has_waiters {
+                            drain_region_waiters(rk, &entry, &regions_in_flight, &parked_generates);
+                        }
+                        drop(guard);
+                    }
+                }
                 // Generate queue is idle — flush deferred bulk-load seam
                 // passes FIRST (player-visible geometry; one bounded batch
                 // per idle window so mine_rx is re-checked between batches),
@@ -283,10 +418,11 @@ fn handle_request(
     mine_rx: &Receiver<WorkerRequest>,
     morph_manifest: &Arc<Mutex<Option<voxel_sleep::ChangeManifest>>>,
     morph_snapshot: &Arc<Mutex<MorphSnapshot>>,
-    regions_in_flight: &Arc<DashMap<(i32, i32, i32), Arc<Mutex<()>>>>,
+    regions_in_flight: &Arc<DashMap<(i32, i32, i32), Arc<RegionInFlight>>>,
     crystal_anchors: &Arc<Mutex<crate::crystal_anchors::CrystalAnchorManager>>,
     deferred_region_stress: &Arc<DeferredRegionStress>,
     pending_seams: &Arc<seam::PendingSeams>,
+    parked_generates: &Arc<ParkedGenerates>,
 ) {
     let ctx = HandlerCtx {
         result_tx,
@@ -306,6 +442,7 @@ fn handle_request(
         crystal_anchors,
         deferred_region_stress,
         pending_seams,
+        parked_generates,
     };
     match req {
         // ComputePath is handled exclusively by the dedicated path-worker
@@ -435,5 +572,52 @@ fn handle_request(
         WorkerRequest::ForceSpawnPool { world_x, world_y, world_z, fluid_type } => {
             scan_support::handle_force_spawn_pool(&ctx, world_x, world_y, world_z, fluid_type);
         }
+    }
+}
+
+#[cfg(test)]
+mod region_park_tests {
+    use super::*;
+    use dashmap::DashMap;
+
+    #[test]
+    fn drain_moves_waiters_to_pool_sets_done_and_retires_entry() {
+        let map: DashMap<(i32, i32, i32), Arc<RegionInFlight>> = DashMap::new();
+        let entry = map
+            .entry((0, 0, 0))
+            .or_insert_with(|| Arc::new(RegionInFlight::default()))
+            .clone();
+        entry.waiters.lock().unwrap().list.push(((1, 2, 3), 7));
+        entry.waiters.lock().unwrap().list.push(((1, 2, 4), 7));
+
+        let pool = ParkedGenerates::new();
+        drain_region_waiters((0, 0, 0), &entry, &map, &pool);
+
+        assert!(entry.waiters.lock().unwrap().done, "drain must set done");
+        assert!(map.get(&(0, 0, 0)).is_none(), "drain must retire the map entry");
+        assert_eq!(pool.pop(), Some(((1, 2, 3), 7)), "waiters re-dispatch FIFO");
+        assert_eq!(pool.pop(), Some(((1, 2, 4), 7)));
+        assert_eq!(pool.pop(), None);
+    }
+
+    #[test]
+    fn parker_protocol_refuses_to_park_after_done() {
+        // Mirrors the parker-side check in generate.rs: a would-be parker
+        // that observes `done` must NOT push into the (never again drained)
+        // list — it re-dispatches itself through the pool instead.
+        let entry = Arc::new(RegionInFlight::default());
+        entry.waiters.lock().unwrap().done = true;
+
+        let parked = {
+            let mut w = entry.waiters.lock().unwrap();
+            if w.done {
+                false
+            } else {
+                w.list.push(((0, 0, 0), 1));
+                true
+            }
+        };
+        assert!(!parked);
+        assert!(entry.waiters.lock().unwrap().list.is_empty());
     }
 }

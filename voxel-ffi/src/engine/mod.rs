@@ -291,12 +291,13 @@ impl VoxelEngine {
         let morph_manifest: Arc<Mutex<Option<voxel_sleep::ChangeManifest>>> = Arc::new(Mutex::new(None));
         let morph_snapshot: Arc<Mutex<crate::worker::MorphSnapshot>> = Arc::new(Mutex::new(crate::worker::MorphSnapshot::default()));
 
-        // Per-region generation-in-flight mutexes. Prevents 2+ workers from
+        // Per-region generation-in-flight claims. Prevents 2+ workers from
         // redundantly generating the same region's base_density (wasted CPU).
-        // A worker claims a region via the per-region Mutex before slow-path;
-        // other workers for the same region block on the mutex, then re-check
-        // the fast path once the owner finishes.
-        let regions_in_flight: Arc<DashMap<(i32, i32, i32), Arc<Mutex<()>>>> =
+        // A worker claims a region via the entry's gate before slow-path;
+        // other workers for the same region PARK their request on the entry
+        // (region-convoy fix — blocking here idled workers 3.5-5.2s) and are
+        // re-dispatched via ParkedGenerates when the owner commits.
+        let regions_in_flight: Arc<DashMap<(i32, i32, i32), Arc<crate::worker::RegionInFlight>>> =
             Arc::new(DashMap::new());
 
         // Crystal Growth Bridge — shared manager; sleep handler in worker_loop
@@ -343,6 +344,10 @@ impl VoxelEngine {
         // generate-queue flood (bulk-load seam mode). Drained in batches when
         // the generate queue idles — see worker_loop's Timeout branch.
         let pending_seams = Arc::new(crate::worker::PendingSeams::new());
+        // Shared by all workers: generate requests parked on an in-flight
+        // region, re-dispatched with priority once the region's densities
+        // commit. See worker::ParkedGenerates (region-convoy fix).
+        let parked_generates = Arc::new(crate::worker::ParkedGenerates::new());
 
         for worker_id in 0..num_workers {
             let shutdown = Arc::clone(&shutdown);
@@ -363,6 +368,7 @@ impl VoxelEngine {
             let heartbeats = Arc::clone(&heartbeats);
             let deferred_stress = Arc::clone(&deferred_region_stress);
             let pending_seams = Arc::clone(&pending_seams);
+            let parked_generates = Arc::clone(&parked_generates);
 
             let builder = thread::Builder::new().name(format!("voxel-worker-{}", worker_id));
             let handle = builder
@@ -396,6 +402,7 @@ impl VoxelEngine {
                             let heartbeats = Arc::clone(&heartbeats);
                             let deferred_stress = Arc::clone(&deferred_stress);
                             let pending_seams = Arc::clone(&pending_seams);
+                            let parked_generates = Arc::clone(&parked_generates);
                             std::panic::catch_unwind(AssertUnwindSafe(move || {
                                 worker_loop(
                                     shutdown,
@@ -418,6 +425,7 @@ impl VoxelEngine {
                                     heartbeats,
                                     deferred_stress,
                                     pending_seams,
+                                    parked_generates,
                                 );
                             }))
                         };

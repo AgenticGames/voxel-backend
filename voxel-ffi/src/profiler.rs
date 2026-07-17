@@ -98,6 +98,11 @@ pub struct WorkerStats {
     pub total_idle_time: Duration,
     pub chunks_processed: u64,
     pub stale_skipped: u64,
+    /// Generate requests this worker parked because the chunk's region was
+    /// mid-generation by another worker (region-convoy fix). Parked chunks
+    /// are re-dispatched at region commit — high counts during floods are
+    /// EXPECTED and mean the convoy fix is doing its job.
+    pub region_parked: u64,
     pub total_seam_time: Duration,
     pub total_send_block_time: Duration,
 }
@@ -109,6 +114,7 @@ impl WorkerStats {
             total_idle_time: Duration::ZERO,
             chunks_processed: 0,
             stale_skipped: 0,
+            region_parked: 0,
             total_seam_time: Duration::ZERO,
             total_send_block_time: Duration::ZERO,
         }
@@ -374,6 +380,18 @@ impl StreamingProfiler {
         let mut m = self.metrics.lock().unwrap();
         if let Some(ws) = m.worker_stats.get_mut(worker_id) {
             ws.stale_skipped += 1;
+        }
+    }
+
+    /// Record that a worker parked a generate request on an in-flight region
+    /// (region-convoy fix) instead of blocking on the region gate.
+    pub fn record_region_park(&self, worker_id: usize) {
+        if !self.is_enabled() {
+            return;
+        }
+        let mut m = self.metrics.lock().unwrap();
+        if let Some(ws) = m.worker_stats.get_mut(worker_id) {
+            ws.region_parked += 1;
         }
     }
 
@@ -652,6 +670,7 @@ impl StreamingProfiler {
         let _ = writeln!(out, "  Requested:    {}", total_requested);
         let _ = writeln!(out, "  Completed:    {}", m.total_chunk.count);
         let _ = writeln!(out, "  Stale skip:   {}", m.worker_stats.iter().map(|w| w.stale_skipped).sum::<u64>());
+        let _ = writeln!(out, "  Region park:  {}", m.worker_stats.iter().map(|w| w.region_parked).sum::<u64>());
         let _ = writeln!(out, "  Errors:       {}", m.error_count);
         let _ = writeln!(out, "  Slow path:    {}", m.slow_path_count);
         let _ = writeln!(out, "  Fast path:    {}", m.fast_path_count);

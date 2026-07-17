@@ -5,7 +5,7 @@
 //! Behavior is unchanged.
 
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use std::collections::HashSet;
@@ -131,13 +131,20 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
             let (mesh, dc_vertices, boundary_edges, dc_normals) = if let Some(result) = mesh_result {
                 result
             } else {
-                // Fix A: Per-region mutex — blocks if another worker is
-                // generating this region, preventing redundant slow-path work.
-                let region_mutex = regions_in_flight
+                // Fix A + region-convoy fix (2026-07-17): claim the region
+                // via try_lock instead of a blocking lock. Blocking idled
+                // non-owner workers 3.5-5.2s per region while one peer ran
+                // the slow path — during virgin-terrain floods that
+                // serialized region generation across the whole pool.
+                // Non-owners park their request on the entry and go pull
+                // other queue work (typically becoming owners of OTHER
+                // regions); the owner re-dispatches them via ParkedGenerates
+                // the moment the region's densities are committed.
+                let region_entry = regions_in_flight
                     .entry(rk)
-                    .or_insert_with(|| Arc::new(Mutex::new(())))
+                    .or_insert_with(|| Arc::new(super::RegionInFlight::default()))
                     .clone();
-                // The mutex guards (), not data — there's no invariant a
+                // The gate guards (), not data — there's no invariant a
                 // panicked worker could have violated. Recover from
                 // poisoning so a single panic in region-gen code (e.g. an
                 // OOB in voxel-gen) does NOT cascade through every other
@@ -145,7 +152,33 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
                 // peer hits PoisonError on lock().unwrap() and the whole
                 // pool dies — which is exactly how PANIC #1 took out 4
                 // peers via worker.rs:596 PoisonError.
-                let _region_guard = region_mutex.lock().unwrap_or_else(|p| p.into_inner());
+                let region_guard = match region_entry.gate.try_lock() {
+                    Ok(g) => g,
+                    Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        let parked = {
+                            let mut w = region_entry
+                                .waiters
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner());
+                            if w.done {
+                                false
+                            } else {
+                                w.list.push((chunk, generation));
+                                true
+                            }
+                        };
+                        if !parked {
+                            // The owner drained between our try_lock and the
+                            // park attempt — the region is committed. Re-
+                            // dispatch ourselves through the pool rather than
+                            // blocking on the (possibly still-held) stale gate.
+                            ctx.parked_generates.push(chunk, generation);
+                        }
+                        profiler.record_region_park(worker_id);
+                        return;
+                    }
+                };
 
                 // Re-check fast path under the guard — the owner may have
                 // just finished generating this region while we were waiting.
@@ -180,11 +213,20 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
                 };
 
                 if let Some(result) = retry_result {
+                    // Region was committed by a predecessor while we raced
+                    // for the gate. Drain any peers that parked on this
+                    // entry — with our fast-path mesh already in hand,
+                    // nobody else will.
+                    super::drain_region_waiters(
+                        rk, &region_entry, regions_in_flight, ctx.parked_generates,
+                    );
+                    drop(region_guard);
                     result
                 } else {
-                // Slow path: (re)generate region densities.
-                // Region guard is held throughout — other workers for this
-                // region block on the mutex until we finish.
+                // Slow path: (re)generate region densities. The region gate
+                // is held until the densities are committed below; peers
+                // that arrive meanwhile park on the entry instead of
+                // blocking (see drain after the commit write-block).
                 was_slow_path = true;
 
                 let t0 = Instant::now();
@@ -281,6 +323,16 @@ pub(super) fn handle_generate(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32
 
                     s.store_region_worms(rk, worm_paths.clone());
                 }
+                // Region densities are committed — is_region_generated(&rk)
+                // is now true, so no worker can redundantly slow-path this
+                // region and the gate has served its purpose. Release the
+                // parked waiters (they mesh via the fast path, concurrently
+                // with the backward-carve / cross-region-sync work below)
+                // and drop the gate.
+                super::drain_region_waiters(
+                    rk, &region_entry, regions_in_flight, ctx.parked_generates,
+                );
+                drop(region_guard);
                 // Backward sharing: carve new worms into already-loaded chunks
                 // from other regions, then re-extract hermite and re-mesh
                 if !worm_paths.is_empty() {
