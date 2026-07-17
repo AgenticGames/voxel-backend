@@ -147,6 +147,10 @@ pub struct VoxelEngine {
 
     // Worker threads
     workers: Vec<JoinHandle<()>>,
+    /// Shared per-worker heartbeats (same Arc the stall monitor reads).
+    /// Held here so `shutdown()`'s slow-join watchdog can dump each
+    /// worker's live activity when a teardown join wedges.
+    worker_heartbeats: Arc<Vec<crate::worker::heartbeat::WorkerHeartbeat>>,
 
     // ─── Pathfinding ─────────────────────────────────────────
     /// Dedicated channel for path requests so heavy `BrushCavernStamp` /
@@ -732,6 +736,7 @@ impl VoxelEngine {
             force_spawn_complete: Arc::new(Mutex::new(None)),
             profiler,
             workers,
+            worker_heartbeats: heartbeats,
             path_tx,
             path_results: Arc::new(Mutex::new(PathResultStore::default())),
             strut_broken_stash: Arc::new(Mutex::new(Vec::new())),
@@ -780,11 +785,50 @@ impl VoxelEngine {
         // fail-fasts the entire cascade (send returns SendError, loops see
         // `shutdown` and exit).
         drop(self.result_rx);
-        for handle in self.workers {
+
+        // Slow-join watchdog: if teardown wedges, dump every worker's live
+        // heartbeat to voxel_panic.log every 10s so the hang names its own
+        // culprit (activity + chunk + how long it's been stuck). Exits as
+        // soon as the joins complete — silent in the healthy case.
+        let joins_done = Arc::new(AtomicBool::new(false));
+        {
+            let done = Arc::clone(&joins_done);
+            let hb = Arc::clone(&self.worker_heartbeats);
+            let _ = thread::Builder::new()
+                .name("voxel-shutdown-watchdog".to_string())
+                .spawn(move || {
+                    use crate::worker::heartbeat::{activity, now_ms};
+                    for round in 1u32..=18 {
+                        for _ in 0..100 {
+                            if done.load(Ordering::Relaxed) { return; }
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                        let now = now_ms();
+                        let mut line = format!(
+                            "[FFI_SHUTDOWN] joins still pending after ~{}s |", round * 10
+                        );
+                        for (i, h) in hb.iter().enumerate() {
+                            let (act, since, coord, seq) = h.snapshot();
+                            line.push_str(&format!(
+                                " w{}={}{:?} {:.1}s seq{}",
+                                i, activity::name(act), coord,
+                                now.saturating_sub(since) as f64 / 1000.0, seq,
+                            ));
+                        }
+                        crate::panic_log::note(&line);
+                    }
+                });
+        }
+
+        for (i, handle) in self.workers.into_iter().enumerate() {
             let _ = handle.join();
+            crate::panic_log::note(&format!("[FFI_SHUTDOWN] worker {} joined", i));
         }
         if let Some(handle) = self.fluid_thread.take() {
             let _ = handle.join();
+            crate::panic_log::note("[FFI_SHUTDOWN] fluid thread joined");
         }
+        joins_done.store(true, Ordering::Relaxed);
+        crate::panic_log::note("[FFI_SHUTDOWN] all joins complete");
     }
 }

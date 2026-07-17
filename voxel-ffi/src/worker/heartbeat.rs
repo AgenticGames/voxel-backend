@@ -106,7 +106,7 @@ impl WorkerHeartbeat {
         self.since_ms.store(now_ms(), Ordering::Relaxed);
     }
 
-    fn snapshot(&self) -> (u8, u64, (i32, i32, i32), u64) {
+    pub(crate) fn snapshot(&self) -> (u8, u64, (i32, i32, i32), u64) {
         let act = self.activity.load(Ordering::Acquire);
         (
             act,
