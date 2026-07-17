@@ -1079,6 +1079,13 @@ mod density_bench {
         if let Ok(oct) = std::env::var("BENCH_DETAIL_OCTAVES") {
             config.noise.detail_octaves = oct.parse().unwrap();
         }
+        // BENCH_ORE_SCALE=0 → assign_host_rock shortcut (no ore noise): the
+        // delta vs default isolates the ore-chain cost without the per-voxel
+        // timer overhead that VOXEL_DENSITY_TIMINGS adds (2 QPC calls per
+        // solid voxel inflated the old 52-56% figure).
+        if let Ok(os) = std::env::var("BENCH_ORE_SCALE") {
+            config.ore.ore_global_scale = os.parse().unwrap();
+        }
         let origins: Vec<glam::Vec3> = (0..12)
             .map(|i| glam::Vec3::new(
                 (i % 4) as f32 * 900.0,

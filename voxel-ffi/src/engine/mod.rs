@@ -846,5 +846,29 @@ impl VoxelEngine {
         }
         joins_done.store(true, Ordering::Relaxed);
         crate::panic_log::note("[FFI_SHUTDOWN] all joins complete");
+
+        // Deallocate the ChunkStore on a detached reaper thread. Dropping a
+        // large store on the game thread was ~100% of the remaining PIE-exit
+        // hang once joins were fixed: a 16.8k-chunk store (runaway-fall
+        // session, 2026-07-18) took ~200s of pure free() inside
+        // DestroyEngine; even normal multi-hour sessions accumulate seconds
+        // of drop time. All threads are joined at this point, so this Arc is
+        // the last strong ref and the reaper does the real deallocation.
+        // The DLL outlives PIE sessions, so the thread can't outlive its
+        // code; at editor exit the heap dies with the process either way.
+        let store = Arc::clone(&self.store);
+        drop(self.store);
+        let _ = thread::Builder::new()
+            .name("voxel-store-reaper".to_string())
+            .spawn(move || {
+                let n = store.read().map(|s| s.chunks_loaded()).unwrap_or(0);
+                let t = std::time::Instant::now();
+                drop(store);
+                crate::panic_log::note(&format!(
+                    "[FFI_SHUTDOWN] store reaper: {} chunks freed in {:.1}s (off-thread)",
+                    n,
+                    t.elapsed().as_secs_f64()
+                ));
+            });
     }
 }
