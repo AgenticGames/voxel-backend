@@ -118,6 +118,11 @@ pub struct VoxelEngine {
 
     // Shared state
     store: Arc<RwLock<ChunkStore>>,
+    /// Last successfully sampled `chunks_loaded()` value. `get_stats` polls
+    /// the store with `try_read` and must not block the game thread; when a
+    /// writer holds the lock it reports this cached sample instead of 0
+    /// (which made external pollers see the count flap 0↔real at idle).
+    last_chunks_loaded: AtomicU32,
     config: Arc<RwLock<GenerationConfig>>,
     stress_config: Arc<RwLock<StressConfig>>,
     sleep_config: Arc<RwLock<voxel_sleep::SleepConfig>>,
@@ -757,6 +762,7 @@ impl VoxelEngine {
             path_results: Arc::new(Mutex::new(PathResultStore::default())),
             strut_broken_stash: Arc::new(Mutex::new(Vec::new())),
             next_path_request_id: Arc::new(AtomicU32::new(1)),
+            last_chunks_loaded: AtomicU32::new(0),
             occupied_cells: Arc::clone(&occupied_cells),
             crystal_anchors,
             poi_tracker,

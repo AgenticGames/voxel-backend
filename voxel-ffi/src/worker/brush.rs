@@ -1314,6 +1314,65 @@ pub(super) fn handle_brush_fluid_river(ctx: &super::HandlerCtx<'_>, points: Vec<
             }
 }
 
+/// Store-level core of the lava↔water quench: write Obsidian rim + Scoria
+/// halo voxels and mark every touched chunk in the modification tracker.
+/// Returns the touched chunk keys.
+///
+/// The dirty-marking is load-bearing for persistence: `ChunkStore::unload`
+/// only captures a `ChunkSnapshot` for chunks in
+/// `modification_tracker.dirty_chunks`, and `apply_pending_snapshot` is what
+/// restores the quenched material when the chunk streams back in. Without it
+/// a legitimate unload→reload near a quenched pile regenerates pre-reaction
+/// terrain (the Rust half of the mithril-bug-reports #48 seam flash).
+/// Covered by `quench_persistence_tests` below.
+pub(crate) fn apply_quench_writes_and_mark_dirty(
+    s: &mut crate::store::ChunkStore,
+    cs: i32,
+    obsidian: &[((i32, i32, i32), usize, usize, usize)],
+    scoria: &[((i32, i32, i32), usize, usize, usize)],
+) -> Vec<(i32, i32, i32)> {
+    let mut dirty_set: HashSet<(i32, i32, i32)> = HashSet::new();
+    let mut written: Vec<voxel_core::density_ops::WrittenCell> = Vec::new();
+    let mut changed: u32 = 0;
+
+    // Helper: convert local (key, lx, ly, lz) → world coords + write
+    // through density_ops::write_all_locations so chunk-boundary
+    // mirrors stay in sync.
+    for (key, lx, ly, lz) in obsidian {
+        let wx = key.0 * cs + *lx as i32;
+        let wy = key.1 * cs + *ly as i32;
+        let wz = key.2 * cs + *lz as i32;
+        voxel_core::density_ops::write_all_locations(
+            &mut s.density_fields, cs, wx, wy, wz,
+            |_old_d, _old_m| Some((1.0, voxel_core::material::Material::Obsidian)),
+            &mut dirty_set, &mut written, &mut changed,
+        );
+    }
+    for (key, lx, ly, lz) in scoria {
+        let wx = key.0 * cs + *lx as i32;
+        let wy = key.1 * cs + *ly as i32;
+        let wz = key.2 * cs + *lz as i32;
+        voxel_core::density_ops::write_all_locations(
+            &mut s.density_fields, cs, wx, wy, wz,
+            |_old_d, old_m| {
+                // Don't overwrite obsidian we just placed at the same
+                // boundary position (rim wins over halo).
+                if old_m == voxel_core::material::Material::Obsidian {
+                    None
+                } else {
+                    Some((1.0, voxel_core::material::Material::Scoria))
+                }
+            },
+            &mut dirty_set, &mut written, &mut changed,
+        );
+    }
+
+    // Persist these changes across save/load.
+    let dirty_chunks: Vec<(i32, i32, i32)> = dirty_set.iter().copied().collect();
+    s.modification_tracker.mark_dirty_many(&dirty_chunks);
+    dirty_chunks
+}
+
 pub(super) fn handle_apply_lava_quench(ctx: &super::HandlerCtx<'_>, obsidian: Vec<((i32, i32, i32), usize, usize, usize)>, scoria: Vec<((i32, i32, i32), usize, usize, usize)>, _drained_water: Vec<((i32, i32, i32), usize, usize, usize)>) {
     let result_tx = ctx.result_tx;
     let store = ctx.store;
@@ -1333,45 +1392,7 @@ pub(super) fn handle_apply_lava_quench(ctx: &super::HandlerCtx<'_>, obsidian: Ve
             let cs = cfg.chunk_size as i32;
 
             let mut s = store.write().unwrap();
-            let mut dirty_set: HashSet<(i32, i32, i32)> = HashSet::new();
-            let mut written: Vec<voxel_core::density_ops::WrittenCell> = Vec::new();
-            let mut changed: u32 = 0;
-
-            // Helper: convert local (key, lx, ly, lz) → world coords + write
-            // through density_ops::write_all_locations so chunk-boundary
-            // mirrors stay in sync.
-            for (key, lx, ly, lz) in &obsidian {
-                let wx = key.0 * cs + *lx as i32;
-                let wy = key.1 * cs + *ly as i32;
-                let wz = key.2 * cs + *lz as i32;
-                voxel_core::density_ops::write_all_locations(
-                    &mut s.density_fields, cs, wx, wy, wz,
-                    |_old_d, _old_m| Some((1.0, voxel_core::material::Material::Obsidian)),
-                    &mut dirty_set, &mut written, &mut changed,
-                );
-            }
-            for (key, lx, ly, lz) in &scoria {
-                let wx = key.0 * cs + *lx as i32;
-                let wy = key.1 * cs + *ly as i32;
-                let wz = key.2 * cs + *lz as i32;
-                voxel_core::density_ops::write_all_locations(
-                    &mut s.density_fields, cs, wx, wy, wz,
-                    |_old_d, old_m| {
-                        // Don't overwrite obsidian we just placed at the same
-                        // boundary position (rim wins over halo).
-                        if old_m == voxel_core::material::Material::Obsidian {
-                            None
-                        } else {
-                            Some((1.0, voxel_core::material::Material::Scoria))
-                        }
-                    },
-                    &mut dirty_set, &mut written, &mut changed,
-                );
-            }
-
-            // Persist these changes across save/load.
-            let dirty_chunks: Vec<(i32, i32, i32)> = dirty_set.iter().copied().collect();
-            s.modification_tracker.mark_dirty_many(&dirty_chunks);
+            let dirty_chunks = apply_quench_writes_and_mark_dirty(&mut s, cs, &obsidian, &scoria);
 
             // Remesh affected chunks (full chunk bounds — we touched solid voxels).
             let dirty_bounds: Vec<_> = dirty_chunks.iter().map(|&k| {
@@ -1426,4 +1447,77 @@ pub(super) fn handle_unload(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32))
             s.unload(chunk);
             generation_counters.remove(&chunk);
             let _ = fluid_event_tx.send(FluidEvent::ChunkUnloaded { chunk });
+}
+
+#[cfg(test)]
+mod quench_persistence_tests {
+    use super::apply_quench_writes_and_mark_dirty;
+    use crate::store::ChunkStore;
+    use voxel_core::density::DensityField;
+    use voxel_core::material::Material;
+    use voxel_gen::hermite_extract::extract_hermite_data;
+
+    /// Default `VoxelSample` is solid limestone — a stand-in for pre-reaction
+    /// worldgen output. The quench writes Obsidian/Scoria over it; after
+    /// unload→regen the material (not just density) must round-trip.
+    fn insert_solid(s: &mut ChunkStore, key: (i32, i32, i32), gs: usize) {
+        let df = DensityField::new(gs);
+        let h = extract_hermite_data(&df);
+        s.insert(key, df, h);
+    }
+
+    /// Fluid-sim quench writes must survive unload→regenerate: the quench
+    /// path marks touched chunks in the modification tracker, `unload`
+    /// captures a snapshot for dirty chunks, and `apply_pending_snapshot`
+    /// restores the reaction material when the chunk streams back in.
+    /// Regression guard for the Rust half of mithril-bug-reports #48.
+    #[test]
+    fn quench_writes_survive_unload_and_regen() {
+        let cs = 8usize;
+        let gs = cs + 1;
+        let mut s = ChunkStore::new(4);
+        insert_solid(&mut s, (0, 0, 0), gs);
+        insert_solid(&mut s, (1, 0, 0), gs);
+
+        // Interior obsidian + scoria cells in (0,0,0), plus one obsidian
+        // cell on the shared face at world x=8 — write_all_locations must
+        // fan that out into (1,0,0)'s local (0,4,4) mirror and dirty-mark
+        // BOTH chunks.
+        let obsidian = vec![((0, 0, 0), 3, 3, 3), ((0, 0, 0), cs, 4, 4)];
+        let scoria = vec![((0, 0, 0), 3, 4, 3)];
+
+        let dirty = apply_quench_writes_and_mark_dirty(&mut s, cs as i32, &obsidian, &scoria);
+        assert!(dirty.contains(&(0, 0, 0)) && dirty.contains(&(1, 0, 0)));
+        assert!(s.modification_tracker.dirty_chunks.contains(&(0, 0, 0)));
+        assert!(s.modification_tracker.dirty_chunks.contains(&(1, 0, 0)));
+
+        // Unload both — the dirty flag is what gates snapshot capture.
+        s.unload((0, 0, 0));
+        s.unload((1, 0, 0));
+        assert!(s.preserved_snapshots.contains_key(&(0, 0, 0)));
+        assert!(s.preserved_snapshots.contains_key(&(1, 0, 0)));
+        assert!(s.density_fields.is_empty());
+
+        // Regenerate: fresh pre-reaction worldgen density, then the snapshot
+        // pass that insert_region_chunks_and_resync runs after every insert.
+        for key in [(0, 0, 0), (1, 0, 0)] {
+            insert_solid(&mut s, key, gs);
+            assert!(
+                s.apply_pending_snapshot(key),
+                "snapshot must re-apply for {key:?}"
+            );
+            assert!(s.modification_tracker.dirty_chunks.contains(&key));
+        }
+
+        let df0 = s.density_fields.get(&(0, 0, 0)).unwrap();
+        assert_eq!(df0.get(3, 3, 3).material, Material::Obsidian);
+        assert_eq!(df0.get(3, 4, 3).material, Material::Scoria);
+        assert_eq!(df0.get(cs, 4, 4).material, Material::Obsidian);
+        let df1 = s.density_fields.get(&(1, 0, 0)).unwrap();
+        assert_eq!(
+            df1.get(0, 4, 4).material,
+            Material::Obsidian,
+            "boundary mirror in the neighbor chunk must restore too"
+        );
+    }
 }
