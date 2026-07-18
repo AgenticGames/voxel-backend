@@ -1163,3 +1163,52 @@
             voxel_destroy_engine(engine);
         }
     }
+
+    /// `chunks_loaded` polls the store with `try_read` and must serve the
+    /// last successful sample — not 0 — while a writer holds the lock.
+    /// Regression guard for the cockpit `rust_stored` count flapping
+    /// 0↔real during idle soak (workers take the write lock even at idle).
+    #[test]
+    fn stats_chunks_loaded_survives_lock_contention() {
+        unsafe {
+            let cfg = test_config();
+            let engine_ptr = voxel_create_engine(&cfg);
+            let engine = &*(engine_ptr as *const crate::engine::VoxelEngine);
+
+            // Seed one stored chunk directly (no worker round-trip needed).
+            {
+                let mut s = engine.store_handle().write().unwrap();
+                let df = voxel_core::density::DensityField::new(5);
+                let h = voxel_gen::hermite_extract::extract_hermite_data(&df);
+                s.insert((900, 900, 900), df, h);
+            }
+
+            // Uncontended poll samples the real value (and caches it). A
+            // background writer can race a single poll, so retry briefly.
+            let mut free = voxel_get_stats(engine_ptr);
+            for _ in 0..100 {
+                if free.chunks_loaded >= 1 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                free = voxel_get_stats(engine_ptr);
+            }
+            assert!(
+                free.chunks_loaded >= 1,
+                "uncontended stats poll never observed the stored chunk"
+            );
+
+            // Contended poll: hold the write lock ourselves. try_read fails,
+            // and the poll must report the cached sample, not 0.
+            {
+                let _guard = engine.store_handle().write().unwrap();
+                let contended = voxel_get_stats(engine_ptr);
+                assert_eq!(
+                    contended.chunks_loaded, free.chunks_loaded,
+                    "contended poll must serve the last sample, not reset to 0"
+                );
+            }
+
+            voxel_destroy_engine(engine_ptr);
+        }
+    }

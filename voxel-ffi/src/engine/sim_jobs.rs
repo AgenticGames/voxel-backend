@@ -298,11 +298,31 @@ impl VoxelEngine {
         fc.take()
     }
 
+    /// Test-only: expose the store so tests can hold its write lock and
+    /// exercise the contended-stats fallback in `get_stats`.
+    #[cfg(test)]
+    pub(crate) fn store_handle(&self) -> &Arc<RwLock<ChunkStore>> {
+        &self.store
+    }
+
     /// Get current engine statistics.
     pub fn get_stats(&self) -> FfiEngineStats {
-        let chunks_loaded = self.store.try_read().map(|s| s.chunks_loaded()).unwrap_or(0);
+        // `try_read` fails whenever a writer holds the store lock, and the
+        // workers grab it routinely even at idle (fluid relay, seam passes,
+        // orphan sweep). Returning 0 on contention made pollers see the
+        // stored-chunk count flap between 0 and the real value (cockpit
+        // `rust_stored` 0↔20k during idle soak, 2026-07-18). Serve the last
+        // successful sample instead — never block the game thread here.
+        let chunks_loaded = match self.store.try_read() {
+            Ok(s) => {
+                let n = s.chunks_loaded() as u32;
+                self.last_chunks_loaded.store(n, Ordering::Relaxed);
+                n
+            }
+            Err(_) => self.last_chunks_loaded.load(Ordering::Relaxed),
+        };
         FfiEngineStats {
-            chunks_loaded: chunks_loaded as u32,
+            chunks_loaded,
             pending_requests: self.generate_tx.len() as u32,
             completed_results: self.result_rx.len() as u32,
             worker_threads_active: self.workers.len() as u32,
