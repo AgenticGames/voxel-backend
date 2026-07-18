@@ -19,7 +19,7 @@ use crate::types::WorkerResult;
 use super::seam::{
     batched_seam_pass, batched_seam_pass_mine, hash_mesh,
     prune_destroyed_mushrooms_for_chunks, recompute_crystals_for_chunks,
-    retrieve_crystal_data,
+    retrieve_crystal_data, retrieve_mushroom_data,
 };
 
 pub(super) fn handle_flatten(ctx: &super::HandlerCtx<'_>, base_x: i32, base_y: i32, base_z: i32, host_material: u8) {
@@ -751,12 +751,17 @@ pub(super) fn handle_force_chunk_resync(ctx: &super::HandlerCtx<'_>, chunk: (i32
                 let v = converted.positions.len();
                 let i = converted.indices.len();
                 log_line(format!("target {:?}: sending ChunkMesh — {} verts / {} indices", target, v, i));
+                // Re-attach store decorations — an empty vec here clears the
+                // chunk's crystal/mushroom HISMs on UE (same disease as the
+                // #50 quench path).
+                let crystal_data = retrieve_crystal_data(store, target, cfg.voxel_scale(), world_scale);
+                let mushroom_data = retrieve_mushroom_data(store, target, cfg.voxel_scale(), world_scale);
                 let _ = result_tx.send(WorkerResult::ChunkMesh {
                     chunk: target,
                     mesh: converted,
                     generation: 0,
-                    crystal_data: Vec::new(),
-                    mushroom_data: Vec::new(),
+                    crystal_data,
+                    mushroom_data,
                     zone_descriptors: Vec::new(),
                 });
 
@@ -1373,46 +1378,28 @@ pub(super) fn handle_apply_lava_quench(ctx: &super::HandlerCtx<'_>, obsidian: Ve
             let dirty_chunks: Vec<(i32, i32, i32)> = dirty_set.iter().copied().collect();
             s.modification_tracker.mark_dirty_many(&dirty_chunks);
 
-            // Remesh affected chunks (full chunk bounds — we touched solid voxels).
+            // Refresh store-side base meshes + seam data (full chunk bounds —
+            // we touched solid voxels). The returned base-only meshes are NOT
+            // sent: shipping them wiped UE's seam sections and left black
+            // boundary gaps until the seam pass below repaired them, a visible
+            // wipe→restore flash on every quench event near active lava
+            // (playtest #50). The batched pass is the sole sender, like every
+            // other density-mutating path.
             let dirty_bounds: Vec<_> = dirty_chunks.iter().map(|&k| {
                 (k, 0usize, 0usize, 0usize, cfg.chunk_size, cfg.chunk_size, cfg.chunk_size)
             }).collect();
-            let meshes = s.remesh_dirty(&dirty_bounds, &cfg, world_scale);
-
-            // Capture density for the fluid TerrainModified events while we
-            // still hold the lock, so the fluid sim's density cache is updated
-            // and stops trying to flow into the new solid voxels.
-            let mut terrain_updates: Vec<((i32,i32,i32), Vec<f32>)> = Vec::new();
-            for &k in &dirty_chunks {
-                if let Some(df) = s.density_fields.get(&k) {
-                    let densities: Vec<f32> = df.samples.iter().map(|s| s.density).collect();
-                    terrain_updates.push((k, densities));
-                }
-            }
+            let _ = s.remesh_dirty(&dirty_bounds, &cfg, world_scale);
             drop(s);
 
-            // Ship remeshed chunks back to UE through the normal pipeline.
-            for (chunk, mesh) in meshes {
-                let _ = result_tx.send(WorkerResult::ChunkMesh {
-                    chunk,
-                    mesh,
-                    generation: 0,
-                    crystal_data: Vec::new(),
-                    mushroom_data: Vec::new(),
-                    zone_descriptors: Vec::new(),
-                });
-            }
-
-            // Notify fluid sim of new solid voxels so its density cache
-            // matches the world state.
-            for (chunk, densities) in terrain_updates {
-                let _ = fluid_event_tx.send(FluidEvent::TerrainModified {
-                    chunk, densities,
-                });
-            }
-
-            // Seam pass so chunk-boundary quads tween correctly between
-            // the new solid (1.0) and adjacent air/density values.
+            // Combined base+seam meshes, decorations re-attached from the
+            // store, destroyed-mushroom prune, and the fluid TerrainModified
+            // density-cache refresh all happen inside the pass. Deliberately
+            // NOT the `_mine` variant: MineBatchMesh unpacks at the FFI with a
+            // MineResult drain signal, and UE's mine-result handler (stress
+            // dust, pickup/XP paths) then runs for every ambient quench event
+            // — dozens/sec on fluid-heavy loads, enough to starve the spawn
+            // restore's ground deadline (falling-player regression caught in
+            // #50 verification).
             if !dirty_chunks.is_empty() {
                 batched_seam_pass(&dirty_chunks, &cfg, store, result_tx, fluid_event_tx, world_scale);
             }
@@ -1426,4 +1413,186 @@ pub(super) fn handle_unload(ctx: &super::HandlerCtx<'_>, chunk: (i32, i32, i32))
             s.unload(chunk);
             generation_counters.remove(&chunk);
             let _ = fluid_event_tx.send(FluidEvent::ChunkUnloaded { chunk });
+}
+
+#[cfg(test)]
+mod lava_quench_tests {
+    //! Playtest #50 regression, two-sided:
+    //!
+    //! 1. `handle_apply_lava_quench` must not double-send. The old flow
+    //!    shipped `remesh_dirty`'s base-only meshes (wiping UE's seam
+    //!    sections and clearing crystal/mushroom HISMs via empty decoration
+    //!    vecs) and then re-sent the combined mesh from the seam pass — a
+    //!    visible black-gap wipe→restore flash on every quench event near
+    //!    active lava. Now the batched seam pass is the sole sender: exactly
+    //!    one combined ChunkMesh per dirty chunk, decorations attached.
+    //! 2. It must NOT use the `_mine` batch: MineBatchMesh unpacks at the
+    //!    FFI with a MineResult drain signal, and UE's mine-result handler
+    //!    (stress dust, pickup/XP) then runs per ambient quench — dozens/sec
+    //!    on fluid-heavy loads, enough to starve the spawn restore's ground
+    //!    deadline (falling-player regression caught during #50 verification).
+
+    use super::*;
+    use super::super::{
+        DeferredRegionStress, HandlerCtx, MorphSnapshot, ParkedGenerates, SlowPathPermits,
+    };
+    use super::super::seam::PendingSeams;
+    use crate::profiler::StreamingProfiler;
+    use crate::store::ChunkStore;
+    use crate::types::WorkerRequest;
+    use dashmap::DashMap;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex, RwLock};
+    use voxel_core::density::DensityField;
+    use voxel_core::material::Material;
+    use voxel_gen::config::{GenerationConfig, StressConfig};
+
+    /// Flat terrain: solid (density 1.0) below world y=15, matching the
+    /// quench writes' solid-positive convention.
+    fn build_density(cx: i32, cy: i32, cz: i32, gs: usize) -> DensityField {
+        let size = gs + 1;
+        let oy = cy * gs as i32;
+        let mut df = DensityField::new(size);
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..size {
+                    let wy = oy + y as i32;
+                    let sm = df.get_mut(x, y, z);
+                    sm.density = (15.0 - wy as f32).clamp(-1.0, 1.0);
+                    sm.material = Material::Limestone;
+                }
+            }
+        }
+        let _ = (cx, cz);
+        df.compute_metadata();
+        df
+    }
+
+    fn meshed_store(cfg: &GenerationConfig, keys: &[(i32, i32, i32)]) -> Arc<RwLock<ChunkStore>> {
+        let store = Arc::new(RwLock::new(ChunkStore::new(4)));
+        {
+            let mut s = store.write().unwrap();
+            for &k in keys {
+                let df = build_density(k.0, k.1, k.2, cfg.chunk_size);
+                let hermite = extract_hermite_data(&df);
+                s.insert(k, df, hermite);
+            }
+            let bounds: Vec<_> = keys
+                .iter()
+                .map(|&k| (k, 0usize, 0usize, 0usize, cfg.chunk_size, cfg.chunk_size, cfg.chunk_size))
+                .collect();
+            let _ = s.remesh_dirty(&bounds, cfg, 100.0);
+        }
+        store
+    }
+
+    #[test]
+    fn quench_sends_each_dirty_chunk_once_combined_and_never_as_mine_batch() {
+        let gs = 30usize;
+        let mut cfg = GenerationConfig::default();
+        cfg.chunk_size = gs;
+        let keys = [(0, 0, 0), (1, 0, 0)];
+        let store = meshed_store(&cfg, &keys);
+
+        let (result_tx, result_rx) = crossbeam_channel::unbounded::<WorkerResult>();
+        let (fluid_tx, fluid_rx) = crossbeam_channel::unbounded::<FluidEvent>();
+
+        // Baseline: UE has the combined meshes; hashes recorded.
+        batched_seam_pass_mine(&keys, &cfg, &store, &result_tx, &fluid_tx, 100.0);
+        while result_rx.try_recv().is_ok() {}
+        while fluid_rx.try_recv().is_ok() {}
+        let base_hash = store.read().unwrap().last_sent_mesh_hash.get(&keys[0]).copied();
+        assert!(base_hash.is_some(), "baseline pass must record a hash");
+
+        // HandlerCtx scaffolding — only result/fluid/store/config/world_scale
+        // are read by the quench handler; the rest are inert defaults.
+        let config = Arc::new(RwLock::new(cfg.clone()));
+        let stress_config = Arc::new(RwLock::new(StressConfig::default()));
+        let generation_counters = Arc::new(DashMap::new());
+        let profiler = Arc::new(StreamingProfiler::new(1));
+        let (_gtx, generate_rx) = crossbeam_channel::unbounded::<WorkerRequest>();
+        let (_mtx, mine_rx) = crossbeam_channel::unbounded::<WorkerRequest>();
+        let morph_manifest = Arc::new(Mutex::new(None));
+        let morph_snapshot = Arc::new(Mutex::new(MorphSnapshot::default()));
+        let regions_in_flight = Arc::new(DashMap::new());
+        let crystal_anchors =
+            Arc::new(Mutex::new(crate::crystal_anchors::CrystalAnchorManager::default()));
+        let deferred_region_stress = Arc::new(DeferredRegionStress::new());
+        let pending_seams = Arc::new(PendingSeams::new());
+        let parked_generates = Arc::new(ParkedGenerates::new());
+        let slow_path_permits = Arc::new(SlowPathPermits::new(2));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let ctx = HandlerCtx {
+            result_tx: &result_tx,
+            store: &store,
+            config: &config,
+            stress_config: &stress_config,
+            generation_counters: &generation_counters,
+            world_scale: 100.0,
+            fluid_event_tx: &fluid_tx,
+            profiler: &profiler,
+            worker_id: 0,
+            generate_rx: &generate_rx,
+            mine_rx: &mine_rx,
+            morph_manifest: &morph_manifest,
+            morph_snapshot: &morph_snapshot,
+            regions_in_flight: &regions_in_flight,
+            crystal_anchors: &crystal_anchors,
+            deferred_region_stress: &deferred_region_stress,
+            pending_seams: &pending_seams,
+            parked_generates: &parked_generates,
+            slow_path_permits: &slow_path_permits,
+            shutdown: &shutdown,
+        };
+
+        // Quench a rim of surface cells near the A|B boundary — the classic
+        // obsidian skin + scoria halo shape straddling the y=15 surface.
+        let a = keys[0];
+        let obsidian: Vec<((i32, i32, i32), usize, usize, usize)> =
+            (13..17).map(|ly| (a, 29usize, ly as usize, 10usize)).collect();
+        let scoria: Vec<((i32, i32, i32), usize, usize, usize)> =
+            (13..17).map(|ly| (a, 28usize, ly as usize, 10usize)).collect();
+        handle_apply_lava_quench(&ctx, obsidian, scoria, Vec::new());
+
+        let mut sends_per_chunk: std::collections::HashMap<(i32, i32, i32), usize> =
+            std::collections::HashMap::new();
+        while let Ok(r) = result_rx.try_recv() {
+            match r {
+                WorkerResult::ChunkMesh { chunk, mesh, mushroom_data: _, .. } => {
+                    assert!(!mesh.indices.is_empty(), "send for {chunk:?} carries no geometry");
+                    *sends_per_chunk.entry(chunk).or_insert(0) += 1;
+                }
+                WorkerResult::MineBatchMesh { .. } => panic!(
+                    "quench emitted a MineBatchMesh — the FFI unpacks it with a \
+                     MineResult drain signal, so UE runs its mine-result handler \
+                     (stress dust, pickups) for every ambient quench event"
+                ),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            sends_per_chunk.get(&a),
+            Some(&1),
+            "quenched chunk must be sent exactly once (combined mesh; the old \
+             flow's base-only pre-send wiped UE seam sections — playtest #50): \
+             got {sends_per_chunk:?}"
+        );
+
+        // The recorded hash moved — the combined mesh with the new obsidian
+        // actually shipped (hash-skip did not eat it).
+        let new_hash = store.read().unwrap().last_sent_mesh_hash.get(&a).copied();
+        assert_ne!(new_hash, base_hash, "quench result never re-sent");
+
+        // The fluid density-cache refresh still flows (the pass owns it now).
+        let mut tm_keys: HashSet<(i32, i32, i32)> = HashSet::new();
+        while let Ok(ev) = fluid_rx.try_recv() {
+            if let FluidEvent::TerrainModified { chunk, .. } = ev {
+                tm_keys.insert(chunk);
+            }
+        }
+        assert!(tm_keys.contains(&a), "TerrainModified for the quenched chunk missing");
+
+        // Persistence: quench writes survive save/load only if marked dirty.
+        assert!(store.read().unwrap().modification_tracker.dirty_chunks.contains(&a));
+    }
 }
