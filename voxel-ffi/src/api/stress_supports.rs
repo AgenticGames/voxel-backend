@@ -171,6 +171,35 @@ pub unsafe extern "C" fn voxel_query_stress_at(
     )
 }
 
+/// Query the PAINTED-stress overlay at a single world position (UE coords).
+/// Returns the authored/painted stress at that voxel (0.0 if none). Lets the
+/// game tell authored tunnel collapses (painted stress) apart from natural ones.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_query_painted_stress_at(
+    engine: *mut c_void,
+    world_x: f32,
+    world_y: f32,
+    world_z: f32,
+) -> f32 {
+    use crate::convert::from_ue_world_pos;
+
+    if engine.is_null() {
+        return 0.0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+
+    let chunk_size = engine.chunk_size();
+    let world_scale = engine.get_world_scale();
+
+    let rust_pos = from_ue_world_pos(world_x, world_y, world_z, world_scale);
+    engine.query_painted_stress_at(
+        rust_pos.x as i32,
+        rust_pos.y as i32,
+        rust_pos.z as i32,
+        chunk_size,
+    )
+}
+
 /// Voxel-aware surface probe at a UE world point. Used by spider-nest /
 /// wasp-hive placement validators to confirm a candidate is anchored to a
 /// real surface of the right kind with enough cavity room.

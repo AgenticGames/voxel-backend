@@ -322,6 +322,29 @@ impl VoxelEngine {
             .unwrap_or(0.0)
     }
 
+    /// Query the PAINTED-stress overlay at a single world voxel position
+    /// (0.0 when that chunk has no painted layer). Mirrors `query_stress_at`
+    /// but reads the authored overlay, letting the game tell painted-stress
+    /// (authored) collapses apart from natural ones.
+    pub fn query_painted_stress_at(&self, wx: i32, wy: i32, wz: i32, chunk_size: usize) -> f32 {
+        let cs = chunk_size as i32;
+        let cx = wx.div_euclid(cs);
+        let cy = wy.div_euclid(cs);
+        let cz = wz.div_euclid(cs);
+        let lx = wx.rem_euclid(cs) as usize;
+        let ly = wy.rem_euclid(cs) as usize;
+        let lz = wz.rem_euclid(cs) as usize;
+
+        let store = match self.store.try_read() {
+            Ok(s) => s,
+            Err(_) => return 0.0,
+        };
+        store.stress_fields
+            .get(&(cx, cy, cz))
+            .map(|sf| sf.painted(lx, ly, lz))
+            .unwrap_or(0.0)
+    }
+
     /// Probe the density field at a UE world point. Used by spider-nest /
     /// wasp-hive placement validators — see [`crate::surface_probe`].
     ///
