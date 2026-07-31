@@ -463,6 +463,7 @@ pub(crate) fn try_handle_mine(
     result_tx: &Sender<WorkerResult>,
     store: &Arc<RwLock<ChunkStore>>,
     config: &Arc<RwLock<GenerationConfig>>,
+    stress_config: &Arc<RwLock<StressConfig>>,
     world_scale: f32,
     fluid_event_tx: &Sender<FluidEvent>,
 ) -> bool {
@@ -494,9 +495,16 @@ pub(crate) fn try_handle_mine(
                         s.crystal_placements.insert(key, placements);
                     }
                 }
-                // Queue position-based stress recalculation at mine point
+                // Queue position-based stress recalculation at mine point.
+                // ⚠ Must match `brush::handle_mine` — this preemption path drains
+                // the SAME WorkerRequest::Mine mid-generate, so a mine landing
+                // while a worker is busy must get the identical scan sphere.
+                // (Was hardcoded `+4` until 2026-07-31, which silently shrank the
+                // cinematic scan radius for any mine that arrived during region
+                // generation and desynced it from the debug visualizer.)
                 let stress_center = (center.x as i32, center.y as i32, center.z as i32);
-                let stress_radius = radius as i32 + 4; // mine radius + air decay(2) + small margin
+                let scan_buffer = stress_config.read().unwrap().mining_stress_scan_buffer;
+                let stress_radius = radius as i32 + scan_buffer as i32;
                 s.queue_stress_dirty(stress_center, stress_radius);
                 drop(s);
                 let _ = result_tx.send(WorkerResult::MinedMaterials { mined });
