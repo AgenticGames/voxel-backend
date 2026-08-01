@@ -382,6 +382,7 @@ pub unsafe extern "C" fn voxel_query_path_exists(
     to_x: f32, to_y: f32, to_z: f32,
     agent_radius_ue: f32,
     movement_mode: u8,
+    fine_cells: u8,
     max_nodes: u32,
 ) -> u8 {
     if engine.is_null() {
@@ -394,6 +395,7 @@ pub unsafe extern "C" fn voxel_query_path_exists(
             to_x, to_y, to_z,
             agent_radius_ue,
             movement_mode,
+            fine_cells,
             max_nodes,
         )
         .unwrap_or(1)

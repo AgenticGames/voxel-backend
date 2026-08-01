@@ -125,18 +125,23 @@ fn max_nodes_early_termination() {
 
 // ─── Walking ────────────────────────────────────────────────────
 
+// ⚠️ UP IS +Y in these worlds — matching the live ChunkStoreGrid convention
+// (UE +Z maps to Rust +Y at the FFI boundary). These tests were originally
+// written z-up, which let the z-up bug in the Walking predicate pass its own
+// suite while rejecting every real cell in the game (#206).
+
 #[test]
 fn walking_requires_floor_below() {
     let mut grid = StubGrid::default();
-    // Floor at z=0
+    // Floor at y=0
     for x in 0..=5 {
-        for y in -1..=1 {
-            grid.set_solid(IVec3::new(x, y, 0));
+        for z in -1..=1 {
+            grid.set_solid(IVec3::new(x, 0, z));
         }
     }
     let req = PathRequest {
-        from: IVec3::new(0, 0, 1),
-        to: IVec3::new(5, 0, 1),
+        from: IVec3::new(0, 1, 0),
+        to: IVec3::new(5, 1, 0),
         mode: MovementMode::Walking { agent_radius_cells: 0.5 },
         smooth: false,
         ..Default::default()
@@ -144,10 +149,10 @@ fn walking_requires_floor_below() {
     let outcome = compute_path(&grid, req);
     assert_eq!(outcome.status, PathStatus::Success);
     for n in &outcome.nodes {
-        // Every node must have solid directly below (z-1) — that's the
+        // Every node must have solid directly below (y-1) — that's the
         // Walking traversability predicate.
         assert!(
-            grid.is_solid(IVec3::new(n.cell.x, n.cell.y, n.cell.z - 1)),
+            grid.is_solid(IVec3::new(n.cell.x, n.cell.y - 1, n.cell.z)),
             "node {:?} has no floor below",
             n.cell
         );
@@ -157,16 +162,16 @@ fn walking_requires_floor_below() {
 #[test]
 fn walking_no_path_over_pit() {
     let mut grid = StubGrid::default();
-    // Floor at z=0 with a pit at x=3,4 (no floor there)
+    // Floor at y=0 with a pit at x=3,4 (no floor there)
     for x in 0..=10 {
         if x == 3 || x == 4 { continue; }
-        for y in -1..=1 {
-            grid.set_solid(IVec3::new(x, y, 0));
+        for z in -1..=1 {
+            grid.set_solid(IVec3::new(x, 0, z));
         }
     }
     let req = PathRequest {
-        from: IVec3::new(0, 0, 1),
-        to: IVec3::new(10, 0, 1),
+        from: IVec3::new(0, 1, 0),
+        to: IVec3::new(10, 1, 0),
         mode: MovementMode::Walking { agent_radius_cells: 0.5 },
         smooth: false,
         ..Default::default()
@@ -174,6 +179,63 @@ fn walking_no_path_over_pit() {
     let outcome = compute_path(&grid, req);
     // No floor means no walking path
     assert_eq!(outcome.status, PathStatus::NoPath);
+}
+
+#[test]
+fn flying_radius_one_requires_face_shell() {
+    // Open 5³ air box with a single solid voxel at the origin. A wide agent
+    // (radius ≥ 1 cell) may not occupy the solid's face-neighbors; a thin
+    // agent may. Diagonal neighbors stay legal for both.
+    let mut grid = StubGrid::default();
+    grid.set_solid(IVec3::new(0, 0, 0));
+    let wide = MovementMode::Flying { agent_radius_cells: 1.5 };
+    let thin = MovementMode::Flying { agent_radius_cells: 0.5 };
+    assert!(!crate::movement::can_traverse(&grid, IVec3::new(1, 0, 0), wide));
+    assert!(crate::movement::can_traverse(&grid, IVec3::new(1, 0, 0), thin));
+    assert!(crate::movement::can_traverse(&grid, IVec3::new(1, 1, 0), wide));
+}
+
+#[test]
+fn walking_shell_ignores_the_floor_it_stands_on() {
+    // Flat open floor at y=0: a wide Walking agent must still be able to
+    // stand one above it (the shell skips the below-neighbor Walking
+    // REQUIRES solid), but a solid wall voxel beside it blocks the wide
+    // agent and not the thin one.
+    let mut grid = StubGrid::default();
+    for x in -3..=3 {
+        for z in -3..=3 {
+            grid.set_solid(IVec3::new(x, 0, z));
+        }
+    }
+    let wide = MovementMode::Walking { agent_radius_cells: 1.5 };
+    let thin = MovementMode::Walking { agent_radius_cells: 0.5 };
+    assert!(crate::movement::can_traverse(&grid, IVec3::new(0, 1, 0), wide));
+    grid.set_solid(IVec3::new(1, 1, 0)); // wall voxel beside the agent
+    assert!(!crate::movement::can_traverse(&grid, IVec3::new(0, 1, 0), wide));
+    assert!(crate::movement::can_traverse(&grid, IVec3::new(0, 1, 0), thin));
+}
+
+#[test]
+fn walking_rejects_open_floor_when_up_axis_misread() {
+    // Regression guard for #206: an open chamber — flat floor at y=0, air
+    // everywhere above, nothing along z. A cell one above the floor MUST be
+    // traversable. The old z-up predicate looked sideways for its "floor",
+    // found air, and rejected every standable cell in the world.
+    let mut grid = StubGrid::default();
+    for x in -3..=3 {
+        for z in -3..=3 {
+            grid.set_solid(IVec3::new(x, 0, z));
+        }
+    }
+    let mode = MovementMode::Walking { agent_radius_cells: 0.5 };
+    assert!(
+        crate::movement::can_traverse(&grid, IVec3::new(0, 1, 0), mode),
+        "cell directly above an open floor must be walkable"
+    );
+    assert!(
+        !crate::movement::can_traverse(&grid, IVec3::new(0, 2, 0), mode),
+        "cell floating two above the floor must not be walkable"
+    );
 }
 
 // ─── Surface ────────────────────────────────────────────────────

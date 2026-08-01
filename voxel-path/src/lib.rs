@@ -5,6 +5,10 @@
 //!  - `Walking`: air cells with solid below (hermit crabs, toads, turtles, crocs)
 //!  - `Surface`: air cells adjacent to any solid (spiders on floors/walls/ceilings)
 //!
+//! ⚠️ VERTICAL AXIS IS +Y. The live grid feeds Rust voxel coords (UE +Z up →
+//! Rust +Y up at the FFI boundary), and Walking's floor check depends on it.
+//! Flying/Surface are axis-agnostic, which hid a z-up floor check for months.
+//!
 //! Surface mode supports full 2D-manifold traversal — a single A* result can
 //! span floor→wall→ceiling transitions, with each path node carrying the
 //! dominant surface normal for the AI consumer to orient against.

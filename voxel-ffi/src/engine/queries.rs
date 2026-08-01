@@ -668,6 +668,7 @@ impl VoxelEngine {
         to_ue_x: f32, to_ue_y: f32, to_ue_z: f32,
         agent_radius_ue: f32,
         movement_mode: u8,
+        fine_cells: u8,
         max_nodes: u32,
     ) -> Option<u8> {
         let chunk_size = self.chunk_size();
@@ -679,6 +680,8 @@ impl VoxelEngine {
             to_ue_x, to_ue_y, to_ue_z,
             agent_radius_ue,
             movement_mode,
+            1, // smoothing irrelevant here (and explicitly forced off below)
+            fine_cells,
             if max_nodes == 0 { 10_000 } else { max_nodes },
             world_scale,
         );
@@ -689,14 +692,18 @@ impl VoxelEngine {
         // check, not actual AI routing; including dynamic obstacles would make
         // the answer flicker as agents move and bear no relation to whether
         // the static geometry permits a route.
+        // Match the async solver's resolution — an endpoint validated on the
+        // coarse grid but solid at voxel resolution would pass the probe and
+        // then fail the real fine-cell search (InvalidEndpoint).
+        let cell_factor = if internal.fine_cells { 1 } else { crate::pathing::PATH_CELL_FACTOR };
         let grid = crate::pathing::ChunkStoreGrid {
             store: &store,
             chunk_size,
-            cell_factor: crate::pathing::PATH_CELL_FACTOR,
+            cell_factor,
             occupied_cells: None,
             requester_cell: None,
         };
-        let (path_req, _mode) = crate::pathing::to_path_request(&internal, crate::pathing::PATH_CELL_FACTOR);
+        let (path_req, _mode) = crate::pathing::to_path_request(&internal, cell_factor);
         // smooth = false — we only care whether a path exists; we don't
         // need the post-processed waypoint list.
         let path_req = voxel_path::PathRequest { smooth: false, ..path_req };

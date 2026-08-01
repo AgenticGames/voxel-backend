@@ -154,6 +154,8 @@ pub struct PathRequestInternal {
     pub agent_radius_voxels: f32,
     pub movement_mode_kind: u8, // 0=Flying, 1=Walking, 2=Surface
     pub max_nodes: u32,
+    pub smooth: bool,
+    pub fine_cells: bool,
 }
 
 /// Build the internal request from UE-space inputs. Caller supplies
@@ -164,6 +166,8 @@ pub fn build_request_from_ue(
     to_ue_x: f32, to_ue_y: f32, to_ue_z: f32,
     agent_radius_ue: f32,
     movement_mode: u8,
+    smooth_disable: u8,
+    fine_cells: u8,
     max_nodes: u32,
     world_scale: f32,
 ) -> PathRequestInternal {
@@ -174,6 +178,8 @@ pub fn build_request_from_ue(
         agent_radius_voxels: agent_radius_ue / world_scale,
         movement_mode_kind: movement_mode,
         max_nodes,
+        smooth: smooth_disable == 0,
+        fine_cells: fine_cells != 0,
     }
 }
 
@@ -205,7 +211,7 @@ pub fn to_path_request(
         to: to_cell,
         mode,
         max_nodes: internal.max_nodes,
-        smooth: true,
+        smooth: internal.smooth,
     };
     (req, mode)
 }
@@ -277,7 +283,23 @@ pub struct FfiPathRequest {
     pub to_ue_x: f32, pub to_ue_y: f32, pub to_ue_z: f32,
     pub agent_radius_ue: f32,
     pub movement_mode: u8,   // 0=Flying, 1=Walking, 2=Surface
-    pub _pad: [u8; 3],       // explicit padding to match C layout
+    /// 1 = skip theta* LOS smoothing and return the raw corridor-following
+    /// cell path. Smoothing's zero-width cell ray collapses a route to a few
+    /// long chords that can shave mesh the voxel grid calls open — fine for
+    /// AI steering, fatal for the sense trail's swept-ribbon validation
+    /// (#206). Carved out of the old `_pad`, so the C layout is unchanged
+    /// and zero-initialized callers keep smoothing on.
+    pub smooth_disable: u8,
+    /// 1 = plan on SINGLE-VOXEL cells (cell_factor 1) instead of the default
+    /// 2×2×2 blocks. The block grid samples one voxel of eight for solidity,
+    /// so on slopes A* threads "open" cells that are mostly rock — 26 of 91
+    /// sense-trail corridor points landed inside UE collision on the #206
+    /// route. Fine cells are exact (and let one-voxel passages path at all);
+    /// AI keeps the coarse grid, whose costs are tuned around it. Also skips
+    /// the cross-species occupancy layer (quantized at the coarse factor,
+    /// and a guidance ribbon shouldn't dodge wasps anyway).
+    pub fine_cells: u8,
+    pub _pad: [u8; 1],       // explicit padding to match C layout
     pub max_nodes: u32,
 }
 

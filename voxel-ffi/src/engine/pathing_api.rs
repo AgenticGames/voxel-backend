@@ -42,6 +42,8 @@ impl VoxelEngine {
             request.to_ue_x, request.to_ue_y, request.to_ue_z,
             request.agent_radius_ue,
             request.movement_mode,
+            request.smooth_disable,
+            request.fine_cells,
             request.max_nodes,
             self.world_scale,
         );
