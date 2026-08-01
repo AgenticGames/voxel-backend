@@ -115,6 +115,18 @@ pub fn compute_path<G: CellGrid>(grid: &G, request: PathRequest) -> PathOutcome 
     let mut touched_unloaded = false;
     let mut nodes_expanded: u32 = 0;
 
+    // Clearance cost for wide agents (radius ≥ 1 cell, same gate as the
+    // traversability shell): a soft penalty per solid SECOND-shell face
+    // neighbor, so where a passage is wider than the legal minimum the route
+    // prefers its centre instead of hugging an edge. Shortest-path edge-
+    // hugging is why the same doorway pathed or failed depending on where
+    // the player stood — the swept-ribbon validation downstream can bridge a
+    // centred corridor but not one shaved along the door frame. Uniformly
+    // tight corridors get a uniform penalty, so nothing becomes unpathable.
+    // Cached per cell (the penalty is a property of the cell, not the edge).
+    let wide = !request.mode.is_surface() && request.mode.agent_radius() >= 1.0;
+    let mut clearance_cache: HashMap<IVec3, f32> = HashMap::new();
+
     g_score.insert(request.from, 0.0);
     open.push(OpenEntry {
         cell: request.from,
@@ -223,6 +235,15 @@ pub fn compute_path<G: CellGrid>(grid: &G, request: PathRequest) -> PathOutcome 
                 } else {
                     0.0
                 }
+            } else if wide {
+                let unit = if let Some(&p) = clearance_cache.get(&neighbor) {
+                    p
+                } else {
+                    let p = clearance_pressure(grid, neighbor);
+                    clearance_cache.insert(neighbor, p);
+                    p
+                };
+                unit * step_len
             } else {
                 0.0
             };
@@ -325,6 +346,37 @@ static NEIGHBOR_OFFSETS: [IVec3; 26] = [
 /// adjacent face-cells along the diagonal to be air. For a corner-diagonal
 /// (three non-zero offsets), require all three face-cells along the path to
 /// be air. Otherwise the agent would clip through a solid edge or corner.
+/// "How boxed-in is this cell beyond the legal minimum" — drives the
+/// wide-agent clearance cost. Face neighbors at distance 1 are guaranteed
+/// open by the traversability shell, so pressure comes from solids two cells
+/// out along faces AND the 12 edge-diagonals at distance 1 (which catch
+/// one-voxel-thin walls/shelves a distance-2 probe skips straight past —
+/// the first version of this missed exactly that in its own unit test).
+fn clearance_pressure<G: CellGrid>(grid: &G, cell: IVec3) -> f32 {
+    const FACES: [(i32, i32, i32); 6] = [
+        (1, 0, 0), (-1, 0, 0),
+        (0, 1, 0), (0, -1, 0),
+        (0, 0, 1), (0, 0, -1),
+    ];
+    const EDGES: [(i32, i32, i32); 12] = [
+        (1, 1, 0), (1, -1, 0), (-1, 1, 0), (-1, -1, 0),
+        (1, 0, 1), (1, 0, -1), (-1, 0, 1), (-1, 0, -1),
+        (0, 1, 1), (0, 1, -1), (0, -1, 1), (0, -1, -1),
+    ];
+    let mut p = 0.0;
+    for (dx, dy, dz) in FACES {
+        if grid.is_solid(IVec3::new(cell.x + 2 * dx, cell.y + 2 * dy, cell.z + 2 * dz)) {
+            p += 0.3;
+        }
+    }
+    for (dx, dy, dz) in EDGES {
+        if grid.is_solid(IVec3::new(cell.x + dx, cell.y + dy, cell.z + dz)) {
+            p += 0.15;
+        }
+    }
+    p
+}
+
 fn corner_clip_clear<G: CellGrid>(
     grid: &G,
     current: IVec3,

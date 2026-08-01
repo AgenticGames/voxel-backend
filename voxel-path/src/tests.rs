@@ -182,6 +182,46 @@ fn walking_no_path_over_pit() {
 }
 
 #[test]
+fn wide_agent_route_prefers_room_centre_over_wall_hug() {
+    // A tall/wide open room (x 0..20, y 1..9 air, z 0..8 air) with solid
+    // walls at y=0 (floor), y=10, z=-1, z=9. Endpoints hug the z=-1 wall at
+    // z=0. The pure shortest path is the straight wall-hugging line; the
+    // wide-agent clearance cost must make the route bow toward the middle
+    // where the second shell opens up.
+    let mut grid = StubGrid::default();
+    for x in -2..=22 {
+        for z in -2..=10 {
+            grid.set_solid(IVec3::new(x, 0, z));
+            grid.set_solid(IVec3::new(x, 10, z));
+        }
+        for y in -1..=11 {
+            grid.set_solid(IVec3::new(x, y, -1));
+            grid.set_solid(IVec3::new(x, y, 9));
+        }
+    }
+    // z=1 is the closest SHELL-LEGAL line to the z=-1 wall (z=0 must be open
+    // as a face neighbor); its second shell still presses on the wall.
+    let req = PathRequest {
+        from: IVec3::new(0, 5, 1),
+        to: IVec3::new(20, 5, 1),
+        mode: MovementMode::Flying { agent_radius_cells: 1.5 },
+        smooth: false,
+        ..Default::default()
+    };
+    let outcome = compute_path(&grid, req);
+    assert_eq!(outcome.status, PathStatus::Success);
+    let max_z = outcome.nodes.iter().map(|n| n.cell.z).max().unwrap();
+    // z=2 is the first line whose clearance pressure reads zero — bowing
+    // there is exactly the designed behavior; demanding more would be asking
+    // the route to overshoot the pressure field.
+    assert!(
+        max_z >= 2,
+        "route should bow away from the z wall (max_z {}), not hug it",
+        max_z
+    );
+}
+
+#[test]
 fn flying_radius_one_requires_face_shell() {
     // Open 5³ air box with a single solid voxel at the origin. A wide agent
     // (radius ≥ 1 cell) may not occupy the solid's face-neighbors; a thin
