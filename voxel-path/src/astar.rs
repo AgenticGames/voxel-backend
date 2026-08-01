@@ -239,11 +239,18 @@ pub fn compute_path<G: CellGrid>(grid: &G, request: PathRequest) -> PathOutcome 
                 let unit = if let Some(&p) = clearance_cache.get(&neighbor) {
                     p
                 } else {
-                    let p = clearance_pressure(grid, neighbor);
+                    let p = clearance_pressure(grid, neighbor) + ground_penalty(grid, neighbor);
                     clearance_cache.insert(neighbor, p);
                     p
                 };
-                unit * step_len
+                // Vertical anisotropy: the wide-agent consumer is GUIDANCE for
+                // someone travelling on foot — climbing over a lip and diving
+                // off the far side is worse than a slightly longer walkable
+                // line beside it ("Cliff or Ground", 2026-08-01). Vertical
+                // travel costs 3× lateral (step_len already charges 1×; +2
+                // here). Soft: shafts and chasms with no lateral alternative
+                // still path, they just stop being preferred shortcuts.
+                unit * step_len + 2.0 * offset.y.abs() as f32
             } else {
                 0.0
             };
@@ -375,6 +382,23 @@ fn clearance_pressure<G: CellGrid>(grid: &G, cell: IVec3) -> f32 {
         }
     }
     p
+}
+
+/// Ground affinity for wide agents: cells with no solid within GROUND_REACH
+/// below cost extra, so a grounded corridor a few cells longer beats an
+/// aerial shortcut over a lip (the player follows this route on FOOT — a
+/// "3 nodes shorter" line over a cliff is worse guidance than the walkable
+/// detour beside it). Soft on purpose: where nothing grounded exists —
+/// shafts, chasms, the space over a lake — the route still goes airborne,
+/// every airborne cell paying the same flat surcharge. +Y is up.
+fn ground_penalty<G: CellGrid>(grid: &G, cell: IVec3) -> f32 {
+    const GROUND_REACH: i32 = 4; // cells (~120 UU at fine resolution)
+    for k in 1..=GROUND_REACH {
+        if grid.is_solid(IVec3::new(cell.x, cell.y - k, cell.z)) {
+            return 0.0;
+        }
+    }
+    0.6
 }
 
 fn corner_clip_clear<G: CellGrid>(

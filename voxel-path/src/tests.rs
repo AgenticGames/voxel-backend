@@ -222,6 +222,65 @@ fn wide_agent_route_prefers_room_centre_over_wall_hug() {
 }
 
 #[test]
+fn wide_agent_prefers_grounded_detour_over_overfly() {
+    // Floor at y=0 over x 0..=20, z 0..=10. A wall crosses z at x=10
+    // (y 1..=3) with a doorway gap at z 7..=9. Overflying the wall is the
+    // shorter line from (2,·,2) to (18,·,2); the grounded detour through the
+    // door is ~12 cells longer. The wide agent's ground-affinity cost must
+    // pick the door; a thin agent takes the shortest overfly untouched.
+    let mut grid = StubGrid::default();
+    for x in -2..=22 {
+        for z in -2..=12 {
+            grid.set_solid(IVec3::new(x, 0, z));
+        }
+    }
+    for y in 1..=3 {
+        for z in -2..=12 {
+            if (7..=9).contains(&z) { continue; }
+            grid.set_solid(IVec3::new(10, y, z));
+        }
+    }
+    let wide = PathRequest {
+        from: IVec3::new(2, 2, 2),
+        to: IVec3::new(18, 2, 2),
+        mode: MovementMode::Flying { agent_radius_cells: 1.5 },
+        smooth: false,
+        ..Default::default()
+    };
+    let outcome = compute_path(&grid, wide);
+    assert_eq!(outcome.status, PathStatus::Success);
+    let crossed_door = outcome
+        .nodes
+        .iter()
+        .any(|n| n.cell.x == 10 && (7..=9).contains(&n.cell.z));
+    let max_y = outcome.nodes.iter().map(|n| n.cell.y).max().unwrap();
+    assert!(
+        crossed_door && max_y <= 4,
+        "wide route should ground-detour through the door (crossed {}, max_y {})",
+        crossed_door,
+        max_y
+    );
+
+    let thin = PathRequest {
+        from: IVec3::new(2, 2, 2),
+        to: IVec3::new(18, 2, 2),
+        mode: MovementMode::Flying { agent_radius_cells: 0.5 },
+        smooth: false,
+        ..Default::default()
+    };
+    let outcome = compute_path(&grid, thin);
+    assert_eq!(outcome.status, PathStatus::Success);
+    let thin_crossed_door = outcome
+        .nodes
+        .iter()
+        .any(|n| n.cell.x == 10 && (7..=9).contains(&n.cell.z));
+    assert!(
+        !thin_crossed_door,
+        "thin agent should keep the shortest overfly, not detour"
+    );
+}
+
+#[test]
 fn flying_radius_one_requires_face_shell() {
     // Open 5³ air box with a single solid voxel at the origin. A wide agent
     // (radius ≥ 1 cell) may not occupy the solid's face-neighbors; a thin
