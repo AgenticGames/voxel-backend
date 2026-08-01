@@ -246,11 +246,18 @@ pub fn compute_path<G: CellGrid>(grid: &G, request: PathRequest) -> PathOutcome 
                 // Vertical anisotropy: the wide-agent consumer is GUIDANCE for
                 // someone travelling on foot — climbing over a lip and diving
                 // off the far side is worse than a slightly longer walkable
-                // line beside it ("Cliff or Ground", 2026-08-01). Vertical
-                // travel costs 3× lateral (step_len already charges 1×; +2
-                // here). Soft: shafts and chasms with no lateral alternative
-                // still path, they just stop being preferred shortcuts.
-                unit * step_len + 2.0 * offset.y.abs() as f32
+                // line beside it ("Cliff or Ground", 2026-08-01). Diagonal
+                // climbs (≤45°, a walkable grade) cost 3× lateral; PURE
+                // vertical moves — the signature of a steeper-than-45° face,
+                // which no one can walk — cost 6×. Soft: shafts with no
+                // lateral alternative still path, they just stop being
+                // preferred over a tunnel a few dozen cells longer.
+                let vert = if offset.x == 0 && offset.z == 0 {
+                    5.0 * offset.y.abs() as f32
+                } else {
+                    2.0 * offset.y.abs() as f32
+                };
+                unit * step_len + vert
             } else {
                 0.0
             };
