@@ -267,6 +267,88 @@ pub fn compute_path<G: CellGrid>(grid: &G, request: PathRequest) -> PathOutcome 
                 });
             }
         }
+
+        // ── Extended step/drop moves — wide Walking agents only ──────
+        // Base 26-connectivity limits Walking to ±1-cell (30 UU) height
+        // changes per lateral move, which rejects most genuinely walkable
+        // terrain (real steps are ~60 UU, comfortable drops ~90). Because
+        // Walking is the sense trail's FIRST-choice mode, that meant almost
+        // every trail fell back to Flying and climbed cliffs the player
+        // wanted to walk around ("Cliff or Ground": the torch-lit tunnel
+        // exists, Walking just couldn't step through it). Wide agents may
+        // now step up 2 cells and drop 2-3 per lateral move, with headroom /
+        // fall-column checks. Thin Walking agents (creature AI, tuned on the
+        // coarse grid) keep the old strict connectivity.
+        if wide && matches!(request.mode, MovementMode::Walking { .. }) {
+            // Reach-1 steps plus reach-2 "vaults" (cardinal only, with a
+            // midpoint clearance check): the clearance shell keeps a wide
+            // agent one cell off a ledge riser, so mounting the ledge is a
+            // 2-lateral 2-up move — reach-1 steps alone cannot climb any
+            // sheer 2-cell ledge.
+            const STEPS: [(i32, i32, bool); 12] = [
+                (1, 0, false), (-1, 0, false), (0, 1, false), (0, -1, false),
+                (1, 1, false), (1, -1, false), (-1, 1, false), (-1, -1, false),
+                (2, 0, true), (-2, 0, true), (0, 2, true), (0, -2, true),
+            ];
+            const STEP_DY: [i32; 3] = [2, -2, -3];
+            for (dx, dz, needs_mid) in STEPS {
+                for dy in STEP_DY {
+                    let neighbor = IVec3::new(current.x + dx, current.y + dy, current.z + dz);
+                    if !can_traverse(grid, neighbor, request.mode) {
+                        continue;
+                    }
+                    if needs_mid {
+                        // Arc over the lip (ascend) / walk out flat (descend).
+                        let my = if dy > 0 { current.y + dy } else { current.y };
+                        if grid.is_solid(IVec3::new(
+                            current.x + dx / 2, my, current.z + dz / 2,
+                        )) {
+                            continue;
+                        }
+                    }
+                    let clear = if dy > 0 {
+                        // Rising: headroom above the CURRENT cell.
+                        (1..=dy).all(|k| {
+                            !grid.is_solid(IVec3::new(current.x, current.y + k, current.z))
+                        })
+                    } else {
+                        // Dropping: lateral exit at current height, then a
+                        // clear fall column above the landing cell.
+                        !grid.is_solid(IVec3::new(current.x + dx, current.y, current.z + dz))
+                            && (1..(-dy)).all(|k| {
+                                !grid.is_solid(IVec3::new(
+                                    neighbor.x, neighbor.y + k, neighbor.z,
+                                ))
+                            })
+                    };
+                    if !clear {
+                        continue;
+                    }
+                    let step_len =
+                        ((dx * dx + dy * dy + dz * dz) as f32).sqrt();
+                    let unit = if let Some(&p) = clearance_cache.get(&neighbor) {
+                        p
+                    } else {
+                        let p = clearance_pressure(grid, neighbor) + ground_penalty(grid, neighbor);
+                        clearance_cache.insert(neighbor, p);
+                        p
+                    };
+                    let tentative_g =
+                        current_g + step_len + unit * step_len + 2.0 * dy.abs() as f32;
+                    let existing_g = g_score.get(&neighbor).copied();
+                    if tentative_g < existing_g.unwrap_or(f32::INFINITY) {
+                        came_from.insert(neighbor, current);
+                        g_score.insert(neighbor, tentative_g);
+                        let f = tentative_g + heuristic(neighbor, request.to);
+                        open.push(OpenEntry {
+                            cell: neighbor,
+                            g_score: tentative_g,
+                            f_score: f,
+                        });
+                    }
+                }
+            }
+        }
     }
 
     PathOutcome {

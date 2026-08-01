@@ -222,6 +222,44 @@ fn wide_agent_route_prefers_room_centre_over_wall_hug() {
 }
 
 #[test]
+fn wide_walking_steps_up_a_two_cell_ledge_thin_does_not() {
+    // Lower floor at y=0 (x 0..=4), upper floor at y=2 (x 5..=10) — a 60 UU
+    // ledge at fine resolution. Base 26-connectivity can only change height
+    // ±1 per move, so classic Walking cannot climb it; the wide agent's
+    // extended step (up 2 with headroom) can.
+    let mut grid = StubGrid::default();
+    for x in 0..=4 {
+        for z in -3..=3 {
+            grid.set_solid(IVec3::new(x, 0, z));
+        }
+    }
+    for x in 5..=10 {
+        for z in -3..=3 {
+            grid.set_solid(IVec3::new(x, 0, z));
+            grid.set_solid(IVec3::new(x, 1, z));
+            grid.set_solid(IVec3::new(x, 2, z));
+        }
+    }
+    let wide = PathRequest {
+        from: IVec3::new(1, 1, 0),
+        to: IVec3::new(9, 3, 0),
+        mode: MovementMode::Walking { agent_radius_cells: 1.5 },
+        smooth: false,
+        ..Default::default()
+    };
+    assert_eq!(compute_path(&grid, wide).status, PathStatus::Success);
+
+    let thin = PathRequest {
+        from: IVec3::new(1, 1, 0),
+        to: IVec3::new(9, 3, 0),
+        mode: MovementMode::Walking { agent_radius_cells: 0.5 },
+        smooth: false,
+        ..Default::default()
+    };
+    assert_eq!(compute_path(&grid, thin).status, PathStatus::NoPath);
+}
+
+#[test]
 fn wide_agent_prefers_grounded_detour_over_overfly() {
     // Floor at y=0 over x 0..=20, z 0..=10. A wall crosses z at x=10
     // (y 1..=3) with a doorway gap at z 7..=9. Overflying the wall is the
