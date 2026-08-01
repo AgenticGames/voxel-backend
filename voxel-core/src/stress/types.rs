@@ -16,6 +16,14 @@ pub struct StressField {
     /// `effective_stress = stress + painted_stress` — survives recalc passes since
     /// the recalc only writes into `stress[]`.
     pub painted_stress: Vec<f32>,
+    /// Last warning tier (0 none / 1 dust / 2 creak / 3 shake) EMITTED per cell.
+    /// Warnings are edge-triggered: a recalc only reports cells whose tier ROSE
+    /// since the previous scan, so mining next to a long-standing overhang no
+    /// longer shakes the camera on every swing for stress the player didn't
+    /// cause (playtest #209). Empty Vec = never warned (no allocation);
+    /// transient — deliberately NOT persisted in chunk snapshots (a reload
+    /// re-warns once, which is fine).
+    pub warn_tier: Vec<u8>,
 }
 
 impl StressField {
@@ -26,7 +34,25 @@ impl StressField {
             classification: vec![0u8; count],
             size,
             painted_stress: Vec::new(),
+            warn_tier: Vec::new(),
         }
+    }
+
+    /// Previously-emitted warning tier for a cell (0 if never warned).
+    #[inline]
+    pub fn warned_tier(&self, x: usize, y: usize, z: usize) -> u8 {
+        if self.warn_tier.is_empty() { 0 } else { self.warn_tier[self.index(x, y, z)] }
+    }
+
+    /// Record the warning tier just evaluated for a cell (allocates lazily).
+    #[inline]
+    pub fn set_warned_tier(&mut self, x: usize, y: usize, z: usize, tier: u8) {
+        if self.warn_tier.is_empty() {
+            if tier == 0 { return; }   // stay allocation-free while all-zero
+            self.warn_tier = vec![0u8; self.size * self.size * self.size];
+        }
+        let idx = self.index(x, y, z);
+        self.warn_tier[idx] = tier;
     }
 
     #[inline]

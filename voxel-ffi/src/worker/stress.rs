@@ -326,18 +326,23 @@ pub(crate) fn try_process_stress_queue(
         }
     }
 
-    // Emit stress warnings for UE — scan ALL voxels with stress above dust threshold.
-    // This is push-based: Rust tells UE where the stress is, UE checks proximity to player.
+    // Emit stress warnings for UE — EDGE-TRIGGERED (playtest #209): a cell only
+    // warns when its tier ROSE since the last scan, so re-recalcs near a
+    // long-standing overhang don't shake the camera on every mining swing for
+    // stress the player didn't cause. Tier drops are recorded silently so a
+    // future re-crossing warns again. Push-based: Rust says where, UE checks
+    // proximity to the player.
     {
-        let s = store.read().unwrap();
+        let mut s = store.write().unwrap();
         let mut warnings = Vec::new();
         let mut dust_count = 0u32;
         let mut creak_count = 0u32;
         let mut shake_count = 0u32;
+        let mut suppressed = 0u32;
         let grid_size = chunk_size + 1;
 
         for &(cx, cy, cz) in &dirty_chunks {
-            let sf = match s.stress_fields.get(&(cx, cy, cz)) {
+            let sf = match s.stress_fields.get_mut(&(cx, cy, cz)) {
                 Some(f) => f,
                 None => continue,
             };
@@ -345,16 +350,31 @@ pub(crate) fn try_process_stress_queue(
                 for y in 0..grid_size {
                     for x in 0..grid_size {
                         let stress = sf.get(x, y, z);
-                        if stress < stress_cfg.warn_dust_threshold {
+                        let tier = if stress < stress_cfg.warn_dust_threshold {
+                            0u8
+                        } else if stress >= stress_cfg.warn_shake_threshold {
+                            3u8
+                        } else if stress >= stress_cfg.warn_creak_threshold {
+                            2u8
+                        } else {
+                            1u8
+                        };
+                        let prev = sf.warned_tier(x, y, z);
+                        if tier != prev {
+                            sf.set_warned_tier(x, y, z, tier);
+                        }
+                        if tier == 0 {
                             continue;
                         }
-                        let warning_type = if stress >= stress_cfg.warn_shake_threshold {
-                            shake_count += 1; 3u8
-                        } else if stress >= stress_cfg.warn_creak_threshold {
-                            creak_count += 1; 2u8
-                        } else {
-                            dust_count += 1; 1u8
-                        };
+                        if tier <= prev {
+                            suppressed += 1;
+                            continue;   // already announced at this tier or higher
+                        }
+                        match tier {
+                            3 => shake_count += 1,
+                            2 => creak_count += 1,
+                            _ => dust_count += 1,
+                        }
                         let wx = cx * chunk_size as i32 + x as i32;
                         let wy = cy * chunk_size as i32 + y as i32;
                         let wz = cz * chunk_size as i32 + z as i32;
@@ -363,15 +383,15 @@ pub(crate) fn try_process_stress_queue(
                             world_y: -(wz as f32) * world_scale,
                             world_z: wy as f32 * world_scale,
                             stress,
-                            warning_type,
+                            warning_type: tier,
                         });
                     }
                 }
             }
         }
-        if dust_count + creak_count + shake_count > 0 {
-            dbg(format!("  warnings: dust={} creak={} shake={} (scanned from stress fields)",
-                dust_count, creak_count, shake_count));
+        if dust_count + creak_count + shake_count + suppressed > 0 {
+            dbg(format!("  warnings: dust={} creak={} shake={} (edge-triggered; {} unchanged cells suppressed)",
+                dust_count, creak_count, shake_count, suppressed));
         }
         // Send the highest-stress warnings (sorted, capped at 128)
         warnings.sort_by(|a, b| b.stress.partial_cmp(&a.stress).unwrap_or(std::cmp::Ordering::Equal));
