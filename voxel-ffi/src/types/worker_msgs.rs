@@ -329,12 +329,14 @@ pub enum WorkerResult {
     CollapseResult {
         events: Vec<FfiCollapseEvent>,
     },
-    /// Support place/remove ack. Struts change the stress model, not the
-    /// density field — there is no geometry to remesh (relief lands via
-    /// queue_stress_dirty). See CollapseResult note for why no mesh payload.
-    SupportResult {
-        success: bool,
-    },
+    // NOTE: support place/remove intentionally emit NO worker result.
+    // Struts change the stress model, not the density field (relief lands
+    // via queue_stress_dirty; the UE strut actor spawns at request time).
+    // The old SupportResult ack reached UE disguised as a MineResult with
+    // counts=[1;64] — the yield-divisor remainder accumulated until strut
+    // ops granted 1 of EVERY material + XP, stamped coal-mined, and popped
+    // a PendingMinePositions entry it never pushed. Do not reintroduce an
+    // ack without a dedicated FfiResultType.
     SleepComplete {
         chunks_changed: u32,
         voxels_metamorphosed: u32,

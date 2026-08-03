@@ -13,7 +13,6 @@ use crate::types::WorkerResult;
 use super::seam::{incremental_seam_pass, retrieve_crystal_data, retrieve_mushroom_data};
 
 pub(super) fn handle_place_support(ctx: &super::HandlerCtx<'_>, world_x: i32, world_y: i32, world_z: i32, support_type: u8) {
-    let result_tx = ctx.result_tx;
     let store = ctx.store;
     let config = ctx.config;
     let stress_config = ctx.stress_config;
@@ -32,16 +31,19 @@ pub(super) fn handle_place_support(ctx: &super::HandlerCtx<'_>, world_x: i32, wo
             );
             drop(s);
 
-            // No remesh: a strut only writes the support field (stress model) —
-            // the density is untouched, so remesh_dirty produced an identical
-            // base-only mesh that never reached UE anyway (leaked in
-            // voxel_poll_result) and would wipe seams if it had. Stress relief
+            // No remesh and no result: a strut only writes the support field
+            // (stress model) — the density is untouched (the old remesh here
+            // produced an identical base-only mesh that leaked unsent in
+            // voxel_poll_result), and the old SupportResult ack surfaced in UE
+            // as a phantom MineResult (see WorkerResult docs). Stress relief
             // lands via the queue_stress_dirty call inside place_support.
-            let _ = result_tx.send(WorkerResult::SupportResult { success });
+            if !success {
+                eprintln!("[SUPPORT] place_support at ({}, {}, {}) type={} FAILED",
+                    world_x, world_y, world_z, support_type);
+            }
 }
 
 pub(super) fn handle_remove_support(ctx: &super::HandlerCtx<'_>, world_x: i32, world_y: i32, world_z: i32) {
-    let result_tx = ctx.result_tx;
     let store = ctx.store;
     let config = ctx.config;
     let stress_config = ctx.stress_config;
@@ -54,10 +56,11 @@ pub(super) fn handle_remove_support(ctx: &super::HandlerCtx<'_>, world_x: i32, w
             );
             drop(s);
 
-            // No remesh — same reasoning as handle_place_support above.
-            let _ = result_tx.send(WorkerResult::SupportResult {
-                success: removed.is_some(),
-            });
+            // No remesh and no result — same reasoning as handle_place_support.
+            if removed.is_none() {
+                eprintln!("[SUPPORT] remove_support at ({}, {}, {}): nothing there",
+                    world_x, world_y, world_z);
+            }
 }
 
 pub(super) fn handle_world_scan(ctx: &super::HandlerCtx<'_>) {

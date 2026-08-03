@@ -239,22 +239,6 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                 };
                 Box::into_raw(Box::new(result))
             }
-            WorkerResult::SupportResult { success } => {
-                // Return as a mine result with success indicator
-                let result = FfiResult {
-                    result_type: FfiResultType::MineResult,
-                    chunk: FfiChunkCoord { x: 0, y: 0, z: 0 },
-                    mesh: empty_mesh_data(),
-                    mined: FfiMinedMaterials { counts: [if success { 1 } else { 0 }; 64] },
-                    generation: 0,
-                    fluid_mesh: empty_fluid_mesh_data(),
-                    crystal_data: empty_crystal_data(),
-                    zone_data: empty_zone_data(),
-                    mushroom_data: empty_mushroom_data(),
-                    slab_fall: FfiSlabFallData::default(),
-                };
-                Box::into_raw(Box::new(result))
-            }
             WorkerResult::SleepComplete { .. } => {
                 // This should have been intercepted by engine.poll_result().
                 // If it somehow reaches here, ignore it.
