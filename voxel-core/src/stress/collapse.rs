@@ -363,9 +363,12 @@ pub fn detect_and_execute_collapses_v2_with_force_deadline(
         .map(|v| (v.world_x, v.world_y, v.world_z))
         .collect();
 
-    // Per-strut "blocked voxel count" tally, summed across all collapse
-    // events processed in this call. Applied after the loop as HP damage.
-    let mut strut_halt_counts: std::collections::HashMap<((i32,i32,i32), usize, usize, usize), u32> =
+    // Per-strut braced-workload tally, summed across all collapse events
+    // processed in this call. Applied after the loop as HP damage. f32:
+    // when N struts cover the same blocked voxel they SHARE the cost 1/N
+    // each (2026-08-03 — overlapping struts previously each paid full
+    // price for the same voxel).
+    let mut strut_halt_counts: std::collections::HashMap<((i32,i32,i32), usize, usize, usize), f32> =
         std::collections::HashMap::new();
 
     for ov in overstressed {
@@ -427,9 +430,12 @@ pub fn detect_and_execute_collapses_v2_with_force_deadline(
                             // path ran the old cube scan with UNCACHED
                             // per-cell probes — at radius 14 that was ~24k
                             // cells × 2 HashMap probes per frontier voxel.
-                            let mut halted = false;
                             let cs_i = chunk_size as i32;
                             let (nx, ny, nz) = neighbor;
+                            // Two-phase: collect every alive strut covering
+                            // this voxel first, then split the workload
+                            // 1/N so co-bracing struts SHARE the damage.
+                            let mut covering: Vec<((i32,i32,i32), usize, usize, usize)> = Vec::new();
                             super::calc::for_each_strut_chunk_in_range(
                                 support_fields, nx, ny, nz, chunk_size,
                                 |skey, sf| {
@@ -447,12 +453,16 @@ pub fn detect_and_execute_collapses_v2_with_force_deadline(
                                         if !sf.is_strut_alive(lx as usize, ly as usize, lz as usize) {
                                             continue;
                                         }
-                                        halted = true;
-                                        *strut_halt_counts
-                                            .entry((skey, lx as usize, ly as usize, lz as usize))
-                                            .or_insert(0) += 1;
+                                        covering.push((skey, lx as usize, ly as usize, lz as usize));
                                     }
                                 });
+                            let halted = !covering.is_empty();
+                            if halted {
+                                let share = 1.0f32 / covering.len() as f32;
+                                for key in covering {
+                                    *strut_halt_counts.entry(key).or_insert(0.0) += share;
+                                }
+                            }
                             if halted {
                                 visited.insert(neighbor); // mark to avoid re-checking
                                 continue;
@@ -965,7 +975,7 @@ pub fn detect_and_execute_collapses_v2_with_force_deadline(
     // StrutBroken events to UE.
     if halt_at_struts && !strut_halt_counts.is_empty() {
         for ((chunk_key, lx, ly, lz), count) in strut_halt_counts {
-            let damage = count as f32 * BFS_HALT_DAMAGE_SCALE;
+            let damage = count * BFS_HALT_DAMAGE_SCALE;
             let stype = support_fields
                 .get(&chunk_key)
                 .map(|sf| sf.get(lx, ly, lz))
