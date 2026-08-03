@@ -275,8 +275,15 @@ pub const STRUT_TUNING: [StrutTuning; 6] = [
 pub const MAX_STRUT_RADIUS: u8 = 56;
 
 /// Per-recalc HP-damage scale applied after subtracting `hp_decay_threshold`.
-/// Tune to taste — higher = struts break faster under sustained load.
-pub const HP_DAMAGE_SCALE: f32 = 1.0;
+/// 0.0 = load-decay DISABLED (2026-08-03, #214 round 3): under the linear-cone
+/// relief model a strut's summed load in a hot zone is tens of thousands of
+/// stress-units, so any absolute threshold either never fires or one-shots
+/// the strut ~1s after placement — exactly where the player needs it most
+/// ("dust splashed over the strut and deleted it"). Struts now hold under
+/// static load indefinitely; wear comes from BFS-halt bracing damage and the
+/// sleep survival roll. Re-enable only with a load-DENSITY model (load
+/// normalized by braced-voxel count).
+pub const HP_DAMAGE_SCALE: f32 = 0.0;
 
 /// HP damage per voxel blocked by a strut during the cinematic mining BFS halt.
 /// One mine event that would have peeled 200 voxels into a single Crystal Strut
