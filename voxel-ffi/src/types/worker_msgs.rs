@@ -320,13 +320,20 @@ pub enum WorkerResult {
         scoria: Vec<((i32, i32, i32), usize, usize, usize)>,
         drained_water: Vec<((i32, i32, i32), usize, usize, usize)>,
     },
+    /// Collapse EVENTS only. Remeshed geometry must never ride this variant:
+    /// `voxel_poll_result` can return exactly one FfiResult per call, so
+    /// piggybacked meshes were Box::into_raw-leaked without ever reaching UE
+    /// (and remesh_dirty output is base-only — delivering it raw would wipe
+    /// seams, the cd07682 quench lesson). Send meshes via ChunkMesh /
+    /// batched_seam_pass like every other path.
     CollapseResult {
         events: Vec<FfiCollapseEvent>,
-        meshes: Vec<((i32, i32, i32), ConvertedMesh)>,
     },
+    /// Support place/remove ack. Struts change the stress model, not the
+    /// density field — there is no geometry to remesh (relief lands via
+    /// queue_stress_dirty). See CollapseResult note for why no mesh payload.
     SupportResult {
         success: bool,
-        meshes: Vec<((i32, i32, i32), ConvertedMesh)>,
     },
     SleepComplete {
         chunks_changed: u32,

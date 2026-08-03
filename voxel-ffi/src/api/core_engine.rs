@@ -202,13 +202,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                 // If it reaches here, the intercept missed — just drop it.
                 ptr::null_mut()
             }
-            WorkerResult::CollapseResult { mut events, meshes } => {
-                // Send each collapse-remeshed chunk as a ChunkMesh result first
-                for (chunk, mesh) in meshes {
-                    let r = convert_mesh_to_ffi_result(chunk, mesh, 0, Vec::new(), Vec::new(), Vec::new());
-                    let _ = Box::into_raw(Box::new(r));
-                }
-
+            WorkerResult::CollapseResult { mut events } => {
                 if events.is_empty() {
                     return ptr::null_mut();
                 }
@@ -221,7 +215,6 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     for ev in &events[1..] {
                         engine.requeue_result(WorkerResult::CollapseResult {
                             events: vec![*ev],
-                            meshes: Vec::new(),
                         });
                     }
                 }
@@ -246,12 +239,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                 };
                 Box::into_raw(Box::new(result))
             }
-            WorkerResult::SupportResult { success, meshes } => {
-                // Send each remeshed chunk as a ChunkMesh
-                for (chunk, mesh) in meshes {
-                    let r = convert_mesh_to_ffi_result(chunk, mesh, 0, Vec::new(), Vec::new(), Vec::new());
-                    let _ = Box::into_raw(Box::new(r));
-                }
+            WorkerResult::SupportResult { success } => {
                 // Return as a mine result with success indicator
                 let result = FfiResult {
                     result_type: FfiResultType::MineResult,

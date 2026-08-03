@@ -17,7 +17,6 @@ pub(super) fn handle_place_support(ctx: &super::HandlerCtx<'_>, world_x: i32, wo
     let store = ctx.store;
     let config = ctx.config;
     let stress_config = ctx.stress_config;
-    let world_scale = ctx.world_scale;
             let cfg = config.read().unwrap().clone();
             let stress_cfg = stress_config.read().unwrap().clone();
             // Defensive: if an old UE editor (pre-2026-05-26) sends a
@@ -28,23 +27,17 @@ pub(super) fn handle_place_support(ctx: &super::HandlerCtx<'_>, world_x: i32, wo
             let st = SupportType::from_legacy_u8(support_type);
 
             let mut s = store.write().unwrap();
-            let (success, _collapse_events, dirty_bounds) = s.place_support(
+            let (success, _collapse_events, _dirty_bounds) = s.place_support(
                 (world_x, world_y, world_z), st, &stress_cfg, cfg.chunk_size,
             );
-
-            // Remesh affected chunks
-            let remesh_bounds: Vec<_> = dirty_bounds.iter().map(|&(key, (min_x, min_y, min_z, max_x, max_y, max_z))| {
-                (key, min_x, min_y, min_z, max_x, max_y, max_z)
-            }).collect();
-            let meshes = s.remesh_dirty(&remesh_bounds, &cfg, world_scale);
             drop(s);
 
-            // Send support result with remeshed chunks
-            let mesh_pairs: Vec<_> = meshes.into_iter().collect();
-            let _ = result_tx.send(WorkerResult::SupportResult {
-                success,
-                meshes: mesh_pairs,
-            });
+            // No remesh: a strut only writes the support field (stress model) —
+            // the density is untouched, so remesh_dirty produced an identical
+            // base-only mesh that never reached UE anyway (leaked in
+            // voxel_poll_result) and would wipe seams if it had. Stress relief
+            // lands via the queue_stress_dirty call inside place_support.
+            let _ = result_tx.send(WorkerResult::SupportResult { success });
 }
 
 pub(super) fn handle_remove_support(ctx: &super::HandlerCtx<'_>, world_x: i32, world_y: i32, world_z: i32) {
@@ -52,27 +45,18 @@ pub(super) fn handle_remove_support(ctx: &super::HandlerCtx<'_>, world_x: i32, w
     let store = ctx.store;
     let config = ctx.config;
     let stress_config = ctx.stress_config;
-    let world_scale = ctx.world_scale;
             let cfg = config.read().unwrap().clone();
             let stress_cfg = stress_config.read().unwrap().clone();
 
             let mut s = store.write().unwrap();
-            let (removed, _collapse_events, dirty_bounds) = s.remove_support(
+            let (removed, _collapse_events, _dirty_bounds) = s.remove_support(
                 (world_x, world_y, world_z), &stress_cfg, cfg.chunk_size,
             );
-
-            // Remesh affected chunks
-            let remesh_bounds: Vec<_> = dirty_bounds.iter().map(|&(key, (min_x, min_y, min_z, max_x, max_y, max_z))| {
-                (key, min_x, min_y, min_z, max_x, max_y, max_z)
-            }).collect();
-            let meshes = s.remesh_dirty(&remesh_bounds, &cfg, world_scale);
             drop(s);
 
-            // Send support result
-            let mesh_pairs: Vec<_> = meshes.into_iter().collect();
+            // No remesh — same reasoning as handle_place_support above.
             let _ = result_tx.send(WorkerResult::SupportResult {
                 success: removed.is_some(),
-                meshes: mesh_pairs,
             });
 }
 

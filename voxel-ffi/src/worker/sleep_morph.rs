@@ -203,7 +203,6 @@ pub(super) fn handle_sleep(ctx: &super::HandlerCtx<'_>, player_chunk: (i32, i32,
                 }).collect();
                 let _ = result_tx.send(WorkerResult::CollapseResult {
                     events: ffi_events,
-                    meshes: Vec::new(), // Meshes already sent above
                 });
             }
             let t_collapse_send_elapsed = t_collapse_send.elapsed();
