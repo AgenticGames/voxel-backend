@@ -242,6 +242,7 @@ impl VoxelEngine {
             .push(voxel_core::stress::StressDirtyEvent {
                 center,
                 radius: 1,
+                allow_collapse: true,
             });
         store.stress_dirty_time = Some(std::time::Instant::now());
         let _ = chunk_size;

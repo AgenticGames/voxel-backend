@@ -128,7 +128,10 @@ pub(crate) fn accumulate_strut_load_at_voxel(
             let r2 = (tuning.radius as i32) * (tuning.radius as i32);
             if d2 > r2 { continue; }
             if !sf.is_strut_alive(lx as usize, ly as usize, lz as usize) { continue; }
-            let contribution = tuning.hardness / (d2 as f32).sqrt();
+            // Same linear cone as strut_relief_raw — the loops must stay
+            // structurally identical (every relieved voxel accumulates load).
+            let d = (d2 as f32).sqrt();
+            let contribution = tuning.hardness * (1.0 - d / tuning.radius as f32);
             *loads.entry((skey, lx as usize, ly as usize, lz as usize)).or_insert(0.0) += contribution;
         }
     });
@@ -303,7 +306,15 @@ pub(crate) fn strut_relief_raw(
             if !sf.is_strut_alive(lx as usize, ly as usize, lz as usize) {
                 continue;
             }
-            relief += tuning.hardness / (d2 as f32).sqrt();
+            // Linear cone (#214, 2026-08-03): hardness * (1 - d/r), replacing
+            // hardness/d. The 1/d falloff made the 4x radius resize a lie —
+            // at the zone edge a Mithril strut contributed 35/56 = 0.6 relief
+            // against collapse stresses of 5+, so cracks faded (low crack
+            // threshold) while slabs still fell ("cracks went away but it
+            // still collapsed"). The cone keeps relief meaningful across the
+            // whole advertised radius and reaches 0 exactly at its edge.
+            let d = (d2 as f32).sqrt();
+            relief += tuning.hardness * (1.0 - d / tuning.radius as f32);
         }
     });
     relief

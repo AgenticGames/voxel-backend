@@ -25,6 +25,15 @@ pub const SOURCE_CROSS_SECTION: u8 = 4;
 pub struct StressDirtyEvent {
     pub center: (i32, i32, i32),
     pub radius: i32,
+    /// Whether the recalc batch this event belongs to may EXECUTE collapses
+    /// (#214, 2026-08-03). Mining/removal legitimately push stress UP and may
+    /// collapse. Strut PLACEMENT only relieves — but its recalc region
+    /// (radius+4) re-evaluates rock whose latent overstress predates the
+    /// strut, and executing those turns "place a brace" into "trigger the
+    /// cave-in you were preventing". Placement queues with false; the worker
+    /// skips the collapse pass when NO drained event allows it (stress and
+    /// crack decals still rewrite).
+    pub allow_collapse: bool,
 }
 
 impl StressDirtyEvent {

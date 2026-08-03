@@ -418,7 +418,13 @@ pub(crate) fn try_process_stress_queue(
         // mining doesn't trigger spurious cave-ins on supported rock.
         // Strut halt is ENABLED here — alive struts brace the slab and
         // take HP damage proportional to blocked volume.
-        if !result.overstressed.is_empty() {
+        // #214 gate: a batch whose every event forbids collapse (strut
+        // placement) rewrites stress + decals but must not EXECUTE the
+        // latent overstress it surfaced — placing a brace was turning into
+        // the very cave-in the player was bracing against. Any mining/
+        // removal event in the same batch re-enables the pass.
+        let batch_allows_collapse = mined_dirty_events.iter().any(|e| e.allow_collapse);
+        if !result.overstressed.is_empty() && batch_allows_collapse {
             let (density, stress, support) = s.sleep_fields_mut();
             let natural = voxel_core::stress::detect_and_execute_collapses_v2_with_force(
                 density, stress, support,

@@ -307,7 +307,15 @@ impl ChunkStore {
     /// Queue a localized stress recalculation event (called after mining).
     /// center: mine point in world voxel coords, radius: effective stress radius in voxels.
     pub fn queue_stress_dirty(&mut self, center: (i32, i32, i32), radius: i32) {
-        self.stress_dirty_events.push(voxel_core::stress::StressDirtyEvent { center, radius });
+        self.stress_dirty_events.push(voxel_core::stress::StressDirtyEvent { center, radius, allow_collapse: true });
+        self.stress_dirty_time = Some(std::time::Instant::now());
+    }
+
+    /// Queue a stress recalc that may NOT execute collapses (#214): used by
+    /// strut placement, where stress only goes DOWN and any overstress the
+    /// recalc surfaces is pre-existing latent state, not a new hazard.
+    pub fn queue_stress_dirty_no_collapse(&mut self, center: (i32, i32, i32), radius: i32) {
+        self.stress_dirty_events.push(voxel_core::stress::StressDirtyEvent { center, radius, allow_collapse: false });
         self.stress_dirty_time = Some(std::time::Instant::now());
     }
 
@@ -318,7 +326,7 @@ impl ChunkStore {
         let radius = chunk_size as i32 + 22; // Full chunk + span search + air decay
         for &(cx, cy, cz) in chunk_keys {
             let center = (cx * chunk_size as i32 + half, cy * chunk_size as i32 + half, cz * chunk_size as i32 + half);
-            self.stress_dirty_events.push(voxel_core::stress::StressDirtyEvent { center, radius });
+            self.stress_dirty_events.push(voxel_core::stress::StressDirtyEvent { center, radius, allow_collapse: true });
         }
         self.stress_dirty_time = Some(std::time::Instant::now());
     }
@@ -467,8 +475,10 @@ impl ChunkStore {
         // relief (normal AND painted stress) lands without waiting for an
         // unrelated mine event or sleep to touch the region. +4 margin
         // matches the mining path (air decay + classification fringe).
+        // NO-COLLAPSE variant (#214): placing a brace must never execute the
+        // latent overstress its own recalc region surfaces.
         let radius = voxel_core::stress::STRUT_TUNING[support_type as u8 as usize].radius as i32 + 4;
-        self.queue_stress_dirty(world_pos, radius);
+        self.queue_stress_dirty_no_collapse(world_pos, radius);
 
         let dirty_with_bounds = vec![
             (key, (0usize, 0usize, 0usize, chunk_size, chunk_size, chunk_size))
