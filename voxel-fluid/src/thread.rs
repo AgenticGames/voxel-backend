@@ -14,6 +14,12 @@ use std::collections::VecDeque;
 
 use crate::sim::{detect_lava_water_quench_with_scratch, equalize_horizontal, regen_sources, squeeze_excess_fluid, tick_fluid, try_grow_pillow_voxel, QuenchScratch};
 
+/// Bounds on the sim tick rate (Hz). The low end keeps the tick interval a
+/// finite `Duration`; the high end stops a fat-fingered menu value from
+/// spinning the fluid thread flat out.
+pub const MIN_TICK_RATE: f32 = 0.1;
+pub const MAX_TICK_RATE: f32 = 240.0;
+
 /// "Pool pull" — when a water cell is drained at the heat interface, also
 /// drain one extra connected water cell from the network behind it via BFS.
 /// Without this, the main water blob barely shrinks during the steaming
@@ -155,10 +161,8 @@ pub fn fluid_sim_loop(
     const INWARD_GROWTH_MAX_DEPTH: u8 = 3;
     let chunk_size = config.chunk_size;
 
-    let tick_interval = Duration::from_secs_f32(1.0 / config.tick_rate);
     let mut last_tick = Instant::now();
     let mut tick_count: u64 = 0;
-    let lava_divisor = config.lava_tick_divisor.max(1) as u64;
     // Track chunks that have active (non-empty) fluid meshes so we can send
     // an empty mesh when they transition to empty (e.g. after DrainLavaChunks).
     let mut active_fluid_meshes: HashSet<(i32, i32, i32)> = HashSet::new();
@@ -171,6 +175,15 @@ pub fn fluid_sim_loop(
                 Err(_) => break,
             }
         }
+
+        // Rate knobs are read fresh every iteration (not latched before the
+        // loop) so an `UpdateFluidRates` event actually changes sim speed on
+        // a live world. Clamped because these come straight from a JSON file
+        // the codex menu writes — a 0 or negative tick_rate would make
+        // `from_secs_f32` panic on an infinite duration.
+        let tick_interval =
+            Duration::from_secs_f32(1.0 / config.tick_rate.clamp(MIN_TICK_RATE, MAX_TICK_RATE));
+        let lava_divisor = config.lava_tick_divisor.max(1) as u64;
 
         // Check if it's time for a tick
         let now = Instant::now();
@@ -682,6 +695,25 @@ fn handle_event(
             // skip the full-grid recompute + dirty sweep the old handler did.
             config.source_grace_ticks = source_grace_ticks;
         }
+        FluidEvent::UpdateFluidRates {
+            tick_rate,
+            lava_tick_divisor,
+            water_flow_rate,
+            water_spread_rate,
+            lava_flow_rate,
+            lava_spread_rate,
+        } => {
+            // Pure rate swap — no cell state depends on these, so nothing to
+            // invalidate. The main loop re-reads tick_rate / lava_tick_divisor
+            // every iteration and tick_chunk reads the flow rates per tick,
+            // so the change lands on the next tick.
+            config.tick_rate = tick_rate.clamp(MIN_TICK_RATE, MAX_TICK_RATE);
+            config.lava_tick_divisor = lava_tick_divisor.max(1);
+            config.water_flow_rate = water_flow_rate.max(0.0);
+            config.water_spread_rate = water_spread_rate.max(0.0);
+            config.lava_flow_rate = lava_flow_rate.max(0.0);
+            config.lava_spread_rate = lava_spread_rate.max(0.0);
+        }
         FluidEvent::PendingFluidLoad { chunk, cells } => {
             // Stash the cells; they'll be applied on the next DensityUpdate
             // or TerrainModified for this chunk. If the density is already
@@ -813,4 +845,75 @@ fn ensure_grid(
         ChunkFluidGrid::new(chunk_size)
     };
     chunks.insert(chunk, grid);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Drive `handle_event` the way the sim loop does, with empty world state.
+    fn apply(config: &mut FluidConfig, event: FluidEvent) {
+        let mut chunks = HashMap::new();
+        let mut densities = HashMap::new();
+        let mut pending = HashMap::new();
+        handle_event(event, &mut chunks, &mut densities, &mut pending, config.chunk_size, config);
+    }
+
+    fn rates(tick_rate: f32, divisor: u8, lava_flow: f32, lava_spread: f32) -> FluidEvent {
+        FluidEvent::UpdateFluidRates {
+            tick_rate,
+            lava_tick_divisor: divisor,
+            water_flow_rate: 1.5,
+            water_spread_rate: 0.75,
+            lava_flow_rate: lava_flow,
+            lava_spread_rate: lava_spread,
+        }
+    }
+
+    #[test]
+    fn update_fluid_rates_applies_live() {
+        let mut config = FluidConfig::default();
+        apply(&mut config, rates(30.0, 2, 0.4, 0.6));
+        assert_eq!(config.tick_rate, 30.0);
+        assert_eq!(config.lava_tick_divisor, 2);
+        assert_eq!(config.lava_flow_rate, 0.4);
+        assert_eq!(config.lava_spread_rate, 0.6);
+        assert_eq!(config.water_flow_rate, 1.5);
+        assert_eq!(config.water_spread_rate, 0.75);
+    }
+
+    #[test]
+    fn update_fluid_rates_leaves_non_rate_fields_alone() {
+        // The codex writes several config files; the rate event must not
+        // clobber fields owned by the water-config / creation-time paths.
+        let mut config = FluidConfig::default();
+        config.source_grace_ticks = 123;
+        config.solid_corner_threshold = 3;
+        config.water_substeps = 4;
+        config.seed = 999;
+        apply(&mut config, rates(20.0, 8, 0.2, 0.3));
+        assert_eq!(config.source_grace_ticks, 123);
+        assert_eq!(config.solid_corner_threshold, 3);
+        assert_eq!(config.water_substeps, 4);
+        assert_eq!(config.seed, 999);
+    }
+
+    #[test]
+    fn update_fluid_rates_clamps_hostile_values() {
+        // These come from a hand-editable JSON file. A zero/negative tick rate
+        // would panic `Duration::from_secs_f32` on an infinite interval, and a
+        // zero divisor would panic on `tick_count % 0`.
+        let mut config = FluidConfig::default();
+        apply(&mut config, rates(0.0, 0, -1.0, -1.0));
+        assert_eq!(config.tick_rate, MIN_TICK_RATE);
+        assert_eq!(config.lava_tick_divisor, 1);
+        assert_eq!(config.lava_flow_rate, 0.0);
+        assert_eq!(config.lava_spread_rate, 0.0);
+        // The interval the loop derives must stay finite.
+        let interval = Duration::from_secs_f32(1.0 / config.tick_rate);
+        assert!(interval.as_secs_f32().is_finite());
+
+        apply(&mut config, rates(100_000.0, 8, 0.1, 0.1));
+        assert_eq!(config.tick_rate, MAX_TICK_RATE);
+    }
 }

@@ -150,6 +150,22 @@ pub enum FluidEvent {
     UpdateFluidConfig {
         source_grace_ticks: u16,
     },
+    /// Update the simulation *rate* knobs at runtime — how fast the sim ticks
+    /// and how fast each fluid moves per tick. Sent by
+    /// `VoxelEngine::update_config`, which UE calls on every VoxelConfig.json
+    /// reload (the O-menu codex writes that file), so lava/water speed is
+    /// tunable live instead of only at world creation.
+    ///
+    /// Deliberately does NOT carry source/threshold/mesh fields — those come
+    /// from other config files on their own paths and would be clobbered.
+    UpdateFluidRates {
+        tick_rate: f32,
+        lava_tick_divisor: u8,
+        water_flow_rate: f32,
+        water_spread_rate: f32,
+        lava_flow_rate: f32,
+        lava_spread_rate: f32,
+    },
     /// Request a snapshot of all fluid cells (used by sleep system).
     /// Response sent via the dedicated reply channel.
     SnapshotRequest {

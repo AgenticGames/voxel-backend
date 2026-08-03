@@ -49,6 +49,23 @@ impl VoxelEngine {
         if let Ok(mut cfg) = self.config.write() {
             *cfg = new_config;
         }
+
+        // The same FFI config carries the fluid sim rates, and UE re-pushes it
+        // on every VoxelConfig.json reload (codex menu edits). Forward the rate
+        // knobs to the fluid thread so lava/water speed retunes on a live world
+        // instead of only at engine creation. Built via `ffi_config_to_fluid`
+        // so the 0-means-default sentinel behaves exactly as it does at
+        // creation time. Only rates are forwarded — source/threshold/mesh
+        // fields have their own owners and would be clobbered.
+        let fluid = ffi_config_to_fluid(ffi_config);
+        let _ = self.fluid_event_tx.try_send(FluidEvent::UpdateFluidRates {
+            tick_rate: fluid.tick_rate,
+            lava_tick_divisor: fluid.lava_tick_divisor,
+            water_flow_rate: fluid.water_flow_rate,
+            water_spread_rate: fluid.water_spread_rate,
+            lava_flow_rate: fluid.lava_flow_rate,
+            lava_spread_rate: fluid.lava_spread_rate,
+        });
     }
 
     /// Hot-reload fluid configuration at runtime.
