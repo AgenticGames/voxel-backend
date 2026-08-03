@@ -421,7 +421,12 @@ pub unsafe extern "C" fn voxel_place_support(
         return 0;
     }
     let engine = &*(engine as *const VoxelEngine);
-    let world_scale = 15.0f32;
+    // Coord contract: UE world-space in, engine's LIVE world scale (config-
+    // driven, 30 as of 2026-08) for the transform. This was hardcoded 15.0
+    // in all three support fns — self-consistently wrong (place/query/remove
+    // agreed with each other) but the support-field cells landed at 2x the
+    // aimed voxel, so stress relief centered far from the visual strut.
+    let world_scale = engine.get_world_scale();
     let rust_pos = from_ue_world_pos(world_x, world_y, world_z, world_scale);
     engine.request_place_support(
         rust_pos.x as i32,
@@ -446,7 +451,12 @@ pub unsafe extern "C" fn voxel_remove_support(
         return 0;
     }
     let engine = &*(engine as *const VoxelEngine);
-    let world_scale = 15.0f32;
+    // Coord contract: UE world-space in, engine's LIVE world scale (config-
+    // driven, 30 as of 2026-08) for the transform. This was hardcoded 15.0
+    // in all three support fns — self-consistently wrong (place/query/remove
+    // agreed with each other) but the support-field cells landed at 2x the
+    // aimed voxel, so stress relief centered far from the visual strut.
+    let world_scale = engine.get_world_scale();
     let rust_pos = from_ue_world_pos(world_x, world_y, world_z, world_scale);
     engine.request_remove_support(
         rust_pos.x as i32,
@@ -524,7 +534,12 @@ pub unsafe extern "C" fn voxel_query_strut_hp(
         return 0;
     }
     let engine = &*(engine as *const VoxelEngine);
-    let world_scale = 15.0f32;
+    // Coord contract: UE world-space in, engine's LIVE world scale (config-
+    // driven, 30 as of 2026-08) for the transform. This was hardcoded 15.0
+    // in all three support fns — self-consistently wrong (place/query/remove
+    // agreed with each other) but the support-field cells landed at 2x the
+    // aimed voxel, so stress relief centered far from the visual strut.
+    let world_scale = engine.get_world_scale();
     let rust_pos = from_ue_world_pos(world_x, world_y, world_z, world_scale);
     let (stype, hp, max_hp, valid) = engine.query_strut_hp(
         rust_pos.x as i32, rust_pos.y as i32, rust_pos.z as i32,
