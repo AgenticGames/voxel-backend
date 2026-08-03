@@ -245,25 +245,30 @@ pub struct StrutTuning {
 /// decal. `hp_decay_threshold` scaled ~5× in step: load-borne is a sum over
 /// covered stressed voxels, so wider coverage means proportionally more
 /// idle-tolerable load before HP starts ticking.
+// 2026-08-03 4x zone resize (user playtest: "zone of influence is tiny,
+// should be 4x the size"). Radii x4 from the 07-17 massive-strut values
+// (6/8/11/8/14 -> 24/32/44/32/56); hp_decay_threshold x4 in step, same
+// rationale as the 07-17 x5: load-borne sums over covered stressed voxels,
+// so wider coverage needs a proportionally higher idle-tolerable load.
 pub const STRUT_TUNING: [StrutTuning; 6] = [
     // None
     StrutTuning { hardness: 0.0, radius: 0, max_hp: 0,    hp_decay_threshold: 0.0 },
     // Copper (T1)
-    StrutTuning { hardness:  8.0, radius: 6, max_hp:   50, hp_decay_threshold: 2.5 },
+    StrutTuning { hardness:  8.0, radius: 24, max_hp:   50, hp_decay_threshold: 10.0 },
     // Iron (T2)
-    StrutTuning { hardness: 14.0, radius: 8, max_hp:  150, hp_decay_threshold: 5.0 },
+    StrutTuning { hardness: 14.0, radius: 32, max_hp:  150, hp_decay_threshold: 20.0 },
     // Steel (T3) — wide radius for area coverage
-    StrutTuning { hardness: 18.0, radius: 11, max_hp:  300, hp_decay_threshold: 7.5 },
+    StrutTuning { hardness: 18.0, radius: 44, max_hp:  300, hp_decay_threshold: 30.0 },
     // Crystal (T4) — HP tank
-    StrutTuning { hardness: 25.0, radius: 8, max_hp:  800, hp_decay_threshold: 10.0 },
+    StrutTuning { hardness: 25.0, radius: 32, max_hp:  800, hp_decay_threshold: 40.0 },
     // Mithril (T5) — endgame
-    StrutTuning { hardness: 35.0, radius: 14, max_hp: 2000, hp_decay_threshold: 12.5 },
+    StrutTuning { hardness: 35.0, radius: 56, max_hp: 2000, hp_decay_threshold: 50.0 },
 ];
 
 /// Maximum `radius` value across all tiers — bounds the chunk box the
 /// strut sweeps (`strut_relief_raw`, load accumulate, BFS halt) walk when
 /// gathering nearby struts. Recompute if STRUT_TUNING changes.
-pub const MAX_STRUT_RADIUS: u8 = 14;
+pub const MAX_STRUT_RADIUS: u8 = 56;
 
 /// Per-recalc HP-damage scale applied after subtracting `hp_decay_threshold`.
 /// Tune to taste — higher = struts break faster under sustained load.

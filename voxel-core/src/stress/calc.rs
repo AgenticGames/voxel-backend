@@ -40,12 +40,69 @@ pub fn sample_world(
     })
 }
 
+/// Visit every non-empty support-field chunk that could hold a strut within
+/// `MAX_STRUT_RADIUS` of (wx,wy,wz). Shared by the three strut sweeps
+/// (relief, load-accumulate, BFS halt) — keep them on this helper so their
+/// neighborhoods can never drift apart.
+///
+/// Two walks, cheapest chosen per call (2026-08-03, radius 14 -> 56 resize):
+/// - box-probe: one HashMap probe per chunk in the ±MAX_STRUT_RADIUS box.
+///   Fine at radius 14 (≤8 probes @ cs=30), ~125 probes at radius 56.
+/// - map-filter: iterate support_fields and range-filter — O(#strut chunks)
+///   regardless of radius, and worlds hold a handful of strut chunks.
+/// The map-filter path visits chunks in SORTED order so float-summing
+/// callers (relief) stay deterministic — HashMap iteration order is not.
+pub(crate) fn for_each_strut_chunk_in_range(
+    support_fields: &HashMap<(i32, i32, i32), SupportField>,
+    wx: i32, wy: i32, wz: i32,
+    chunk_size: usize,
+    mut visit: impl FnMut((i32, i32, i32), &SupportField),
+) {
+    let sr = MAX_STRUT_RADIUS as i32;
+    let cs = chunk_size as i32;
+    let kx0 = (wx - sr).div_euclid(cs); let kx1 = (wx + sr).div_euclid(cs);
+    let ky0 = (wy - sr).div_euclid(cs); let ky1 = (wy + sr).div_euclid(cs);
+    let kz0 = (wz - sr).div_euclid(cs); let kz1 = (wz + sr).div_euclid(cs);
+    let box_chunks = ((kx1 - kx0 + 1) as usize)
+        * ((ky1 - ky0 + 1) as usize)
+        * ((kz1 - kz0 + 1) as usize);
+    if support_fields.len() < box_chunks {
+        let mut keys: Vec<(i32, i32, i32)> = support_fields.iter()
+            .filter(|(k, sf)| {
+                !sf.is_empty()
+                    && k.0 >= kx0 && k.0 <= kx1
+                    && k.1 >= ky0 && k.1 <= ky1
+                    && k.2 >= kz0 && k.2 <= kz1
+            })
+            .map(|(&k, _)| k)
+            .collect();
+        keys.sort_unstable();
+        for k in keys {
+            if let Some(sf) = support_fields.get(&k) {
+                visit(k, sf);
+            }
+        }
+    } else {
+        for ckx in kx0..=kx1 {
+            for cky in ky0..=ky1 {
+                for ckz in kz0..=kz1 {
+                    if let Some(sf) = support_fields.get(&(ckx, cky, ckz)) {
+                        if !sf.is_empty() {
+                            visit((ckx, cky, ckz), sf);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Walk the same per-voxel strut neighborhood that `calc_voxel_stress_v2`
 /// walks for stress reduction, and accumulate each strut's `hardness/dist`
 /// contribution into `loads`. Keyed by (chunk, local_xyz). Only alive struts
 /// (HP > 0) and only struts inside their per-tier radius are counted.
 ///
-/// Cheap when no struts exist: the chunk-box walk pays ≤8 HashMap probes
+/// Cheap when no struts exist: the sweep pays min(#strut-chunks, box) probes
 /// and iterates empty strut lists, so the cost is ~0 for early game.
 pub(crate) fn accumulate_strut_load_at_voxel(
     support_fields: &HashMap<(i32, i32, i32), SupportField>,
@@ -57,33 +114,24 @@ pub(crate) fn accumulate_strut_load_at_voxel(
     // scanning the max-radius cube. See strut_relief_raw for the rationale
     // (and keep the two loops structurally identical: every strut that
     // relieves a voxel must also accumulate load for it).
-    let sr = MAX_STRUT_RADIUS as i32;
     let cs = chunk_size as i32;
-    for ckx in (wx - sr).div_euclid(cs)..=(wx + sr).div_euclid(cs) {
-        for cky in (wy - sr).div_euclid(cs)..=(wy + sr).div_euclid(cs) {
-            for ckz in (wz - sr).div_euclid(cs)..=(wz + sr).div_euclid(cs) {
-                let skey = (ckx, cky, ckz);
-                let sf = match support_fields.get(&skey) {
-                    Some(sf) if !sf.is_empty() => sf,
-                    _ => continue,
-                };
-                for &(lx, ly, lz) in sf.strut_cells() {
-                    let dx = ckx * cs + lx as i32 - wx;
-                    let dy = cky * cs + ly as i32 - wy;
-                    let dz = ckz * cs + lz as i32 - wz;
-                    let d2 = dx * dx + dy * dy + dz * dz;
-                    if d2 == 0 { continue; }
-                    let support = sf.get(lx as usize, ly as usize, lz as usize);
-                    let tuning = STRUT_TUNING[support as u8 as usize];
-                    let r2 = (tuning.radius as i32) * (tuning.radius as i32);
-                    if d2 > r2 { continue; }
-                    if !sf.is_strut_alive(lx as usize, ly as usize, lz as usize) { continue; }
-                    let contribution = tuning.hardness / (d2 as f32).sqrt();
-                    *loads.entry((skey, lx as usize, ly as usize, lz as usize)).or_insert(0.0) += contribution;
-                }
-            }
+    for_each_strut_chunk_in_range(support_fields, wx, wy, wz, chunk_size, |skey, sf| {
+        let (ckx, cky, ckz) = skey;
+        for &(lx, ly, lz) in sf.strut_cells() {
+            let dx = ckx * cs + lx as i32 - wx;
+            let dy = cky * cs + ly as i32 - wy;
+            let dz = ckz * cs + lz as i32 - wz;
+            let d2 = dx * dx + dy * dy + dz * dz;
+            if d2 == 0 { continue; }
+            let support = sf.get(lx as usize, ly as usize, lz as usize);
+            let tuning = STRUT_TUNING[support as u8 as usize];
+            let r2 = (tuning.radius as i32) * (tuning.radius as i32);
+            if d2 > r2 { continue; }
+            if !sf.is_strut_alive(lx as usize, ly as usize, lz as usize) { continue; }
+            let contribution = tuning.hardness / (d2 as f32).sqrt();
+            *loads.entry((skey, lx as usize, ly as usize, lz as usize)).or_insert(0.0) += contribution;
         }
-    }
+    });
 }
 
 /// Apply load-decay HP damage to every strut in `loads`. Each strut takes
@@ -234,39 +282,30 @@ pub(crate) fn strut_relief_raw(
     // radius 14; the strut-list walk is O(nearby struts) — nanoseconds for
     // realistic strut counts, and the no-struts common case is the same
     // ≤8 HashMap probes the old any_supports_in_radius_box guard paid.
-    let sr = MAX_STRUT_RADIUS as i32;
     let cs = chunk_size as i32;
     let mut relief = 0.0f32;
-    for ckx in (wx - sr).div_euclid(cs)..=(wx + sr).div_euclid(cs) {
-        for cky in (wy - sr).div_euclid(cs)..=(wy + sr).div_euclid(cs) {
-            for ckz in (wz - sr).div_euclid(cs)..=(wz + sr).div_euclid(cs) {
-                let sf = match support_fields.get(&(ckx, cky, ckz)) {
-                    Some(sf) if !sf.is_empty() => sf,
-                    _ => continue,
-                };
-                for &(lx, ly, lz) in sf.strut_cells() {
-                    let dx = ckx * cs + lx as i32 - wx;
-                    let dy = cky * cs + ly as i32 - wy;
-                    let dz = ckz * cs + lz as i32 - wz;
-                    let d2 = dx * dx + dy * dy + dz * dz;
-                    // A strut occupying the target cell itself relieves
-                    // nothing there (matches the old scan's center skip).
-                    if d2 == 0 { continue; }
-                    let support = sf.get(lx as usize, ly as usize, lz as usize);
-                    let tuning = STRUT_TUNING[support as u8 as usize];
-                    let r2 = (tuning.radius as i32) * (tuning.radius as i32);
-                    if d2 > r2 { continue; }
-                    // Broken struts (HP=0) contribute nothing — the worker
-                    // tick will clear them, but until it does we must not
-                    // pretend they're still holding the rock up.
-                    if !sf.is_strut_alive(lx as usize, ly as usize, lz as usize) {
-                        continue;
-                    }
-                    relief += tuning.hardness / (d2 as f32).sqrt();
-                }
+    for_each_strut_chunk_in_range(support_fields, wx, wy, wz, chunk_size, |(ckx, cky, ckz), sf| {
+        for &(lx, ly, lz) in sf.strut_cells() {
+            let dx = ckx * cs + lx as i32 - wx;
+            let dy = cky * cs + ly as i32 - wy;
+            let dz = ckz * cs + lz as i32 - wz;
+            let d2 = dx * dx + dy * dy + dz * dz;
+            // A strut occupying the target cell itself relieves
+            // nothing there (matches the old scan's center skip).
+            if d2 == 0 { continue; }
+            let support = sf.get(lx as usize, ly as usize, lz as usize);
+            let tuning = STRUT_TUNING[support as u8 as usize];
+            let r2 = (tuning.radius as i32) * (tuning.radius as i32);
+            if d2 > r2 { continue; }
+            // Broken struts (HP=0) contribute nothing — the worker
+            // tick will clear them, but until it does we must not
+            // pretend they're still holding the rock up.
+            if !sf.is_strut_alive(lx as usize, ly as usize, lz as usize) {
+                continue;
             }
+            relief += tuning.hardness / (d2 as f32).sqrt();
         }
-    }
+    });
     relief
 }
 

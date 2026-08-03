@@ -367,7 +367,6 @@ pub fn detect_and_execute_collapses_v2_with_force_deadline(
     // events processed in this call. Applied after the loop as HP damage.
     let mut strut_halt_counts: std::collections::HashMap<((i32,i32,i32), usize, usize, usize), u32> =
         std::collections::HashMap::new();
-    let sr_max = MAX_STRUT_RADIUS as i32;
 
     for ov in overstressed {
         // Deadline check — happens at every seed so the longest a single
@@ -431,35 +430,29 @@ pub fn detect_and_execute_collapses_v2_with_force_deadline(
                             let mut halted = false;
                             let cs_i = chunk_size as i32;
                             let (nx, ny, nz) = neighbor;
-                            for ckx in (nx - sr_max).div_euclid(cs_i)..=(nx + sr_max).div_euclid(cs_i) {
-                                for cky in (ny - sr_max).div_euclid(cs_i)..=(ny + sr_max).div_euclid(cs_i) {
-                                    for ckz in (nz - sr_max).div_euclid(cs_i)..=(nz + sr_max).div_euclid(cs_i) {
-                                        let skey = (ckx, cky, ckz);
-                                        let sf = match support_fields.get(&skey) {
-                                            Some(sf) if !sf.is_empty() => sf,
-                                            _ => continue,
-                                        };
-                                        for &(lx, ly, lz) in sf.strut_cells() {
-                                            let sdx = ckx * cs_i + lx as i32 - nx;
-                                            let sdy = cky * cs_i + ly as i32 - ny;
-                                            let sdz = ckz * cs_i + lz as i32 - nz;
-                                            let d2 = sdx * sdx + sdy * sdy + sdz * sdz;
-                                            if d2 == 0 { continue; }
-                                            let support = sf.get(lx as usize, ly as usize, lz as usize);
-                                            let tuning = STRUT_TUNING[support as u8 as usize];
-                                            let r2 = (tuning.radius as i32) * (tuning.radius as i32);
-                                            if d2 > r2 { continue; }
-                                            if !sf.is_strut_alive(lx as usize, ly as usize, lz as usize) {
-                                                continue;
-                                            }
-                                            halted = true;
-                                            *strut_halt_counts
-                                                .entry((skey, lx as usize, ly as usize, lz as usize))
-                                                .or_insert(0) += 1;
+                            super::calc::for_each_strut_chunk_in_range(
+                                support_fields, nx, ny, nz, chunk_size,
+                                |skey, sf| {
+                                    let (ckx, cky, ckz) = skey;
+                                    for &(lx, ly, lz) in sf.strut_cells() {
+                                        let sdx = ckx * cs_i + lx as i32 - nx;
+                                        let sdy = cky * cs_i + ly as i32 - ny;
+                                        let sdz = ckz * cs_i + lz as i32 - nz;
+                                        let d2 = sdx * sdx + sdy * sdy + sdz * sdz;
+                                        if d2 == 0 { continue; }
+                                        let support = sf.get(lx as usize, ly as usize, lz as usize);
+                                        let tuning = STRUT_TUNING[support as u8 as usize];
+                                        let r2 = (tuning.radius as i32) * (tuning.radius as i32);
+                                        if d2 > r2 { continue; }
+                                        if !sf.is_strut_alive(lx as usize, ly as usize, lz as usize) {
+                                            continue;
                                         }
+                                        halted = true;
+                                        *strut_halt_counts
+                                            .entry((skey, lx as usize, ly as usize, lz as usize))
+                                            .or_insert(0) += 1;
                                     }
-                                }
-                            }
+                                });
                             if halted {
                                 visited.insert(neighbor); // mark to avoid re-checking
                                 continue;
