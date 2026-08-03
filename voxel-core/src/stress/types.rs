@@ -257,22 +257,24 @@ pub const STRUT_TUNING: [StrutTuning; 6] = [
     // (hardness x radius x 10 — PROVISIONAL, tune from live [stress] debug
     // load telemetry): per-voxel contributions are ~10x the old 1/d values,
     // and load-borne sums them over every stressed voxel in the zone.
+    // 2026-08-03 live-tuned: 4x zone resize then -30% on playtest feel
+    // (24/32/44/32/56 -> 17/22/31/22/39).
     // Copper (T1)
-    StrutTuning { hardness:  8.0, radius: 24, max_hp:   50, hp_decay_threshold: 1920.0 },
+    StrutTuning { hardness:  8.0, radius: 17, max_hp:   50, hp_decay_threshold: 1360.0 },
     // Iron (T2)
-    StrutTuning { hardness: 14.0, radius: 32, max_hp:  150, hp_decay_threshold: 4480.0 },
+    StrutTuning { hardness: 14.0, radius: 22, max_hp:  150, hp_decay_threshold: 3080.0 },
     // Steel (T3) — wide radius for area coverage
-    StrutTuning { hardness: 18.0, radius: 44, max_hp:  300, hp_decay_threshold: 7920.0 },
+    StrutTuning { hardness: 18.0, radius: 31, max_hp:  300, hp_decay_threshold: 5580.0 },
     // Crystal (T4) — HP tank
-    StrutTuning { hardness: 25.0, radius: 32, max_hp:  800, hp_decay_threshold: 8000.0 },
+    StrutTuning { hardness: 25.0, radius: 22, max_hp:  800, hp_decay_threshold: 5500.0 },
     // Mithril (T5) — endgame
-    StrutTuning { hardness: 35.0, radius: 56, max_hp: 2000, hp_decay_threshold: 19600.0 },
+    StrutTuning { hardness: 35.0, radius: 39, max_hp: 2000, hp_decay_threshold: 13650.0 },
 ];
 
 /// Maximum `radius` value across all tiers — bounds the chunk box the
 /// strut sweeps (`strut_relief_raw`, load accumulate, BFS halt) walk when
 /// gathering nearby struts. Recompute if STRUT_TUNING changes.
-pub const MAX_STRUT_RADIUS: u8 = 56;
+pub const MAX_STRUT_RADIUS: u8 = 39;
 
 /// Per-recalc HP-damage scale applied after subtracting `hp_decay_threshold`.
 /// 0.0 = load-decay DISABLED (2026-08-03, #214 round 3): under the linear-cone
