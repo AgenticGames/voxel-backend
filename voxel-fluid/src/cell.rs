@@ -570,6 +570,51 @@ impl ChunkFluidGrid {
                     f >= STREAM_FLUX_MIN
                 };
             }
+            // Shoreline fringe: a thin film laterally touching an above-iso
+            // body of the same fluid is that body's EDGE — render it as part
+            // of the pond instead of cutting the mesh at the iso contour
+            // mid-film (pond fringes and spill sheets otherwise render as
+            // confetti). Seeded from RAW ≥ iso cells and grown a few rings
+            // through real film (raw ≥ 0.02) — bounded, so isolated dribble
+            // never lights up; stagnant films evaporate via the orphan
+            // system so fringes are transient by construction.
+            let size = self.size;
+            let stride_z = size * size;
+            let cells = &self.cells;
+            let stream_mark = &mut self.stream_mark;
+            let mut frontier: Vec<usize> = Vec::new();
+            for idx in 0..total {
+                if cells[idx].level >= MESH_STICKY_ON {
+                    frontier.push(idx);
+                }
+            }
+            for _ring in 0..5 {
+                let mut next: Vec<usize> = Vec::new();
+                for &idx in &frontier {
+                    let lava = cells[idx].fluid_type.is_lava();
+                    let x = idx % size;
+                    let z = idx / stride_z;
+                    let mut probe = |nidx: usize| {
+                        let n = &cells[nidx];
+                        if !stream_mark[nidx]
+                            && n.level >= 0.02
+                            && n.level < MESH_STICKY_ON
+                            && n.fluid_type.is_lava() == lava
+                        {
+                            stream_mark[nidx] = true;
+                            next.push(nidx);
+                        }
+                    };
+                    if x > 0 { probe(idx - 1); }
+                    if x + 1 < size { probe(idx + 1); }
+                    if z > 0 { probe(idx - stride_z); }
+                    if z + 1 < size { probe(idx + stride_z); }
+                }
+                if next.is_empty() {
+                    break;
+                }
+                frontier = next;
+            }
         }
         if !flux_render {
             self.update_mesh_hysteresis(sticky_release);

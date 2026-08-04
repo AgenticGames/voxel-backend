@@ -19,6 +19,11 @@ pub(super) struct CrossChunkTransfer {
     /// Bounded-flow propagation: dest cell inherits this max from the source it
     /// propagated from. 0 = unlimited.
     pub dest_max_flow: u8,
+    /// True for cascade transfers (gravity/slope) — these FEED the dest cell
+    /// for transit retention. Spread transfers are equalization, not feeding:
+    /// marking them lets retention-held neighbors sustain each other forever
+    /// (perched lava across chunk seams).
+    pub feeds: bool,
 }
 
 /// Number of hops at the tail of a bounded source where flow tapers from 1.0 → 0.
@@ -454,6 +459,7 @@ pub(super) fn tick_chunk(
                                             fluid_type: cell.fluid_type,
                                             dest_hops: new_hops,
                                             dest_max_flow: cell.max_flow_dist,
+                                            feeds: true,
                                         });
                                         changed = true;
                                     }
@@ -644,6 +650,7 @@ pub(super) fn tick_chunk(
                                         fluid_type: cell.fluid_type,
                                         dest_hops: new_hops,
                                         dest_max_flow: cell.max_flow_dist,
+                                        feeds: true,
                                     });
                                 } else {
                                     new_cells[ni].level += transfer;
@@ -741,6 +748,9 @@ pub(super) fn tick_chunk(
                                                 if !is_source && !has_grace {
                                                     new_cells[idx].level -= transfer;
                                                 }
+                                                if is_lava_tick {
+                                                    flux_out[idx] += transfer;
+                                                }
                                                 cross_transfers.push(CrossChunkTransfer {
                                                     dest_key,
                                                     dest_x: tx,
@@ -750,6 +760,7 @@ pub(super) fn tick_chunk(
                                                     fluid_type: cell.fluid_type,
                                                     dest_hops: new_hops_h,
                                                     dest_max_flow: cell.max_flow_dist,
+                                                    feeds: false,
                                                 });
                                                 changed = true;
                                             }
@@ -788,6 +799,21 @@ pub(super) fn tick_chunk(
                                 new_cells[ni].fluid_type = cell.fluid_type;
                                 new_cells[ni].hops_from_source = new_hops_h;
                                 new_cells[ni].max_flow_dist = cell.max_flow_dist;
+                                // Spread IS transport on flats (pond fronts,
+                                // fall fan-out across ledges) — count it into
+                                // the flux average or those cells render as
+                                // the old confetti while visibly carrying
+                                // lava. Settled ponds equalize (no diffs, no
+                                // transfers) so their flux decays cleanly.
+                                // ⚠️ Spread must NOT set influx marks:
+                                // retention-held unequal neighbors keep
+                                // micro-spreading at each other and would
+                                // feed each other's retention forever —
+                                // perched lava (caught by the drain-out red
+                                // test). Feeding = gravity/slope only.
+                                if is_lava_tick {
+                                    flux_out[idx] += transfer;
+                                }
                                 changed = true;
                             }
                         }

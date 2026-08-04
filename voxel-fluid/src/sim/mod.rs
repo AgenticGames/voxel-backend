@@ -109,9 +109,12 @@ pub fn tick_fluid(
                     cell.hops_from_source = xfer.dest_hops;
                     cell.max_flow_dist = xfer.dest_max_flow;
                 }
-                // Cross-chunk cascade arrivals count as "fed" for transit
-                // retention, same as in-chunk gravity/slope receives.
-                if is_lava_tick {
+                // Cross-chunk CASCADE arrivals count as "fed" for transit
+                // retention, same as in-chunk gravity/slope receives. Spread
+                // arrivals (feeds=false) don't — retention-held unequal
+                // neighbors would otherwise sustain each other forever
+                // across the seam (perched lava).
+                if is_lava_tick && xfer.feeds {
                     grid.mark_influx(xfer.dest_x, xfer.dest_y, xfer.dest_z);
                 }
                 grid.dirty = true;
@@ -2674,6 +2677,82 @@ mod tests {
                 cols.iter().map(|c| (c * 100.0).round() / 100.0).collect::<Vec<_>>()
             );
         }
+    }
+
+    // ── 2026-08-04 spread-flux instrumentation ───────────────────────────
+    // Spread IS transport on flats: pond fronts and fall fan-out carry lava
+    // via the spread pass, which previously generated no flux — those cells
+    // got no ribbon floor and rendered as confetti (user screenshots: sheet
+    // edges + lavafall scatter were exactly the un-instrumented cells).
+
+    /// Flat-floor spill: source pouring onto a big open floor, pond grows
+    /// radially — mid-spill, the front is spread-driven.
+    fn make_flat_spill() -> ChunkFluidGrid {
+        let size = 16;
+        let config = crate::FluidConfig::default();
+        let mut d = make_density_field_solid(size);
+        carve_box(&mut d, size, 1..16, 4..15, 1..16);
+        let mut grid = make_chunk(size);
+        apply_density(&mut grid, &d, &config);
+        {
+            let cell = grid.get_mut(8, 4, 8);
+            cell.level = SOURCE_LEVEL;
+            cell.fluid_type = FluidType::Lava;
+            cell.is_source = true;
+            cell.max_flow_dist = 0;
+            cell.hops_from_source = 0;
+        }
+        grid.has_fluid = true;
+        grid.has_lava = true;
+        grid.has_sources = true;
+        grid
+    }
+
+    #[test]
+    fn spreading_pond_front_renders_connected() {
+        // Mid-spill, floor row y=4: most wet cells must RENDER when the
+        // ribbon is on (spread now counts as flux). With the ribbon off the
+        // same sim state renders a fraction of it — documents the delta the
+        // instrumentation closes.
+        let ratio_for = |ribbon: bool| -> (usize, usize) {
+            let cfg = crate::FluidConfig {
+                mesh_stream_ribbon: ribbon,
+                ..crate::FluidConfig::default()
+            };
+            let mut chunks = HashMap::new();
+            chunks.insert((0, 0, 0), make_flat_spill());
+            run_cascade_ticks(&mut chunks, 40, &cfg, true);
+            let grid = chunks.get(&(0, 0, 0)).unwrap();
+            let mut wet = 0usize;
+            let mut rendered = 0usize;
+            // The pond body spans the carved floor row AND the half-open
+            // boundary layer below it (cap 0.5 — every carve boundary makes
+            // one; fluid settles into it first).
+            for z in 1..16usize {
+                for x in 1..16usize {
+                    for y in 3..5usize {
+                        if grid.get(x, y, z).level >= 0.02 {
+                            wet += 1;
+                            if grid.mesh_level(x, y, z) >= 0.15 {
+                                rendered += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            (wet, rendered)
+        };
+        let (wet_on, rendered_on) = ratio_for(true);
+        assert!(wet_on >= 20, "spill never grew (wet={wet_on}) — fixture drift?");
+        assert!(
+            rendered_on * 10 >= wet_on * 7,
+            "spreading pond still renders confetti with ribbon on: {rendered_on}/{wet_on} rendered"
+        );
+        let (wet_off, rendered_off) = ratio_for(false);
+        assert!(
+            rendered_off * 2 < wet_off,
+            "ribbon-off under-rendering vanished ({rendered_off}/{wet_off}) — fixture no longer exercises the fix"
+        );
     }
 
     #[test]
