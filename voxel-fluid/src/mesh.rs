@@ -119,7 +119,7 @@ fn has_fluid_above(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> bool 
     if y + 1 >= size {
         return false;
     }
-    grid.grid_point_density(x, y + 1, z) <= 0.0 && grid.get(x, y + 1, z).level >= ISO_LEVEL
+    grid.grid_point_density(x, y + 1, z) <= 0.0 && grid.mesh_level(x, y + 1, z) >= ISO_LEVEL
 }
 
 /// Sample the scalar field for MC meshing.
@@ -145,7 +145,7 @@ fn sample_field(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary: &
     if grid.grid_point_density(x, y, z) > 0.0 {
         1.0 // inside — prevents surface at rock/fluid boundary
     } else {
-        let level = grid.get(x, y, z).level;
+        let level = grid.mesh_level(x, y, z);
         // Floor extension: low-fluid cell on solid rock (or chunk bottom) with fluid above
         if level < ISO_LEVEL && (y == 0 || grid.grid_point_density(x, y - 1, z) > 0.0) && has_fluid_above(grid, x, y, z) {
             1.0 // boost to close floor gap
@@ -199,13 +199,13 @@ fn cube_has_fluid(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary:
                     // rim cells straddling the basin wall). Without this the
                     // cube is skipped, the sheet is cut a cell early, and its
                     // open edge floats in mid-air over the terrain.
-                    if grid.get(cx, cy, cz).level >= ISO_LEVEL {
+                    if grid.mesh_level(cx, cy, cz) >= ISO_LEVEL {
                         return true;
                     }
                     continue;
                 }
                 {
-                    let level = grid.get(cx, cy, cz).level;
+                    let level = grid.mesh_level(cx, cy, cz);
                     if level >= MIN_LEVEL {
                         return true;
                     }
@@ -226,7 +226,7 @@ fn cube_has_fluid(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary:
 fn cell_level_at(grid: &ChunkFluidGrid, boundary: &BoundaryLevels, cx: usize, cy: usize, cz: usize) -> f32 {
     let size = grid.size;
     if cx < size && cy < size && cz < size {
-        grid.get(cx, cy, cz).level
+        grid.mesh_level(cx, cy, cz)
     } else {
         boundary.get_level(cx, cy, cz).unwrap_or(0.0)
     }

@@ -469,6 +469,9 @@ pub fn fluid_sim_loop(
         for key in &all_dirty {
             let boundary = build_boundary_levels(*key, &chunks, chunk_size);
             if let Some(grid) = chunks.get_mut(key) {
+                // Mesh hysteresis: refresh the sticky flags so borderline
+                // cascade cells hold in the mesh instead of strobing.
+                grid.update_mesh_hysteresis();
                 let mesh = mesh_fluid(grid, &boundary, &config);
                 grid.dirty = false;
 

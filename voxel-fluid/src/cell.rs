@@ -144,6 +144,14 @@ pub fn face_blocked(corners: &[f32], idx: usize, dx: i32, dy: i32, dz: i32) -> b
     face.iter().filter(|&&c| corners[base + c] > 0.0).count() >= need
 }
 
+/// Mesh hysteresis (2026-08-04): a cell ENTERS the fluid mesh at
+/// MESH_STICKY_ON (= the mesher's ISO_LEVEL) but doesn't LEAVE until it
+/// falls below MESH_STICKY_OFF. Cascade transit cells end ticks straddling
+/// the iso threshold (drain-then-refill), and without hysteresis the mesh
+/// pops them in and out every tick ("strobing" — user repro 2026-08-04).
+pub const MESH_STICKY_ON: f32 = 0.15;
+pub const MESH_STICKY_OFF: f32 = 0.05;
+
 /// Minimum fluid level to consider non-empty.
 pub const MIN_LEVEL: f32 = 0.001;
 /// Orphan puddle threshold: cells below this level get boosted slope flow.
@@ -279,6 +287,11 @@ pub struct ChunkFluidGrid {
     pub scratch_weights: Vec<f32>,
     /// Reusable per-tick drain-delta buffer for entrainment.
     pub scratch_drain: Vec<f32>,
+    /// Mesh-hysteresis memory: true while the cell is "held" in the fluid
+    /// mesh (entered at MESH_STICKY_ON, released below MESH_STICKY_OFF).
+    /// Updated by update_mesh_hysteresis() right before meshing; callers
+    /// that never update it (viewer/tests) get raw-level behavior.
+    pub mesh_sticky: Vec<bool>,
 }
 
 impl ChunkFluidGrid {
@@ -298,6 +311,7 @@ impl ChunkFluidGrid {
             scratch_cells: Vec::new(),
             scratch_weights: Vec::new(),
             scratch_drain: Vec::new(),
+            mesh_sticky: Vec::new(),
         }
     }
 
@@ -327,6 +341,7 @@ impl ChunkFluidGrid {
             scratch_cells: Vec::new(),
             scratch_weights: Vec::new(),
             scratch_drain: Vec::new(),
+            mesh_sticky: Vec::new(),
         }
     }
 
@@ -368,6 +383,37 @@ impl ChunkFluidGrid {
         let base = idx * 8;
         let count = (0..8).filter(|&c| self.cell_corners[base + c] > 0.0).count();
         count >= threshold as usize
+    }
+
+    /// Update the mesh-hysteresis flags from current levels. Call once per
+    /// chunk right before meshing.
+    pub fn update_mesh_hysteresis(&mut self) {
+        let total = self.size * self.size * self.size;
+        if self.mesh_sticky.len() != total {
+            self.mesh_sticky = vec![false; total];
+        }
+        for idx in 0..total {
+            let l = self.cells[idx].level;
+            if l >= MESH_STICKY_ON {
+                self.mesh_sticky[idx] = true;
+            } else if l < MESH_STICKY_OFF {
+                self.mesh_sticky[idx] = false;
+            }
+        }
+    }
+
+    /// Level as the fluid MESHER should see it: cells held by hysteresis
+    /// render just above the iso threshold, so borderline cascade cells
+    /// stay visible instead of strobing in and out of the mesh.
+    #[inline]
+    pub fn mesh_level(&self, x: usize, y: usize, z: usize) -> f32 {
+        let idx = self.index(x, y, z);
+        let l = self.cells[idx].level;
+        if l < MESH_STICKY_ON && self.mesh_sticky.get(idx).copied().unwrap_or(false) {
+            MESH_STICKY_ON + 0.01
+        } else {
+            l
+        }
     }
 
     /// Recompute cell capacity from corner densities (fractional: air_corners/8).

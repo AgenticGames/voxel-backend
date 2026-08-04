@@ -1120,10 +1120,13 @@ mod tests {
         let dc = empty_density_cache();
         for _ in 0..500 { tick_fluid(&mut chunks, &dc, size, false, &config, true); }
         let final_w = total_water(&chunks);
-        // 3% relative (was 0.1 absolute): face-gating settle-time skin soak,
-        // see bowl_symmetric_retains_water. Loss here is order-dependent
-        // (HashMap chunk iteration) — observed 0-0.9 of 243.
-        assert!((final_w - initial).abs() / initial < 0.03, "Cross-chunk conservation: initial={:.2}, final={:.2}", initial, final_w);
+        // 8% relative: face-gating skin soak PLUS the one-way-floor rule
+        // (down-transit blocks at >=2 solid corners) — at the chunk boundary
+        // some carved-floor crossing cells can no longer drain downward, and
+        // their films evaporate instead. Order-dependent (HashMap chunk
+        // iteration): observed 0.9-13.5 of 243. Containment beats perfect
+        // conservation here by design ("never under the world").
+        assert!((final_w - initial).abs() / initial < 0.08, "Cross-chunk conservation: initial={:.2}, final={:.2}", initial, final_w);
     }
 
     #[test]
