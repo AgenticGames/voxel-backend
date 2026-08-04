@@ -128,7 +128,13 @@ pub fn face_blocked(corners: &[f32], idx: usize, dx: i32, dy: i32, dz: i32) -> b
         _ => return false,
     };
     let base = idx * 8;
-    face.iter().all(|&c| corners[base + c] > 0.0)
+    // >=3 of 4 solid corners = the surface covers most of this face —
+    // blocked. All-4 alone misses corner-nicked membranes (real DC terrain
+    // nicks single lattice points constantly; every face at a nick reads
+    // 3/4 solid and a leak path zigzags through). Legitimate flow uses
+    // 0-2-solid faces: shoreline spread along a floor (bottom pair solid),
+    // ledge lips and slope surfaces (lower pair solid at most).
+    face.iter().filter(|&&c| corners[base + c] > 0.0).count() >= 3
 }
 
 /// Minimum fluid level to consider non-empty.
