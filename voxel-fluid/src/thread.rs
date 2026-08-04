@@ -120,6 +120,11 @@ pub fn fluid_sim_loop(
     // grid (cell_cap=1.0 everywhere) and end up with fluid in cells that
     // turn out to be solid once density arrives.
     let mut pending_fluid: HashMap<(i32, i32, i32), Vec<PendingFluidCell>> = HashMap::new();
+    // Once-per-chunk guard for procedural fluid features (kind 0 = noise
+    // lava, 1 = geological springs) — the worker re-sends placement events
+    // on every stream-in, which used to refill every pool and resurrect
+    // self-extinguished sources whenever the streaming set churned (#216).
+    let mut features_placed: HashSet<((i32, i32, i32), u8)> = HashSet::new();
     // Active pillow sources — lava vent positions (world voxel coords) that
     // are growing obsidian mounds. Cleared when growth_count hits the cap or
     // no water remains within reach. See sim::try_grow_pillow_voxel.
@@ -171,7 +176,7 @@ pub fn fluid_sim_loop(
         // Drain all pending events
         loop {
             match event_rx.try_recv() {
-                Ok(event) => handle_event(event, &mut chunks, &mut chunk_densities, &mut pending_fluid, chunk_size, &mut config),
+                Ok(event) => handle_event(event, &mut chunks, &mut chunk_densities, &mut pending_fluid, &mut features_placed, chunk_size, &mut config),
                 Err(_) => break,
             }
         }
@@ -490,9 +495,13 @@ fn handle_event(
     chunks: &mut HashMap<(i32, i32, i32), ChunkFluidGrid>,
     chunk_densities: &mut HashMap<(i32, i32, i32), ChunkDensityCache>,
     pending_fluid: &mut HashMap<(i32, i32, i32), Vec<PendingFluidCell>>,
+    features_placed: &mut HashSet<((i32, i32, i32), u8)>,
     chunk_size: usize,
     config: &mut FluidConfig,
 ) {
+    // features_placed kinds: 0 = noise-lava sources, 1 = geological springs.
+    const FEATURE_SOURCES: u8 = 0;
+    const FEATURE_SPRINGS: u8 = 1;
     match event {
         FluidEvent::DensityUpdate { chunk, densities } => {
             // Store density in lightweight cache only — do NOT create a full grid
@@ -512,6 +521,18 @@ fn handle_event(
             apply_pending_fluid(chunks, chunk_densities, pending_fluid, chunk, chunk_size, config);
         }
         FluidEvent::PlaceSources { chunk } => {
+            // ONCE per chunk per session (2026-08-04, bug #216): the worker
+            // re-sends PlaceSources on EVERY stream-in, and re-planting
+            // refilled every noise-lava pool to full in one tick ("all 3
+            // pools refilled at once" whenever the player's streaming set
+            // churned — e.g. flying under the world), resurrected
+            // self-extinguished sources, and the overfill transient burst
+            // basins that were otherwise holding. Chunks restored from a
+            // save are marked placed by PendingFluidLoad so loaded state is
+            // never stomped either.
+            if !features_placed.insert((chunk, FEATURE_SOURCES)) {
+                return;
+            }
             // Only create grid if density exists and sources are actually placed
             ensure_grid(chunks, chunk_densities, chunk, chunk_size);
             if let Some(grid) = chunks.get_mut(&chunk) {
@@ -623,6 +644,12 @@ fn handle_event(
             }
         }
         FluidEvent::PlaceGeologicalSprings { chunk, springs } => {
+            // Same once-per-chunk guard as PlaceSources (worker re-sends on
+            // every stream-in), keyed separately so the two events don't
+            // lock each other out.
+            if !features_placed.insert((chunk, FEATURE_SPRINGS)) {
+                return;
+            }
             ensure_grid(chunks, chunk_densities, chunk, chunk_size);
             if let Some(grid) = chunks.get_mut(&chunk) {
                 for (lx, ly, lz, level, fluid_type_u8) in springs {
@@ -719,6 +746,11 @@ fn handle_event(
             // or TerrainModified for this chunk. If the density is already
             // cached (chunk was streamed before fluid load was issued), drain
             // immediately so the player sees fluid without waiting.
+            // Loaded chunks count as feature-placed: their saved fluid IS the
+            // truth, and a later PlaceSources/PlaceGeologicalSprings from the
+            // stream-in path must not stomp it back to gen-fresh full.
+            features_placed.insert((chunk, FEATURE_SOURCES));
+            features_placed.insert((chunk, FEATURE_SPRINGS));
             pending_fluid.entry(chunk).or_default().extend(cells);
             if chunk_densities.contains_key(&chunk) {
                 apply_pending_fluid(chunks, chunk_densities, pending_fluid, chunk, chunk_size, config);
@@ -856,7 +888,58 @@ mod tests {
         let mut chunks = HashMap::new();
         let mut densities = HashMap::new();
         let mut pending = HashMap::new();
-        handle_event(event, &mut chunks, &mut densities, &mut pending, config.chunk_size, config);
+        let mut placed = HashSet::new();
+        handle_event(event, &mut chunks, &mut densities, &mut pending, &mut placed, config.chunk_size, config);
+    }
+
+    /// Bug #216 regression: the worker re-sends PlaceSources on every chunk
+    /// stream-in. Re-planting must be a no-op — it used to refill every
+    /// noise-lava pool to full and resurrect self-extinguished sources
+    /// whenever the player's streaming set churned.
+    #[test]
+    fn place_sources_fires_once_per_chunk() {
+        let mut config = FluidConfig::default();
+        config.lava_depth_min = -1.0e9;
+        config.lava_depth_max = 1.0e9;
+        config.lava_source_threshold = -1.0; // every candidate cell qualifies
+        let chunk = (0, 0, 0);
+        let size = config.chunk_size;
+
+        let mut chunks = HashMap::new();
+        let mut densities = HashMap::new();
+        let mut pending = HashMap::new();
+        let mut placed = HashSet::new();
+
+        // Density must exist for ensure_grid to build the chunk.
+        let stride = size + 1;
+        let lattice = vec![-1.0f32; stride * stride * stride];
+        handle_event(
+            FluidEvent::DensityUpdate { chunk, densities: lattice },
+            &mut chunks, &mut densities, &mut pending, &mut placed, size, &mut config,
+        );
+        handle_event(
+            FluidEvent::PlaceSources { chunk },
+            &mut chunks, &mut densities, &mut pending, &mut placed, size, &mut config,
+        );
+
+        // Find a planted source and simulate a self-extinguish + drain.
+        let grid = chunks.get_mut(&chunk).expect("grid created");
+        let idx = grid.cells.iter().position(|c| c.is_source).expect("sources planted");
+        grid.cells[idx].is_source = false;
+        grid.cells[idx].level = 0.1;
+
+        // Stream-in re-send must not stomp the demoted state.
+        handle_event(
+            FluidEvent::PlaceSources { chunk },
+            &mut chunks, &mut densities, &mut pending, &mut placed, size, &mut config,
+        );
+        let cell = &chunks[&chunk].cells[idx];
+        assert!(!cell.is_source, "re-sent PlaceSources resurrected a demoted source");
+        assert!(
+            (cell.level - 0.1).abs() < 1e-6,
+            "re-sent PlaceSources refilled a drained cell: level={}",
+            cell.level
+        );
     }
 
     fn rates(tick_rate: f32, divisor: u8, lava_flow: f32, lava_spread: f32) -> FluidEvent {
