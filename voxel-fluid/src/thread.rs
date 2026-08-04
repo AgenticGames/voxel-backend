@@ -918,6 +918,10 @@ fn apply_pending_fluid(
 }
 
 /// Build boundary levels from neighboring chunks for seamless fluid meshing.
+// Boundary faces carry the neighbor's RENDER field (mesh_level: EMA +
+// ribbon/fringe floors), not raw levels — the MC field is continuous across
+// the seam only if both sides speak the same language. Raw sampling cut the
+// surface at every chunk boundary (user repro: "broken at all seams").
 fn build_boundary_levels(
     key: (i32, i32, i32),
     chunks: &HashMap<(i32, i32, i32), ChunkFluidGrid>,
@@ -932,7 +936,7 @@ fn build_boundary_levels(
             let mut levels = vec![0.0f32; size * size];
             for z in 0..size {
                 for y in 0..size {
-                    levels[z * size + y] = nbr.get(0, y, z).level;
+                    levels[z * size + y] = nbr.mesh_level(0, y, z);
                 }
             }
             boundary.pos_x = Some(levels);
@@ -946,7 +950,7 @@ fn build_boundary_levels(
             let mut levels = vec![0.0f32; size * size];
             for z in 0..size {
                 for x in 0..size {
-                    levels[z * size + x] = nbr.get(x, 0, z).level;
+                    levels[z * size + x] = nbr.mesh_level(x, 0, z);
                 }
             }
             boundary.pos_y = Some(levels);
@@ -960,7 +964,7 @@ fn build_boundary_levels(
             let mut levels = vec![0.0f32; size * size];
             for y in 0..size {
                 for x in 0..size {
-                    levels[y * size + x] = nbr.get(x, y, 0).level;
+                    levels[y * size + x] = nbr.mesh_level(x, y, 0);
                 }
             }
             boundary.pos_z = Some(levels);

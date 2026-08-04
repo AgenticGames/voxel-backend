@@ -387,11 +387,19 @@ pub(super) fn tick_chunk(
                         let below_space = (below_capacity - new_cells[below_idx].level).max(0.0);
                         if below_space > MIN_LEVEL {
                             had_down_path = true;
+                            // FREE FALL: an open shaft below (near-full
+                            // capacity, near-empty) imposes no viscous rate —
+                            // the gulp cap is for seepage through partial
+                            // cells, not ballistic drops. Without this a
+                            // waterfall front crawls at flow_rate*mult per
+                            // tick ("painfully slow" — user, 2026-08-04).
+                            let free_fall = below_capacity >= 0.9 && new_cells[below_idx].level < 0.05;
+                            let rate_cap = if free_fall { f32::MAX } else { flow_rate * gravity_mult * channel_speed };
                             // Bounded-flow cap: child receives at most `level_cap`.
                             let new_hops = cell.hops_from_source.saturating_add(1);
                             let cap = bounded_level_cap(new_hops, cell.max_flow_dist);
                             let bounded_space = (cap - new_cells[below_idx].level).max(0.0).min(below_space);
-                            let transfer = (cell.level - retain).max(0.0).min(bounded_space).min(flow_rate * gravity_mult * channel_speed);
+                            let transfer = (cell.level - retain).max(0.0).min(bounded_space).min(rate_cap);
                             if transfer > MIN_LEVEL {
                                 if !is_source && !has_grace {
                                     new_cells[idx].level -= transfer;
@@ -439,10 +447,12 @@ pub(super) fn tick_chunk(
                                 let below_space = (below_capacity - below_grid.cells[below_idx].level).max(0.0);
                                 if below_space > MIN_LEVEL {
                                     had_down_path = true;
+                                    let free_fall = below_capacity >= 0.9 && below_grid.cells[below_idx].level < 0.05;
+                                    let rate_cap = if free_fall { f32::MAX } else { flow_rate * gravity_mult * channel_speed };
                                     let new_hops = cell.hops_from_source.saturating_add(1);
                                     let cap = bounded_level_cap(new_hops, cell.max_flow_dist);
                                     let bounded_space = (cap - below_grid.cells[below_idx].level).max(0.0).min(below_space);
-                                    let transfer = (new_cells[idx].level - retain).max(0.0).min(bounded_space).min(flow_rate * gravity_mult * channel_speed);
+                                    let transfer = (new_cells[idx].level - retain).max(0.0).min(bounded_space).min(rate_cap);
                                     if transfer > MIN_LEVEL {
                                         if !is_source && !has_grace {
                                             new_cells[idx].level -= transfer;
