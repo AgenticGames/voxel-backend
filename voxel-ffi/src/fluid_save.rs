@@ -153,8 +153,17 @@ pub fn deserialize(
             cur.read_exact(&mut byte_buf).map_err(|_| FluidSaveError::Truncated)?;
             let fluid_type = FluidType::from_u8(byte_buf[0]);
             let is_source = byte_buf[1] != 0;
-            let max_flow_dist = byte_buf[2];
+            let mut max_flow_dist = byte_buf[2];
             // byte_buf[3] reserved
+            // 2026-08-04 legacy-save backfill: saves written before the
+            // containment bundle carry LAVA sources with max_flow_dist=0
+            // (unbounded) — the bug-#215 world-flooding pumps. Heal them on
+            // load with the geological bound. Water sources keep whatever
+            // they were saved with (springs already carried 12; authored
+            // unlimited water remains possible by re-placing).
+            if is_source && max_flow_dist == 0 && fluid_type.is_lava() {
+                max_flow_dist = 12;
+            }
             cells.push(PendingFluidCell {
                 idx,
                 fluid_type,

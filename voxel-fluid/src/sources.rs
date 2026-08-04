@@ -63,6 +63,13 @@ pub fn place_sources(
                         cell.level = SOURCE_LEVEL;
                         cell.fluid_type = FluidType::Lava;
                         cell.is_source = true;
+                        // 2026-08-04 containment: noise-lava was the generator
+                        // of the bug-#215 "fort pools" — unbounded infinite
+                        // emitters in natural basins pump fluid through sim
+                        // pinholes onto the void-side underside of the world
+                        // forever. Bound like springs/pipes/breaches.
+                        cell.max_flow_dist = 12;
+                        cell.hops_from_source = 0;
                         grid.dirty = true;
                         grid.has_fluid = true;
                         grid.has_lava = true;
