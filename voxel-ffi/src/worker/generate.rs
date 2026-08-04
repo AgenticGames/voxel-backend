@@ -839,7 +839,11 @@ pub(super) fn handle_generate(
                                 fluid_type: voxel_fluid::cell::FluidType::Lava,
                                 level: lv.level,
                                 is_source: true,
-                                max_flow_dist: 0, // legacy procedural source — unbounded
+                                // 2026-08-04 containment: pipe-lava vents were the
+                                // other unbounded infinite emitter (with pools) —
+                                // bound them like geological springs so a vent
+                                // oozes a local flow instead of flooding.
+                                max_flow_dist: 12,
                             });
                         }
                     }
@@ -864,7 +868,11 @@ pub(super) fn handle_generate(
                         },
                         level: 1.0,
                         is_source: seed.is_source,
-                        max_flow_dist: 0, // legacy procedural source — unbounded
+                        // 2026-08-04 containment: pool seeds carry their own
+                        // hop bound (radius+basin_depth+4) so a breached basin
+                        // oozes a few voxels and dies instead of pumping lava
+                        // across the world forever.
+                        max_flow_dist: seed.max_flow_dist,
                     });
                 }
             }

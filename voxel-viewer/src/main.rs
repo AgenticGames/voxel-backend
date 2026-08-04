@@ -969,6 +969,7 @@ fn serve_mine(
                                 lz: lz as u8,
                                 fluid_type: voxel_gen::pools::PoolFluid::Lava,
                                 is_source: true,
+                                max_flow_dist: 0, // viewer debug brush — unbounded on purpose
                             });
                             lava_placed += 1;
                         }

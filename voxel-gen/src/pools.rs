@@ -59,6 +59,11 @@ pub struct FluidSeed {
     pub fluid_type: PoolFluid,
     /// True for infinite sources (pools), false for finite fill (cauldrons)
     pub is_source: bool,
+    /// Bounded-flow limit for source cells (see FluidCell::max_flow_dist):
+    /// 0 = unlimited, N = flow from this source dies N hops out. Pools set
+    /// radius+basin_depth+4 so a breached basin oozes locally instead of
+    /// exporting fluid across the world forever (2026-08-04 containment).
+    pub max_flow_dist: u8,
 }
 
 /// A cluster of adjacent floor cells at similar Y levels.
@@ -199,6 +204,53 @@ pub fn place_pools(
             continue;
         }
 
+        // Containment gate (2026-08-04): a pool only exists if its rim ring
+        // can actually be built — every ring column must sit inside the
+        // writable chunk interior (the old code silently SKIPPED ring cells
+        // near chunk edges, shipping pools with missing wall segments), and
+        // must find solid ground within UNDER_SEAL_MAX voxels below the
+        // basin bottom so dips under the rim can be sealed. Pool seeds are
+        // infinite sources; an unsealable basin is a world-flooding pump.
+        const UNDER_SEAL_MAX: usize = 4;
+        let rim_r = effective_radius + 1;
+        let rim_r2 = (rim_r * rim_r) as i32;
+        let rim_bottom = floor_y.saturating_sub(config.basin_depth.saturating_sub(1));
+        let mut containable = true;
+        'ring_gate: for dz in -(rim_r as i32)..=(rim_r as i32) {
+            for dx in -(rim_r as i32)..=(rim_r as i32) {
+                let dist2 = dx * dx + dz * dz;
+                if dist2 <= r2 || dist2 > rim_r2 {
+                    continue;
+                }
+                let gx = center_x as i32 + dx;
+                let gz = center_z as i32 + dz;
+                if gx < 1 || gx >= size as i32 - 1 || gz < 1 || gz >= size as i32 - 1 {
+                    containable = false;
+                    break 'ring_gate;
+                }
+                if rim_bottom > 0 {
+                    let mut found_anchor = false;
+                    for d in 1..=UNDER_SEAL_MAX {
+                        if d > rim_bottom {
+                            break;
+                        }
+                        let y = rim_bottom - d;
+                        if density.get(gx as usize, y, gz as usize).material.is_solid() {
+                            found_anchor = true;
+                            break;
+                        }
+                    }
+                    if !found_anchor {
+                        containable = false;
+                        break 'ring_gate;
+                    }
+                }
+            }
+        }
+        if !containable {
+            continue;
+        }
+
         // Carve basin: set voxels below floor to air within radius circle
         for dz in -(effective_radius as i32)..=(effective_radius as i32) {
             for dx in -(effective_radius as i32)..=(effective_radius as i32) {
@@ -260,9 +312,13 @@ pub fn place_pools(
             }
         }
 
-        // Reinforce rim: solid ring at floor level just outside the pool radius
-        let rim_r = effective_radius + 1;
-        let rim_r2 = (rim_r * rim_r) as i32;
+        // Reinforce rim: solid ring just outside the pool radius. Each column
+        // is anchored to real terrain (fills down through any dip until the
+        // solid the containment gate proved exists) and rises one voxel of
+        // freeboard ABOVE the fluid top — fluid is seeded to floor_y, rim
+        // reaches floor_y + rim_height (the old code stopped the rim at
+        // floor_y while seeding fluid to floor_y+1: every pool overfilled
+        // above its own wall by construction).
         for dz in -(rim_r as i32)..=(rim_r as i32) {
             for dx in -(rim_r as i32)..=(rim_r as i32) {
                 let dist2 = dx * dx + dz * dz;
@@ -273,15 +329,30 @@ pub fn place_pools(
                 let gx = center_x as i32 + dx;
                 let gz = center_z as i32 + dz;
                 if gx < 1 || gx >= size as i32 - 1 || gz < 1 || gz >= size as i32 - 1 {
-                    continue;
+                    continue; // unreachable: the containment gate rejected these
                 }
                 let gx = gx as usize;
                 let gz = gz as usize;
 
-                // Cover full basin depth + rim height to create vertical containment walls
-                let rim_bottom = floor_y.saturating_sub(config.basin_depth.saturating_sub(1));
-                let rim_top = floor_y + config.rim_height.max(1) - 1;
-                for gy in rim_bottom..=rim_top {
+                // Anchor: walk down from the basin bottom through air to the
+                // first solid voxel (bounded by UNDER_SEAL_MAX, guaranteed by
+                // the containment gate).
+                let mut col_bottom = rim_bottom;
+                if rim_bottom > 0 {
+                    for d in 1..=UNDER_SEAL_MAX {
+                        if d > rim_bottom {
+                            break;
+                        }
+                        let y = rim_bottom - d;
+                        if density.get(gx, y, gz).material.is_solid() {
+                            break;
+                        }
+                        col_bottom = y;
+                    }
+                }
+
+                let rim_top = floor_y + config.rim_height.max(1);
+                for gy in col_bottom..=rim_top {
                     if gy >= size {
                         break;
                     }
@@ -304,8 +375,13 @@ pub fn place_pools(
             fluid_type,
         });
 
-        // Step 7: Pre-fill entire basin volume with fluid seeds
+        // Step 7: Pre-fill the basin with fluid seeds — up to floor_y ONLY
+        // (2026-08-04: seeding to surface_y put the top fluid layer a full
+        // voxel above the rim; brim-plus-one guaranteed overflow). The full
+        // cell at floor_y renders its fluid surface at the floor_y+1
+        // boundary, so the pool still LOOKS filled to the old level.
         let basin_bottom_y = floor_y.saturating_sub(config.basin_depth.saturating_sub(1));
+        let flow_bound = (effective_radius + config.basin_depth + 4).min(250) as u8;
         for dz in -(effective_radius as i32)..=(effective_radius as i32) {
             for dx in -(effective_radius as i32)..=(effective_radius as i32) {
                 if dx * dx + dz * dz > r2 {
@@ -316,8 +392,8 @@ pub fn place_pools(
                 if gx < 0 || gx >= size as i32 || gz < 0 || gz >= size as i32 {
                     continue;
                 }
-                // Fill every Y level from basin bottom to surface
-                for gy in basin_bottom_y..=surface_y {
+                // Fill every Y level from basin bottom to the floor layer
+                for gy in basin_bottom_y..=floor_y {
                     if gy >= size {
                         continue;
                     }
@@ -328,6 +404,7 @@ pub fn place_pools(
                         lz: gz as u8,
                         fluid_type,
                         is_source: true,
+                        max_flow_dist: flow_bound,
                         });
                 }
             }
@@ -661,9 +738,13 @@ pub fn force_spawn_pool(
         }
     }
 
-    // Emit fluid seeds
+    // Emit fluid seeds — same containment rules as place_pools (2026-08-04):
+    // fluid tops at floor_y, sources are hop-bounded so a breach oozes
+    // locally instead of flooding. (This debug path force-places and builds
+    // no rim, so the bound is doing the real containment work here.)
     let mut fluid_seeds = Vec::new();
     let basin_bottom_y = floor_y.saturating_sub(config.basin_depth.saturating_sub(1));
+    let flow_bound = (effective_radius + config.basin_depth + 4).min(250) as u8;
     for dz in -(effective_radius as i32)..=(effective_radius as i32) {
         for dx in -(effective_radius as i32)..=(effective_radius as i32) {
             if dx * dx + dz * dz > r2 {
@@ -674,7 +755,7 @@ pub fn force_spawn_pool(
             if gx < 0 || gx >= size as i32 || gz < 0 || gz >= size as i32 {
                 continue;
             }
-            for gy in basin_bottom_y..=surface_y {
+            for gy in basin_bottom_y..=floor_y {
                 if gy >= size {
                     continue;
                 }
@@ -685,6 +766,7 @@ pub fn force_spawn_pool(
                     lz: gz as u8,
                     fluid_type,
                     is_source: true,
+                    max_flow_dist: flow_bound,
                 });
             }
         }
@@ -1168,6 +1250,178 @@ mod tests {
                 y_values.len(), y_values
             );
         }
+    }
+
+    // ── 2026-08-04 containment bundle ────────────────────────────────────
+    // The invariant these encode: a pool's rim wall must be SOLID and
+    // IN-BOUNDS on every ring column, continuously from the lowest seeded
+    // fluid cell up to the highest seeded fluid cell. Any hole at any
+    // seeded layer is a horizontal escape path — and pool seeds are
+    // infinite sources, so an escape path exports fluid forever.
+
+    /// Collect containment violations for one pool. Empty vec = contained.
+    fn pool_containment_violations(
+        density: &DensityField,
+        desc: &PoolDescriptor,
+        seeds: &[FluidSeed],
+    ) -> Vec<String> {
+        let size = density.size;
+        let center_x = desc.world_x as i32; // Vec3::ZERO origin in these tests
+        let center_z = desc.world_z as i32;
+        let radius = desc.radius as i32;
+        let r2 = radius * radius;
+        let rim_r = radius + 1;
+        let rim_r2 = rim_r * rim_r;
+
+        // Seeds belonging to this pool: XZ within the fluid footprint.
+        let mut fluid_top: i32 = i32::MIN;
+        let mut fluid_bottom: i32 = i32::MAX;
+        for s in seeds {
+            let dx = s.lx as i32 - center_x;
+            let dz = s.lz as i32 - center_z;
+            if dx * dx + dz * dz <= r2 {
+                fluid_top = fluid_top.max(s.ly as i32);
+                fluid_bottom = fluid_bottom.min(s.ly as i32);
+            }
+        }
+        let mut violations = Vec::new();
+        if fluid_top == i32::MIN {
+            return violations; // no seeds (empty pool) — nothing to contain
+        }
+
+        for dz in -rim_r..=rim_r {
+            for dx in -rim_r..=rim_r {
+                let dist2 = dx * dx + dz * dz;
+                if dist2 <= r2 || dist2 > rim_r2 {
+                    continue;
+                }
+                let gx = center_x + dx;
+                let gz = center_z + dz;
+                if gx < 0 || gx >= size as i32 || gz < 0 || gz >= size as i32 {
+                    violations.push(format!(
+                        "ring column ({gx},{gz}) out of chunk bounds — wall cannot exist there"
+                    ));
+                    continue;
+                }
+                for gy in fluid_bottom..=fluid_top {
+                    if gy < 0 || gy >= size as i32 {
+                        continue;
+                    }
+                    let sample = density.get(gx as usize, gy as usize, gz as usize);
+                    if !sample.material.is_solid() {
+                        violations.push(format!(
+                            "ring column ({gx},{gz}) is not solid at y={gy} (fluid spans y {fluid_bottom}..={fluid_top})"
+                        ));
+                    }
+                }
+            }
+        }
+        violations
+    }
+
+    #[test]
+    fn test_pool_wall_reaches_fluid_top_on_all_ring_columns() {
+        let config = PoolConfig {
+            pool_chance: 1.0,
+            placement_threshold: -1.0,
+            min_area: 2,
+            water_pct: 0.0,
+            lava_pct: 1.0,
+            empty_pct: 0.0,
+            max_cave_height: 0,
+            min_floor_thickness: 0,
+            ..Default::default()
+        };
+
+        let size = 17;
+        let mut density = DensityField::new(size);
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..size {
+                    let sample = density.get_mut(x, y, z);
+                    if y < size / 2 {
+                        sample.density = 1.0;
+                        sample.material = Material::Limestone;
+                    } else {
+                        sample.density = -1.0;
+                        sample.material = Material::Air;
+                    }
+                }
+            }
+        }
+
+        let (descriptors, seeds) = place_pools(&mut density, &config, Vec3::ZERO, 42, 100, (0, 0, 0));
+        assert!(!descriptors.is_empty(), "test setup: expected at least one pool on the flat floor");
+
+        let mut all_violations = Vec::new();
+        for desc in &descriptors {
+            let v = pool_containment_violations(&density, desc, &seeds);
+            if !v.is_empty() {
+                all_violations.push(format!(
+                    "pool at ({},{},{}) r={}: {} violation(s), first: {}",
+                    desc.world_x, desc.world_y, desc.world_z, desc.radius, v.len(), v[0]
+                ));
+            }
+        }
+        assert!(
+            all_violations.is_empty(),
+            "{} of {} pools are not contained:\n{}",
+            all_violations.len(), descriptors.len(), all_violations.join("\n")
+        );
+    }
+
+    #[test]
+    fn test_pool_touching_chunk_edge_is_fully_walled_or_rejected() {
+        let config = PoolConfig {
+            pool_chance: 1.0,
+            placement_threshold: -1.0,
+            min_area: 2,
+            water_pct: 0.0,
+            lava_pct: 1.0,
+            empty_pct: 0.0,
+            max_cave_height: 0,
+            min_floor_thickness: 0,
+            ..Default::default()
+        };
+
+        // Floor strip hugging the west chunk edge (x 0..=4 solid below y=8,
+        // everything else bottomless air) — the only possible pool sits so
+        // close to x=0 that its rim ring would leave the chunk.
+        let size = 17;
+        let mut density = DensityField::new(size);
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..size {
+                    let sample = density.get_mut(x, y, z);
+                    if x <= 4 && y < 8 {
+                        sample.density = 1.0;
+                        sample.material = Material::Limestone;
+                    } else {
+                        sample.density = -1.0;
+                        sample.material = Material::Air;
+                    }
+                }
+            }
+        }
+
+        let (descriptors, seeds) = place_pools(&mut density, &config, Vec3::ZERO, 42, 100, (0, 0, 0));
+        // Either no pool places here (rejected as unsealable) — fine — or
+        // every placed pool must satisfy the full containment invariant.
+        let mut all_violations = Vec::new();
+        for desc in &descriptors {
+            let v = pool_containment_violations(&density, desc, &seeds);
+            if !v.is_empty() {
+                all_violations.push(format!(
+                    "edge pool at ({},{},{}) r={}: {}",
+                    desc.world_x, desc.world_y, desc.world_z, desc.radius, v.join("; ")
+                ));
+            }
+        }
+        assert!(
+            all_violations.is_empty(),
+            "chunk-edge pools placed without a complete wall:\n{}",
+            all_violations.join("\n")
+        );
     }
 
 }

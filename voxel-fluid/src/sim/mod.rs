@@ -1850,4 +1850,125 @@ mod tests {
         let min_t = last_100.iter().cloned().fold(f64::MAX, f64::min);
         assert!(max_t - min_t < 0.1, "Should be stable in last 100 ticks: range={:.4}", max_t - min_t);
     }
+
+    // ── 2026-08-04 containment bundle: source-boundedness mechanism ──────
+    // Pool basins are seeded with is_source cells, and regen_sources refills
+    // every source to full EVERY tick. These two tests document why a
+    // breached basin of max_flow_dist=0 sources floods the world forever,
+    // and why bounding max_flow_dist makes any leak die a few cells out.
+
+    /// Two chunks side by side along +X. Solid floor spanning both, sloping
+    /// gently downhill to the east (one step down every ~6 cells — flat
+    /// floors reach a thin-film steady state and stall the leak; real cavern
+    /// floors slope, and slope flow is what carries a leak across the
+    /// world). A walled lava basin sits near the west edge of chunk 0 with
+    /// a 2-cell breach in its east wall.
+    fn make_breached_source_basin(
+        max_flow_dist: u8,
+    ) -> HashMap<(i32, i32, i32), ChunkFluidGrid> {
+        let size = 16;
+        let mut west = ChunkFluidGrid::new(size);
+        let mut east = ChunkFluidGrid::new(size);
+        // Floor: slab whose top surface steps down eastward.
+        // world x 0..=11 -> floor below y=4; 12..=17 -> y=3; 18..=23 -> y=2;
+        // 24..=31 -> y=1.
+        for wx in 0..(2 * size) {
+            let floor_top = match wx {
+                0..=11 => 4usize,
+                12..=17 => 3,
+                18..=23 => 2,
+                _ => 1,
+            };
+            let (grid, x) = if wx < size {
+                (&mut west, wx)
+            } else {
+                (&mut east, wx - size)
+            };
+            for z in 0..size { for y in 0..floor_top {
+                grid.set_density(x, y, z, 1.0);
+            }}
+        }
+        // Basin walls in chunk 0: ring around interior x 2..=5, z 6..=9,
+        // two voxels tall (y 4..=5) so pressure can't hop the lip.
+        for z in 5..=10usize { for x in 1..=6usize {
+            let on_ring = x == 1 || x == 6 || z == 5 || z == 10;
+            if !on_ring { continue; }
+            // Breach: east wall open at z=7,8.
+            if x == 6 && (z == 7 || z == 8) { continue; }
+            west.set_density(x, 4, z, 1.0);
+            west.set_density(x, 5, z, 1.0);
+        }}
+        // Lava source cells fill the basin interior at y=4.
+        for z in 6..=9usize { for x in 2..=5usize {
+            let cell = west.get_mut(x, 4, z);
+            cell.level = SOURCE_LEVEL;
+            cell.fluid_type = FluidType::Lava;
+            cell.is_source = true;
+            cell.max_flow_dist = max_flow_dist;
+            cell.hops_from_source = 0;
+        }}
+        west.has_fluid = true;
+        west.has_sources = true;
+
+        let mut chunks = HashMap::new();
+        chunks.insert((0, 0, 0), west);
+        chunks.insert((1, 0, 0), east);
+        chunks
+    }
+
+    /// World-space X of the furthest cell holding at least `min_level` lava.
+    fn furthest_lava_x(chunks: &HashMap<(i32, i32, i32), ChunkFluidGrid>, min_level: f32) -> i32 {
+        let mut max_x = i32::MIN;
+        for (key, grid) in chunks {
+            let size = grid.size;
+            for z in 0..size { for y in 0..size { for x in 0..size {
+                let cell = grid.get(x, y, z);
+                if cell.fluid_type.is_lava() && cell.level >= min_level {
+                    max_x = max_x.max(key.0 * size as i32 + x as i32);
+                }
+            }}}
+        }
+        max_x
+    }
+
+    #[test]
+    fn breached_unbounded_source_basin_floods_far() {
+        // max_flow_dist = 0 — exactly how pool seeds are injected today.
+        let mut chunks = make_breached_source_basin(0);
+        let config = crate::FluidConfig::default();
+        let dc = empty_density_cache();
+        // 900 ticks: cross-chunk transfer timing varies with HashMap chunk
+        // order (run-to-run), and the front's tail advances slowly — give the
+        // flood time to express itself regardless of iteration order.
+        for _ in 0..900 {
+            crate::sim::regen_sources(&mut chunks);
+            tick_fluid(&mut chunks, &dc, 16, true, &config, true);
+        }
+        let reach = furthest_lava_x(&chunks, 0.1);
+        // Basin east wall is at x=6. Unbounded + infinitely-refilled sources
+        // must push a substantial sheet deep into the neighbor chunk.
+        assert!(
+            reach >= 20,
+            "expected unbounded breached basin to flood far east (>= x 20), reach = {reach}"
+        );
+    }
+
+    #[test]
+    fn breached_bounded_source_basin_leak_stays_local() {
+        // Same geometry, but sources permit only 6 hops of propagation.
+        let mut chunks = make_breached_source_basin(6);
+        let config = crate::FluidConfig::default();
+        let dc = empty_density_cache();
+        for _ in 0..900 {
+            crate::sim::regen_sources(&mut chunks);
+            tick_fluid(&mut chunks, &dc, 16, true, &config, true);
+        }
+        // 6 hops from the basin edge (x=6) plus taper slack: nothing with a
+        // visible level should exist past x=14, and the east chunk stays dry.
+        let reach = furthest_lava_x(&chunks, 0.05);
+        assert!(
+            reach <= 14,
+            "bounded (6-hop) breach leaked past the expected taper: reach = {reach}"
+        );
+    }
 }

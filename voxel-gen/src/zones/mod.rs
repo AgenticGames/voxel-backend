@@ -43,6 +43,10 @@ pub fn world_to_fluid_seed(wx: f32, wy: f32, wz: f32, effective_bounds: f32, chu
         lx, ly, lz,
         fluid_type: if is_lava { PoolFluid::Lava } else { PoolFluid::Water },
         is_source: true,
+        // Zone fluid bodies stay unbounded for now — they are large deliberate
+        // lakes, and bounding them is a separate (riskier) decision from the
+        // 2026-08-04 pool-containment bundle.
+        max_flow_dist: 0,
     }
 }
 

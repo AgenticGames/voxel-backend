@@ -906,6 +906,7 @@ fn generate_cauldron_fluid_seeds(
                     lz: gz as u8,
                     fluid_type,
                     is_source: false,
+                    max_flow_dist: 0, // finite fill — bound is meaningless for non-sources
                 });
             }
         }
