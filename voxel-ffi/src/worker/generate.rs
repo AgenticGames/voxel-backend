@@ -846,29 +846,31 @@ pub(super) fn handle_generate(
                 }
             }
 
-            // Inject pool fluid seeds into the fluid simulation
-            // When fluid_sources_enabled is off, only inject cauldron seeds (is_source == false)
+            // Inject pool fluid seeds into the fluid simulation via the
+            // once-guarded PlaceSeedFluids event (#216: store eviction makes
+            // regions re-generate on return flights; a raw AddFluid replay
+            // refilled every basin to gen-fresh full).
+            // When fluid_sources_enabled is off, only inject cauldron seeds
+            // (is_source == false).
             if was_slow_path {
+                let mut per_chunk: std::collections::HashMap<(i32, i32, i32), Vec<(u8, u8, u8, u8, bool, u8)>> =
+                    std::collections::HashMap::new();
                 for seed in &pool_fluid_seeds {
                     if !cfg.fluid_sources_enabled && seed.is_source {
                         continue; // skip infinite pool sources when toggle is off
                     }
-                    let _ = fluid_event_tx.send(FluidEvent::AddFluid {
-                        chunk: seed.chunk,
-                        x: seed.lx,
-                        y: seed.ly,
-                        z: seed.lz,
-                        fluid_type: match seed.fluid_type {
-                            voxel_gen::pools::PoolFluid::Water => voxel_fluid::cell::FluidType::WaterPool,
-                            voxel_gen::pools::PoolFluid::Lava => voxel_fluid::cell::FluidType::Lava,
-                        },
-                        level: 1.0,
-                        is_source: seed.is_source,
-                        // 2026-08-04 containment: pool seeds carry their own
-                        // hop bound (radius+basin_depth+4) so a breached basin
-                        // oozes a few voxels and dies instead of pumping lava
-                        // across the world forever.
-                        max_flow_dist: seed.max_flow_dist,
+                    let ft_u8 = match seed.fluid_type {
+                        voxel_gen::pools::PoolFluid::Water => 9, // FluidType::WaterPool
+                        voxel_gen::pools::PoolFluid::Lava => 2,  // FluidType::Lava
+                    };
+                    per_chunk.entry(seed.chunk).or_default().push((
+                        seed.lx, seed.ly, seed.lz, ft_u8, seed.is_source, seed.max_flow_dist,
+                    ));
+                }
+                for (seed_chunk, cells) in per_chunk {
+                    let _ = fluid_event_tx.send(FluidEvent::PlaceSeedFluids {
+                        chunk: seed_chunk,
+                        cells,
                     });
                 }
             }

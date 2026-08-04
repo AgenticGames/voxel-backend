@@ -290,7 +290,9 @@ mod tests {
         grid.set_density(8, 4, 8, 1.0);
         grid.set_density(9, 3, 8, 1.0);
         grid.set_density(10, 2, 8, 1.0);
-        for x in 8..14 { grid.set_density(x, 0, 8, 1.0); }
+        // Full floor: with the void-cull backstop, fluid reaching an open
+        // y=0 in a chunk with no neighbor below falls out of the world.
+        for z in 0..16 { for x in 0..16 { grid.set_density(x, 0, z, 1.0); } }
         chunks.insert(key, grid);
 
         let mut config = crate::FluidConfig::default();
@@ -1499,7 +1501,10 @@ mod tests {
         let size = 16;
         let stride = size + 1;
         let mut densities = make_density_field_solid(size);
-        for gz in 0..stride { for gy in 0..stride { for gx in 0..stride {
+        // gy starts at 1: keep the bottom lattice plane solid so the cave
+        // has a real floor — with the void-cull backstop, noise pockets
+        // that opened to y=0 drained water out of the world (correctly).
+        for gz in 0..stride { for gy in 1..stride { for gx in 0..stride {
             let val = (gx * 7 + gy * 13 + gz * 17) % 23;
             if val >= 8 { densities[gz * stride * stride + gy * stride + gx] = -1.0; }
         }}}

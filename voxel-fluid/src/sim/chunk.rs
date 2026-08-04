@@ -336,6 +336,22 @@ pub(super) fn tick_chunk(
                 }
                 // Cross-chunk downward flow: y==0 means neighbor chunk below
                 else {
+                    // Void-cull backstop (2026-08-04, user directive): no
+                    // loaded chunk below AND our own bottom face is open =
+                    // this fluid is resting on the EDGE OF LOADED SPACE, not
+                    // on rock. The old "treat as solid" default made the
+                    // bottom of the world a raft — escaped fluid rivers
+                    // travelled along the void-side underside forever. Let
+                    // it fall out of the world instead (sources included:
+                    // their emissions vanish rather than accumulate, and the
+                    // self-extinguish pass then retires them).
+                    if nbr_below.is_none()
+                        && face_open(idx, 0, -1, 0)
+                        && new_cells[idx].level > MIN_LEVEL
+                    {
+                        new_cells[idx].level = 0.0;
+                        changed = true;
+                    }
                     let below_key = key_below;
                     if let Some(below_grid) = nbr_below {
                         if face_open(idx, 0, -1, 0)

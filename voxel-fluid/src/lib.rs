@@ -144,6 +144,16 @@ pub enum FluidEvent {
         chunk: (i32, i32, i32),
         cells: Vec<(u8, u8, u8, f32)>,
     },
+    /// Gen-time fluid seeds for one chunk (pools, formation cauldron fills,
+    /// zone lakes). Once-guarded like the other procedural placements: store
+    /// eviction makes a region re-generate via the slow path on return
+    /// flights, and re-injecting seeds refilled every basin to gen-fresh
+    /// full (#216, the "no dormancy involved" refills).
+    /// cells: (x, y, z, fluid_type_u8, is_source, max_flow_dist).
+    PlaceSeedFluids {
+        chunk: (i32, i32, i32),
+        cells: Vec<(u8, u8, u8, u8, bool, u8)>,
+    },
     AddFluid {
         chunk: (i32, i32, i32),
         x: u8,

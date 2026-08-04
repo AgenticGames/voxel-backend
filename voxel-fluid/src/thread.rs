@@ -707,6 +707,43 @@ fn handle_event(
                 }
             }
         }
+        FluidEvent::PlaceSeedFluids { chunk, cells } => {
+            // Once-per-chunk (kind 3): region re-generation after store
+            // eviction re-runs the slow path and re-sends gen-time seeds —
+            // without the guard every pool/formation/zone basin snapped back
+            // to gen-fresh full on return flights (#216).
+            const FEATURE_SEEDS: u8 = 3;
+            if !features_placed.insert((chunk, FEATURE_SEEDS)) {
+                return;
+            }
+            ensure_grid(chunks, chunk_densities, chunk, chunk_size);
+            if let Some(grid) = chunks.get_mut(&chunk) {
+                for (x, y, z, ft_u8, is_source, max_flow_dist) in cells {
+                    let (xu, yu, zu) = (x as usize, y as usize, z as usize);
+                    if xu < chunk_size && yu < chunk_size && zu < chunk_size
+                        && grid.cell_capacity(xu, yu, zu) > crate::cell::MIN_LEVEL
+                        && !grid.is_mostly_solid(xu, yu, zu, config.solid_corner_threshold)
+                    {
+                        let cap = grid.cell_capacity(xu, yu, zu);
+                        let ft = crate::cell::FluidType::from_u8(ft_u8);
+                        let cell = grid.get_mut(xu, yu, zu);
+                        cell.fluid_type = ft;
+                        cell.level = crate::cell::MAX_LEVEL.min(cap);
+                        cell.is_source = is_source;
+                        if is_source {
+                            cell.hops_from_source = 0;
+                            cell.max_flow_dist = max_flow_dist;
+                        }
+                        grid.dirty = true;
+                        grid.has_fluid = true;
+                        grid.has_sources |= is_source;
+                        if ft.is_lava() {
+                            grid.has_lava = true;
+                        }
+                    }
+                }
+            }
+        }
         FluidEvent::AddFluid { chunk, x, y, z, fluid_type, level, is_source, max_flow_dist } => {
             ensure_grid(chunks, chunk_densities, chunk, chunk_size);
             if let Some(grid) = chunks.get_mut(&chunk) {
@@ -783,6 +820,7 @@ fn handle_event(
             features_placed.insert((chunk, FEATURE_SOURCES));
             features_placed.insert((chunk, FEATURE_SPRINGS));
             features_placed.insert((chunk, 2)); // pipe lava — same protection
+            features_placed.insert((chunk, 3)); // gen-time seeds — same protection
             pending_fluid.entry(chunk).or_default().extend(cells);
             if chunk_densities.contains_key(&chunk) {
                 apply_pending_fluid(chunks, chunk_densities, pending_fluid, chunk, chunk_size, config);
