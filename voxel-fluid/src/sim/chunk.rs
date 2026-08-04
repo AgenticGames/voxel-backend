@@ -360,6 +360,20 @@ pub(super) fn tick_chunk(
                 // the normal rate (basins fill flat, stream mouths fan out).
                 let mut had_down_path = false;
 
+                // Vertical transit: the cell below is an open shaft (high
+                // capacity) with real space — this cell's fluid is falling,
+                // not standing on anything. Set by the gravity sections; a
+                // falling cell must NOT lateral-spread: fluid in transit has
+                // no pressure column to push sideways, and spreading mid-air
+                // turns a fall into a widening cone of dribbles that each
+                // sit under the retention floor, so the column starves and
+                // stalls ("giant spikey blob" + falls that never land,
+                // 2026-08-05 two-chunk fixture; through-flux measured
+                // shrinking 0.4→0.05 down an established column). Pond
+                // surfaces (below ≥75% full) and ledge lips (below solid)
+                // keep spreading — pouring fills locally, then fans out.
+                let mut in_fall_column = false;
+
                 // Channels flow FASTER (focus): narrowing the sheet removes
                 // parallel transport lanes, and per-lane flux is capped by
                 // flow_rate — without a speed boost a channeled slope
@@ -394,6 +408,7 @@ pub(super) fn tick_chunk(
                             // waterfall front crawls at flow_rate*mult per
                             // tick ("painfully slow" — user, 2026-08-04).
                             let free_fall = below_capacity >= 0.9 && new_cells[below_idx].level < 0.05;
+                            in_fall_column = below_capacity >= 0.9 && below_space > below_capacity * 0.25;
                             let rate_cap = if free_fall { f32::MAX } else { flow_rate * gravity_mult * channel_speed };
                             // Bounded-flow cap: child receives at most `level_cap`.
                             let new_hops = cell.hops_from_source.saturating_add(1);
@@ -448,6 +463,7 @@ pub(super) fn tick_chunk(
                                 if below_space > MIN_LEVEL {
                                     had_down_path = true;
                                     let free_fall = below_capacity >= 0.9 && below_grid.cells[below_idx].level < 0.05;
+                                    in_fall_column = below_capacity >= 0.9 && below_space > below_capacity * 0.25;
                                     let rate_cap = if free_fall { f32::MAX } else { flow_rate * gravity_mult * channel_speed };
                                     let new_hops = cell.hops_from_source.saturating_add(1);
                                     let cap = bounded_level_cap(new_hops, cell.max_flow_dist);
@@ -680,7 +696,7 @@ pub(super) fn tick_chunk(
                 // Horizontal spread using fill-fraction equalization
                 // Skip for orphan puddles — force them downhill only
                 let is_orphan = cell.level < ORPHAN_THRESHOLD && cell.stagnant_ticks > 0;
-                if new_cells[idx].level > MIN_LEVEL && !is_orphan
+                if new_cells[idx].level > MIN_LEVEL && !is_orphan && !in_fall_column
                     && !bounded_blocks_transfer(cell.hops_from_source, cell.max_flow_dist)
                 {
                     let neighbors: [(i32, i32, i32); 4] = [

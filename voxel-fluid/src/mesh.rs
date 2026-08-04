@@ -63,6 +63,11 @@ pub struct BoundaryLevels {
     pub pos_y: Option<Vec<f32>>,
     /// Neighbor's z=0 face fluid levels, indexed [y * size + x]. size*size values.
     pub pos_z: Option<Vec<f32>>,
+    /// Whether the BELOW neighbor's top cell can hold fluid (capacity > 0),
+    /// indexed [z * size + x]. Falls keep falling through an open seam — the
+    /// y==0 floor-extension boost must not draw a lid there. None = no below
+    /// neighbor known: treat the chunk bottom as a world floor (legacy).
+    pub neg_y_open: Option<Vec<bool>>,
     pub size: usize,
 }
 
@@ -73,8 +78,18 @@ impl BoundaryLevels {
             pos_x: None,
             pos_y: None,
             pos_z: None,
+            neg_y_open: None,
             size,
         }
+    }
+
+    /// Is the cell directly below chunk-local (x, -1, z) open fluid space?
+    /// False when unknown — unknown must behave like the legacy world floor.
+    #[inline]
+    pub fn below_open(&self, x: usize, z: usize) -> bool {
+        self.neg_y_open
+            .as_ref()
+            .map_or(false, |v| v[z * self.size + x])
     }
 
     /// Get the fluid level at an out-of-bounds coordinate from neighbor data.
@@ -170,7 +185,7 @@ fn has_fluid_above(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) -> bool 
 /// bottom boundary) with fluid above get boosted to 1.0 to close the visual gap.
 /// Out-of-bounds coordinates return BOUNDARY_FIELD to close mesh at chunk edges.
 #[inline]
-fn sample_field(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary: &BoundaryLevels) -> f32 {
+pub(crate) fn sample_field(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary: &BoundaryLevels) -> f32 {
     let size = grid.size;
     if x >= size || y >= size || z >= size {
         // Density at boundary coords is valid via grid_point_density (handles up to size)
@@ -187,8 +202,16 @@ fn sample_field(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary: &
         1.0 // inside — prevents surface at rock/fluid boundary
     } else {
         let level = grid.mesh_level(x, y, z);
-        // Floor extension: low-fluid cell on solid rock (or chunk bottom) with fluid above
-        if level < ISO_LEVEL && (y == 0 || grid.grid_point_density(x, y - 1, z) > 0.0) && has_fluid_above(grid, x, y, z) {
+        // Floor extension: low-fluid cell on solid rock (or a genuinely
+        // closed chunk bottom) with fluid above. At y==0 the "floor" is only
+        // real when the chunk below is solid/unknown — an open seam must NOT
+        // get a lid (falls read a flat cap at every vertical chunk boundary).
+        let on_floor = if y == 0 {
+            !boundary.below_open(x, z)
+        } else {
+            grid.grid_point_density(x, y - 1, z) > 0.0
+        };
+        if level < ISO_LEVEL && on_floor && has_fluid_above(grid, x, y, z) {
             1.0 // boost to close floor gap
         } else {
             level
@@ -256,8 +279,14 @@ fn cube_has_fluid(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary:
                     if level >= min_qual {
                         return true;
                     }
-                    // Floor extension: low-fluid cell on solid rock (or chunk bottom) with fluid above
-                    if level < ISO_LEVEL && (cy == 0 || grid.grid_point_density(cx, cy - 1, cz) > 0.0) && has_fluid_above(grid, cx, cy, cz) {
+                    // Floor extension — below-aware at cy==0, same rule as
+                    // sample_field (open seam ≠ floor).
+                    let on_floor = if cy == 0 {
+                        !boundary.below_open(cx, cz)
+                    } else {
+                        grid.grid_point_density(cx, cy - 1, cz) > 0.0
+                    };
+                    if level < ISO_LEVEL && on_floor && has_fluid_above(grid, cx, cy, cz) {
                         return true;
                     }
                 }

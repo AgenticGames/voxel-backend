@@ -2807,4 +2807,257 @@ mod tests {
             "gallery still holds {left_in_gallery:.2} lava long after the source died — retention is perching fluid"
         );
     }
+
+    // ── ROUND 14: lavafall crossing a VERTICAL chunk boundary ─────────────
+    // User repro (2026-08-04 screenshots): a fall spanning a horizontal seam
+    // skips a ~1-cell band — the upper piece ends in a flat lid just above
+    // the seam, the lower piece resumes below it.
+
+    /// Upper chunk (0,1,0): open air with a lava source at (8,12,8).
+    /// Lower chunk (0,0,0): open air over a solid floor (lattice y<3).
+    fn make_fall_pair() -> HashMap<(i32, i32, i32), ChunkFluidGrid> {
+        let size = 16;
+        let config = crate::FluidConfig::default();
+        let mut chunks = HashMap::new();
+
+        let mut d_up = make_density_field_solid(size);
+        carve_box(&mut d_up, size, 0..17, 0..17, 0..17);
+        let mut upper = make_chunk(size);
+        apply_density(&mut upper, &d_up, &config);
+        {
+            let cell = upper.get_mut(8, 12, 8);
+            cell.level = SOURCE_LEVEL;
+            cell.fluid_type = FluidType::Lava;
+            cell.is_source = true;
+            cell.max_flow_dist = 0;
+            cell.hops_from_source = 0;
+        }
+        upper.has_fluid = true;
+        upper.has_lava = true;
+        upper.has_sources = true;
+        chunks.insert((0, 1, 0), upper);
+
+        let mut d_low = make_density_field_solid(size);
+        carve_box(&mut d_low, size, 0..17, 3..17, 0..17);
+        let mut lower = make_chunk(size);
+        apply_density(&mut lower, &d_low, &config);
+        chunks.insert((0, 0, 0), lower);
+        chunks
+    }
+
+    /// One engine tick exactly as thread.rs runs it: sim tick, then per chunk
+    /// IN THE GIVEN ORDER build boundary levels from the neighbors' CURRENT
+    /// render state, update own render field, mesh. thread.rs iterates a
+    /// HashSet, so any order is one the shipped loop can produce.
+    fn run_fall_tick(
+        chunks: &mut HashMap<(i32, i32, i32), ChunkFluidGrid>,
+        config: &crate::FluidConfig,
+        order: &[(i32, i32, i32)],
+    ) -> HashMap<(i32, i32, i32), (crate::mesh::BoundaryLevels, crate::mesh::FluidMeshData)> {
+        let dc = empty_density_cache();
+        crate::sim::regen_sources(chunks);
+        tick_fluid(chunks, &dc, 16, true, config, true);
+        // Phase 1 (mirrors thread.rs): render fields refresh for EVERY chunk
+        // being meshed BEFORE any boundary sampling.
+        for key in order {
+            let grid = chunks.get_mut(key).unwrap();
+            grid.update_render_field(
+                config.mesh_sticky_release,
+                config.mesh_flux_render,
+                config.mesh_stream_ribbon,
+            );
+        }
+        // Phase 2: boundaries + mesh.
+        let mut out = HashMap::new();
+        for key in order {
+            let boundary = crate::thread::build_boundary_levels(*key, chunks, 16);
+            let grid = chunks.get(key).unwrap();
+            let mesh = crate::mesh::mesh_fluid(grid, &boundary, config);
+            out.insert(*key, (boundary, mesh));
+        }
+        out
+    }
+
+    #[test]
+    #[ignore] // diagnostic probe — run manually with --ignored --nocapture
+    fn fall_seam_probe() {
+        let config = crate::FluidConfig::default();
+        let mut chunks = make_fall_pair();
+        let order = [(0, 0, 0), (0, 1, 0)];
+        for _ in 0..30 {
+            run_fall_tick(&mut chunks, &config, &order);
+        }
+        for t in 0..6 {
+            run_fall_tick(&mut chunks, &config, &order);
+            let upper = chunks.get(&(0, 1, 0)).unwrap();
+            let lower = chunks.get(&(0, 0, 0)).unwrap();
+            eprintln!("── tick {t}: column (8, z=8), upper then lower ──");
+            for y in (0..13usize).rev() {
+                eprintln!(
+                    "  U y={y:2}: raw={:.3} mesh={:.3} flux={:.3}",
+                    upper.get(8, y, 8).level,
+                    upper.mesh_level(8, y, 8),
+                    upper.flux_at(8, y, 8),
+                );
+            }
+            for y in (13..16usize).rev() {
+                eprintln!(
+                    "  L y={y:2}: raw={:.3} mesh={:.3} flux={:.3}",
+                    lower.get(8, y, 8).level,
+                    lower.mesh_level(8, y, 8),
+                    lower.flux_at(8, y, 8),
+                );
+            }
+            // Where does upper y=0's fluid go? Show the whole seam-row patch
+            // plus stagnancy state of the core cell.
+            let c = upper.get(8, 0, 8);
+            eprintln!(
+                "  U y0 core: stagnant={} src={} | y0 row x6..10 z7..9:",
+                c.stagnant_ticks, c.is_source
+            );
+            for z in 7..10usize {
+                let row: Vec<String> = (6..11usize)
+                    .map(|x| format!("{:.3}", upper.get(x, 0, z).level))
+                    .collect();
+                eprintln!("    z={z}: {}", row.join(" "));
+            }
+        }
+    }
+
+    #[test]
+    fn fall_seam_fields_match_across_vertical_boundary() {
+        // The MC fields of the two chunks sample the SAME physical plane
+        // (upper's lattice y=0 == lower's lattice y=16). Wherever the two
+        // sides disagree, one draws a lid/cut where the other continues —
+        // the user-visible "fall skips a line at the seam".
+        let config = crate::FluidConfig::default();
+        let mut chunks = make_fall_pair();
+        let order = [(0, 0, 0), (0, 1, 0)]; // lower meshed first — legal HashSet order
+        for _ in 0..30 {
+            run_fall_tick(&mut chunks, &config, &order);
+        }
+        let mut worst: f32 = 0.0;
+        let mut note = String::new();
+        for t in 0..20 {
+            let passes = run_fall_tick(&mut chunks, &config, &order);
+            let upper = chunks.get(&(0, 1, 0)).unwrap();
+            let lower = chunks.get(&(0, 0, 0)).unwrap();
+            let (up_bnd, _) = &passes[&(0, 1, 0)];
+            let (low_bnd, _) = &passes[&(0, 0, 0)];
+            for z in 0..16usize {
+                for x in 0..16usize {
+                    // Only judge columns where the seam actually carries fluid.
+                    if upper.get(x, 0, z).level < 0.02 && lower.get(x, 15, z).level < 0.02 {
+                        continue;
+                    }
+                    let f_up = crate::mesh::sample_field(upper, x, 0, z, up_bnd);
+                    let f_low = crate::mesh::sample_field(lower, x, 16, z, low_bnd);
+                    let d = (f_up - f_low).abs();
+                    if d > worst {
+                        worst = d;
+                        note = format!(
+                            "tick {t} col ({x},{z}): upper y0 raw={:.3} mesh={:.3} field={f_up:.3} | \
+                             lower boundary-sample={f_low:.3} (lower y15 raw={:.3} mesh={:.3})",
+                            upper.get(x, 0, z).level,
+                            upper.mesh_level(x, 0, z),
+                            lower.get(x, 15, z).level,
+                            lower.mesh_level(x, 15, z),
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            worst <= 0.01,
+            "MC fields disagree at the vertical seam (worst diff {worst:.3}): {note}"
+        );
+    }
+
+    #[test]
+    fn fall_renders_continuously_across_vertical_boundary() {
+        // With in-game (pulsy) supply, once the fall has spanned the seam
+        // for a few consecutive ticks (EMA warm), the rendered geometry must
+        // be continuous: the upper piece reaches the seam plane and the
+        // lower piece meets it — no skipped band.
+        let config = crate::FluidConfig::default();
+        let mut chunks = make_fall_pair();
+        let order = [(0, 0, 0), (0, 1, 0)];
+        for _ in 0..30 {
+            run_fall_tick(&mut chunks, &config, &order);
+        }
+        let mut spanning_ticks = 0usize;
+        let mut consec = 0usize;
+        let mut worst_gap: f32 = -1.0;
+        let mut worst_note = String::new();
+        for t in 0..36usize {
+            {
+                let grid = chunks.get_mut(&(0, 1, 0)).unwrap();
+                let on = (t / 3) % 2 == 0;
+                let cell = grid.get_mut(8, 12, 8);
+                cell.is_source = on;
+                if on {
+                    cell.level = SOURCE_LEVEL;
+                    cell.fluid_type = FluidType::Lava;
+                    cell.hops_from_source = 0;
+                    cell.max_flow_dist = 0;
+                }
+                grid.has_sources = on;
+                grid.has_fluid = true;
+            }
+            let passes = run_fall_tick(&mut chunks, &config, &order);
+            let upper = chunks.get(&(0, 1, 0)).unwrap();
+            let lower = chunks.get(&(0, 0, 0)).unwrap();
+            // Real fluid spanning the plane in the core column, with supply
+            // still flowing in from above.
+            let spans = upper.get(8, 0, 8).level >= 0.15
+                && upper.get(8, 1, 8).level >= 0.15
+                && lower.get(8, 15, 8).level >= 0.15;
+            if !spans {
+                consec = 0;
+                continue;
+            }
+            consec += 1;
+            if consec < 3 {
+                continue; // allow the EMA its by-design warm-up lag
+            }
+            spanning_ticks += 1;
+            let col = |p: &&[f32; 3]| (p[0] - 8.5).abs() <= 2.5 && (p[2] - 8.5).abs() <= 2.5;
+            let up_min = passes[&(0, 1, 0)]
+                .1
+                .positions
+                .iter()
+                .filter(col)
+                .map(|p| p[1])
+                .fold(f32::INFINITY, f32::min);
+            let low_max = passes[&(0, 0, 0)]
+                .1
+                .positions
+                .iter()
+                .filter(col)
+                .map(|p| p[1])
+                .fold(f32::NEG_INFINITY, f32::max);
+            let gap = (up_min + 16.0) - low_max;
+            if gap > worst_gap {
+                worst_gap = gap;
+                worst_note = format!(
+                    "tick {t}: upper column geometry stops at local y={up_min:.2} (world {:.2}), \
+                     lower resumes at {low_max:.2} — {gap:.2} cells unrendered (upper y0 \
+                     raw={:.3}/mesh={:.3}, lower y15 raw={:.3}/mesh={:.3})",
+                    up_min + 16.0,
+                    upper.get(8, 0, 8).level,
+                    upper.mesh_level(8, 0, 8),
+                    lower.get(8, 15, 8).level,
+                    lower.mesh_level(8, 15, 8),
+                );
+            }
+        }
+        assert!(
+            spanning_ticks >= 8,
+            "fall never established across the seam ({spanning_ticks} spanning ticks) — fixture drift?"
+        );
+        assert!(
+            worst_gap <= 1.0,
+            "fall skips a band at the vertical chunk seam: {worst_note}"
+        );
+    }
 }

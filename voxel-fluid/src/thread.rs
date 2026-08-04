@@ -465,17 +465,52 @@ pub fn fluid_sim_loop(
             }
         }
 
-        // Mesh dirty chunks and send results
+        // A dirty chunk's render field feeds its neighbors' boundary
+        // sampling. When the shared face is wet on either side, the neighbor
+        // must re-mesh THIS pass too, or the two sides of the seam show
+        // different ticks (falls "skip a line" at chunk boundaries).
+        let mut mesh_set = all_dirty.clone();
         for key in &all_dirty {
-            let boundary = build_boundary_levels(*key, &chunks, chunk_size);
+            let dirs: [((i32, i32, i32), usize, bool); 6] = [
+                ((1, 0, 0), 0, true),
+                ((-1, 0, 0), 0, false),
+                ((0, 1, 0), 1, true),
+                ((0, -1, 0), 1, false),
+                ((0, 0, 1), 2, true),
+                ((0, 0, -1), 2, false),
+            ];
+            for (d, axis, hi) in dirs {
+                let nkey = (key.0 + d.0, key.1 + d.1, key.2 + d.2);
+                if mesh_set.contains(&nkey) {
+                    continue;
+                }
+                let Some(nbr) = chunks.get(&nkey) else { continue };
+                let me = chunks.get(key).unwrap();
+                if face_row_wet(me, axis, hi, chunk_size) || face_row_wet(nbr, axis, !hi, chunk_size) {
+                    mesh_set.insert(nkey);
+                }
+            }
+        }
+
+        // Phase 1: refresh render state (EMA field + ribbon/fringe flags —
+        // or legacy hysteresis) for EVERY chunk being meshed, BEFORE any
+        // boundary sampling. Updating mid-loop made seam continuity depend
+        // on HashSet iteration order: one side sampled the other one tick
+        // stale.
+        for key in &mesh_set {
             if let Some(grid) = chunks.get_mut(key) {
-                // Pre-mesh render state: smoothed EMA field + ribbon flags
-                // when the cascade bundle is on, legacy hysteresis otherwise.
                 grid.update_render_field(
                     config.mesh_sticky_release,
                     config.mesh_flux_render,
                     config.mesh_stream_ribbon,
                 );
+            }
+        }
+
+        // Phase 2: mesh and send.
+        for key in &mesh_set {
+            let boundary = build_boundary_levels(*key, &chunks, chunk_size);
+            if let Some(grid) = chunks.get_mut(key) {
                 let mesh = mesh_fluid(grid, &boundary, &config);
                 grid.dirty = false;
 
@@ -917,12 +952,32 @@ fn apply_pending_fluid(
     }
 }
 
+/// Any mesh-relevant fluid on a chunk face row (raw level OR render field —
+/// ribbon floors and EMA tails render without raw fluid)? Decides whether a
+/// seam needs both sides re-meshed on the same pass.
+fn face_row_wet(grid: &ChunkFluidGrid, axis: usize, hi: bool, size: usize) -> bool {
+    let edge = if hi { size - 1 } else { 0 };
+    for b in 0..size {
+        for a in 0..size {
+            let (x, y, z) = match axis {
+                0 => (edge, a, b),
+                1 => (a, edge, b),
+                _ => (a, b, edge),
+            };
+            if grid.get(x, y, z).level > 0.001 || grid.mesh_level(x, y, z) > 0.001 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Build boundary levels from neighboring chunks for seamless fluid meshing.
 // Boundary faces carry the neighbor's RENDER field (mesh_level: EMA +
 // ribbon/fringe floors), not raw levels — the MC field is continuous across
 // the seam only if both sides speak the same language. Raw sampling cut the
 // surface at every chunk boundary (user repro: "broken at all seams").
-fn build_boundary_levels(
+pub(crate) fn build_boundary_levels(
     key: (i32, i32, i32),
     chunks: &HashMap<(i32, i32, i32), ChunkFluidGrid>,
     size: usize,
@@ -969,6 +1024,20 @@ fn build_boundary_levels(
             }
             boundary.pos_z = Some(levels);
         }
+    }
+
+    // -Y neighbor: openness of its TOP cells (density, not fluid — needed
+    // even for a bone-dry chunk below so the y==0 floor extension knows an
+    // open seam from a world floor and doesn't draw a lid across a fall).
+    let ny_key = (key.0, key.1 - 1, key.2);
+    if let Some(nbr) = chunks.get(&ny_key) {
+        let mut open = vec![false; size * size];
+        for z in 0..size {
+            for x in 0..size {
+                open[z * size + x] = nbr.cell_capacity(x, size - 1, z) > 0.001;
+            }
+        }
+        boundary.neg_y_open = Some(open);
     }
 
     boundary
