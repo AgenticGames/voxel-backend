@@ -305,6 +305,12 @@ pub(super) fn tick_chunk(
                 let flow_rate = if is_lava { config.lava_flow_rate } else { config.water_flow_rate };
                 let horizontal_spread = if is_lava { config.lava_spread_rate } else { config.water_spread_rate };
                 let pressure_rate = if is_lava { config.lava_pressure_rate } else { config.water_pressure_rate };
+                // Lava falls in HALF-gulps (2026-08-04): the water 8x gravity
+                // multiplier moved near-full cells per tick, so a cascade's
+                // cells flip full->empty->full and the mesh flashes wildly.
+                // At 4x, transit cells hold partial levels across ticks and
+                // a fall reads as a continuous ribbon. Water keeps 8x.
+                let gravity_mult = if is_lava { 4.0 } else { 8.0 };
 
                 // Gravity: try to flow down (8x flow rate for fast pooling)
                 if y > 0 {
@@ -320,7 +326,7 @@ pub(super) fn tick_chunk(
                             let new_hops = cell.hops_from_source.saturating_add(1);
                             let cap = bounded_level_cap(new_hops, cell.max_flow_dist);
                             let bounded_space = (cap - new_cells[below_idx].level).max(0.0).min(below_space);
-                            let transfer = cell.level.min(bounded_space).min(flow_rate * 8.0);
+                            let transfer = cell.level.min(bounded_space).min(flow_rate * gravity_mult);
                             if transfer > MIN_LEVEL {
                                 if !is_source && !has_grace {
                                     new_cells[idx].level -= transfer;
@@ -366,7 +372,7 @@ pub(super) fn tick_chunk(
                                     let new_hops = cell.hops_from_source.saturating_add(1);
                                     let cap = bounded_level_cap(new_hops, cell.max_flow_dist);
                                     let bounded_space = (cap - below_grid.cells[below_idx].level).max(0.0).min(below_space);
-                                    let transfer = new_cells[idx].level.min(bounded_space).min(flow_rate * 8.0);
+                                    let transfer = new_cells[idx].level.min(bounded_space).min(flow_rate * gravity_mult);
                                     if transfer > MIN_LEVEL {
                                         if !is_source && !has_grace {
                                             new_cells[idx].level -= transfer;
