@@ -151,6 +151,13 @@ pub fn face_blocked(corners: &[f32], idx: usize, dx: i32, dy: i32, dz: i32) -> b
 /// pops them in and out every tick ("strobing" — user repro 2026-08-04).
 pub const MESH_STICKY_ON: f32 = 0.15;
 pub const MESH_STICKY_OFF: f32 = 0.05;
+/// Stagnant ticks before a hysteresis-held sub-iso cell is released from the
+/// mesh (mesh_sticky_release flag). Cascade transit cells reset their
+/// stagnant counter every tick they drain-and-refill, so they keep the
+/// anti-strobe hold; only genuinely settled remnants (a drained pool rim)
+/// expire. Without this a settled pool's rim cells in [OFF, ON) render as a
+/// phantom ring forever.
+pub const MESH_STICKY_RELEASE_TICKS: u8 = 10;
 
 /// Minimum fluid level to consider non-empty.
 pub const MIN_LEVEL: f32 = 0.001;
@@ -386,17 +393,27 @@ impl ChunkFluidGrid {
     }
 
     /// Update the mesh-hysteresis flags from current levels. Call once per
-    /// chunk right before meshing.
-    pub fn update_mesh_hysteresis(&mut self) {
+    /// chunk right before meshing. With `release_stagnant` (the
+    /// mesh_sticky_release config flag), held sub-iso cells whose sim state
+    /// has been stagnant for MESH_STICKY_RELEASE_TICKS also release — the
+    /// hold exists to stop strobing on ACTIVE cells, not to preserve a
+    /// settled pool's drained rim as a phantom ring.
+    pub fn update_mesh_hysteresis(&mut self, release_stagnant: bool) {
         let total = self.size * self.size * self.size;
         if self.mesh_sticky.len() != total {
             self.mesh_sticky = vec![false; total];
         }
         for idx in 0..total {
-            let l = self.cells[idx].level;
+            let cell = &self.cells[idx];
+            let l = cell.level;
             if l >= MESH_STICKY_ON {
                 self.mesh_sticky[idx] = true;
             } else if l < MESH_STICKY_OFF {
+                self.mesh_sticky[idx] = false;
+            } else if release_stagnant
+                && self.mesh_sticky[idx]
+                && cell.stagnant_ticks >= MESH_STICKY_RELEASE_TICKS
+            {
                 self.mesh_sticky[idx] = false;
             }
         }
@@ -704,5 +721,41 @@ mod tests {
         assert!(!grid.is_mostly_solid(1, 1, 1, 8));
         // With threshold=6, 6/8 IS enough
         assert!(grid.is_mostly_solid(1, 1, 1, 6));
+    }
+
+    #[test]
+    fn sticky_release_expires_stagnant_cells_only() {
+        let mut grid = ChunkFluidGrid::new(4);
+
+        // Two cells get wet enough to enter the mesh...
+        grid.get_mut(1, 1, 1).level = 0.2;
+        grid.get_mut(2, 1, 1).level = 0.2;
+        grid.update_mesh_hysteresis(false);
+        assert!(grid.mesh_level(1, 1, 1) >= MESH_STICKY_ON);
+
+        // ...then drain into the hysteresis band [OFF, ON). One is a settled
+        // remnant (stagnant), the other an active cascade cell (stagnant=0).
+        grid.get_mut(1, 1, 1).level = 0.10;
+        grid.get_mut(1, 1, 1).stagnant_ticks = MESH_STICKY_RELEASE_TICKS;
+        grid.get_mut(2, 1, 1).level = 0.10;
+        grid.get_mut(2, 1, 1).stagnant_ticks = 0;
+
+        // Without the release flag both are held forever — the phantom-ring
+        // bug (a settled pool's drained rim never leaves the mesh).
+        grid.update_mesh_hysteresis(false);
+        assert!(grid.mesh_level(1, 1, 1) >= MESH_STICKY_ON, "legacy: settled remnant held");
+        assert!(grid.mesh_level(2, 1, 1) >= MESH_STICKY_ON, "legacy: active cell held");
+
+        // With the flag: the stagnant remnant releases, the active cell keeps
+        // its anti-strobe hold.
+        grid.update_mesh_hysteresis(true);
+        assert!(
+            grid.mesh_level(1, 1, 1) < MESH_STICKY_ON,
+            "stagnant sub-iso cell must be released from the mesh"
+        );
+        assert!(
+            grid.mesh_level(2, 1, 1) >= MESH_STICKY_ON,
+            "active (non-stagnant) cell must keep its anti-strobe hold"
+        );
     }
 }

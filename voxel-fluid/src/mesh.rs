@@ -13,6 +13,43 @@ const ISO_LEVEL: f32 = 0.15;
 /// the air point and can stop up to 0.85 cells short of the DC wall (visible
 /// gap slits around pool rims). 0.1 cells = 4 UE units at world scale 40.
 const ROCK_RECESS_T: f32 = 0.1;
+/// Recess used instead of ROCK_RECESS_T on floor-contact rim edges when the
+/// mesh_floor_clamp flag is on: just enough burial to avoid z-fighting with
+/// the terrain surface, shallow enough that the sheet hugs the floor instead
+/// of diving under it (0.02 cells ≈ 0.6-0.8 UE units at world scale 30-40).
+const FLOOR_RECESS_T: f32 = 0.02;
+
+/// The rim/skirt fix flags, extracted from FluidConfig so the inner MC
+/// functions don't need the whole config. See FluidConfig for what each does.
+#[derive(Clone, Copy)]
+pub struct MeshFlags {
+    /// Mesher half of mesh_sticky_release: plain (non-special-rule) cells
+    /// must hold mesh_level >= ISO_LEVEL to qualify a cube, not merely
+    /// MIN_LEVEL. Sub-iso remnants adjacent to rock otherwise form crossings
+    /// against the solid corners' constant 1.0 sample and paint rock-hugging
+    /// phantom geometry (the raised rim ring) no matter what the hysteresis
+    /// does. Hysteresis-held cells report mesh_level at iso+0.01, so the
+    /// anti-strobe hold is unaffected.
+    pub sticky_release: bool,
+    pub floor_clamp: bool,
+    pub buried_cull: bool,
+}
+
+impl MeshFlags {
+    /// Pre-bundle behavior (all fixes off) — used by tests that assert the
+    /// legacy geometry.
+    pub fn legacy() -> Self {
+        Self { sticky_release: false, floor_clamp: false, buried_cull: false }
+    }
+
+    pub fn from_config(config: &FluidConfig) -> Self {
+        Self {
+            sticky_release: config.mesh_sticky_release,
+            floor_clamp: config.mesh_floor_clamp,
+            buried_cull: config.mesh_buried_cull,
+        }
+    }
+}
 /// Tiny SDF value for out-of-bounds samples — places boundary faces near chunk edge.
 const BOUNDARY_SDF: f32 = 0.001;
 /// Field value for out-of-bounds samples — just below ISO_LEVEL so MC places face at edge.
@@ -93,12 +130,16 @@ pub fn mesh_fluid(grid: &ChunkFluidGrid, boundary: &BoundaryLevels, config: &Flu
         };
     }
 
-    let mut mesh = mesh_fluid_mc(grid, boundary);
+    let flags = MeshFlags::from_config(config);
+    let mut mesh = mesh_fluid_mc(grid, boundary, flags);
     weld_vertices(&mut mesh);
     // Vertices at/inside the terrain surface are rim-contact vertices placed by
     // the rock-crossing override in mesh_fluid_mc. QEF and smoothing must not
     // move them or the seam re-opens.
-    let pinned = compute_rock_pins(&mesh, grid);
+    let mut pinned = compute_rock_pins(&mesh, grid);
+    if flags.buried_cull {
+        cull_buried_triangles(&mut mesh, &mut pinned);
+    }
     if config.mesh_qef_refinement {
         qef_refine_vertices(&mut mesh, size, &pinned);
     }
@@ -163,8 +204,14 @@ fn sample_field(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary: &
 /// would generate phantom water surfaces on every cave wall.
 /// Out-of-bounds corners use neighbor boundary levels when available.
 #[inline]
-fn cube_has_fluid(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary: &BoundaryLevels) -> bool {
+fn cube_has_fluid(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary: &BoundaryLevels, flags: MeshFlags) -> bool {
     let size = grid.size;
+    // With sticky_release: a plain cell only qualifies at iso — sub-iso
+    // dribbles can't force cubes whose only >=iso corners are solid rock
+    // (constant 1.0), which paint phantom rock-hugging geometry. All the
+    // special rules below (solid-corner lapping, floor extension) keep their
+    // own iso-based thresholds.
+    let min_qual = if flags.sticky_release { ISO_LEVEL } else { MIN_LEVEL };
     for dz in 0..=1usize {
         for dy in 0..=1usize {
             for dx in 0..=1usize {
@@ -187,7 +234,7 @@ fn cube_has_fluid(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary:
                             }
                         }
                     } else if let Some(level) = boundary.get_level(cx, cy, cz) {
-                        if level >= MIN_LEVEL {
+                        if level >= min_qual {
                             return true;
                         }
                     }
@@ -206,7 +253,7 @@ fn cube_has_fluid(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize, boundary:
                 }
                 {
                     let level = grid.mesh_level(cx, cy, cz);
-                    if level >= MIN_LEVEL {
+                    if level >= min_qual {
                         return true;
                     }
                     // Floor extension: low-fluid cell on solid rock (or chunk bottom) with fluid above
@@ -254,6 +301,7 @@ fn cell_level_at(grid: &ChunkFluidGrid, boundary: &BoundaryLevels, cx: usize, cy
 fn edge_crossing_t(
     grid: &ChunkFluidGrid,
     boundary: &BoundaryLevels,
+    flags: MeshFlags,
     x: usize,
     y: usize,
     z: usize,
@@ -272,26 +320,51 @@ fn edge_crossing_t(
         let off_s = CORNER_OFFSETS[sc];
         let off_a = CORNER_OFFSETS[ac];
         let vertical = off_s[0] == off_a[0] && off_s[2] == off_a[2];
+        let floor_contact = vertical && off_s[1] < off_a[1];
 
-        if vertical && off_s[1] < off_a[1] {
+        if floor_contact {
             let level = cell_level_at(grid, boundary, x + off_s[0], y + off_s[1], z + off_s[2]);
             if level >= ISO_LEVEL {
                 // Lapping: solid-below, dry-above, but the solid point's cell
                 // holds water — surface at the cell's fluid level.
                 let (lv0, lv1) = if solid0 { (level, v1) } else { (v0, level) };
-                return if (lv1 - lv0).abs() > 1e-6 {
+                let mut t = if (lv1 - lv0).abs() > 1e-6 {
                     ((ISO_LEVEL - lv0) / (lv1 - lv0)).clamp(0.0, 1.0)
                 } else {
                     0.5
                 };
+                // Floor clamp: a barely-at-iso cell puts the "water level"
+                // crossing essentially AT the solid lattice point, which on
+                // a sloped floor sits up to a full cell inside rock — the
+                // deepest under-floor verts in the skirt come from here, not
+                // from the recess. Keep the lapping surface at/above the
+                // terrain line (whisker below at most). Genuine lapping
+                // (water level above the rock line) is untouched.
+                if flags.floor_clamp {
+                    let denom = d1 - d0;
+                    if denom.abs() > 1e-6 {
+                        let t_rock = (-d0 / denom).clamp(0.0, 1.0);
+                        if solid0 {
+                            t = t.max(t_rock - FLOOR_RECESS_T);
+                        } else {
+                            t = t.min(t_rock + FLOOR_RECESS_T);
+                        }
+                    }
+                }
+                return t;
             }
         }
 
         // Rim seam: terrain density zero-crossing, recessed into the rock.
+        // Floor-contact edges (solid-below) get only a whisker of recess when
+        // mesh_floor_clamp is on — the full recess is for WALLS, where the
+        // terrain occludes the burial; on a floor it puts the sheet under the
+        // ground the player is standing on.
         let denom = d1 - d0;
         if denom.abs() > 1e-6 {
             let t_rock = -d0 / denom;
-            let recess = if solid1 { ROCK_RECESS_T } else { -ROCK_RECESS_T };
+            let mag = if flags.floor_clamp && floor_contact { FLOOR_RECESS_T } else { ROCK_RECESS_T };
+            let recess = if solid1 { mag } else { -mag };
             return (t_rock + recess).clamp(0.0, 1.0);
         }
         return 0.5;
@@ -347,7 +420,7 @@ fn compute_rock_pins(mesh: &FluidMeshData, grid: &ChunkFluidGrid) -> Vec<bool> {
 /// Marching Cubes fluid mesher.
 /// Produces triangulated isosurface at ISO_LEVEL, passing through the actual
 /// geological FluidType from each cell via dominant_fluid_type().
-fn mesh_fluid_mc(grid: &ChunkFluidGrid, boundary: &BoundaryLevels) -> FluidMeshData {
+fn mesh_fluid_mc(grid: &ChunkFluidGrid, boundary: &BoundaryLevels, flags: MeshFlags) -> FluidMeshData {
     let size = grid.size;
     let mut mesh = FluidMeshData {
         positions: Vec::new(),
@@ -362,7 +435,7 @@ fn mesh_fluid_mc(grid: &ChunkFluidGrid, boundary: &BoundaryLevels) -> FluidMeshD
         for y in 0..size {
             for x in 0..size {
                 // Skip cubes with no actual fluid — prevents phantom surfaces on cave walls
-                if !cube_has_fluid(grid, x, y, z, boundary) {
+                if !cube_has_fluid(grid, x, y, z, boundary, flags) {
                     continue;
                 }
 
@@ -395,7 +468,7 @@ fn mesh_fluid_mc(grid: &ChunkFluidGrid, boundary: &BoundaryLevels) -> FluidMeshD
                         let v0 = corner_vals[c0];
                         let v1 = corner_vals[c1];
                         let t = edge_crossing_t(
-                            grid, boundary, x, y, z,
+                            grid, boundary, flags, x, y, z,
                             c0, c1, v0, v1,
                             corner_density[c0], corner_density[c1],
                         );
@@ -455,6 +528,80 @@ fn mesh_fluid_mc(grid: &ChunkFluidGrid, boundary: &BoundaryLevels) -> FluidMeshD
     }
 
     mesh
+}
+
+/// Drop triangles whose three vertices are all at/inside the terrain surface
+/// (the `pinned` predicate). These form the buried closure skirt — the sheet
+/// the rim-sealing system tucks under floors and into walls so the terrain
+/// occludes the seam. It is only ever visible from inside the ground or
+/// through terrain cracks, and under a pool floor it reads as fluid "below
+/// the world". Triangles with at least one above-terrain vertex are kept, so
+/// the visible waterline still terminates in a pinned rock contact.
+/// Compacts the vertex arrays (and the pinned flags) after filtering.
+fn cull_buried_triangles(mesh: &mut FluidMeshData, pinned: &mut Vec<bool>) {
+    if mesh.indices.is_empty() {
+        return;
+    }
+
+    let mut new_indices: Vec<u32> = Vec::with_capacity(mesh.indices.len());
+    for t in 0..mesh.indices.len() / 3 {
+        let i0 = mesh.indices[t * 3] as usize;
+        let i1 = mesh.indices[t * 3 + 1] as usize;
+        let i2 = mesh.indices[t * 3 + 2] as usize;
+        if pinned[i0] && pinned[i1] && pinned[i2] {
+            continue;
+        }
+        new_indices.push(i0 as u32);
+        new_indices.push(i1 as u32);
+        new_indices.push(i2 as u32);
+    }
+    if new_indices.len() == mesh.indices.len() {
+        return;
+    }
+
+    // Compact: drop vertices no longer referenced by any surviving triangle.
+    let mut remap: Vec<u32> = vec![u32::MAX; mesh.positions.len()];
+    let mut kept = 0u32;
+    for &idx in &new_indices {
+        if remap[idx as usize] == u32::MAX {
+            remap[idx as usize] = kept;
+            kept += 1;
+        }
+    }
+    let kept = kept as usize;
+    let mut positions = Vec::with_capacity(kept);
+    let mut normals = Vec::with_capacity(kept);
+    let mut fluid_types = Vec::with_capacity(kept);
+    let mut uvs = Vec::with_capacity(kept);
+    let mut flow_directions = Vec::with_capacity(kept);
+    let mut new_pinned = Vec::with_capacity(kept);
+    // remap assigns new ids in first-reference order; rebuild arrays in that order
+    let mut order: Vec<(u32, usize)> = remap
+        .iter()
+        .enumerate()
+        .filter(|&(_, &m)| m != u32::MAX)
+        .map(|(old, &m)| (m, old))
+        .collect();
+    order.sort_unstable_by_key(|&(m, _)| m);
+    for &(_, old) in &order {
+        positions.push(mesh.positions[old]);
+        normals.push(mesh.normals[old]);
+        fluid_types.push(mesh.fluid_types[old]);
+        uvs.push(mesh.uvs[old]);
+        flow_directions.push(mesh.flow_directions[old]);
+        new_pinned.push(pinned[old]);
+    }
+    for idx in &mut new_indices {
+        *idx = remap[*idx as usize];
+    }
+
+    mesh.positions = positions;
+    mesh.normals = normals;
+    mesh.fluid_types = fluid_types;
+    mesh.uvs = uvs;
+    mesh.flow_directions = flow_directions;
+    mesh.indices = new_indices;
+    *pinned = new_pinned;
 }
 
 /// Neighbor-cell offsets to probe along one axis during vertex welding.
@@ -923,7 +1070,7 @@ mod tests {
     #[test]
     fn test_mc_produces_mesh() {
         let grid = make_fluid_grid(&[(6..10, 6..10, 6..10, 1.0)]);
-        let mesh = mesh_fluid_mc(&grid, &no_boundary());
+        let mesh = mesh_fluid_mc(&grid, &no_boundary(), MeshFlags::legacy());
         assert!(!mesh.positions.is_empty(), "MC should produce vertices");
         assert!(!mesh.indices.is_empty(), "MC should produce indices");
         assert_eq!(mesh.indices.len() % 3, 0, "MC indices should be triangles");
@@ -936,7 +1083,7 @@ mod tests {
     #[test]
     fn test_mc_no_mesh_for_empty() {
         let grid = ChunkFluidGrid::new(16);
-        let mesh = mesh_fluid_mc(&grid, &no_boundary());
+        let mesh = mesh_fluid_mc(&grid, &no_boundary(), MeshFlags::legacy());
         assert!(mesh.positions.is_empty(), "Empty grid should produce no MC geometry");
         assert!(mesh.indices.is_empty());
     }
@@ -1049,7 +1196,7 @@ mod tests {
                 }
             }
         }
-        let mesh = mesh_fluid_mc(&grid, &no_boundary());
+        let mesh = mesh_fluid_mc(&grid, &no_boundary(), MeshFlags::legacy());
         assert!(!mesh.positions.is_empty(), "MC should produce vertices");
         let min_y = mesh.positions.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
         // Without floor extension, mesh bottom would be at y≈4.9 (above transition cell).
@@ -1115,8 +1262,8 @@ mod tests {
         }
         boundary.pos_x = Some(pos_x_levels);
 
-        let mesh_with_boundary = mesh_fluid_mc(&grid_a, &boundary);
-        let mesh_without_boundary = mesh_fluid_mc(&grid_a, &no_boundary());
+        let mesh_with_boundary = mesh_fluid_mc(&grid_a, &boundary, MeshFlags::legacy());
+        let mesh_without_boundary = mesh_fluid_mc(&grid_a, &no_boundary(), MeshFlags::legacy());
 
         // With boundary data, the mesh should have fewer vertices at the +X face
         // (the surface is open there instead of sealed). Alternatively, the vertex count
@@ -1160,7 +1307,7 @@ mod tests {
     fn test_weld_reduces_vertex_count() {
         // MC emits 3 vertices per triangle — welding should reduce count significantly
         let grid = make_fluid_grid(&[(4..8, 4..8, 4..8, 1.0)]);
-        let raw = mesh_fluid_mc(&grid, &no_boundary());
+        let raw = mesh_fluid_mc(&grid, &no_boundary(), MeshFlags::legacy());
         let raw_count = raw.positions.len();
         assert!(raw_count > 0, "Should have raw vertices");
         // Every vertex in raw MC is unique (3 per tri)
@@ -1256,7 +1403,7 @@ mod tests {
         // near-face cases to resolve, then assert the shipped epsilon-bounded weld
         // produces byte-for-byte the same result as the full 27-cell scan.
         let grid = make_fluid_grid(&[(2..14, 2..14, 2..14, 1.0)]);
-        let raw = mesh_fluid_mc(&grid, &no_boundary());
+        let raw = mesh_fluid_mc(&grid, &no_boundary(), MeshFlags::legacy());
         assert!(raw.positions.len() > 500, "want a non-trivial mesh to exercise the search");
 
         let mut a = clone_mesh(&raw);
@@ -1287,7 +1434,7 @@ mod tests {
     fn bench_weld_ab() {
         use std::time::Instant;
         let grid = make_fluid_grid(&[(1..15, 1..15, 1..15, 1.0)]);
-        let raw = mesh_fluid_mc(&grid, &no_boundary());
+        let raw = mesh_fluid_mc(&grid, &no_boundary(), MeshFlags::legacy());
         println!("raw MC verts: {}", raw.positions.len());
 
         let rounds = 6;
@@ -1347,7 +1494,7 @@ mod tests {
         // After recalculating normals on a welded mesh, normals should vary
         // (not all identical flat per-triangle normals)
         let grid = make_fluid_grid(&[(4..8, 4..8, 4..8, 1.0)]);
-        let mut mesh = mesh_fluid_mc(&grid, &no_boundary());
+        let mut mesh = mesh_fluid_mc(&grid, &no_boundary(), MeshFlags::legacy());
         weld_vertices(&mut mesh);
         recalculate_fluid_normals(&mut mesh);
 
@@ -1481,7 +1628,7 @@ mod tests {
         // The water rim must reach the DC wall at x=8.7 and tuck slightly
         // inside it — not stop at the old fixed crossing x=8.15.
         let grid = make_walled_basin();
-        let mesh = mesh_fluid_mc(&grid, &no_boundary());
+        let mesh = mesh_fluid_mc(&grid, &no_boundary(), MeshFlags::legacy());
         assert!(!mesh.positions.is_empty(), "basin should produce a mesh");
         let max_x = mesh.positions.iter().map(|p| p[0]).fold(f32::NEG_INFINITY, f32::max);
         assert!(
@@ -1529,7 +1676,7 @@ mod tests {
         // Away from walls the top surface must stay where the fluid field puts
         // it: full cells at y=3..=5, dry above -> crossing at y = 5 + 0.85.
         let grid = make_walled_basin();
-        let mesh = mesh_fluid_mc(&grid, &no_boundary());
+        let mesh = mesh_fluid_mc(&grid, &no_boundary(), MeshFlags::legacy());
         let mut top = f32::NEG_INFINITY;
         for p in &mesh.positions {
             if p[0] > 3.0 && p[0] < 7.0 && p[2] > 5.0 && p[2] < 10.0 {
@@ -1550,7 +1697,7 @@ mod tests {
         // there must stay at the water level (y = 6 + 0.625), not snap down to
         // the rock face and dent the sheet.
         let grid = make_shoreline();
-        let mesh = mesh_fluid_mc(&grid, &no_boundary());
+        let mesh = mesh_fluid_mc(&grid, &no_boundary(), MeshFlags::legacy());
         assert!(!mesh.positions.is_empty());
         let at_level = mesh.positions.iter().any(|p| {
             p[0] > 8.6 && p[0] < 9.4 && p[1] > 6.5 && p[1] < 6.72
@@ -1611,5 +1758,243 @@ mod tests {
                 pos[0], pos[1], pos[2]
             );
         }
+    }
+
+    // ── Rim/skirt bundle (2026-08-04): settled saucer pool ────────────────
+    // User repro: a fully-settled pool renders its RIM higher than the flat
+    // middle with bare floor between them, and the fluid mesh continues
+    // under the floor as a juttery skirt. Fixture: a saucer-shaped rock
+    // floor, a settled pool in the middle, and a ring of drained rim cells
+    // (sub-iso levels, stagnant, still hysteresis-held) one step up the
+    // saucer wall — exactly what the sim leaves behind after settling.
+
+    /// Saucer floor: height 3 + 0.08·r² from chunk center. Pool filled to
+    /// y=5 (surface ≈ 5.85) out to r≈4.2; drained-but-held remnant cells in
+    /// the ring r∈(4.2, 6.0] at the waterline row.
+    fn make_settled_saucer() -> ChunkFluidGrid {
+        let size = 16;
+        let mut grid = ChunkFluidGrid::new(size);
+        let floor_h = |x: f32, z: f32| 3.0 + 0.08 * ((x - 8.0).powi(2) + (z - 8.0).powi(2));
+        let d = density_field_from_fn(size, |x, y, z| (floor_h(x, z) - y) * 0.4);
+        grid.update_density(&d);
+
+        // Pool body: full cells wherever the cell row sits above the local
+        // floor, out to the shoreline.
+        for z in 2..14usize {
+            for x in 2..14usize {
+                let r2 = (x as f32 - 8.0).powi(2) + (z as f32 - 8.0).powi(2);
+                if r2 <= 4.2f32.powi(2) {
+                    for y in 3..=5usize {
+                        let cell = grid.get_mut(x, y, z);
+                        cell.level = 1.0;
+                        cell.fluid_type = FluidType::Lava;
+                    }
+                }
+            }
+        }
+
+        // Drained rim rings: cells that were wet during flooding (entered
+        // the mesh), then drained back into the hysteresis band and went
+        // stagnant. Two rows: shoreline remnants at the waterline row (y=5,
+        // partially inside rock — the lapping/skirt generators), and the
+        // receded high-water ring one row ABOVE the settled surface (y=6, up
+        // the saucer wall — the raised phantom ring).
+        let mut ring: Vec<(usize, usize, usize)> = Vec::new();
+        for z in 2..14usize {
+            for x in 2..14usize {
+                let r2 = (x as f32 - 8.0).powi(2) + (z as f32 - 8.0).powi(2);
+                if r2 > 4.2f32.powi(2) && r2 <= 6.0f32.powi(2) {
+                    ring.push((x, 5, z));
+                }
+                let fh = floor_h(x as f32, z as f32);
+                if fh > 5.5 && fh < 6.5 {
+                    ring.push((x, 6, z));
+                }
+            }
+        }
+        for &(x, y, z) in &ring {
+            let cell = grid.get_mut(x, y, z);
+            cell.level = 0.2; // wet enough to enter the mesh
+            cell.fluid_type = FluidType::Lava;
+        }
+        grid.update_mesh_hysteresis(false); // ring cells become sticky
+        for &(x, y, z) in &ring {
+            let cell = grid.get_mut(x, y, z);
+            cell.level = 0.10; // drained into [STICKY_OFF, STICKY_ON)
+            cell.stagnant_ticks = 20; // settled
+        }
+        grid
+    }
+
+    fn saucer_config(sticky_release: bool, floor_clamp: bool, buried_cull: bool) -> FluidConfig {
+        FluidConfig {
+            mesh_sticky_release: sticky_release,
+            mesh_floor_clamp: floor_clamp,
+            mesh_buried_cull: buried_cull,
+            ..FluidConfig::default()
+        }
+    }
+
+    /// Mesh the saucer the way the fluid thread does: hysteresis refresh
+    /// (honoring the release flag), then the full pipeline.
+    fn mesh_saucer(grid: &mut ChunkFluidGrid, config: &FluidConfig) -> FluidMeshData {
+        grid.update_mesh_hysteresis(config.mesh_sticky_release);
+        mesh_fluid(grid, &no_boundary(), config)
+    }
+
+    /// The phantom-ring band: above the real fluid surface (5.85 + slack),
+    /// outside the pool body.
+    fn ring_verts_above_surface(mesh: &FluidMeshData) -> usize {
+        mesh.positions
+            .iter()
+            .filter(|p| {
+                let r2 = (p[0] - 8.0).powi(2) + (p[2] - 8.0).powi(2);
+                r2 > 4.0f32.powi(2) && p[1] > 6.02
+            })
+            .count()
+    }
+
+    /// Triangles whose three vertices all sit strictly inside rock — the
+    /// under-floor skirt, invisible unless the camera is inside the ground.
+    fn buried_triangles(mesh: &FluidMeshData, grid: &ChunkFluidGrid, margin: f32) -> usize {
+        (0..mesh.indices.len() / 3)
+            .filter(|&t| {
+                (0..3).all(|k| {
+                    let p = mesh.positions[mesh.indices[t * 3 + k] as usize];
+                    terrain_density_at(grid, p) >= margin
+                })
+            })
+            .count()
+    }
+
+    #[test]
+    fn saucer_legacy_reproduces_ring_and_skirt() {
+        // RED-FIRST DOCUMENTATION: with the bundle off, the fixture must
+        // reproduce BOTH user-reported symptoms. If this test ever fails the
+        // fixture no longer models the bug and the bundle tests prove nothing.
+        let mut grid = make_settled_saucer();
+        let mesh = mesh_saucer(&mut grid, &saucer_config(false, false, false));
+        assert!(!mesh.positions.is_empty());
+
+        let ring = ring_verts_above_surface(&mesh);
+        assert!(
+            ring > 0,
+            "legacy mesher no longer paints the raised phantom ring — fixture drift?"
+        );
+        let buried = buried_triangles(&mesh, &grid, 0.02);
+        assert!(
+            buried > 0,
+            "legacy mesher no longer emits an under-floor skirt — fixture drift?"
+        );
+    }
+
+    #[test]
+    fn saucer_sticky_release_removes_phantom_ring() {
+        let mut grid = make_settled_saucer();
+        let mesh = mesh_saucer(&mut grid, &saucer_config(true, false, false));
+        assert!(!mesh.positions.is_empty(), "pool body must still mesh");
+        assert_eq!(
+            ring_verts_above_surface(&mesh),
+            0,
+            "drained stagnant rim cells must drop out of the mesh (no raised ring)"
+        );
+    }
+
+    #[test]
+    fn saucer_buried_cull_removes_underfloor_skirt() {
+        let mut grid = make_settled_saucer();
+        let mesh = mesh_saucer(&mut grid, &saucer_config(false, false, true));
+        assert!(!mesh.positions.is_empty(), "pool body must still mesh");
+        assert_eq!(
+            buried_triangles(&mesh, &grid, 0.02),
+            0,
+            "no triangle may survive with all three vertices inside rock"
+        );
+        // The waterline must still terminate in rock contact — culling the
+        // buried skirt must not reopen the rim gap slits.
+        let open = open_boundary_vertices(&mesh);
+        let size_f = 16.0f32;
+        for vi in open {
+            let p = mesh.positions[vi];
+            if p[0] < 0.5 || p[1] < 0.5 || p[2] < 0.5
+                || p[0] > size_f - 0.5 || p[1] > size_f - 0.5 || p[2] > size_f - 0.5
+            {
+                continue;
+            }
+            let d = terrain_density_at(&grid, p);
+            assert!(
+                d >= -1e-3,
+                "open-boundary vertex [{:.2},{:.2},{:.2}] floats in air (density {:.3}) — gap reopened",
+                p[0], p[1], p[2], d
+            );
+        }
+    }
+
+    #[test]
+    fn saucer_floor_clamp_shrinks_burial_depth() {
+        // Flag 2 alone: rim crossings on floor-contact edges recess by a
+        // whisker instead of 0.1 cells, so the deepest burial (in density
+        // terms) must strictly shrink versus legacy.
+        let mut grid = make_settled_saucer();
+        let legacy = mesh_saucer(&mut grid, &saucer_config(false, false, false));
+        let clamped = mesh_saucer(&mut grid, &saucer_config(false, true, false));
+        let max_d = |mesh: &FluidMeshData| {
+            mesh.positions
+                .iter()
+                .map(|p| terrain_density_at(&grid, *p))
+                .fold(f32::NEG_INFINITY, f32::max)
+        };
+        let d_legacy = max_d(&legacy);
+        let d_clamped = max_d(&clamped);
+        assert!(
+            d_clamped < d_legacy - 1e-3,
+            "floor clamp did not shrink burial: legacy {:.4}, clamped {:.4}",
+            d_legacy, d_clamped
+        );
+    }
+
+    #[test]
+    fn saucer_full_bundle_holds_all_invariants() {
+        let mut grid = make_settled_saucer();
+        let mesh = mesh_saucer(&mut grid, &saucer_config(true, true, true));
+        assert!(!mesh.positions.is_empty(), "pool body must still mesh");
+
+        // (a) nothing under the floor
+        assert_eq!(buried_triangles(&mesh, &grid, 0.02), 0, "under-floor skirt survived");
+        // (b) no raised rim above the fluid surface
+        assert_eq!(ring_verts_above_surface(&mesh), 0, "raised phantom ring survived");
+        // (c) interior surface height untouched by the bundle
+        let mut top = f32::NEG_INFINITY;
+        for p in &mesh.positions {
+            let r2 = (p[0] - 8.0).powi(2) + (p[2] - 8.0).powi(2);
+            if r2 < 2.0f32.powi(2) {
+                top = top.max(p[1]);
+            }
+        }
+        assert!(
+            (top - 5.85).abs() < 0.05,
+            "interior top surface moved: y={:.3}, expected ≈5.85",
+            top
+        );
+        // (d) no bare-floor gap: every interior open edge lands in rock contact
+        let open = open_boundary_vertices(&mesh);
+        let size_f = 16.0f32;
+        let mut checked = 0;
+        for vi in open {
+            let p = mesh.positions[vi];
+            if p[0] < 0.5 || p[1] < 0.5 || p[2] < 0.5
+                || p[0] > size_f - 0.5 || p[1] > size_f - 0.5 || p[2] > size_f - 0.5
+            {
+                continue;
+            }
+            checked += 1;
+            let d = terrain_density_at(&grid, p);
+            assert!(
+                d >= -1e-3,
+                "open-boundary vertex [{:.2},{:.2},{:.2}] floats in air (density {:.3})",
+                p[0], p[1], p[2], d
+            );
+        }
+        assert!(checked > 0, "no interior open boundary found — shoreline vanished?");
     }
 }

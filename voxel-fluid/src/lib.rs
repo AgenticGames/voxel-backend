@@ -66,6 +66,20 @@ pub struct FluidConfig {
     pub mesh_smooth_strength: f32,
     pub mesh_qef_refinement: bool,
     pub mesh_recalc_normals: bool,
+    // Rim/skirt fix bundle (2026-08-04) — three independently toggleable
+    // flags so they can be A/B tested live, then defaulted on.
+    /// Release hysteresis-held cells that have been stagnant below the mesh
+    /// iso threshold: a settled pool's drained rim cells otherwise stay in
+    /// the mesh forever (raised phantom ring above the real surface).
+    pub mesh_sticky_release: bool,
+    /// On floor-contact rim edges (vertical, solid-below) use a whisker
+    /// recess instead of the full ROCK_RECESS_T, so the sheet hugs the floor
+    /// from just below the surface instead of diving 0.1 cells into it.
+    pub mesh_floor_clamp: bool,
+    /// Drop triangles whose three vertices are all at/inside the terrain —
+    /// the buried closure skirt is only ever visible from inside the ground
+    /// (or through terrain cracks), and is the "under the floor" sheet.
+    pub mesh_buried_cull: bool,
 }
 
 impl Default for FluidConfig {
@@ -100,6 +114,9 @@ impl Default for FluidConfig {
             mesh_smooth_strength: 0.3,
             mesh_qef_refinement: true,
             mesh_recalc_normals: true,
+            mesh_sticky_release: false,
+            mesh_floor_clamp: false,
+            mesh_buried_cull: false,
         }
     }
 }
@@ -183,6 +200,15 @@ pub enum FluidEvent {
         water_spread_rate: f32,
         lava_flow_rate: f32,
         lava_spread_rate: f32,
+    },
+    /// Update the rim/skirt mesh flags at runtime (same reload path as
+    /// UpdateFluidRates). The handler dirty-sweeps every fluid grid so a
+    /// settled pool re-meshes immediately — without that, toggling a flag
+    /// would only show on chunks the sim happens to touch next.
+    UpdateFluidMeshFlags {
+        sticky_release: bool,
+        floor_clamp: bool,
+        buried_cull: bool,
     },
     /// Request a snapshot of all fluid cells (used by sleep system).
     /// Response sent via the dedicated reply channel.

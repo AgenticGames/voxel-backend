@@ -920,4 +920,10 @@ pub struct FfiEngineConfig {
     pub mushroom_ghost_tower_spawn_chance: f32,
     pub mushroom_ghost_tower_scale_min: f32,
     pub mushroom_ghost_tower_scale_max: f32,
+    // ── Fluid mesh rim/skirt flags (3 fields, 2026-08-04) ──
+    // Plain 0/1 bools — NO 0-means-default sentinel here: 0 must mean OFF
+    // (the flags are A/B toggles; a sentinel would make "off" unreachable).
+    pub fluid_mesh_sticky_release: u32,
+    pub fluid_mesh_floor_clamp: u32,
+    pub fluid_mesh_buried_cull: u32,
 }

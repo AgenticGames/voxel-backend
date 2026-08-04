@@ -471,7 +471,7 @@ pub fn fluid_sim_loop(
             if let Some(grid) = chunks.get_mut(key) {
                 // Mesh hysteresis: refresh the sticky flags so borderline
                 // cascade cells hold in the mesh instead of strobing.
-                grid.update_mesh_hysteresis();
+                grid.update_mesh_hysteresis(config.mesh_sticky_release);
                 let mesh = mesh_fluid(grid, &boundary, &config);
                 grid.dirty = false;
 
@@ -811,6 +811,24 @@ fn handle_event(
             config.water_spread_rate = water_spread_rate.max(0.0);
             config.lava_flow_rate = lava_flow_rate.max(0.0);
             config.lava_spread_rate = lava_spread_rate.max(0.0);
+        }
+        FluidEvent::UpdateFluidMeshFlags { sticky_release, floor_clamp, buried_cull } => {
+            let changed = config.mesh_sticky_release != sticky_release
+                || config.mesh_floor_clamp != floor_clamp
+                || config.mesh_buried_cull != buried_cull;
+            config.mesh_sticky_release = sticky_release;
+            config.mesh_floor_clamp = floor_clamp;
+            config.mesh_buried_cull = buried_cull;
+            // Dirty-sweep so settled (never-again-dirty) pools re-mesh with
+            // the new flags immediately — this is what makes the A/B toggle
+            // land on screen without touching the fluid.
+            if changed {
+                for grid in chunks.values_mut() {
+                    if grid.has_fluid {
+                        grid.dirty = true;
+                    }
+                }
+            }
         }
         FluidEvent::PendingFluidLoad { chunk, cells } => {
             // Stash the cells; they'll be applied on the next DensityUpdate

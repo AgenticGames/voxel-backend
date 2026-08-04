@@ -66,6 +66,13 @@ impl VoxelEngine {
             lava_flow_rate: fluid.lava_flow_rate,
             lava_spread_rate: fluid.lava_spread_rate,
         });
+        // Rim/skirt mesh flags ride the same live-reload path; the handler
+        // dirty-sweeps fluid grids so toggles re-mesh settled pools at once.
+        let _ = self.fluid_event_tx.try_send(FluidEvent::UpdateFluidMeshFlags {
+            sticky_release: fluid.mesh_sticky_release,
+            floor_clamp: fluid.mesh_floor_clamp,
+            buried_cull: fluid.mesh_buried_cull,
+        });
     }
 
     /// Hot-reload fluid configuration at runtime.
@@ -741,6 +748,11 @@ pub(crate) fn ffi_config_to_fluid(c: &FfiEngineConfig) -> FluidConfig {
         mesh_smooth_strength: 0.3,
         mesh_qef_refinement: true,
         mesh_recalc_normals: true,
+        // Direct 0/1 mapping — deliberately NOT the 0-means-default sentinel:
+        // these are toggles where 0 (off) is a meaningful, reachable state.
+        mesh_sticky_release: c.fluid_mesh_sticky_release != 0,
+        mesh_floor_clamp: c.fluid_mesh_floor_clamp != 0,
+        mesh_buried_cull: c.fluid_mesh_buried_cull != 0,
     }
 }
 
