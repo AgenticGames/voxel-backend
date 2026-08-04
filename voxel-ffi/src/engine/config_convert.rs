@@ -77,6 +77,7 @@ impl VoxelEngine {
             transit_retention: fluid.lava_transit_retention,
             channel_bias: fluid.lava_channel_bias,
             channel_focus: fluid.lava_channel_focus,
+            momentum: fluid.lava_momentum,
         });
     }
 
@@ -765,9 +766,13 @@ pub(crate) fn ffi_config_to_fluid(c: &FfiEngineConfig) -> FluidConfig {
         // probe-measured neutral (bias — forks already commit 77/23 via the
         // instant-level score + retention) to harmful (focus — trades basin
         // delivery for marginal sheet narrowing). Research harness lives in
-        // sim/mod.rs (river_convergence_probe); revisit with momentum.
+        // sim/mod.rs (river_convergence_probe).
         lava_channel_bias: false,
         lava_channel_focus: false,
+        // Momentum steering IS exposed (2026-08-05): direction-relative
+        // spread redistribution — probe-measured 2.7x basin delivery with
+        // arrival concentration preserved, settled ponds unchanged.
+        lava_momentum: c.fluid_lava_momentum != 0,
     }
 }
 

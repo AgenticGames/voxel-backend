@@ -187,6 +187,21 @@ pub const TRANSIT_RETENTION: f32 = 0.22;
 pub const INFLUX_HOLD_TICKS: u8 = 3;
 /// EMA rate for the per-cell cascade flux average when flux RISES.
 pub const FLUX_EMA_ALPHA: f32 = 0.35;
+
+// ── Momentum steering (lava_momentum, 2026-08-05) ──
+/// Softmax sharpness of the momentum redistribution at full strength. Each
+/// spread direction is weighted exp(k·alignment) and normalized by the mean
+/// weight, so steering REDISTRIBUTES spread (aligned ~2.7×, perpendicular
+/// ~0.6×, opposed ~0.13× at k=1.5) while conserving the total. Direction-
+/// relative with no absolute flux gate: a moving sheet keeps its delivery
+/// while it narrows — magnitude gating starved it (round-11 probe: −60%).
+pub const MOMENTUM_GAIN: f32 = 1.5;
+/// Momentum magnitude below which steering is off (isotropic spread).
+pub const MOMENTUM_MIN: f32 = 0.005;
+/// Vector EMA rates for the momentum fold: quick to take a direction, slow
+/// to forget one (same shape as the flux ribbon).
+pub const MOMENTUM_ALPHA: f32 = 0.35;
+pub const MOMENTUM_DECAY: f32 = 0.08;
 /// River channel bias (lava_channel_bias): weight of a slope target's flux
 /// HISTORY in candidate scoring. The instant-level term (existing*10) tops
 /// out around 10; steady channel flux_ema runs ~0.1-0.4, so *30 makes a
@@ -363,6 +378,13 @@ pub struct ChunkFluidGrid {
     /// STREAM_FLUX_MIN, leave below STREAM_FLUX_OFF). Updated in
     /// update_render_field.
     pub stream_mark: Vec<bool>,
+    /// Per-cell horizontal flow-direction memory (lava_momentum): EMA of the
+    /// cell's directed outflow (dx, dz weighted by amount). Steers the spread
+    /// pass — along-flow reinforced, cross-flow damped — so sheets converge
+    /// into streams. Empty until the flag is on and a lava tick folds it.
+    pub momentum: Vec<[f32; 2]>,
+    /// Per-tick directed-outflow scratch (taken/restored by tick_chunk).
+    pub scratch_dir: Vec<[f32; 2]>,
     /// Mesher mode, stamped by update_render_field right before meshing so
     /// mesh_level() knows which field to serve without a config reference.
     pub render_flux: bool,
@@ -393,6 +415,8 @@ impl ChunkFluidGrid {
             scratch_flux: Vec::new(),
             scratch_influx: Vec::new(),
             stream_mark: Vec::new(),
+            momentum: Vec::new(),
+            scratch_dir: Vec::new(),
             render_flux: false,
             render_ribbon: false,
         }
@@ -431,6 +455,8 @@ impl ChunkFluidGrid {
             scratch_flux: Vec::new(),
             scratch_influx: Vec::new(),
             stream_mark: Vec::new(),
+            momentum: Vec::new(),
+            scratch_dir: Vec::new(),
             render_flux: false,
             render_ribbon: false,
         }

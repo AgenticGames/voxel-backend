@@ -110,6 +110,12 @@ pub struct FluidConfig {
     /// its channel. Cells with no downhill exit (pool interiors, stream
     /// mouths) spread normally so basins still fill flat.
     pub lava_channel_focus: bool,
+    /// Momentum steering (2026-08-05): per-cell directional flow memory
+    /// biases the spread pass — along-flow reinforced, cross-flow damped —
+    /// so sheets converge into streams. Direction-relative (no flux gate),
+    /// which is what the round-11 magnitude-gated variants got wrong.
+    /// Internal-only until probe-verified (not in FfiEngineConfig).
+    pub lava_momentum: bool,
 }
 
 impl Default for FluidConfig {
@@ -156,6 +162,7 @@ impl Default for FluidConfig {
             lava_transit_retention: true,
             lava_channel_bias: false,
             lava_channel_focus: false,
+            lava_momentum: false,
         }
     }
 }
@@ -253,6 +260,7 @@ pub enum FluidEvent {
         transit_retention: bool,
         channel_bias: bool,
         channel_focus: bool,
+        momentum: bool,
     },
     /// Request a snapshot of all fluid cells (used by sleep system).
     /// Response sent via the dedicated reply channel.

@@ -959,6 +959,7 @@
             fluid_mesh_flux_render: 1,
             fluid_mesh_stream_ribbon: 1,
             fluid_lava_transit_retention: 1,
+            fluid_lava_momentum: 0,
         }
     }
 

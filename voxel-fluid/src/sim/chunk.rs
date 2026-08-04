@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use crate::cell::{ChunkFluidGrid, FluidType, CHANNEL_BIAS_WEIGHT, CHANNEL_FOCUS_FACTOR,
-    FLUX_EMA_ALPHA, INFLUX_HOLD_TICKS, MIN_LEVEL, ORPHAN_EVAP_TICKS, ORPHAN_THRESHOLD,
+    FLUX_EMA_ALPHA, INFLUX_HOLD_TICKS, MIN_LEVEL, MOMENTUM_ALPHA, MOMENTUM_DECAY,
+    MOMENTUM_GAIN, MOMENTUM_MIN, ORPHAN_EVAP_TICKS, ORPHAN_THRESHOLD,
     STREAM_FLUX_MIN, TRANSIT_RETENTION};
 use crate::FluidConfig;
 
@@ -168,7 +169,8 @@ pub(super) fn tick_chunk(
     // Reusing these allocations is the single biggest win for tick perf —
     // at chunk_size=30 each scratch is ≈540KB / ≈108KB / ≈108KB, allocated
     // 6× per water tick × N chunks/sec on the old code path.
-    let (mut new_cells, mut fluid_weight, mut drain_scratch, mut flux_out, mut influx_mark) = {
+    let momentum_on = config.lava_momentum && is_lava_tick;
+    let (mut new_cells, mut fluid_weight, mut drain_scratch, mut flux_out, mut influx_mark, mut dir_scratch) = {
         let g = chunks.get_mut(&key).unwrap();
         let mut nc = std::mem::take(&mut g.scratch_cells);
         let mut fw = std::mem::take(&mut g.scratch_weights);
@@ -176,6 +178,7 @@ pub(super) fn tick_chunk(
         // Cascade flux tracking (lava ticks): per-cell outflux + inflow marks.
         let mut fo = std::mem::take(&mut g.scratch_flux);
         let mut im = std::mem::take(&mut g.scratch_influx);
+        let mut ds = std::mem::take(&mut g.scratch_dir);
         if nc.len() == total {
             nc.copy_from_slice(&g.cells);
         } else {
@@ -190,7 +193,11 @@ pub(super) fn tick_chunk(
             im.clear();
             im.resize(total, 0);
         }
-        (nc, fw, dd, fo, im)
+        if momentum_on {
+            ds.clear();
+            ds.resize(total, [0.0, 0.0]);
+        }
+        (nc, fw, dd, fo, im, ds)
     };
 
     let grid = chunks.get(&key).unwrap();
@@ -206,6 +213,9 @@ pub(super) fn tick_chunk(
     let bias_on = config.lava_channel_bias && is_lava_tick;
     let focus_on = config.lava_channel_focus && is_lava_tick;
     let flux_hist = &grid.flux_ema;
+    // Momentum steering: last ticks' directed-outflow EMA (empty until the
+    // flag has been on for a lava tick — .get() treats that as no memory).
+    let momentum_hist = &grid.momentum;
     // Face gating (2026-08-04, bug #215): the rendered surface must be a
     // transit barrier. Checked from the SOURCE cell's own corners, so
     // cross-chunk directions need no neighbor data.
@@ -725,11 +735,37 @@ pub(super) fn tick_chunk(
                         && had_down_path
                         && own_flux >= STREAM_FLUX_MIN;
 
+                    // Momentum steering: the cell's remembered flow direction
+                    // REDISTRIBUTES spread across the 4 directions — each is
+                    // weighted exp(k·alignment), normalized by the mean, so
+                    // along-flow reinforces, cross-flow damps, and the total
+                    // is conserved (a moving sheet narrows without slowing).
+                    // Purely relative: no flux threshold to fall under.
+                    let mom = momentum_hist.get(idx).copied().unwrap_or([0.0, 0.0]);
+                    let mom_mag = (mom[0] * mom[0] + mom[1] * mom[1]).sqrt();
+                    let steering = momentum_on && is_lava && mom_mag >= MOMENTUM_MIN;
+                    let (mom_k, mom_ax, mom_az, mom_mean) = if steering {
+                        let k = MOMENTUM_GAIN * (mom_mag / flow_rate).min(1.0);
+                        let ax = mom[0] / mom_mag;
+                        let az = mom[1] / mom_mag;
+                        let mean = ((k * ax).cosh() + (k * az).cosh()) / 2.0;
+                        (k, ax, az, mean)
+                    } else {
+                        (0.0, 0.0, 0.0, 1.0)
+                    };
+
                     for (nx, ny, nz) in neighbors {
                         // Face gating: no spreading through a rendered surface.
                         if !face_open(idx, nx - x as i32, 0, nz - z as i32) {
                             continue;
                         }
+                        let dxi = (nx - x as i32) as f32;
+                        let dzi = (nz - z as i32) as f32;
+                        let mom_scale = if steering {
+                            ((mom_k * (mom_ax * dxi + mom_az * dzi)).exp() / mom_mean).min(4.0)
+                        } else {
+                            1.0
+                        };
                         // Recompute src_fill from current level each iteration
                         // to prevent over-deduction when multiple neighbors drain us
                         if new_cells[idx].level < MIN_LEVEL && !is_source && !has_grace {
@@ -766,7 +802,7 @@ pub(super) fn tick_chunk(
                                             let dir_scale = if channeled
                                                 && nbr_grid.flux_ema.get(bi).copied().unwrap_or(0.0) < own_flux * 0.5
                                             { CHANNEL_FOCUS_FACTOR } else { 1.0 };
-                                            let transfer = (diff * horizontal_spread * dir_scale * src_capacity)
+                                            let transfer = (diff * horizontal_spread * dir_scale * mom_scale * src_capacity)
                                                 .min(flow_rate)
                                                 .min(new_cells[idx].level)
                                                 .min(bounded_room);
@@ -776,6 +812,10 @@ pub(super) fn tick_chunk(
                                                 }
                                                 if is_lava_tick {
                                                     flux_out[idx] += transfer;
+                                                }
+                                                if momentum_on {
+                                                    dir_scratch[idx][0] += dxi * transfer;
+                                                    dir_scratch[idx][1] += dzi * transfer;
                                                 }
                                                 cross_transfers.push(CrossChunkTransfer {
                                                     dest_key,
@@ -813,13 +853,17 @@ pub(super) fn tick_chunk(
                             let dir_scale = if channeled
                                 && flux_hist.get(ni).copied().unwrap_or(0.0) < own_flux * 0.5
                             { CHANNEL_FOCUS_FACTOR } else { 1.0 };
-                            let transfer = (diff * horizontal_spread * dir_scale * src_capacity)
+                            let transfer = (diff * horizontal_spread * dir_scale * mom_scale * src_capacity)
                                 .min(flow_rate)
                                 .min(new_cells[idx].level) // prevent overdrain
                                 .min(bounded_space);       // prevent overfill + bounded cap
                             if transfer > MIN_LEVEL {
                                 if !is_source && !has_grace {
                                     new_cells[idx].level -= transfer;
+                                }
+                                if momentum_on {
+                                    dir_scratch[idx][0] += dxi * transfer;
+                                    dir_scratch[idx][1] += dzi * transfer;
                                 }
                                 new_cells[ni].level += transfer;
                                 new_cells[ni].fluid_type = cell.fluid_type;
@@ -1272,11 +1316,29 @@ pub(super) fn tick_chunk(
                 grid.flux_ema[i] = if e < 0.001 { 0.0 } else { e };
             }
         }
+        // Momentum fold (vector EMA, same asymmetric shape as the flux one:
+        // quick to take a direction, slow to forget it).
+        if momentum_on && dir_scratch.len() == total {
+            if grid.momentum.len() != total {
+                grid.momentum = vec![[0.0, 0.0]; total];
+            }
+            for i in 0..total {
+                let old = grid.momentum[i];
+                let new = dir_scratch[i];
+                let old_mag = (old[0] * old[0] + old[1] * old[1]).sqrt();
+                let new_mag = (new[0] * new[0] + new[1] * new[1]).sqrt();
+                let a = if new_mag > old_mag { MOMENTUM_ALPHA } else { MOMENTUM_DECAY };
+                let mx = old[0] * (1.0 - a) + new[0] * a;
+                let mz = old[1] * (1.0 - a) + new[1] * a;
+                grid.momentum[i] = if mx * mx + mz * mz < 1e-8 { [0.0, 0.0] } else { [mx, mz] };
+            }
+        }
         grid.scratch_cells = new_cells;
         grid.scratch_weights = fluid_weight;
         grid.scratch_drain = drain_scratch;
         grid.scratch_flux = flux_out;
         grid.scratch_influx = influx_mark;
+        grid.scratch_dir = dir_scratch;
     }
 
     (changed, cross_transfers)

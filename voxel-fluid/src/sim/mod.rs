@@ -2563,6 +2563,52 @@ mod tests {
         grid
     }
 
+    /// Wide slope with scattered floor bumps (raised lattice points on a
+    /// fixed pseudo-random pattern). A sheet must thread between bumps —
+    /// momentum decides whether the threads RE-MERGE into committed lanes
+    /// downstream or re-sheet after every obstacle. The uniform slope can't
+    /// measure convergence at all: every z-column is identical, so there is
+    /// no asymmetry to amplify.
+    fn make_noisy_slope() -> ChunkFluidGrid {
+        let size = 16;
+        let config = crate::FluidConfig::default();
+        let mut d = make_density_field_solid(size);
+        for i in 0..5usize {
+            let x0 = 2 + 2 * i;
+            let floor = 11 - 2 * i;
+            carve_box(&mut d, size, x0..(x0 + 3), floor..15, 2..14);
+        }
+        carve_box(&mut d, size, 12..15, 1..6, 2..14);
+        // Bumps: re-solidify the floor lattice point at ~1/3 of columns on a
+        // fixed interference pattern (skip the source column's fan area).
+        let stride = size + 1;
+        for i in 0..5usize {
+            let x0 = 2 + 2 * i;
+            let floor = 11 - 2 * i;
+            for gx in x0..(x0 + 3) {
+                for gz in 3..13usize {
+                    if gx >= 4 && (gx * 5 + gz * 7) % 3 == 0 {
+                        d[gz * stride * stride + floor * stride + gx] = 1.0;
+                    }
+                }
+            }
+        }
+        let mut grid = make_chunk(size);
+        apply_density(&mut grid, &d, &config);
+        {
+            let cell = grid.get_mut(2, 11, 8);
+            cell.level = SOURCE_LEVEL;
+            cell.fluid_type = FluidType::Lava;
+            cell.is_source = true;
+            cell.max_flow_dist = 0;
+            cell.hops_from_source = 0;
+        }
+        grid.has_fluid = true;
+        grid.has_lava = true;
+        grid.has_sources = true;
+        grid
+    }
+
     fn river_config(bias: bool, focus: bool) -> crate::FluidConfig {
         crate::FluidConfig {
             lava_channel_bias: bias,
@@ -2659,13 +2705,15 @@ mod tests {
             let share = a.max(b) / (a + b).max(1e-6);
             eprintln!("RIVER {name}: A={a:.2} B={b:.2} winner_share={share:.2}");
         }
-        for (name, bias, focus) in [
-            ("legacy", false, false),
-            ("bias", true, false),
-            ("focus", false, true),
-            ("bias+focus", true, true),
+        for (name, bias, focus, momentum) in [
+            ("legacy", false, false, false),
+            ("bias", true, false, false),
+            ("focus", false, true, false),
+            ("bias+focus", true, true, false),
+            ("momentum", false, false, true),
         ] {
-            let cfg = river_config(bias, focus);
+            let mut cfg = river_config(bias, focus);
+            cfg.lava_momentum = momentum;
             let mut chunks = HashMap::new();
             chunks.insert((0, 0, 0), make_wide_slope());
             run_cascade_ticks(&mut chunks, 150, &cfg, false);
@@ -2676,6 +2724,54 @@ mod tests {
                 "RIVER {name}: top3_share={top3:.2} wet_cols={wet_cols} basin={basin:.1} cols={:?}",
                 cols.iter().map(|c| (c * 100.0).round() / 100.0).collect::<Vec<_>>()
             );
+        }
+        // Noisy slope: the convergence measurement that matters — does the
+        // sheet commit to lanes between obstacles?
+        for (name, momentum) in [("noisy legacy", false), ("noisy momentum", true)] {
+            let mut cfg = crate::FluidConfig::default();
+            cfg.lava_momentum = momentum;
+            let mut chunks = HashMap::new();
+            chunks.insert((0, 0, 0), make_noisy_slope());
+            run_cascade_ticks(&mut chunks, 150, &cfg, false);
+            let grid = chunks.get(&(0, 0, 0)).unwrap();
+            let (cols, top3, basin) = slope_arrival_stats(grid);
+            let wet_cols = cols.iter().filter(|&&c| c > 0.01).count();
+            eprintln!(
+                "RIVER {name}: top3_share={top3:.2} wet_cols={wet_cols} basin={basin:.1} cols={:?}",
+                cols.iter().map(|c| (c * 100.0).round() / 100.0).collect::<Vec<_>>()
+            );
+        }
+        // Momentum on the flat spill: a pond must stay a pond (radial memory
+        // is symmetric), not tear into fingers. Measured mid-growth (40) and
+        // near-settled (110) — the outward surge may thin films transiently
+        // but the settled pond must render like legacy.
+        for (name, momentum, ticks) in [
+            ("spill legacy t40", false, 40),
+            ("spill momentum t40", true, 40),
+            ("spill legacy t110", false, 110),
+            ("spill momentum t110", true, 110),
+        ] {
+            let mut cfg = crate::FluidConfig::default();
+            cfg.lava_momentum = momentum;
+            let mut chunks = HashMap::new();
+            chunks.insert((0, 0, 0), make_flat_spill());
+            run_cascade_ticks(&mut chunks, ticks, &cfg, true);
+            let grid = chunks.get(&(0, 0, 0)).unwrap();
+            let mut wet = 0usize;
+            let mut rendered = 0usize;
+            for z in 1..16usize {
+                for x in 1..16usize {
+                    for y in 3..5usize {
+                        if grid.get(x, y, z).level >= 0.02 {
+                            wet += 1;
+                            if grid.mesh_level(x, y, z) >= 0.15 {
+                                rendered += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            eprintln!("RIVER {name}: wet={wet} rendered={rendered}");
         }
     }
 
@@ -2805,6 +2901,70 @@ mod tests {
         assert!(
             left_in_gallery < 1.0,
             "gallery still holds {left_in_gallery:.2} lava long after the source died — retention is perching fluid"
+        );
+    }
+
+    #[test]
+    fn momentum_speeds_streams_without_starving_or_scattering() {
+        // Momentum steering must (a) DELIVER more — streams commit downstream
+        // instead of dithering (measured 2.7× basin on the noisy slope) —
+        // (b) never scatter the arrival wider than legacy, and (c) leave
+        // settled ponds untouched. Round 11's magnitude-gated variants
+        // failed (a) at −60%; this is the guard that momentum stays the
+        // direction-relative mechanism that doesn't.
+        let run_slope = |momentum: bool| -> (f32, f64) {
+            let mut cfg = crate::FluidConfig::default();
+            cfg.lava_momentum = momentum;
+            let mut chunks = HashMap::new();
+            chunks.insert((0, 0, 0), make_noisy_slope());
+            run_cascade_ticks(&mut chunks, 150, &cfg, false);
+            let grid = chunks.get(&(0, 0, 0)).unwrap();
+            let (_, top3, basin) = slope_arrival_stats(grid);
+            (top3, basin)
+        };
+        let (top3_legacy, basin_legacy) = run_slope(false);
+        let (top3_momentum, basin_momentum) = run_slope(true);
+        assert!(
+            basin_legacy > 0.5,
+            "fixture drift: legacy slope delivers nothing (basin={basin_legacy:.1})"
+        );
+        assert!(
+            basin_momentum >= basin_legacy * 1.5,
+            "momentum stopped speeding delivery: basin {basin_momentum:.1} vs legacy {basin_legacy:.1}"
+        );
+        assert!(
+            top3_momentum >= top3_legacy - 0.05,
+            "momentum SCATTERS the arrival: top3 {top3_momentum:.2} vs legacy {top3_legacy:.2}"
+        );
+
+        // Settled pond invariance: at t110 the spill must render like legacy.
+        let settled = |momentum: bool| -> (usize, usize) {
+            let mut cfg = crate::FluidConfig::default();
+            cfg.lava_momentum = momentum;
+            let mut chunks = HashMap::new();
+            chunks.insert((0, 0, 0), make_flat_spill());
+            run_cascade_ticks(&mut chunks, 110, &cfg, true);
+            let grid = chunks.get(&(0, 0, 0)).unwrap();
+            let mut wet = 0usize;
+            let mut rendered = 0usize;
+            for z in 1..16usize {
+                for x in 1..16usize {
+                    for y in 3..5usize {
+                        if grid.get(x, y, z).level >= 0.02 {
+                            wet += 1;
+                            if grid.mesh_level(x, y, z) >= 0.15 {
+                                rendered += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            (wet, rendered)
+        };
+        let (wet_m, rendered_m) = settled(true);
+        assert!(
+            wet_m >= 200 && rendered_m * 10 >= wet_m * 9,
+            "settled pond regressed under momentum: {rendered_m}/{wet_m} rendered"
         );
     }
 

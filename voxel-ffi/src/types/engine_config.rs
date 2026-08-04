@@ -930,4 +930,6 @@ pub struct FfiEngineConfig {
     pub fluid_mesh_flux_render: u32,
     pub fluid_mesh_stream_ribbon: u32,
     pub fluid_lava_transit_retention: u32,
+    // ── Momentum steering (2026-08-05; same 0/1 rule) ──
+    pub fluid_lava_momentum: u32,
 }
