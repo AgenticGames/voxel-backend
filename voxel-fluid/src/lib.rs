@@ -136,6 +136,14 @@ pub enum FluidEvent {
     /// compat). >0 = source's children stop propagating beyond this hop count
     /// (Minecraft-style hard length limit, with linear taper across the last
     /// `chunk::TAPER_HOPS` cells). Ignored for non-source placements.
+    /// Procedural pipe-lava vents for one chunk (kimberlite-adjacent).
+    /// Separate from AddFluid so the fluid thread can once-guard it — the
+    /// worker re-sends on every stream-in, and generic AddFluid must keep
+    /// working for player brushes (bug #216 refill class).
+    PlacePipeLava {
+        chunk: (i32, i32, i32),
+        cells: Vec<(u8, u8, u8, f32)>,
+    },
     AddFluid {
         chunk: (i32, i32, i32),
         x: u8,

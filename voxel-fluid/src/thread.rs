@@ -676,6 +676,37 @@ fn handle_event(
                 }
             }
         }
+        FluidEvent::PlacePipeLava { chunk, cells } => {
+            // Once-per-chunk like PlaceSources/springs (kind 2): the worker
+            // re-sends on every stream-in; re-adding refilled vents to full
+            // and resurrected self-extinguished ones (#216 refill class).
+            const FEATURE_PIPE_LAVA: u8 = 2;
+            if !features_placed.insert((chunk, FEATURE_PIPE_LAVA)) {
+                return;
+            }
+            ensure_grid(chunks, chunk_densities, chunk, chunk_size);
+            if let Some(grid) = chunks.get_mut(&chunk) {
+                for (x, y, z, level) in cells {
+                    let (xu, yu, zu) = (x as usize, y as usize, z as usize);
+                    if xu < chunk_size && yu < chunk_size && zu < chunk_size
+                        && grid.cell_capacity(xu, yu, zu) > crate::cell::MIN_LEVEL
+                        && !grid.is_mostly_solid(xu, yu, zu, config.solid_corner_threshold)
+                    {
+                        let cap = grid.cell_capacity(xu, yu, zu);
+                        let cell = grid.get_mut(xu, yu, zu);
+                        cell.fluid_type = crate::cell::FluidType::Lava;
+                        cell.level = level.min(crate::cell::MAX_LEVEL).min(cap);
+                        cell.is_source = true;
+                        cell.hops_from_source = 0;
+                        cell.max_flow_dist = 12; // geological bound, like springs
+                        grid.dirty = true;
+                        grid.has_fluid = true;
+                        grid.has_lava = true;
+                        grid.has_sources = true;
+                    }
+                }
+            }
+        }
         FluidEvent::AddFluid { chunk, x, y, z, fluid_type, level, is_source, max_flow_dist } => {
             ensure_grid(chunks, chunk_densities, chunk, chunk_size);
             if let Some(grid) = chunks.get_mut(&chunk) {
@@ -751,6 +782,7 @@ fn handle_event(
             // stream-in path must not stomp it back to gen-fresh full.
             features_placed.insert((chunk, FEATURE_SOURCES));
             features_placed.insert((chunk, FEATURE_SPRINGS));
+            features_placed.insert((chunk, 2)); // pipe lava — same protection
             pending_fluid.entry(chunk).or_default().extend(cells);
             if chunk_densities.contains_key(&chunk) {
                 apply_pending_fluid(chunks, chunk_densities, pending_fluid, chunk, chunk_size, config);

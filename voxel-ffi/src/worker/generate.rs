@@ -830,20 +830,16 @@ pub(super) fn handle_generate(
                             density, chunk, cfg.chunk_size,
                             &cfg.pipe_lava, cfg.seed,
                         );
-                        for lv in &pipe_lava {
-                            let _ = fluid_event_tx.send(FluidEvent::AddFluid {
+                        // 2026-08-04 (#216): dedicated once-guarded event — a
+                        // plain AddFluid re-add on every stream-in refilled
+                        // vents to full and resurrected self-extinguished
+                        // ones. Bound (12) + guard live in the fluid thread.
+                        if !pipe_lava.is_empty() {
+                            let _ = fluid_event_tx.send(FluidEvent::PlacePipeLava {
                                 chunk,
-                                x: lv.lx,
-                                y: lv.ly,
-                                z: lv.lz,
-                                fluid_type: voxel_fluid::cell::FluidType::Lava,
-                                level: lv.level,
-                                is_source: true,
-                                // 2026-08-04 containment: pipe-lava vents were the
-                                // other unbounded infinite emitter (with pools) —
-                                // bound them like geological springs so a vent
-                                // oozes a local flow instead of flooding.
-                                max_flow_dist: 12,
+                                cells: pipe_lava.iter()
+                                    .map(|lv| (lv.lx, lv.ly, lv.lz, lv.level))
+                                    .collect(),
                             });
                         }
                     }
