@@ -280,7 +280,11 @@ pub(super) fn handle_mine(ctx: &super::HandlerCtx<'_>, request: crate::types::Ff
                                     fluid_type: voxel_fluid::cell::FluidType::WaterBreach,
                                     level: b.level,
                                     is_source: true,
-                                    max_flow_dist: 0, // procedural breach — unbounded
+                                    // 2026-08-04 containment: breach sources were the last
+                                    // unbounded infinite emitters — bound like geological
+                                    // springs so a mined-open aquifer feeds a local flow,
+                                    // not a world-crossing one.
+                                    max_flow_dist: 12,
                                 });
                             }
                         }
@@ -420,7 +424,11 @@ pub(super) fn handle_mine_and_fill_fluid(ctx: &super::HandlerCtx<'_>, world_x: f
                                     fluid_type: voxel_fluid::cell::FluidType::WaterBreach,
                                     level: b.level,
                                     is_source: true,
-                                    max_flow_dist: 0, // procedural breach — unbounded
+                                    // 2026-08-04 containment: breach sources were the last
+                                    // unbounded infinite emitters — bound like geological
+                                    // springs so a mined-open aquifer feeds a local flow,
+                                    // not a world-crossing one.
+                                    max_flow_dist: 12,
                                 });
                             }
                         }
