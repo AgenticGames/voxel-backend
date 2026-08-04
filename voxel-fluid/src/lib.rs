@@ -137,9 +137,11 @@ impl Default for FluidConfig {
             mesh_sticky_release: true,
             mesh_floor_clamp: true,
             mesh_buried_cull: true,
-            mesh_flux_render: false,
-            mesh_stream_ribbon: false,
-            lava_transit_retention: false,
+            // Cascade bundle: default ON since 2026-08-04 (user-verified live
+            // on lava streams; all three approved).
+            mesh_flux_render: true,
+            mesh_stream_ribbon: true,
+            lava_transit_retention: true,
         }
     }
 }

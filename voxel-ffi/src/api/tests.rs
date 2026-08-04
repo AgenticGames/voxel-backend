@@ -956,9 +956,9 @@
             fluid_mesh_sticky_release: 1,
             fluid_mesh_floor_clamp: 1,
             fluid_mesh_buried_cull: 1,
-            fluid_mesh_flux_render: 0,
-            fluid_mesh_stream_ribbon: 0,
-            fluid_lava_transit_retention: 0,
+            fluid_mesh_flux_render: 1,
+            fluid_mesh_stream_ribbon: 1,
+            fluid_lava_transit_retention: 1,
         }
     }
 
