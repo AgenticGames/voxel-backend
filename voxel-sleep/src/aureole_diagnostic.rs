@@ -42,7 +42,7 @@ mod tests {
             fluid_type: FluidType::Water,
             is_source: false,
             grace_ticks: 0,
-            stagnant_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
+            stagnant_ticks: 0, drain_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
         }; CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE]
     }
 
@@ -60,7 +60,7 @@ mod tests {
                 fluid_type: FluidType::Lava,
                 is_source: true,
                 grace_ticks: 0,
-                stagnant_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
+                stagnant_ticks: 0, drain_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
             };
         }
     }
@@ -740,7 +740,7 @@ mod tests {
                     fluid_type: FluidType::Water,
                     is_source: false,
                     grace_ticks: 0,
-                    stagnant_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
+                    stagnant_ticks: 0, drain_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
                 }; cs * cs * cs]
             });
 
@@ -764,7 +764,7 @@ mod tests {
                                 fluid_type: FluidType::Lava,
                                 is_source: true,
                                 grace_ticks: 0,
-                                stagnant_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
+                                stagnant_ticks: 0, drain_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
                             };
                             lava_injected += 1;
 

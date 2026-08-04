@@ -58,6 +58,15 @@ pub struct FluidCell {
     /// Ticks of stagnation for orphan puddle detection. Incremented when
     /// level < ORPHAN_THRESHOLD and no flow occurred. Reset on movement.
     pub stagnant_ticks: u8,
+    /// Source self-extinguish (2026-08-04): consecutive ticks this SOURCE
+    /// cell ended below SOURCE_DRAIN_LEVEL despite regen refilling it to
+    /// full at tick start — meaning its fluid is vanishing into a sink
+    /// (void pinhole, out-of-world, thin-film loss) and it can never reach
+    /// steady state. At SOURCE_DRAIN_DEMOTE_TICKS the source demotes to a
+    /// one-shot fill (is_source=false) and the pump dies. Sealed pools and
+    /// spring-fed rivers equalize (post-tick level stays high), so they
+    /// never accumulate a streak. Only meaningful while is_source.
+    pub drain_ticks: u8,
     /// **Bounded-flow tracking** — hops from the originating source cell.
     /// Source cells reset to 0 each tick; flow propagation increments by 1
     /// on each transfer. Cells whose hop count meets/exceeds the source's
@@ -81,6 +90,7 @@ impl Default for FluidCell {
             is_source: false,
             grace_ticks: 0,
             stagnant_ticks: 0,
+            drain_ticks: 0,
             hops_from_source: 255, // sentinel: no source recorded
             max_flow_dist: 0,      // 0 = unlimited (legacy)
         }
@@ -103,6 +113,14 @@ pub const MIN_LEVEL: f32 = 0.001;
 pub const ORPHAN_THRESHOLD: f32 = 0.15;
 /// Ticks of stagnation before orphan puddles start evaporating.
 pub const ORPHAN_EVAP_TICKS: u8 = 35;
+/// Source self-extinguish: if none of a source's passable neighbors holds
+/// at least this level, nothing it emits is accumulating (it's all
+/// vanishing into a sink).
+pub const SOURCE_DRAIN_LEVEL: f32 = 0.5;
+/// Consecutive draining ticks before a source demotes to a one-shot fill.
+/// ~40 lava ticks ≈ a few seconds at default rates — matches the user's
+/// "infinite pool turns off after ~4 seconds" design instinct.
+pub const SOURCE_DRAIN_DEMOTE_TICKS: u8 = 40;
 /// Level at which a cell is considered a full source block.
 pub const SOURCE_LEVEL: f32 = 1.0;
 /// Maximum fluid level.

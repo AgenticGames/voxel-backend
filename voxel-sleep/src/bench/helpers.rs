@@ -143,7 +143,7 @@ pub(crate) fn empty_fluid_cells() -> Vec<FluidCell> {
         fluid_type: FluidType::Water,
         is_source: false,
         grace_ticks: 0,
-        stagnant_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
+        stagnant_ticks: 0, drain_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
     }; 4096]
 }
 
@@ -201,7 +201,7 @@ pub(crate) fn inject_water_sources(
                 fluid_type: FluidType::Water,
                 is_source: true,
                 grace_ticks: 0,
-                stagnant_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
+                stagnant_ticks: 0, drain_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
             };
             placed += 1;
         }

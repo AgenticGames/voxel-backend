@@ -250,7 +250,7 @@ impl GeneratedRegion {
                     fluid_type: voxel_fluid::cell::FluidType::Water,
                     is_source: false,
                     grace_ticks: 0,
-                    stagnant_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
+                    stagnant_ticks: 0, drain_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
                 }; cs * cs * cs]
             });
             let idx = fs.lz as usize * cs * cs + fs.ly as usize * cs + fs.lx as usize;
@@ -264,7 +264,7 @@ impl GeneratedRegion {
                     fluid_type: ft,
                     is_source: fs.is_source,
                     grace_ticks: 0,
-                    stagnant_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
+                    stagnant_ticks: 0, drain_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
                 };
             }
         }
@@ -285,7 +285,7 @@ impl GeneratedRegion {
                     fluid_type: voxel_fluid::cell::FluidType::Water,
                     is_source: false,
                     grace_ticks: 0,
-                    stagnant_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
+                    stagnant_ticks: 0, drain_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
                 }; cs * cs * cs]
             });
             let idx = lz * cs * cs + ly * cs + lx;
@@ -295,7 +295,7 @@ impl GeneratedRegion {
                     fluid_type: voxel_fluid::cell::FluidType::Water,
                     is_source: true,
                     grace_ticks: 0,
-                    stagnant_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
+                    stagnant_ticks: 0, drain_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
                 };
                 placed_water_count += 1;
             }
@@ -348,7 +348,7 @@ impl GeneratedRegion {
                                     fluid_type: voxel_fluid::cell::FluidType::Water,
                                     is_source: false,
                                     grace_ticks: 0,
-                                    stagnant_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
+                                    stagnant_ticks: 0, drain_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
                                 }; cs * cs * cs]
                             });
 
@@ -359,7 +359,7 @@ impl GeneratedRegion {
                                     fluid_type: voxel_fluid::cell::FluidType::Lava,
                                     is_source: true,
                                     grace_ticks: 0,
-                                    stagnant_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
+                                    stagnant_ticks: 0, drain_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
                                 };
                                 injected += 1;
 

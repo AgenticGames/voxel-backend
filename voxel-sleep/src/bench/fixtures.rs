@@ -67,7 +67,7 @@ pub(crate) fn make_realistic_world(seed: u64, water_count: usize) -> (
                 fluid_type: ft,
                 is_source: fs.is_source,
                 grace_ticks: 0,
-                stagnant_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
+                stagnant_ticks: 0, drain_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
             };
         }
     }
@@ -377,7 +377,7 @@ pub(crate) fn make_realistic_world_at(
                 fluid_type: ft,
                 is_source: fs.is_source,
                 grace_ticks: 0,
-                stagnant_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
+                stagnant_ticks: 0, drain_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
             };
         }
     }
@@ -476,7 +476,7 @@ pub(crate) fn inject_fluid_patches(
             if idx < cells.len() && cells[idx].level < 0.01 {
                 cells[idx] = FluidCell {
                     level: 1.0, fluid_type: FluidType::Water,
-                    is_source: true, grace_ticks: 0, stagnant_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
+                    is_source: true, grace_ticks: 0, stagnant_ticks: 0, drain_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
                 };
                 water_placed += 1;
             }
@@ -500,7 +500,7 @@ pub(crate) fn inject_fluid_patches(
             if idx < cells.len() && cells[idx].level < 0.01 {
                 cells[idx] = FluidCell {
                     level: 1.0, fluid_type: FluidType::Lava,
-                    is_source: true, grace_ticks: 0, stagnant_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
+                    is_source: true, grace_ticks: 0, stagnant_ticks: 0, drain_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
                 };
                 lava_placed += 1;
             }
@@ -579,7 +579,7 @@ pub(crate) fn make_synthetic_world(
                 fluid_type: FluidType::Lava,
                 is_source: true,
                 grace_ticks: 0,
-                stagnant_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
+                stagnant_ticks: 0, drain_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
             };
         }
     }
@@ -598,7 +598,7 @@ pub(crate) fn make_synthetic_world(
                 fluid_type: FluidType::Water,
                 is_source: true,
                 grace_ticks: 0,
-                stagnant_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
+                stagnant_ticks: 0, drain_ticks: 0, hops_from_source: 255, max_flow_dist: 0,
             };
         }
     }

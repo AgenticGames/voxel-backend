@@ -843,6 +843,62 @@ pub(super) fn tick_chunk(
                         }
                         changed = true;
                     }
+
+                    // Source self-extinguish (2026-08-04): source cells never
+                    // deduct on outflow (their own level is useless as a
+                    // signal) — instead watch whether the fluid they emit
+                    // ever ACCUMULATES. A source at steady state (sealed
+                    // pool, filled basin, spring-fed river under its hop
+                    // bound) has at least one passable neighbor holding a
+                    // solid level. A source pumping into a sink (void below
+                    // the world, pinhole into nowhere) has neighbors that
+                    // never hold anything — everything falls away — and an
+                    // eternal pump is exactly the bug-#215 world-flooder.
+                    // Gate on the CURRENT tick's fluid type so the divisor'd
+                    // lava cadence can't falsely grow/reset the streak on
+                    // water ticks.
+                    if new_cells[idx].is_source
+                        && new_cells[idx].fluid_type.is_lava() == is_lava_tick
+                    {
+                        let mut max_neighbor_level = 0.0f32;
+                        let mut has_passable_neighbor = false;
+                        let offsets: [(i32,i32,i32); 6] =
+                            [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)];
+                        for &(dx,dy,dz) in &offsets {
+                            let nx = x as i32 + dx;
+                            let ny = y as i32 + dy;
+                            let nz = z as i32 + dz;
+                            if nx < 0 || nx >= size as i32 || ny < 0 || ny >= size as i32
+                                || nz < 0 || nz >= size as i32
+                            {
+                                continue; // cross-chunk unknown — ignore
+                            }
+                            let ni = nz as usize * size * size + ny as usize * size + nx as usize;
+                            if cell_cap[ni] < MIN_LEVEL {
+                                continue; // solid
+                            }
+                            has_passable_neighbor = true;
+                            max_neighbor_level = max_neighbor_level.max(new_cells[ni].level);
+                        }
+
+                        if has_passable_neighbor
+                            && max_neighbor_level < crate::cell::SOURCE_DRAIN_LEVEL
+                        {
+                            new_cells[idx].drain_ticks =
+                                new_cells[idx].drain_ticks.saturating_add(1);
+                            if new_cells[idx].drain_ticks
+                                >= crate::cell::SOURCE_DRAIN_DEMOTE_TICKS
+                            {
+                                new_cells[idx].is_source = false;
+                                new_cells[idx].drain_ticks = 0;
+                                changed = true;
+                            }
+                        } else {
+                            // Fully-encased sources idle harmlessly; a held
+                            // neighbor means steady state (or honest filling).
+                            new_cells[idx].drain_ticks = 0;
+                        }
+                    }
                 }
             }
         }

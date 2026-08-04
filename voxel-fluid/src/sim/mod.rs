@@ -1971,4 +1971,109 @@ mod tests {
             "bounded (6-hop) breach leaked past the expected taper: reach = {reach}"
         );
     }
+
+    // ── 2026-08-04 source self-extinguish ────────────────────────────────
+    // A source that can never reach steady state (its outflow vanishes into
+    // a sink: void below the world, pinhole into nowhere) must demote itself
+    // to a one-shot fill. Sources that equalize — sealed bowls, filled
+    // basins — must live forever. Bounding flow reach did NOT stop the
+    // bug-#215 pumping; this is the mechanism that does.
+
+    fn run_lava_ticks(chunks: &mut HashMap<(i32, i32, i32), ChunkFluidGrid>, n: usize) {
+        let config = crate::FluidConfig::default();
+        let dc = empty_density_cache();
+        for _ in 0..n {
+            crate::sim::regen_sources(chunks);
+            tick_fluid(chunks, &dc, 16, true, &config, true);
+        }
+    }
+
+    #[test]
+    fn source_draining_into_void_self_extinguishes() {
+        // Lone lava source on a 1-cell pedestal at the top of an otherwise
+        // EMPTY chunk with no chunk below: everything it emits falls out of
+        // the world and is dropped (the void sink). It can never equalize.
+        let mut grid = make_chunk(16);
+        grid.set_density(8, 7, 8, 1.0); // pedestal
+        {
+            let cell = grid.get_mut(8, 8, 8);
+            cell.level = SOURCE_LEVEL;
+            cell.fluid_type = FluidType::Lava;
+            cell.is_source = true;
+            cell.max_flow_dist = 12;
+            cell.hops_from_source = 0;
+        }
+        grid.has_fluid = true;
+        grid.has_sources = true;
+        let mut chunks = HashMap::new();
+        chunks.insert((0, 0, 0), grid);
+
+        run_lava_ticks(&mut chunks, 200);
+
+        let cell = chunks[&(0, 0, 0)].get(8, 8, 8);
+        assert!(
+            !cell.is_source,
+            "void-draining source should have self-extinguished (level={}, drain_ticks={})",
+            cell.level, cell.drain_ticks
+        );
+    }
+
+    #[test]
+    fn source_in_sealed_bowl_persists() {
+        // Source at the bottom of a sealed 5x5 bowl: fills it, equalizes,
+        // reaches steady state — must stay a source indefinitely.
+        let mut grid = make_sealed_box(16, 5..10, 5..8, 5..10);
+        {
+            let cell = grid.get_mut(7, 5, 7);
+            cell.level = SOURCE_LEVEL;
+            cell.fluid_type = FluidType::Lava;
+            cell.is_source = true;
+            cell.max_flow_dist = 12;
+            cell.hops_from_source = 0;
+        }
+        grid.has_fluid = true;
+        grid.has_sources = true;
+        let mut chunks = HashMap::new();
+        chunks.insert((0, 0, 0), grid);
+
+        run_lava_ticks(&mut chunks, 300);
+
+        let cell = chunks[&(0, 0, 0)].get(7, 5, 7);
+        assert!(
+            cell.is_source,
+            "sealed-bowl source must survive (drain_ticks={})",
+            cell.drain_ticks
+        );
+        assert!(cell.level > 0.5, "sealed-bowl source should sit full, level={}", cell.level);
+    }
+
+    #[test]
+    fn source_filling_wide_sealed_floor_persists() {
+        // Source on a sealed but WIDE floor (takes many ticks of honest
+        // spreading before its own cell holds level again). The demote
+        // streak must tolerate the fill phase — this is the false-positive
+        // guard for the threshold constants.
+        let mut grid = make_sealed_box(16, 1..15, 5..8, 1..15);
+        {
+            let cell = grid.get_mut(8, 5, 8);
+            cell.level = SOURCE_LEVEL;
+            cell.fluid_type = FluidType::Lava;
+            cell.is_source = true;
+            cell.max_flow_dist = 0; // unlimited spread within the tray
+            cell.hops_from_source = 0;
+        }
+        grid.has_fluid = true;
+        grid.has_sources = true;
+        let mut chunks = HashMap::new();
+        chunks.insert((0, 0, 0), grid);
+
+        run_lava_ticks(&mut chunks, 400);
+
+        let cell = chunks[&(0, 0, 0)].get(8, 5, 8);
+        assert!(
+            cell.is_source,
+            "source honestly filling a sealed tray must not be demoted (drain_ticks={}, level={})",
+            cell.drain_ticks, cell.level
+        );
+    }
 }
