@@ -2076,4 +2076,62 @@ mod tests {
             cell.drain_ticks, cell.level
         );
     }
+
+    // ── 2026-08-04 pinhole membrane ──────────────────────────────────────
+    // Fractional capacity makes every surface-crossing cell partially
+    // passable — a THIN rendered slab (no fully-solid cell layer inside it)
+    // is a permeable membrane and fluid seeps straight through "solid" rock
+    // onto the void-side underside of the world (bug #215). The rendered
+    // surface must be a transit barrier: fluid may not cross a cell face
+    // whose 4 shared lattice corners are all solid.
+
+    #[test]
+    #[ignore = "RED (2026-08-04): reproduces bug #215 pinhole seepage — 16.0 units pass through. Un-ignore when landing face gating (see lava-containment memory note): fluid must not cross a cell face whose 4 shared lattice corners are all solid. Gate every flow pass in sim/chunk.rs + equalize_horizontal."]
+    fn fluid_does_not_seep_through_thin_rendered_slab() {
+        let size = 16usize;
+        let stride = size + 1;
+        // 17³ lattice: a single solid plane at lattice y=8, air everywhere
+        // else. The zero-crossings sit above AND below that plane — the DC
+        // surface renders a closed thin slab, but no cell layer is fully
+        // solid: cells at y=7 and y=8 each have 4 solid corners (cap 0.5).
+        let mut lattice = vec![-1.0f32; stride * stride * stride];
+        for z in 0..stride {
+            for x in 0..stride {
+                lattice[z * stride * stride + 8 * stride + x] = 0.3;
+            }
+        }
+        let mut cache = crate::cell::ChunkDensityCache::new(size);
+        cache.update_density(&lattice);
+        let mut grid = ChunkFluidGrid::from_density_cache(&cache);
+
+        // Water dropped well above the slab.
+        for z in 6..10usize {
+            for x in 6..10usize {
+                let cell = grid.get_mut(x, 12, z);
+                cell.level = 1.0;
+                cell.fluid_type = FluidType::Water;
+            }
+        }
+        grid.has_fluid = true;
+        let mut chunks = HashMap::new();
+        chunks.insert((0, 0, 0), grid);
+
+        let config = crate::FluidConfig::default();
+        let dc = empty_density_cache();
+        for _ in 0..200 {
+            tick_fluid(&mut chunks, &dc, size, false, &config, true);
+        }
+
+        // Nothing may exist below the slab (cells y <= 6 are pure air —
+        // any fluid there came THROUGH the rendered surface).
+        let grid = &chunks[&(0, 0, 0)];
+        let mut below = 0.0f64;
+        for z in 0..size { for y in 0..7 { for x in 0..size {
+            below += grid.get(x, y, z).level as f64;
+        }}}
+        assert!(
+            below < 0.001,
+            "fluid seeped through a rendered-solid thin slab: {below:.3} total level below it"
+        );
+    }
 }
