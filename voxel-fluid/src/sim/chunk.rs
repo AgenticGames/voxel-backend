@@ -731,7 +731,18 @@ pub(super) fn tick_chunk(
             for x in 0..size {
                 let idx = z * size * size + y * size + x;
                 let level = new_cells[idx].level;
-                if level <= 0.0 || level >= MIN_LEVEL {
+                // Lava is STICKY (2026-08-04, user request): stagnant lava
+                // dribbles up to the orphan threshold get vacuumed into a
+                // fuller neighbor instead of sitting apart and evaporating —
+                // breakout blobs pull themselves together. Water keeps the
+                // original sub-MIN-films-only rule; the stagnation gate stops
+                // this from disturbing actively flowing lava.
+                let is_sticky_lava = is_lava_tick
+                    && new_cells[idx].fluid_type.is_lava()
+                    && new_cells[idx].stagnant_ticks > 2
+                    && !new_cells[idx].is_source
+                    && level < ORPHAN_THRESHOLD;
+                if level <= 0.0 || (level >= MIN_LEVEL && !is_sticky_lava) {
                     continue; // skip empty or substantial cells
                 }
                 // Try to push tiny amount to a neighbor that has water

@@ -893,7 +893,15 @@ fn generate_cauldron_fluid_seeds(
             // Fill from basin bottom+floor_inset+lip_ceil up to anchor_y+lip_ceil
             // floor_inset raises fill above floor boundary cells
             // lip_ceil raises fill into the lip ring area
-            let min_y = (bottom_y + floor_inset + lip_ceil).max(0);
+            // 2026-08-04: fill starts at the true basin floor (the old bound
+            // added lip_ceil to the BOTTOM too, skipping the deepest band).
+            // The old shallow fill only LOOKED right because the #216
+            // stream-in refill topped basins up repeatedly; once-guarded, the
+            // single injection settles (skin soak, mostly-solid skips) into
+            // very dry bowls. User-tuned: "double the starting lava amount" —
+            // the reclaimed bottom band roughly doubles delivered volume with
+            // zero over-lip spill risk (all new fluid sits BELOW the old top).
+            let min_y = (bottom_y + floor_inset).max(0);
             let max_y = anchor_y as i32 + lip_ceil; // exclusive
             for iy in min_y..max_y {
                 if iy >= size as i32 {
@@ -1510,14 +1518,17 @@ mod tests {
                 seed.lx, seed.ly, seed.lz, dist_h, radius - 1.0,
             );
 
-            // Fluid should be raised above floor boundary + lip_ceil
+            // Fluid rests on the floor inset only (2026-08-04: the lip_ceil
+            // bottom-raise was removed — it skipped the deepest fill band,
+            // and once placement became once-guarded the shallow fill left
+            // bowls very dry; reclaiming it ~doubles delivered volume).
             let rim_factor = dist_h / radius;
             let carve_depth_at_r = depth * (1.0 - rim_factor.powf(0.3).min(1.0));
             let bottom_y = (anchor_y as f32 - carve_depth_at_r).floor() as i32;
             assert!(
-                (seed.ly as i32) >= bottom_y + 1 + lip_ceil,
-                "Seed y={} should be >= bottom_y+floor_inset+lip_ceil={} (floor inset + lip raise)",
-                seed.ly, bottom_y + 1 + lip_ceil,
+                (seed.ly as i32) >= bottom_y + 1,
+                "Seed y={} should be >= bottom_y+floor_inset={} (floor inset)",
+                seed.ly, bottom_y + 1,
             );
         }
     }
