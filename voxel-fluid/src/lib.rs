@@ -98,6 +98,18 @@ pub struct FluidConfig {
     /// levels stop straddling the iso, and lights/quench/damage see the
     /// stream too. Fed cells drain fully once inflow stops.
     pub lava_transit_retention: bool,
+    // River bundle (2026-08-04 night): wide dribbling faces self-organize
+    // into few, stable streams instead of diffusing into thin sheets.
+    /// Slope-flow targets are additionally scored by their cross-tick flux
+    /// history (flux_ema) — flow prefers paths that have carried flow, so
+    /// channels dig themselves in. Decay lets abandoned channels fade and
+    /// flow re-route after terrain edits.
+    pub lava_channel_bias: bool,
+    /// In-transit stream cells (sustained flux AND a downhill exit) spread
+    /// laterally at a fraction of the normal rate — channeled lava stays in
+    /// its channel. Cells with no downhill exit (pool interiors, stream
+    /// mouths) spread normally so basins still fill flat.
+    pub lava_channel_focus: bool,
 }
 
 impl Default for FluidConfig {
@@ -142,6 +154,8 @@ impl Default for FluidConfig {
             mesh_flux_render: true,
             mesh_stream_ribbon: true,
             lava_transit_retention: true,
+            lava_channel_bias: false,
+            lava_channel_focus: false,
         }
     }
 }
@@ -237,6 +251,8 @@ pub enum FluidEvent {
         flux_render: bool,
         stream_ribbon: bool,
         transit_retention: bool,
+        channel_bias: bool,
+        channel_focus: bool,
     },
     /// Request a snapshot of all fluid cells (used by sleep system).
     /// Response sent via the dedicated reply channel.

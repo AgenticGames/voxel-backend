@@ -819,19 +819,24 @@ fn handle_event(
         FluidEvent::UpdateFluidMeshFlags {
             sticky_release, floor_clamp, buried_cull,
             flux_render, stream_ribbon, transit_retention,
+            channel_bias, channel_focus,
         } => {
             let changed = config.mesh_sticky_release != sticky_release
                 || config.mesh_floor_clamp != floor_clamp
                 || config.mesh_buried_cull != buried_cull
                 || config.mesh_flux_render != flux_render
                 || config.mesh_stream_ribbon != stream_ribbon
-                || config.lava_transit_retention != transit_retention;
+                || config.lava_transit_retention != transit_retention
+                || config.lava_channel_bias != channel_bias
+                || config.lava_channel_focus != channel_focus;
             config.mesh_sticky_release = sticky_release;
             config.mesh_floor_clamp = floor_clamp;
             config.mesh_buried_cull = buried_cull;
             config.mesh_flux_render = flux_render;
             config.mesh_stream_ribbon = stream_ribbon;
             config.lava_transit_retention = transit_retention;
+            config.lava_channel_bias = channel_bias;
+            config.lava_channel_focus = channel_focus;
             // Dirty-sweep so settled (never-again-dirty) pools re-mesh with
             // the new flags immediately — this is what makes the A/B toggle
             // land on screen without touching the fluid.

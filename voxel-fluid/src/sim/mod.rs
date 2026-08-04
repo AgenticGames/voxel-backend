@@ -2527,6 +2527,155 @@ mod tests {
         }
     }
 
+    // ── 2026-08-04 river bundle (channel bias + focus) ───────────────────
+    // A wide slope fed from one point should converge into few stable
+    // streams; legacy flow fans into a thin sheet (every ledge spreads
+    // laterally, slope targets are chosen by instant state only).
+
+    /// Wide gentle staircase: 5 full-width steps (z 2..14) descending along
+    /// +x from a single top-center lava source, basin at the bottom.
+    fn make_wide_slope() -> ChunkFluidGrid {
+        let size = 16;
+        let config = crate::FluidConfig::default();
+        let mut d = make_density_field_solid(size);
+        for i in 0..5usize {
+            let x0 = 2 + 2 * i;
+            let floor = 11 - 2 * i;
+            carve_box(&mut d, size, x0..(x0 + 3), floor..15, 2..14);
+        }
+        carve_box(&mut d, size, 12..15, 1..6, 2..14);
+        let mut grid = make_chunk(size);
+        apply_density(&mut grid, &d, &config);
+        {
+            let cell = grid.get_mut(2, 11, 8);
+            cell.level = SOURCE_LEVEL;
+            cell.fluid_type = FluidType::Lava;
+            cell.is_source = true;
+            cell.max_flow_dist = 0;
+            cell.hops_from_source = 0;
+        }
+        grid.has_fluid = true;
+        grid.has_lava = true;
+        grid.has_sources = true;
+        grid
+    }
+
+    fn river_config(bias: bool, focus: bool) -> crate::FluidConfig {
+        crate::FluidConfig {
+            lava_channel_bias: bias,
+            lava_channel_focus: focus,
+            ..crate::FluidConfig::default()
+        }
+    }
+
+    /// Per-z-column flux totals on the LAST step (arrival band), plus the
+    /// basin lava total. Concentration = top-3 columns' share of band flux.
+    fn slope_arrival_stats(grid: &ChunkFluidGrid) -> (Vec<f32>, f32, f64) {
+        let mut cols = vec![0.0f32; 16];
+        for z in 2..14usize {
+            for x in 10..13usize {
+                for y in 3..7usize {
+                    cols[z] += grid.flux_at(x, y, z);
+                }
+            }
+        }
+        let total: f32 = cols.iter().sum();
+        let mut sorted = cols.clone();
+        sorted.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        let top3_share = if total > 1e-6 { (sorted[0] + sorted[1] + sorted[2]) / total } else { 0.0 };
+        let mut basin = 0.0f64;
+        for z in 2..14usize {
+            for x in 12..15usize {
+                for y in 1..6usize {
+                    basin += grid.get(x, y, z).level as f64;
+                }
+            }
+        }
+        (cols, top3_share, basin)
+    }
+
+    /// Fork fixture for channel BIAS: a flat feed channel dead-ends above
+    /// two drop shafts reachable only via the (0,-1,±1) slope diagonals —
+    /// the junction cell has exactly two candidates. Legacy feeds both every
+    /// tick (~50/50 forever); with bias the historically-stronger branch
+    /// wins the score and (winner-takes-most) carries the flow.
+    fn make_fork() -> ChunkFluidGrid {
+        let size = 16;
+        let config = crate::FluidConfig::default();
+        let mut d = make_density_field_solid(size);
+        // Feed channel: cells x 2..=6, y 10..12, z=8.
+        carve_box(&mut d, size, 2..8, 10..14, 8..10);
+        // Shaft A (z=6 side): lattice z 6,7 — cells z=6 full, z=7 half.
+        carve_box(&mut d, size, 6..8, 2..14, 6..8);
+        // Shaft B (z=10 side): lattice z 10,11 — cells z=10 full, z=9 half.
+        carve_box(&mut d, size, 6..8, 2..14, 10..12);
+        // Small catch basins so the shafts don't back up.
+        carve_box(&mut d, size, 4..10, 1..4, 4..8);
+        carve_box(&mut d, size, 4..10, 1..4, 10..14);
+        let mut grid = make_chunk(size);
+        apply_density(&mut grid, &d, &config);
+        {
+            let cell = grid.get_mut(2, 10, 8);
+            cell.level = SOURCE_LEVEL;
+            cell.fluid_type = FluidType::Lava;
+            cell.is_source = true;
+            cell.max_flow_dist = 0;
+            cell.hops_from_source = 0;
+        }
+        grid.has_fluid = true;
+        grid.has_lava = true;
+        grid.has_sources = true;
+        grid
+    }
+
+    /// Flux share of branch A (z <= 7) vs branch B (z >= 9) below the fork.
+    fn fork_branch_share(grid: &ChunkFluidGrid) -> (f32, f32) {
+        let mut a = 0.0f32;
+        let mut b = 0.0f32;
+        for z in 2..14usize {
+            for x in 4..10usize {
+                for y in 2..10usize {
+                    let f = grid.flux_at(x, y, z);
+                    if z <= 7 { a += f; } else if z >= 9 { b += f; }
+                }
+            }
+        }
+        (a, b)
+    }
+
+    #[test]
+    #[ignore] // diagnostic probe — run manually with --ignored --nocapture
+    fn river_convergence_probe() {
+        for (name, bias) in [("fork legacy", false), ("fork bias", true)] {
+            let cfg = river_config(bias, false);
+            let mut chunks = HashMap::new();
+            chunks.insert((0, 0, 0), make_fork());
+            run_cascade_ticks(&mut chunks, 150, &cfg, false);
+            let grid = chunks.get(&(0, 0, 0)).unwrap();
+            let (a, b) = fork_branch_share(grid);
+            let share = a.max(b) / (a + b).max(1e-6);
+            eprintln!("RIVER {name}: A={a:.2} B={b:.2} winner_share={share:.2}");
+        }
+        for (name, bias, focus) in [
+            ("legacy", false, false),
+            ("bias", true, false),
+            ("focus", false, true),
+            ("bias+focus", true, true),
+        ] {
+            let cfg = river_config(bias, focus);
+            let mut chunks = HashMap::new();
+            chunks.insert((0, 0, 0), make_wide_slope());
+            run_cascade_ticks(&mut chunks, 150, &cfg, false);
+            let grid = chunks.get(&(0, 0, 0)).unwrap();
+            let (cols, top3, basin) = slope_arrival_stats(grid);
+            let wet_cols = cols.iter().filter(|&&c| c > 0.01).count();
+            eprintln!(
+                "RIVER {name}: top3_share={top3:.2} wet_cols={wet_cols} basin={basin:.1} cols={:?}",
+                cols.iter().map(|c| (c * 100.0).round() / 100.0).collect::<Vec<_>>()
+            );
+        }
+    }
+
     #[test]
     fn transit_retention_gives_stream_volume_then_drains() {
         // With retention: fed transit cells hold REAL standing lava (the

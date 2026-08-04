@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
-use crate::cell::{ChunkFluidGrid, FluidType, FLUX_EMA_ALPHA, INFLUX_HOLD_TICKS, MIN_LEVEL,
-    ORPHAN_EVAP_TICKS, ORPHAN_THRESHOLD, TRANSIT_RETENTION};
+use crate::cell::{ChunkFluidGrid, FluidType, CHANNEL_BIAS_WEIGHT, CHANNEL_FOCUS_FACTOR,
+    FLUX_EMA_ALPHA, INFLUX_HOLD_TICKS, MIN_LEVEL, ORPHAN_EVAP_TICKS, ORPHAN_THRESHOLD,
+    STREAM_FLUX_MIN, TRANSIT_RETENTION};
 use crate::FluidConfig;
 
 /// A pending fluid transfer across a chunk boundary.
@@ -195,6 +196,11 @@ pub(super) fn tick_chunk(
     // — .get() treats that as "not fed".
     let retention_on = config.lava_transit_retention && is_lava_tick;
     let influx_hold = &grid.influx_hold;
+    // River channeling (lava): bias slope targets by flux history; focus
+    // in-transit stream cells (suppressed lateral spread).
+    let bias_on = config.lava_channel_bias && is_lava_tick;
+    let focus_on = config.lava_channel_focus && is_lava_tick;
+    let flux_hist = &grid.flux_ema;
     // Face gating (2026-08-04, bug #215): the rendered surface must be a
     // transit barrier. Checked from the SOURCE cell's own corners, so
     // cross-chunk directions need no neighbor data.
@@ -343,6 +349,28 @@ pub(super) fn tick_chunk(
                     0.0
                 };
 
+                // Channel focus: does this cell have anywhere downhill to
+                // send fluid? Set by the gravity/slope sections below; a
+                // cell with NO downhill exit is pooled and must spread at
+                // the normal rate (basins fill flat, stream mouths fan out).
+                let mut had_down_path = false;
+
+                // Channels flow FASTER (focus): narrowing the sheet removes
+                // parallel transport lanes, and per-lane flux is capped by
+                // flow_rate — without a speed boost a channeled slope
+                // delivers less than a sheet (probe-verified: basin −60%).
+                // Deeper streams flowing faster is also just how rivers
+                // work. Safe now that the mesh renders time-averages: gulp
+                // size no longer shows as strobing.
+                let channel_speed = if focus_on
+                    && is_lava
+                    && flux_hist.get(idx).copied().unwrap_or(0.0) >= STREAM_FLUX_MIN
+                {
+                    2.0
+                } else {
+                    1.0
+                };
+
                 // Gravity: try to flow down (8x flow rate for fast pooling)
                 if y > 0 {
                     let below_idx = z * size * size + (y - 1) * size + x;
@@ -353,11 +381,12 @@ pub(super) fn tick_chunk(
                         let below_capacity = cell_cap[below_idx];
                         let below_space = (below_capacity - new_cells[below_idx].level).max(0.0);
                         if below_space > MIN_LEVEL {
+                            had_down_path = true;
                             // Bounded-flow cap: child receives at most `level_cap`.
                             let new_hops = cell.hops_from_source.saturating_add(1);
                             let cap = bounded_level_cap(new_hops, cell.max_flow_dist);
                             let bounded_space = (cap - new_cells[below_idx].level).max(0.0).min(below_space);
-                            let transfer = (cell.level - retain).max(0.0).min(bounded_space).min(flow_rate * gravity_mult);
+                            let transfer = (cell.level - retain).max(0.0).min(bounded_space).min(flow_rate * gravity_mult * channel_speed);
                             if transfer > MIN_LEVEL {
                                 if !is_source && !has_grace {
                                     new_cells[idx].level -= transfer;
@@ -404,10 +433,11 @@ pub(super) fn tick_chunk(
                             if below_capacity > MIN_LEVEL {
                                 let below_space = (below_capacity - below_grid.cells[below_idx].level).max(0.0);
                                 if below_space > MIN_LEVEL {
+                                    had_down_path = true;
                                     let new_hops = cell.hops_from_source.saturating_add(1);
                                     let cap = bounded_level_cap(new_hops, cell.max_flow_dist);
                                     let bounded_space = (cap - below_grid.cells[below_idx].level).max(0.0).min(below_space);
-                                    let transfer = (new_cells[idx].level - retain).max(0.0).min(bounded_space).min(flow_rate * gravity_mult);
+                                    let transfer = (new_cells[idx].level - retain).max(0.0).min(bounded_space).min(flow_rate * gravity_mult * channel_speed);
                                     if transfer > MIN_LEVEL {
                                         if !is_source && !has_grace {
                                             new_cells[idx].level -= transfer;
@@ -508,7 +538,10 @@ pub(super) fn tick_chunk(
                                             let existing = nbr_grid.cells[bi].level;
                                             let dst_space = (cap - existing).max(0.0);
                                             if dst_space > MIN_LEVEL {
-                                                let score = existing * 10.0 + dst_space;
+                                                let hist = if bias_on {
+                                                    nbr_grid.flux_ema.get(bi).copied().unwrap_or(0.0) * CHANNEL_BIAS_WEIGHT
+                                                } else { 0.0 };
+                                                let score = existing * 10.0 + dst_space + hist;
                                                 candidates.push((score, dst_space, 0, true, dest_key, tx, ty, tz));
                                             }
                                         }
@@ -531,7 +564,12 @@ pub(super) fn tick_chunk(
                                 if dst_space > MIN_LEVEL {
                                     // Use old state for channel score (not biased by iteration order)
                                     let existing = grid.cells[ni].level;
-                                    let score = existing * 10.0 + dst_space;
+                                    // Channel bias: history-weighted — a dug-in
+                                    // channel outvotes a merely-wet neighbor.
+                                    let hist = if bias_on {
+                                        flux_hist.get(ni).copied().unwrap_or(0.0) * CHANNEL_BIAS_WEIGHT
+                                    } else { 0.0 };
+                                    let score = existing * 10.0 + dst_space + hist;
                                     candidates.push((score, dst_space, ni, false, key, 0, 0, 0));
                                 }
                             } else if ny < 0 {
@@ -549,11 +587,18 @@ pub(super) fn tick_chunk(
                                     let existing = below_grid.cells[bi].level;
                                     let dst_space = (cap - existing).max(0.0);
                                     if dst_space > MIN_LEVEL {
-                                        let score = existing * 10.0 + dst_space;
+                                        let hist = if bias_on {
+                                            below_grid.flux_ema.get(bi).copied().unwrap_or(0.0) * CHANNEL_BIAS_WEIGHT
+                                        } else { 0.0 };
+                                        let score = existing * 10.0 + dst_space + hist;
                                         candidates.push((score, dst_space, 0, true, below_key, tx, ty, tz));
                                     }
                                 }
                             }
+                        }
+
+                        if !candidates.is_empty() {
+                            had_down_path = true;
                         }
 
                         // Sort by channel score descending: prefer cells with existing water
@@ -566,15 +611,22 @@ pub(super) fn tick_chunk(
                         let bounded_blocked = bounded_blocks_transfer(cell.hops_from_source, cell.max_flow_dist);
                         let new_hops = cell.hops_from_source.saturating_add(1);
                         let level_cap = bounded_level_cap(new_hops, cell.max_flow_dist);
-                        for &(_score, dst_space, ni, is_cross, dest_key, dest_x, dest_y, dest_z) in candidates.iter() {
+                        for (cand_k, &(_score, dst_space, ni, is_cross, dest_key, dest_x, dest_y, dest_z)) in candidates.iter().enumerate() {
                             if bounded_blocked { break; }
                             if new_cells[idx].level < MIN_LEVEL && !is_source && !has_grace {
                                 break;
                             }
+                            // Channel bias is WINNER-TAKES-MOST: score alone is
+                            // just priority (with fluid to spare every candidate
+                            // gets fed and history changes nothing — probe-
+                            // verified). Runner-up targets get a quarter-rate
+                            // cap, so the top-scored (history-favored) path
+                            // carries the flow and channels dig in.
+                            let rate_scale = if bias_on && cand_k > 0 { CHANNEL_FOCUS_FACTOR } else { 1.0 };
                             // Cap dst's allowed receive level by bounded-flow rule.
                             let dst_existing = if is_cross { 0.0 } else { new_cells[ni].level };
                             let bounded_space = (level_cap - dst_existing).max(0.0).min(dst_space);
-                            let transfer = (new_cells[idx].level - retain).max(0.0).min(bounded_space).min(flow_rate * slope_mult);
+                            let transfer = (new_cells[idx].level - retain).max(0.0).min(bounded_space).min(flow_rate * slope_mult * rate_scale * channel_speed);
                             if transfer > MIN_LEVEL {
                                 if !is_source && !has_grace {
                                     new_cells[idx].level -= transfer;
@@ -622,6 +674,23 @@ pub(super) fn tick_chunk(
                     ];
                     let new_hops_h = cell.hops_from_source.saturating_add(1);
                     let level_cap_h = bounded_level_cap(new_hops_h, cell.max_flow_dist);
+                    // Channel focus is DIRECTION-AWARE, not a blanket damp:
+                    // on flat terrain lateral spread IS the downhill
+                    // transport (film crossing a step to reach the next
+                    // drop), so suppressing it wholesale just throttles
+                    // delivery (probe-verified: basin −60%, fan unchanged).
+                    // Instead, an in-transit stream cell spreads at FULL
+                    // rate toward neighbors that also carry flux (along the
+                    // stream) and at quarter rate into dry land (across it)
+                    // — early asymmetries reinforce and the sheet narrows
+                    // into channels while throughput is preserved. Pooled
+                    // cells (no downhill exit) spread normally: basins fill
+                    // flat, stream mouths fan out.
+                    let own_flux = flux_hist.get(idx).copied().unwrap_or(0.0);
+                    let channeled = focus_on
+                        && is_lava
+                        && had_down_path
+                        && own_flux >= STREAM_FLUX_MIN;
 
                     for (nx, ny, nz) in neighbors {
                         // Face gating: no spreading through a rendered surface.
@@ -658,7 +727,13 @@ pub(super) fn tick_chunk(
                                             // Bounded-flow level cap on cross-chunk dst.
                                             let dst_existing = nbr_grid.cells[bi].level;
                                             let bounded_room = (level_cap_h - dst_existing).max(0.0);
-                                            let transfer = (diff * horizontal_spread * src_capacity)
+                                            // Relative comparison: a uniform sheet is all
+                                            // above any absolute threshold — the signal is
+                                            // "this neighbor carries much less than ME".
+                                            let dir_scale = if channeled
+                                                && nbr_grid.flux_ema.get(bi).copied().unwrap_or(0.0) < own_flux * 0.5
+                                            { CHANNEL_FOCUS_FACTOR } else { 1.0 };
+                                            let transfer = (diff * horizontal_spread * dir_scale * src_capacity)
                                                 .min(flow_rate)
                                                 .min(new_cells[idx].level)
                                                 .min(bounded_room);
@@ -698,7 +773,10 @@ pub(super) fn tick_chunk(
                             let dst_space = (dst_capacity - new_cells[ni].level).max(0.0);
                             // Bounded-flow level cap.
                             let bounded_space = (level_cap_h - new_cells[ni].level).max(0.0).min(dst_space);
-                            let transfer = (diff * horizontal_spread * src_capacity)
+                            let dir_scale = if channeled
+                                && flux_hist.get(ni).copied().unwrap_or(0.0) < own_flux * 0.5
+                            { CHANNEL_FOCUS_FACTOR } else { 1.0 };
+                            let transfer = (diff * horizontal_spread * dir_scale * src_capacity)
                                 .min(flow_rate)
                                 .min(new_cells[idx].level) // prevent overdrain
                                 .min(bounded_space);       // prevent overfill + bounded cap

@@ -187,6 +187,16 @@ pub const TRANSIT_RETENTION: f32 = 0.22;
 pub const INFLUX_HOLD_TICKS: u8 = 3;
 /// EMA rate for the per-cell cascade flux average when flux RISES.
 pub const FLUX_EMA_ALPHA: f32 = 0.35;
+/// River channel bias (lava_channel_bias): weight of a slope target's flux
+/// HISTORY in candidate scoring. The instant-level term (existing*10) tops
+/// out around 10; steady channel flux_ema runs ~0.1-0.4, so *30 makes a
+/// dug-in channel outvote a merely-wet neighbor — flow converges instead
+/// of fanning at every ledge.
+pub const CHANNEL_BIAS_WEIGHT: f32 = 30.0;
+/// River channel focus (lava_channel_focus): lateral spread multiplier for
+/// in-transit stream cells. Channeled lava mostly stays in its channel;
+/// pool cells (no downhill exit) spread at the normal rate.
+pub const CHANNEL_FOCUS_FACTOR: f32 = 0.25;
 /// EMA rate when flux falls — slow, so a stream keeps its identity through
 /// short supply gaps (sources pulse, gulps march, paths shift). A 3-tick
 /// gap keeps ~78% of the average instead of dropping below the stream

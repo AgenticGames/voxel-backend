@@ -75,6 +75,8 @@ impl VoxelEngine {
             flux_render: fluid.mesh_flux_render,
             stream_ribbon: fluid.mesh_stream_ribbon,
             transit_retention: fluid.lava_transit_retention,
+            channel_bias: fluid.lava_channel_bias,
+            channel_focus: fluid.lava_channel_focus,
         });
     }
 
@@ -759,6 +761,13 @@ pub(crate) fn ffi_config_to_fluid(c: &FfiEngineConfig) -> FluidConfig {
         mesh_flux_render: c.fluid_mesh_flux_render != 0,
         mesh_stream_ribbon: c.fluid_mesh_stream_ribbon != 0,
         lava_transit_retention: c.fluid_lava_transit_retention != 0,
+        // River channeling (bias/focus) is EXPERIMENTAL and not FFI-exposed:
+        // probe-measured neutral (bias — forks already commit 77/23 via the
+        // instant-level score + retention) to harmful (focus — trades basin
+        // delivery for marginal sheet narrowing). Research harness lives in
+        // sim/mod.rs (river_convergence_probe); revisit with momentum.
+        lava_channel_bias: false,
+        lava_channel_focus: false,
     }
 }
 
