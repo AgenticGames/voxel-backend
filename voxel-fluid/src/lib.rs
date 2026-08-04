@@ -114,9 +114,11 @@ impl Default for FluidConfig {
             mesh_smooth_strength: 0.3,
             mesh_qef_refinement: true,
             mesh_recalc_normals: true,
-            mesh_sticky_release: false,
-            mesh_floor_clamp: false,
-            mesh_buried_cull: false,
+            // Rim/skirt bundle: default ON since 2026-08-04 (user-verified
+            // live on the seed-5282 settled pool; all three approved).
+            mesh_sticky_release: true,
+            mesh_floor_clamp: true,
+            mesh_buried_cull: true,
         }
     }
 }

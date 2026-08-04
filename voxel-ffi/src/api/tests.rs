@@ -953,9 +953,9 @@
             mushroom_ghost_tower_spawn_chance: 0.5,
             mushroom_ghost_tower_scale_min: 1.5,
             mushroom_ghost_tower_scale_max: 3.0,
-            fluid_mesh_sticky_release: 0,
-            fluid_mesh_floor_clamp: 0,
-            fluid_mesh_buried_cull: 0,
+            fluid_mesh_sticky_release: 1,
+            fluid_mesh_floor_clamp: 1,
+            fluid_mesh_buried_cull: 1,
         }
     }
 
