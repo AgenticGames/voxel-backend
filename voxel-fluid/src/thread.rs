@@ -469,9 +469,13 @@ pub fn fluid_sim_loop(
         for key in &all_dirty {
             let boundary = build_boundary_levels(*key, &chunks, chunk_size);
             if let Some(grid) = chunks.get_mut(key) {
-                // Mesh hysteresis: refresh the sticky flags so borderline
-                // cascade cells hold in the mesh instead of strobing.
-                grid.update_mesh_hysteresis(config.mesh_sticky_release);
+                // Pre-mesh render state: smoothed EMA field + ribbon flags
+                // when the cascade bundle is on, legacy hysteresis otherwise.
+                grid.update_render_field(
+                    config.mesh_sticky_release,
+                    config.mesh_flux_render,
+                    config.mesh_stream_ribbon,
+                );
                 let mesh = mesh_fluid(grid, &boundary, &config);
                 grid.dirty = false;
 
@@ -812,13 +816,22 @@ fn handle_event(
             config.lava_flow_rate = lava_flow_rate.max(0.0);
             config.lava_spread_rate = lava_spread_rate.max(0.0);
         }
-        FluidEvent::UpdateFluidMeshFlags { sticky_release, floor_clamp, buried_cull } => {
+        FluidEvent::UpdateFluidMeshFlags {
+            sticky_release, floor_clamp, buried_cull,
+            flux_render, stream_ribbon, transit_retention,
+        } => {
             let changed = config.mesh_sticky_release != sticky_release
                 || config.mesh_floor_clamp != floor_clamp
-                || config.mesh_buried_cull != buried_cull;
+                || config.mesh_buried_cull != buried_cull
+                || config.mesh_flux_render != flux_render
+                || config.mesh_stream_ribbon != stream_ribbon
+                || config.lava_transit_retention != transit_retention;
             config.mesh_sticky_release = sticky_release;
             config.mesh_floor_clamp = floor_clamp;
             config.mesh_buried_cull = buried_cull;
+            config.mesh_flux_render = flux_render;
+            config.mesh_stream_ribbon = stream_ribbon;
+            config.lava_transit_retention = transit_retention;
             // Dirty-sweep so settled (never-again-dirty) pools re-mesh with
             // the new flags immediately — this is what makes the A/B toggle
             // land on screen without touching the fluid.

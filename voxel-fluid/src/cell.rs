@@ -159,6 +159,40 @@ pub const MESH_STICKY_OFF: f32 = 0.05;
 /// phantom ring forever.
 pub const MESH_STICKY_RELEASE_TICKS: u8 = 10;
 
+// ── Cascade bundle constants (2026-08-04) ──
+/// EMA rate when the raw level RISES above the render field — fast, so
+/// arriving fluid appears within ~2 updates.
+pub const RENDER_ALPHA_UP: f32 = 0.45;
+/// EMA rate when the raw level falls below the render field — slow, so a
+/// steady-but-oscillating transit cell renders near its time-average and a
+/// dying stream fades out over ~8 updates (reads as cooling lava).
+pub const RENDER_ALPHA_DOWN: f32 = 0.12;
+/// Sustained cascade outflux (EMA) above which a cell ENTERS the stream
+/// set for the ribbon mesh floor.
+pub const STREAM_FLUX_MIN: f32 = 0.02;
+/// Flux below which a stream cell LEAVES the set (hysteresis — margin
+/// cells hovering at the entry threshold must not flicker the ribbon).
+pub const STREAM_FLUX_OFF: f32 = 0.008;
+/// Mesh floor for stream cells — just above ISO so ribbon cells stay in the
+/// mesh without looking like a full block.
+pub const STREAM_FLOOR: f32 = 0.18;
+/// Lava a FED transit cell keeps when draining via gravity/slope (transit
+/// retention). Above the mesh iso (0.15) so channel cells render steadily
+/// from raw levels, and above ORPHAN_THRESHOLD so retained cells never get
+/// orphan-evaporated while fed.
+pub const TRANSIT_RETENTION: f32 = 0.22;
+/// Lava ticks a cell stays "fed" after receiving cascade inflow. When the
+/// countdown expires (source died / flow moved elsewhere) retention lifts
+/// and the cell drains fully.
+pub const INFLUX_HOLD_TICKS: u8 = 3;
+/// EMA rate for the per-cell cascade flux average when flux RISES.
+pub const FLUX_EMA_ALPHA: f32 = 0.35;
+/// EMA rate when flux falls — slow, so a stream keeps its identity through
+/// short supply gaps (sources pulse, gulps march, paths shift). A 3-tick
+/// gap keeps ~78% of the average instead of dropping below the stream
+/// threshold and flickering the ribbon.
+pub const FLUX_EMA_DECAY: f32 = 0.08;
+
 /// Minimum fluid level to consider non-empty.
 pub const MIN_LEVEL: f32 = 0.001;
 /// Orphan puddle threshold: cells below this level get boosted slope flow.
@@ -299,6 +333,30 @@ pub struct ChunkFluidGrid {
     /// Updated by update_mesh_hysteresis() right before meshing; callers
     /// that never update it (viewer/tests) get raw-level behavior.
     pub mesh_sticky: Vec<bool>,
+    // ── Cascade bundle state (2026-08-04). All lazily sized; empty = off. ──
+    /// Per-cell EMA of the level for meshing (mesh_flux_render). Fast rise,
+    /// slow fade — the time-average is what the eye expects of a stream.
+    pub render_level: Vec<f32>,
+    /// Per-cell EMA of cascade outflux (gravity+slope, lava ticks). Feeds the
+    /// stream-ribbon mesh floor.
+    pub flux_ema: Vec<f32>,
+    /// Countdown ticks since the cell last RECEIVED cascade inflow. >0 means
+    /// "fed" — transit retention holds a floor of lava in fed cells; once
+    /// feeding stops the countdown expires and the cell drains fully.
+    pub influx_hold: Vec<u8>,
+    /// Per-tick outflux scratch (taken/restored by tick_chunk like the other
+    /// scratch buffers).
+    pub scratch_flux: Vec<f32>,
+    /// Per-tick "received inflow" scratch marks.
+    pub scratch_influx: Vec<u8>,
+    /// Stream-membership hysteresis for the ribbon (enter at
+    /// STREAM_FLUX_MIN, leave below STREAM_FLUX_OFF). Updated in
+    /// update_render_field.
+    pub stream_mark: Vec<bool>,
+    /// Mesher mode, stamped by update_render_field right before meshing so
+    /// mesh_level() knows which field to serve without a config reference.
+    pub render_flux: bool,
+    pub render_ribbon: bool,
 }
 
 impl ChunkFluidGrid {
@@ -319,6 +377,14 @@ impl ChunkFluidGrid {
             scratch_weights: Vec::new(),
             scratch_drain: Vec::new(),
             mesh_sticky: Vec::new(),
+            render_level: Vec::new(),
+            flux_ema: Vec::new(),
+            influx_hold: Vec::new(),
+            scratch_flux: Vec::new(),
+            scratch_influx: Vec::new(),
+            stream_mark: Vec::new(),
+            render_flux: false,
+            render_ribbon: false,
         }
     }
 
@@ -349,6 +415,14 @@ impl ChunkFluidGrid {
             scratch_weights: Vec::new(),
             scratch_drain: Vec::new(),
             mesh_sticky: Vec::new(),
+            render_level: Vec::new(),
+            flux_ema: Vec::new(),
+            influx_hold: Vec::new(),
+            scratch_flux: Vec::new(),
+            scratch_influx: Vec::new(),
+            stream_mark: Vec::new(),
+            render_flux: false,
+            render_ribbon: false,
         }
     }
 
@@ -419,18 +493,111 @@ impl ChunkFluidGrid {
         }
     }
 
-    /// Level as the fluid MESHER should see it: cells held by hysteresis
-    /// render just above the iso threshold, so borderline cascade cells
-    /// stay visible instead of strobing in and out of the mesh.
+    /// Level as the fluid MESHER should see it.
+    /// - mesh_flux_render on (render_flux): the smoothed render field — the
+    ///   time-average is what the eye expects of a stream.
+    /// - otherwise: hysteresis behavior (held cells render just above iso).
+    /// - mesh_stream_ribbon on (render_ribbon): cells with sustained cascade
+    ///   flux get a mesh floor so the stream path renders connected.
     #[inline]
     pub fn mesh_level(&self, x: usize, y: usize, z: usize) -> f32 {
         let idx = self.index(x, y, z);
-        let l = self.cells[idx].level;
-        if l < MESH_STICKY_ON && self.mesh_sticky.get(idx).copied().unwrap_or(false) {
+        let raw = self.cells[idx].level;
+        let mut l = if self.render_flux {
+            self.render_level.get(idx).copied().unwrap_or(raw)
+        } else if raw < MESH_STICKY_ON && self.mesh_sticky.get(idx).copied().unwrap_or(false) {
             MESH_STICKY_ON + 0.01
         } else {
-            l
+            raw
+        };
+        if self.render_ribbon && self.is_stream_cell(idx) {
+            // No raw-level gate: a stream cell mid supply-gap (raw 0 for a
+            // tick or two) must not flicker out. dominant_fluid_type counts
+            // flux-carrying cells by their remembered fluid_type, so color
+            // resolution works on dry ribbon cells too.
+            l = l.max(STREAM_FLOOR);
         }
+        l
+    }
+
+    /// Ribbon stream membership: the hysteresis mark when maintained (by
+    /// update_render_field), else a raw flux-threshold compare.
+    #[inline]
+    fn is_stream_cell(&self, idx: usize) -> bool {
+        match self.stream_mark.get(idx) {
+            Some(&m) if self.stream_mark.len() == self.cells.len() => m,
+            _ => self.flux_ema.get(idx).copied().unwrap_or(0.0) >= STREAM_FLUX_MIN,
+        }
+    }
+
+    /// Cross-tick cascade flux average at a cell (0.0 when tracking is off).
+    #[inline]
+    pub fn flux_at(&self, x: usize, y: usize, z: usize) -> f32 {
+        let idx = self.index(x, y, z);
+        self.flux_ema.get(idx).copied().unwrap_or(0.0)
+    }
+
+    /// Refresh the pre-mesh render state. Call once per chunk right before
+    /// meshing (replaces the bare update_mesh_hysteresis call).
+    /// With flux_render the smoothed field updates (and hysteresis is
+    /// irrelevant); otherwise the legacy hysteresis pass runs.
+    pub fn update_render_field(&mut self, sticky_release: bool, flux_render: bool, ribbon: bool) {
+        self.render_flux = flux_render;
+        self.render_ribbon = ribbon;
+        if ribbon {
+            // Stream-membership hysteresis: enter at STREAM_FLUX_MIN, leave
+            // below STREAM_FLUX_OFF — margin cells hovering at the entry
+            // threshold must not flicker the ribbon.
+            let total = self.size * self.size * self.size;
+            if self.stream_mark.len() != total {
+                self.stream_mark = vec![false; total];
+            }
+            for idx in 0..total {
+                let f = self.flux_ema.get(idx).copied().unwrap_or(0.0);
+                self.stream_mark[idx] = if self.stream_mark[idx] {
+                    f >= STREAM_FLUX_OFF
+                } else {
+                    f >= STREAM_FLUX_MIN
+                };
+            }
+        }
+        if !flux_render {
+            self.update_mesh_hysteresis(sticky_release);
+            return;
+        }
+        let total = self.size * self.size * self.size;
+        if self.render_level.len() != total {
+            // First enable: snap to current levels (no global fade-in).
+            self.render_level = self.cells.iter().map(|c| c.level).collect();
+            return;
+        }
+        for idx in 0..total {
+            let raw = self.cells[idx].level;
+            let prev = self.render_level[idx];
+            let a = if raw > prev { RENDER_ALPHA_UP } else { RENDER_ALPHA_DOWN };
+            let mut v = prev + (raw - prev) * a;
+            // Converge exactly so settled chunks stop needing re-mesh, and
+            // empty cells don't hold an infinite fade tail.
+            if (v - raw).abs() < 0.01 {
+                v = raw;
+            }
+            if raw <= 0.0 && v < 0.02 {
+                v = 0.0;
+            }
+            self.render_level[idx] = v;
+        }
+    }
+
+    /// Mark a cell as having received cascade inflow (cross-chunk arrivals;
+    /// in-chunk arrivals fold in at tick_chunk's swap). Lazily sizes.
+    #[inline]
+    pub fn mark_influx(&mut self, x: usize, y: usize, z: usize) {
+        let total = self.size * self.size * self.size;
+        if self.influx_hold.len() != total {
+            self.influx_hold = vec![0; total];
+        }
+        let idx = self.index(x, y, z);
+        self.influx_hold[idx] = INFLUX_HOLD_TICKS;
     }
 
     /// Recompute cell capacity from corner densities (fractional: air_corners/8).

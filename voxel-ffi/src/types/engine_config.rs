@@ -926,4 +926,8 @@ pub struct FfiEngineConfig {
     pub fluid_mesh_sticky_release: u32,
     pub fluid_mesh_floor_clamp: u32,
     pub fluid_mesh_buried_cull: u32,
+    // ── Fluid cascade flags (3 fields, 2026-08-04 evening; same 0/1 rule) ──
+    pub fluid_mesh_flux_render: u32,
+    pub fluid_mesh_stream_ribbon: u32,
+    pub fluid_lava_transit_retention: u32,
 }

@@ -72,6 +72,9 @@ impl VoxelEngine {
             sticky_release: fluid.mesh_sticky_release,
             floor_clamp: fluid.mesh_floor_clamp,
             buried_cull: fluid.mesh_buried_cull,
+            flux_render: fluid.mesh_flux_render,
+            stream_ribbon: fluid.mesh_stream_ribbon,
+            transit_retention: fluid.lava_transit_retention,
         });
     }
 
@@ -753,6 +756,9 @@ pub(crate) fn ffi_config_to_fluid(c: &FfiEngineConfig) -> FluidConfig {
         mesh_sticky_release: c.fluid_mesh_sticky_release != 0,
         mesh_floor_clamp: c.fluid_mesh_floor_clamp != 0,
         mesh_buried_cull: c.fluid_mesh_buried_cull != 0,
+        mesh_flux_render: c.fluid_mesh_flux_render != 0,
+        mesh_stream_ribbon: c.fluid_mesh_stream_ribbon != 0,
+        lava_transit_retention: c.fluid_lava_transit_retention != 0,
     }
 }
 

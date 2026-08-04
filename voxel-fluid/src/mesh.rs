@@ -981,7 +981,10 @@ pub fn dominant_fluid_type(grid: &ChunkFluidGrid, x: usize, y: usize, z: usize) 
         for cy in y..=(y + 1).min(size - 1) {
             for cx in x..=(x + 1).min(size - 1) {
                 let cell = grid.get(cx, cy, cz);
-                if cell.level >= MIN_LEVEL {
+                // Flux-carrying cells count by their REMEMBERED type even
+                // when momentarily dry (stream ribbon cells mid supply-gap
+                // must not tint as the generic-Water fallback).
+                if cell.level >= MIN_LEVEL || grid.flux_at(cx, cy, cz) > 0.0 {
                     if cell.fluid_type.is_lava() {
                         lava_count += 1;
                     } else {

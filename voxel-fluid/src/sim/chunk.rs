@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use crate::cell::{ChunkFluidGrid, FluidType, MIN_LEVEL, ORPHAN_EVAP_TICKS, ORPHAN_THRESHOLD};
+use crate::cell::{ChunkFluidGrid, FluidType, FLUX_EMA_ALPHA, INFLUX_HOLD_TICKS, MIN_LEVEL,
+    ORPHAN_EVAP_TICKS, ORPHAN_THRESHOLD, TRANSIT_RETENTION};
 use crate::FluidConfig;
 
 /// A pending fluid transfer across a chunk boundary.
@@ -161,11 +162,14 @@ pub(super) fn tick_chunk(
     // Reusing these allocations is the single biggest win for tick perf —
     // at chunk_size=30 each scratch is ≈540KB / ≈108KB / ≈108KB, allocated
     // 6× per water tick × N chunks/sec on the old code path.
-    let (mut new_cells, mut fluid_weight, mut drain_scratch) = {
+    let (mut new_cells, mut fluid_weight, mut drain_scratch, mut flux_out, mut influx_mark) = {
         let g = chunks.get_mut(&key).unwrap();
         let mut nc = std::mem::take(&mut g.scratch_cells);
         let mut fw = std::mem::take(&mut g.scratch_weights);
         let dd = std::mem::take(&mut g.scratch_drain);
+        // Cascade flux tracking (lava ticks): per-cell outflux + inflow marks.
+        let mut fo = std::mem::take(&mut g.scratch_flux);
+        let mut im = std::mem::take(&mut g.scratch_influx);
         if nc.len() == total {
             nc.copy_from_slice(&g.cells);
         } else {
@@ -174,12 +178,23 @@ pub(super) fn tick_chunk(
         }
         fw.clear();
         fw.resize(total, 0.0);
-        (nc, fw, dd)
+        if is_lava_tick {
+            fo.clear();
+            fo.resize(total, 0.0);
+            im.clear();
+            im.resize(total, 0);
+        }
+        (nc, fw, dd, fo, im)
     };
 
     let grid = chunks.get(&key).unwrap();
     let cell_solid = &grid.cell_solid;
     let cell_cap = &grid.cell_cap;
+    // Transit retention (lava): fed cells keep a standing floor when
+    // draining via gravity/slope. influx_hold may be lazily unsized (empty)
+    // — .get() treats that as "not fed".
+    let retention_on = config.lava_transit_retention && is_lava_tick;
+    let influx_hold = &grid.influx_hold;
     // Face gating (2026-08-04, bug #215): the rendered surface must be a
     // transit barrier. Checked from the SOURCE cell's own corners, so
     // cross-chunk directions need no neighbor data.
@@ -312,6 +327,22 @@ pub(super) fn tick_chunk(
                 // a fall reads as a continuous ribbon. Water keeps 8x.
                 let gravity_mult = if is_lava { 4.0 } else { 8.0 };
 
+                // Transit retention: a FED lava cell (received cascade inflow
+                // within INFLUX_HOLD_TICKS) keeps TRANSIT_RETENTION standing
+                // when draining down/downslope — streams hold real volume and
+                // stop straddling the mesh iso. Unfed cells (source died,
+                // flow moved on) drain fully.
+                let retain = if retention_on
+                    && is_lava
+                    && !is_source
+                    && !has_grace
+                    && influx_hold.get(idx).copied().unwrap_or(0) > 0
+                {
+                    TRANSIT_RETENTION
+                } else {
+                    0.0
+                };
+
                 // Gravity: try to flow down (8x flow rate for fast pooling)
                 if y > 0 {
                     let below_idx = z * size * size + (y - 1) * size + x;
@@ -326,7 +357,7 @@ pub(super) fn tick_chunk(
                             let new_hops = cell.hops_from_source.saturating_add(1);
                             let cap = bounded_level_cap(new_hops, cell.max_flow_dist);
                             let bounded_space = (cap - new_cells[below_idx].level).max(0.0).min(below_space);
-                            let transfer = cell.level.min(bounded_space).min(flow_rate * gravity_mult);
+                            let transfer = (cell.level - retain).max(0.0).min(bounded_space).min(flow_rate * gravity_mult);
                             if transfer > MIN_LEVEL {
                                 if !is_source && !has_grace {
                                     new_cells[idx].level -= transfer;
@@ -335,6 +366,10 @@ pub(super) fn tick_chunk(
                                 new_cells[below_idx].fluid_type = cell.fluid_type;
                                 new_cells[below_idx].hops_from_source = new_hops;
                                 new_cells[below_idx].max_flow_dist = cell.max_flow_dist;
+                                if is_lava_tick {
+                                    flux_out[idx] += transfer;
+                                    influx_mark[below_idx] = 1;
+                                }
                                 changed = true;
                             }
                         }
@@ -372,10 +407,13 @@ pub(super) fn tick_chunk(
                                     let new_hops = cell.hops_from_source.saturating_add(1);
                                     let cap = bounded_level_cap(new_hops, cell.max_flow_dist);
                                     let bounded_space = (cap - below_grid.cells[below_idx].level).max(0.0).min(below_space);
-                                    let transfer = new_cells[idx].level.min(bounded_space).min(flow_rate * gravity_mult);
+                                    let transfer = (new_cells[idx].level - retain).max(0.0).min(bounded_space).min(flow_rate * gravity_mult);
                                     if transfer > MIN_LEVEL {
                                         if !is_source && !has_grace {
                                             new_cells[idx].level -= transfer;
+                                        }
+                                        if is_lava_tick {
+                                            flux_out[idx] += transfer;
                                         }
                                         cross_transfers.push(CrossChunkTransfer {
                                             dest_key: below_key,
@@ -536,10 +574,13 @@ pub(super) fn tick_chunk(
                             // Cap dst's allowed receive level by bounded-flow rule.
                             let dst_existing = if is_cross { 0.0 } else { new_cells[ni].level };
                             let bounded_space = (level_cap - dst_existing).max(0.0).min(dst_space);
-                            let transfer = new_cells[idx].level.min(bounded_space).min(flow_rate * slope_mult);
+                            let transfer = (new_cells[idx].level - retain).max(0.0).min(bounded_space).min(flow_rate * slope_mult);
                             if transfer > MIN_LEVEL {
                                 if !is_source && !has_grace {
                                     new_cells[idx].level -= transfer;
+                                }
+                                if is_lava_tick {
+                                    flux_out[idx] += transfer;
                                 }
                                 if is_cross {
                                     cross_transfers.push(CrossChunkTransfer {
@@ -557,6 +598,9 @@ pub(super) fn tick_chunk(
                                     new_cells[ni].fluid_type = cell.fluid_type;
                                     new_cells[ni].hops_from_source = new_hops;
                                     new_cells[ni].max_flow_dist = cell.max_flow_dist;
+                                    if is_lava_tick {
+                                        influx_mark[ni] = 1;
+                                    }
                                 }
                                 changed = true;
                             }
@@ -1074,9 +1118,35 @@ pub(super) fn tick_chunk(
         grid.has_fluid = any_fluid;
         grid.has_lava = any_lava;
         grid.has_sources = any_source;
+        // Fold this tick's cascade flux into the cross-tick state (lava
+        // ticks only — the scratches are only sized then). Cheap enough to
+        // run unconditionally on lava ticks; both consumers (stream ribbon,
+        // transit retention) read via .get() and tolerate empty vecs.
+        if is_lava_tick && flux_out.len() == total {
+            if grid.influx_hold.len() != total {
+                grid.influx_hold = vec![0; total];
+            }
+            if grid.flux_ema.len() != total {
+                grid.flux_ema = vec![0.0; total];
+            }
+            for i in 0..total {
+                if influx_mark[i] != 0 {
+                    grid.influx_hold[i] = INFLUX_HOLD_TICKS;
+                } else {
+                    grid.influx_hold[i] = grid.influx_hold[i].saturating_sub(1);
+                }
+                // Asymmetric: quick to recognize a stream, slow to forget one
+                // (short supply gaps must not flicker the ribbon).
+                let a = if flux_out[i] > grid.flux_ema[i] { FLUX_EMA_ALPHA } else { crate::cell::FLUX_EMA_DECAY };
+                let e = grid.flux_ema[i] * (1.0 - a) + flux_out[i] * a;
+                grid.flux_ema[i] = if e < 0.001 { 0.0 } else { e };
+            }
+        }
         grid.scratch_cells = new_cells;
         grid.scratch_weights = fluid_weight;
         grid.scratch_drain = drain_scratch;
+        grid.scratch_flux = flux_out;
+        grid.scratch_influx = influx_mark;
     }
 
     (changed, cross_transfers)

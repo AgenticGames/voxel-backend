@@ -80,6 +80,24 @@ pub struct FluidConfig {
     /// the buried closure skirt is only ever visible from inside the ground
     /// (or through terrain cracks), and is the "under the floor" sheet.
     pub mesh_buried_cull: bool,
+    // Cascade bundle (2026-08-04 evening): a cascade is high FLUX with low
+    // standing volume — instantaneous levels oscillate around the mesh iso
+    // even when the stream is perfectly steady. Three A/B-toggleable fixes.
+    /// Mesh from a per-cell exponential moving average of the level instead
+    /// of the instant (asymmetric: fast rise, slow fade). A transit cell
+    /// oscillating 0<->0.3 renders as a steady ribbon; when flow stops the
+    /// stream fades out like cooling residue. Replaces the hysteresis hack
+    /// when on.
+    pub mesh_flux_render: bool,
+    /// Cells with sustained cascade flux (gravity+slope throughput, lava)
+    /// mesh at a guaranteed floor level — the stream path renders as a
+    /// connected ribbon even where standing levels dip.
+    pub mesh_stream_ribbon: bool,
+    /// Sim-side (lava only): a transit cell that received inflow recently
+    /// keeps a retention floor of standing lava — streams get real volume,
+    /// levels stop straddling the iso, and lights/quench/damage see the
+    /// stream too. Fed cells drain fully once inflow stops.
+    pub lava_transit_retention: bool,
 }
 
 impl Default for FluidConfig {
@@ -119,6 +137,9 @@ impl Default for FluidConfig {
             mesh_sticky_release: true,
             mesh_floor_clamp: true,
             mesh_buried_cull: true,
+            mesh_flux_render: false,
+            mesh_stream_ribbon: false,
+            lava_transit_retention: false,
         }
     }
 }
@@ -203,7 +224,7 @@ pub enum FluidEvent {
         lava_flow_rate: f32,
         lava_spread_rate: f32,
     },
-    /// Update the rim/skirt mesh flags at runtime (same reload path as
+    /// Update the rim/skirt + cascade flags at runtime (same reload path as
     /// UpdateFluidRates). The handler dirty-sweeps every fluid grid so a
     /// settled pool re-meshes immediately — without that, toggling a flag
     /// would only show on chunks the sim happens to touch next.
@@ -211,6 +232,9 @@ pub enum FluidEvent {
         sticky_release: bool,
         floor_clamp: bool,
         buried_cull: bool,
+        flux_render: bool,
+        stream_ribbon: bool,
+        transit_retention: bool,
     },
     /// Request a snapshot of all fluid cells (used by sleep system).
     /// Response sent via the dedicated reply channel.

@@ -109,6 +109,11 @@ pub fn tick_fluid(
                     cell.hops_from_source = xfer.dest_hops;
                     cell.max_flow_dist = xfer.dest_max_flow;
                 }
+                // Cross-chunk cascade arrivals count as "fed" for transit
+                // retention, same as in-chunk gravity/slope receives.
+                if is_lava_tick {
+                    grid.mark_influx(xfer.dest_x, xfer.dest_y, xfer.dest_z);
+                }
                 grid.dirty = true;
                 grid.has_fluid = true;
                 dirty.insert(xfer.dest_key);
@@ -2218,6 +2223,360 @@ mod tests {
         assert!(
             below < 0.001,
             "fluid seeped through a corner-nicked rendered slab: {below:.3} total level below it"
+        );
+    }
+
+    // ── 2026-08-04 cascade bundle ─────────────────────────────────────────
+    // A cascade is high FLUX with low standing volume: transit cells end
+    // ticks with levels oscillating around the mesh iso (0.15) even when the
+    // stream is steady, so the mesh strobes ("flashing wildly at different
+    // locations" — user repro). Fixture: a descending stepped gallery from a
+    // lava source down to a basin, 3 cells wide so spread thins per-cell
+    // flux to the borderline regime where strobing lives.
+
+    /// Stepped gallery: 6 steps descending along +x (3 wide in z), basin at
+    /// the far end, lava source at the top entry.
+    fn make_cascade() -> ChunkFluidGrid {
+        let size = 16;
+        let config = crate::FluidConfig::default();
+        let mut d = make_density_field_solid(size);
+        // Steps: step i floor at gy = 12 - 2*i, air carved above it.
+        for i in 0..6usize {
+            let x0 = 2 + 2 * i;
+            let floor = 12 - 2 * i;
+            carve_box(&mut d, size, x0..(x0 + 3), floor..15, 7..11);
+        }
+        // Basin at the bottom of the last step.
+        carve_box(&mut d, size, 12..16, 1..5, 5..12);
+        let mut grid = make_chunk(size);
+        apply_density(&mut grid, &d, &config);
+        {
+            let cell = grid.get_mut(2, 12, 8);
+            cell.level = SOURCE_LEVEL;
+            cell.fluid_type = FluidType::Lava;
+            cell.is_source = true;
+            cell.max_flow_dist = 0; // unlimited — clean steady flux signal
+            cell.hops_from_source = 0;
+        }
+        grid.has_fluid = true;
+        grid.has_lava = true;
+        grid.has_sources = true;
+        grid
+    }
+
+    fn cascade_config(flux_render: bool, ribbon: bool, retention: bool) -> crate::FluidConfig {
+        crate::FluidConfig {
+            mesh_flux_render: flux_render,
+            mesh_stream_ribbon: ribbon,
+            lava_transit_retention: retention,
+            ..crate::FluidConfig::default()
+        }
+    }
+
+    fn run_cascade_ticks(
+        chunks: &mut HashMap<(i32, i32, i32), ChunkFluidGrid>,
+        n: usize,
+        config: &crate::FluidConfig,
+        update_render: bool,
+    ) {
+        let dc = empty_density_cache();
+        for _ in 0..n {
+            crate::sim::regen_sources(chunks);
+            tick_fluid(chunks, &dc, 16, true, config, true);
+            if update_render {
+                let grid = chunks.get_mut(&(0, 0, 0)).unwrap();
+                grid.update_render_field(
+                    config.mesh_sticky_release,
+                    config.mesh_flux_render,
+                    config.mesh_stream_ribbon,
+                );
+            }
+        }
+    }
+
+    /// The gallery's transit cells (steps only — basin excluded).
+    fn gallery_cells() -> Vec<(usize, usize, usize)> {
+        let mut v = Vec::new();
+        for i in 0..6usize {
+            let x0 = 2 + 2 * i;
+            let floor = 12 - 2 * i;
+            for x in x0..(x0 + 3).min(12) {
+                for z in 7..11usize {
+                    for y in floor..(floor + 3).min(15) {
+                        v.push((x, y, z));
+                    }
+                }
+            }
+        }
+        v
+    }
+
+    /// Count per-cell mesh-membership toggles over a window of ticks.
+    /// Returns (mesh_toggles, raw_toggles): membership by mesh_level vs by
+    /// raw level, so a fix can be shown to stabilize the MESH while the sim
+    /// still oscillates underneath.
+    fn measure_strobe(config: &crate::FluidConfig, warmup: usize, window: usize) -> (usize, usize) {
+        let mut chunks = HashMap::new();
+        chunks.insert((0, 0, 0), make_cascade());
+        run_cascade_ticks(&mut chunks, warmup, config, true);
+
+        let cells = gallery_cells();
+        let mut prev_mesh: Vec<bool> = Vec::new();
+        let mut prev_raw: Vec<bool> = Vec::new();
+        let mut mesh_toggles = 0usize;
+        let mut raw_toggles = 0usize;
+        for t in 0..window {
+            run_cascade_ticks(&mut chunks, 1, config, true);
+            let grid = chunks.get(&(0, 0, 0)).unwrap();
+            let mesh_now: Vec<bool> = cells.iter().map(|&(x, y, z)| grid.mesh_level(x, y, z) >= 0.15).collect();
+            let raw_now: Vec<bool> = cells.iter().map(|&(x, y, z)| grid.get(x, y, z).level >= 0.15).collect();
+            if t > 0 {
+                mesh_toggles += mesh_now.iter().zip(&prev_mesh).filter(|(a, b)| a != b).count();
+                raw_toggles += raw_now.iter().zip(&prev_raw).filter(|(a, b)| a != b).count();
+            }
+            prev_mesh = mesh_now;
+            prev_raw = raw_now;
+        }
+        (mesh_toggles, raw_toggles)
+    }
+
+    #[test]
+    #[ignore] // diagnostic probe — run manually with --ignored --nocapture
+    fn cascade_strobe_probe() {
+        for (name, flow, warmup) in [
+            ("transient_default", 0.1f32, 3usize),
+            ("transient_flow05", 0.05, 3),
+            ("mid_default", 0.1, 15),
+            ("steady_default", 0.1, 60),
+        ] {
+            let mut cfg = cascade_config(false, false, false);
+            cfg.lava_flow_rate = flow;
+            let (m, r) = measure_strobe(&cfg, warmup, 45);
+            let mut cfg2 = cascade_config(true, false, false);
+            cfg2.lava_flow_rate = flow;
+            let (m2, r2) = measure_strobe(&cfg2, warmup, 45);
+            eprintln!("PROBE {name}: legacy mesh={m} raw={r} | flux_render mesh={m2} raw={r2}");
+        }
+        // Steady-state visibility: wet vs rendered cells at the sub-iso regime.
+        for (name, fx, rb, rt) in [
+            ("legacy", false, false, false),
+            ("flux", true, false, false),
+            ("flux+ribbon", true, true, false),
+            ("full(retention)", true, true, true),
+        ] {
+            let cfg = cascade_config(fx, rb, rt);
+            let mut chunks = HashMap::new();
+            chunks.insert((0, 0, 0), make_cascade());
+            run_cascade_ticks(&mut chunks, 100, &cfg, true);
+            let grid = chunks.get(&(0, 0, 0)).unwrap();
+            let wet = gallery_cells().iter().filter(|&&(x, y, z)| grid.get(x, y, z).level >= 0.02).count();
+            let rendered = gallery_cells().iter().filter(|&&(x, y, z)| grid.mesh_level(x, y, z) >= 0.15).count();
+            eprintln!("PROBE visibility {name}: wet={wet} rendered={rendered}");
+        }
+    }
+
+    #[test]
+    fn cascade_stream_mostly_invisible_with_bundle_off() {
+        // FIXTURE HONESTY (the "isolated specs" symptom): a steady cascade
+        // is high flux / low standing volume, so most of its wet cells sit
+        // below the mesh iso — the legacy pipeline renders a scatter of
+        // specs, not a stream. Measured 2026-08-04: 57 wet, 6 rendered.
+        // If this fails the fixture stopped modeling the bug and the bundle
+        // tests prove nothing.
+        let cfg = cascade_config(false, false, false);
+        let mut chunks = HashMap::new();
+        chunks.insert((0, 0, 0), make_cascade());
+        run_cascade_ticks(&mut chunks, 100, &cfg, true);
+        let grid = chunks.get(&(0, 0, 0)).unwrap();
+        let wet = gallery_cells().iter().filter(|&&(x, y, z)| grid.get(x, y, z).level >= 0.02).count();
+        let rendered = gallery_cells().iter().filter(|&&(x, y, z)| grid.mesh_level(x, y, z) >= 0.15).count();
+        assert!(wet >= 40, "cascade dried up (wet={wet}) — fixture drift?");
+        assert!(
+            rendered * 4 <= wet,
+            "legacy no longer under-renders the stream (wet={wet}, rendered={rendered}) — fixture drift?"
+        );
+    }
+
+    #[test]
+    fn cascade_bundle_renders_the_stream() {
+        // flux+ribbon must render the channel (measured 34/57), and
+        // retention must give it real volume and render more still (51/108).
+        let render_count = |cfg: &crate::FluidConfig| -> (usize, usize) {
+            let mut chunks = HashMap::new();
+            chunks.insert((0, 0, 0), make_cascade());
+            run_cascade_ticks(&mut chunks, 100, cfg, true);
+            let grid = chunks.get(&(0, 0, 0)).unwrap();
+            let wet = gallery_cells().iter().filter(|&&(x, y, z)| grid.get(x, y, z).level >= 0.02).count();
+            let rendered = gallery_cells().iter().filter(|&&(x, y, z)| grid.mesh_level(x, y, z) >= 0.15).count();
+            (wet, rendered)
+        };
+        let (_, legacy_rendered) = render_count(&cascade_config(false, false, false));
+        let (_, ribbon_rendered) = render_count(&cascade_config(true, true, false));
+        let (full_wet, full_rendered) = render_count(&cascade_config(true, true, true));
+        assert!(
+            ribbon_rendered >= legacy_rendered * 4 && ribbon_rendered >= 25,
+            "ribbon did not render the channel: legacy={legacy_rendered}, ribbon={ribbon_rendered}"
+        );
+        assert!(
+            full_rendered >= ribbon_rendered && full_wet >= 80,
+            "retention did not add stream volume: rendered={full_rendered}, wet={full_wet}"
+        );
+    }
+
+    #[test]
+    fn cascade_flux_render_stops_pulse_strobing() {
+        // The in-game oscillator: supply is INTERMITTENT (sources regen and
+        // self-extinguish, flow paths shift, gulps march). Model it with a
+        // source pulsing 3 ticks on / 3 off — legacy mesh membership churns
+        // with every pulse; the EMA render field + ribbon must hold the
+        // stream visually steady while raw levels swing underneath.
+        let pulse_toggles = |cfg: &crate::FluidConfig| -> (usize, usize) {
+            let mut chunks = HashMap::new();
+            chunks.insert((0, 0, 0), make_cascade());
+            run_cascade_ticks(&mut chunks, 40, cfg, true);
+            let cells = gallery_cells();
+            let mut prev_mesh: Vec<bool> = Vec::new();
+            let mut prev_raw: Vec<bool> = Vec::new();
+            let mut mesh_toggles = 0usize;
+            let mut raw_toggles = 0usize;
+            for t in 0..48usize {
+                {
+                    let grid = chunks.get_mut(&(0, 0, 0)).unwrap();
+                    let on = (t / 3) % 2 == 0;
+                    let cell = grid.get_mut(2, 12, 8);
+                    cell.is_source = on;
+                    if on {
+                        cell.level = SOURCE_LEVEL;
+                        cell.fluid_type = FluidType::Lava;
+                        cell.hops_from_source = 0;
+                        cell.max_flow_dist = 0;
+                    }
+                    grid.has_sources = on;
+                    grid.has_fluid = true;
+                }
+                run_cascade_ticks(&mut chunks, 1, cfg, true);
+                let grid = chunks.get(&(0, 0, 0)).unwrap();
+                let mesh_now: Vec<bool> =
+                    cells.iter().map(|&(x, y, z)| grid.mesh_level(x, y, z) >= 0.15).collect();
+                let raw_now: Vec<bool> =
+                    cells.iter().map(|&(x, y, z)| grid.get(x, y, z).level >= 0.15).collect();
+                if t > 0 {
+                    mesh_toggles += mesh_now.iter().zip(&prev_mesh).filter(|(a, b)| a != b).count();
+                    raw_toggles += raw_now.iter().zip(&prev_raw).filter(|(a, b)| a != b).count();
+                }
+                prev_mesh = mesh_now;
+                prev_raw = raw_now;
+            }
+            (mesh_toggles, raw_toggles)
+        };
+
+        let (bundle_mesh, bundle_raw) = pulse_toggles(&cascade_config(true, true, false));
+        assert!(
+            bundle_raw > 0,
+            "pulsed source produced no raw churn at all — fixture drift?"
+        );
+        // The user-visible metric is churn per rendered cell per tick: the
+        // ~40-cell rendered ribbon must flicker at most ~1% of its cells per
+        // tick (legacy renders ~6 cells total, so absolute-toggle compares
+        // are meaningless — its 'stability' is emptiness).
+        let rendered = {
+            let cfg = cascade_config(true, true, false);
+            let mut chunks = HashMap::new();
+            chunks.insert((0, 0, 0), make_cascade());
+            run_cascade_ticks(&mut chunks, 100, &cfg, true);
+            let grid = chunks.get(&(0, 0, 0)).unwrap();
+            gallery_cells().iter().filter(|&&(x, y, z)| grid.mesh_level(x, y, z) >= 0.15).count()
+        };
+        assert!(rendered >= 25, "ribbon rendered too little to judge ({rendered})");
+        let churn_per_tick = bundle_mesh as f32 / 47.0;
+        assert!(
+            churn_per_tick <= rendered as f32 * 0.02,
+            "bundle ribbon flickers under pulses: {bundle_mesh} toggles/47t over {rendered} rendered cells (raw churn {bundle_raw})"
+        );
+    }
+
+    #[test]
+    fn cascade_ribbon_renders_connected_stream() {
+        let cfg = cascade_config(true, true, false);
+        let mut chunks = HashMap::new();
+        chunks.insert((0, 0, 0), make_cascade());
+        run_cascade_ticks(&mut chunks, 100, &cfg, true);
+
+        let grid = chunks.get(&(0, 0, 0)).unwrap();
+        // Stream cells = sustained flux. There must BE a stream...
+        let stream: Vec<(usize, usize, usize)> = gallery_cells()
+            .into_iter()
+            .filter(|&(x, y, z)| {
+                let idx = grid.index(x, y, z);
+                grid.flux_ema.get(idx).copied().unwrap_or(0.0) >= crate::cell::STREAM_FLUX_MIN
+                    && grid.get(x, y, z).level >= MIN_LEVEL
+            })
+            .collect();
+        assert!(
+            stream.len() >= 6,
+            "no sustained stream detected in the gallery ({} flux cells)",
+            stream.len()
+        );
+        // ...and every wet stream cell must render in the mesh (no gaps).
+        for (x, y, z) in stream {
+            assert!(
+                grid.mesh_level(x, y, z) >= 0.15,
+                "stream cell ({x},{y},{z}) not rendered — gap in the ribbon (raw={:.3})",
+                grid.get(x, y, z).level
+            );
+        }
+    }
+
+    #[test]
+    fn transit_retention_gives_stream_volume_then_drains() {
+        // With retention: fed transit cells hold REAL standing lava (the
+        // stream exists for lights/quench/damage, not just the mesher)...
+        let cfg = cascade_config(false, false, true);
+        let mut chunks = HashMap::new();
+        chunks.insert((0, 0, 0), make_cascade());
+        run_cascade_ticks(&mut chunks, 100, &cfg, false);
+
+        let retained: usize = {
+            let grid = chunks.get(&(0, 0, 0)).unwrap();
+            gallery_cells()
+                .iter()
+                .filter(|&&(x, y, z)| grid.get(x, y, z).level >= 0.18)
+                .count()
+        };
+        let baseline: usize = {
+            let cfg0 = cascade_config(false, false, false);
+            let mut chunks0 = HashMap::new();
+            chunks0.insert((0, 0, 0), make_cascade());
+            run_cascade_ticks(&mut chunks0, 100, &cfg0, false);
+            let grid = chunks0.get(&(0, 0, 0)).unwrap();
+            gallery_cells()
+                .iter()
+                .filter(|&&(x, y, z)| grid.get(x, y, z).level >= 0.18)
+                .count()
+        };
+        assert!(
+            retained > baseline + 4,
+            "retention added no stream volume (retained={retained}, baseline={baseline})"
+        );
+
+        // ...and when the source dies the channel must DRAIN — retention is
+        // for fed cells only, never a source of perched fluid.
+        {
+            let grid = chunks.get_mut(&(0, 0, 0)).unwrap();
+            let cell = grid.get_mut(2, 12, 8);
+            cell.is_source = false;
+            cell.level = 0.0;
+            grid.has_sources = false;
+        }
+        run_cascade_ticks(&mut chunks, 250, &cfg, false);
+        let grid = chunks.get(&(0, 0, 0)).unwrap();
+        let left_in_gallery: f64 = gallery_cells()
+            .iter()
+            .map(|&(x, y, z)| grid.get(x, y, z).level as f64)
+            .sum();
+        assert!(
+            left_in_gallery < 1.0,
+            "gallery still holds {left_in_gallery:.2} lava long after the source died — retention is perching fluid"
         );
     }
 }
