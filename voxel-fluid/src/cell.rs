@@ -107,6 +107,30 @@ impl FluidCell {
     }
 }
 
+/// Face gating (2026-08-04, bug #215): true if the given face of cell `idx`
+/// is fully solid — all 4 lattice corners shared with the neighbor in
+/// direction (dx,dy,dz) have positive density, meaning the rendered surface
+/// lies on/inside that face. Fluid must never TRANSIT such a face (thin
+/// slabs are otherwise permeable membranes: fractional capacity makes both
+/// crossing cells partially passable). Holding fluid IN a crossing cell
+/// stays allowed — shorelines and lapping keep their look.
+/// Corner order per CELL_CORNER_OFFSETS: 0=(0,0,0) 1=(1,0,0) 2=(1,1,0)
+/// 3=(0,1,0) 4=(0,0,1) 5=(1,0,1) 6=(1,1,1) 7=(0,1,1).
+#[inline]
+pub fn face_blocked(corners: &[f32], idx: usize, dx: i32, dy: i32, dz: i32) -> bool {
+    let face: [usize; 4] = match (dx, dy, dz) {
+        (1, 0, 0) => [1, 2, 5, 6],
+        (-1, 0, 0) => [0, 3, 4, 7],
+        (0, 1, 0) => [2, 3, 6, 7],
+        (0, -1, 0) => [0, 1, 4, 5],
+        (0, 0, 1) => [4, 5, 6, 7],
+        (0, 0, -1) => [0, 1, 2, 3],
+        _ => return false,
+    };
+    let base = idx * 8;
+    face.iter().all(|&c| corners[base + c] > 0.0)
+}
+
 /// Minimum fluid level to consider non-empty.
 pub const MIN_LEVEL: f32 = 0.001;
 /// Orphan puddle threshold: cells below this level get boosted slope flow.

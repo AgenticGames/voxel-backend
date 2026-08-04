@@ -2086,7 +2086,6 @@ mod tests {
     // whose 4 shared lattice corners are all solid.
 
     #[test]
-    #[ignore = "RED (2026-08-04): reproduces bug #215 pinhole seepage — 16.0 units pass through. Un-ignore when landing face gating (see lava-containment memory note): fluid must not cross a cell face whose 4 shared lattice corners are all solid. Gate every flow pass in sim/chunk.rs + equalize_horizontal."]
     fn fluid_does_not_seep_through_thin_rendered_slab() {
         let size = 16usize;
         let stride = size + 1;

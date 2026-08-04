@@ -79,7 +79,7 @@ pub fn equalize_horizontal(
 
     // Build global index: collect all water cells with level > MIN_LEVEL
     // Key: (world_x, world_y, world_z) → (chunk_key, local_x, local_y, local_z, level, capacity)
-    let mut water_cells: HashMap<(i32, i32, i32), ((i32, i32, i32), usize, usize, usize, f32, f32)> = HashMap::new();
+    let mut water_cells: HashMap<(i32, i32, i32), ((i32, i32, i32), usize, usize, usize, f32, f32, u8)> = HashMap::new();
 
     for (&chunk_key, grid) in chunks.iter() {
         if !grid.has_fluid {
@@ -107,7 +107,16 @@ pub fn equalize_horizontal(
                     let wx = chunk_key.0 * chunk_size as i32 + x as i32;
                     let wy = chunk_key.1 * chunk_size as i32 + y as i32;
                     let wz = chunk_key.2 * chunk_size as i32 + z as i32;
-                    water_cells.insert((wx, wy, wz), (chunk_key, x, y, z, cell.level, cap));
+                    // Face gating (2026-08-04, bug #215): record which lateral
+                    // faces are open so the BFS can't equalize THROUGH a
+                    // rendered surface (thin walls were permeable membranes).
+                    let idx = z * size * size + y * size + x;
+                    let mut open_mask = 0u8;
+                    if !crate::cell::face_blocked(&grid.cell_corners, idx, 1, 0, 0) { open_mask |= 1; }
+                    if !crate::cell::face_blocked(&grid.cell_corners, idx, -1, 0, 0) { open_mask |= 2; }
+                    if !crate::cell::face_blocked(&grid.cell_corners, idx, 0, 0, 1) { open_mask |= 4; }
+                    if !crate::cell::face_blocked(&grid.cell_corners, idx, 0, 0, -1) { open_mask |= 8; }
+                    water_cells.insert((wx, wy, wz), (chunk_key, x, y, z, cell.level, cap, open_mask));
                 }
             }
         }
@@ -142,8 +151,13 @@ pub fn equalize_horizontal(
 
         while let Some(pos) = queue.pop_front() {
             region.push(pos);
-            // 4-connected on XZ plane
-            for &(dx, dz) in &[(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+            // 4-connected on XZ plane, gated on open faces: two water cells
+            // separated by a rendered surface are NOT connected.
+            let src_mask = water_cells[&pos].6;
+            for (bit, &(dx, dz)) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)].iter().enumerate() {
+                if src_mask & (1u8 << bit) == 0 {
+                    continue;
+                }
                 let neighbor = (pos.0 + dx, pos.1, pos.2 + dz);
                 if !visited.contains(&neighbor) && water_cells.contains_key(&neighbor) {
                     visited.insert(neighbor);
@@ -160,7 +174,7 @@ pub fn equalize_horizontal(
         let mut total_water = 0.0f32;
         let mut total_cap = 0.0f32;
         for &pos in &region {
-            let (_, _, _, _, level, cap) = water_cells[&pos];
+            let (_, _, _, _, level, cap, _) = water_cells[&pos];
             total_water += level;
             total_cap += cap;
         }
@@ -176,7 +190,7 @@ pub fn equalize_horizontal(
         const EQ_DAMPING: f32 = 0.3; // blend 30% toward average each tick
 
         for &pos in &region {
-            let (chunk_key, lx, ly, lz, old_level, cap) = water_cells[&pos];
+            let (chunk_key, lx, ly, lz, old_level, cap, _) = water_cells[&pos];
             let target = (avg_fill * cap).min(cap);
             let new_level = old_level + EQ_DAMPING * (target - old_level);
             if (new_level - old_level).abs() > MIN_LEVEL {

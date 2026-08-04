@@ -180,6 +180,13 @@ pub(super) fn tick_chunk(
     let grid = chunks.get(&key).unwrap();
     let cell_solid = &grid.cell_solid;
     let cell_cap = &grid.cell_cap;
+    // Face gating (2026-08-04, bug #215): the rendered surface must be a
+    // transit barrier. Checked from the SOURCE cell's own corners, so
+    // cross-chunk directions need no neighbor data.
+    let corners = &grid.cell_corners;
+    let face_open = |idx: usize, dx: i32, dy: i32, dz: i32| -> bool {
+        !crate::cell::face_blocked(corners, idx, dx, dy, dz)
+    };
     let mut changed = false;
     let mut cross_transfers: Vec<CrossChunkTransfer> = Vec::new();
     // Reused across all cells in this chunk-tick. Slope flow gathers ≤4
@@ -303,6 +310,7 @@ pub(super) fn tick_chunk(
                 if y > 0 {
                     let below_idx = z * size * size + (y - 1) * size + x;
                     if cell_cap[below_idx] > MIN_LEVEL
+                        && face_open(idx, 0, -1, 0)
                         && !bounded_blocks_transfer(cell.hops_from_source, cell.max_flow_dist)
                     {
                         let below_capacity = cell_cap[below_idx];
@@ -330,7 +338,9 @@ pub(super) fn tick_chunk(
                 else {
                     let below_key = key_below;
                     if let Some(below_grid) = nbr_below {
-                        if !bounded_blocks_transfer(cell.hops_from_source, cell.max_flow_dist) {
+                        if face_open(idx, 0, -1, 0)
+                            && !bounded_blocks_transfer(cell.hops_from_source, cell.max_flow_dist)
+                        {
                             let by = size - 1;
                             let below_idx = z * size * size + by * size + x;
                             let below_capacity = below_grid.cell_capacity(x, by, z);
@@ -394,6 +404,13 @@ pub(super) fn tick_chunk(
                         let candidates = &mut slope_candidates;
 
                         for (dx, dy, dz) in slope_offsets {
+                            // Face gating: the sideways leg of the diagonal
+                            // must not cross a rendered surface (the dest
+                            // cell's own down-face gate covers the drop leg
+                            // next tick).
+                            if !face_open(idx, dx, 0, dz) {
+                                continue;
+                            }
                             let nx = x as i32 + dx;
                             let ny = y as i32 + dy;
                             let nz = z as i32 + dz;
@@ -541,6 +558,10 @@ pub(super) fn tick_chunk(
                     let level_cap_h = bounded_level_cap(new_hops_h, cell.max_flow_dist);
 
                     for (nx, ny, nz) in neighbors {
+                        // Face gating: no spreading through a rendered surface.
+                        if !face_open(idx, nx - x as i32, 0, nz - z as i32) {
+                            continue;
+                        }
                         // Recompute src_fill from current level each iteration
                         // to prevent over-deduction when multiple neighbors drain us
                         if new_cells[idx].level < MIN_LEVEL && !is_source && !has_grace {
@@ -644,7 +665,7 @@ pub(super) fn tick_chunk(
 
                     if below_pressurized {
                         let ai = z * size * size + (y + 1) * size + x;
-                        if cell_cap[ai] > MIN_LEVEL {
+                        if cell_cap[ai] > MIN_LEVEL && face_open(idx, 0, 1, 0) {
                             // Compare column weight with horizontal neighbors
                             let our_weight = fluid_weight[idx];
                             let mut max_neighbor_weight = 0.0f32;
@@ -713,7 +734,9 @@ pub(super) fn tick_chunk(
                     if nx < 0 || nx >= size as i32 || ny < 0 || ny >= size as i32
                         || nz < 0 || nz >= size as i32 { continue; }
                     let ni = nz as usize * size * size + ny as usize * size + nx as usize;
-                    if new_cells[ni].level >= MIN_LEVEL && cell_cap[ni] > MIN_LEVEL {
+                    if new_cells[ni].level >= MIN_LEVEL && cell_cap[ni] > MIN_LEVEL
+                        && face_open(idx, dx, dy, dz)
+                    {
                         let space = cell_cap[ni] - new_cells[ni].level;
                         if space > 0.0 {
                             let push = level.min(space);
