@@ -775,7 +775,40 @@ pub(super) fn tick_chunk(
                         }
                     }
                 }
-                if !pushed {
+                if !pushed && is_sticky_lava {
+                    // Range-2 crawl (2026-08-04): isolated specs have no wet
+                    // neighbor at all — scan two steps out along open faces
+                    // and MOVE one step toward the nearest wet lava cell.
+                    // Specs converge into blobs over a few ticks instead of
+                    // sitting apart as scattered dots until evaporation.
+                    'crawl: for &(dx, dy, dz) in &consolidate_offsets {
+                        let (sx, sy, sz) = (x as i32 + dx, y as i32 + dy, z as i32 + dz);
+                        let (fx, fy, fz) = (x as i32 + 2 * dx, y as i32 + 2 * dy, z as i32 + 2 * dz);
+                        if sx < 0 || sx >= size as i32 || sy < 0 || sy >= size as i32
+                            || sz < 0 || sz >= size as i32
+                            || fx < 0 || fx >= size as i32 || fy < 0 || fy >= size as i32
+                            || fz < 0 || fz >= size as i32 { continue; }
+                        let si = sz as usize * size * size + sy as usize * size + sx as usize;
+                        let fi = fz as usize * size * size + fy as usize * size + fx as usize;
+                        if new_cells[fi].level >= MIN_LEVEL
+                            && new_cells[fi].fluid_type.is_lava()
+                            && cell_cap[si] > MIN_LEVEL
+                            && face_open(idx, dx, dy, dz)
+                            && face_open(si, dx, dy, dz)
+                        {
+                            let space = cell_cap[si] - new_cells[si].level;
+                            if space > 0.0 {
+                                let step = level.min(space);
+                                new_cells[si].level += step;
+                                new_cells[si].fluid_type = fluid_type;
+                                new_cells[idx].level = 0.0;
+                                pushed = true;
+                                break 'crawl;
+                            }
+                        }
+                    }
+                }
+                if !pushed && !is_sticky_lava {
                     new_cells[idx].level = 0.0; // no neighbor to absorb, evaporate
                 }
             }

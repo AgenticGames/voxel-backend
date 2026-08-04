@@ -893,15 +893,17 @@ fn generate_cauldron_fluid_seeds(
             // Fill from basin bottom+floor_inset+lip_ceil up to anchor_y+lip_ceil
             // floor_inset raises fill above floor boundary cells
             // lip_ceil raises fill into the lip ring area
-            // 2026-08-04: fill starts at the true basin floor (the old bound
-            // added lip_ceil to the BOTTOM too, skipping the deepest band).
-            // The old shallow fill only LOOKED right because the #216
-            // stream-in refill topped basins up repeatedly; once-guarded, the
-            // single injection settles (skin soak, mostly-solid skips) into
-            // very dry bowls. User-tuned: "double the starting lava amount" —
-            // the reclaimed bottom band roughly doubles delivered volume with
-            // zero over-lip spill risk (all new fluid sits BELOW the old top).
-            let min_y = (bottom_y + floor_inset).max(0);
+            // 2026-08-04 fill tuning (two rounds): the old bound added
+            // lip_ceil to the BOTTOM too — bowls only looked full because
+            // the #216 stream-in refill topped them up; once-guarded they
+            // spawned very dry. Reclaiming the band EVERYWHERE overdid it
+            // (fluid seated against the bowl's thin outer skin seeped
+            // through the ground again). Middle ground: only the deep
+            // CENTER (rim_factor < 0.6) reclaims the bottom band — farthest
+            // from the skin, still a solid volume boost — while cells near
+            // the rim keep the original safety raise.
+            let bottom_raise = if rim_factor < 0.6 { 0 } else { lip_ceil };
+            let min_y = (bottom_y + floor_inset + bottom_raise).max(0);
             let max_y = anchor_y as i32 + lip_ceil; // exclusive
             for iy in min_y..max_y {
                 if iy >= size as i32 {

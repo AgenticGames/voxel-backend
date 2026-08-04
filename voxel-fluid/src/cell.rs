@@ -134,7 +134,14 @@ pub fn face_blocked(corners: &[f32], idx: usize, dx: i32, dy: i32, dz: i32) -> b
     // 3/4 solid and a leak path zigzags through). Legitimate flow uses
     // 0-2-solid faces: shoreline spread along a floor (bottom pair solid),
     // ledge lips and slope surfaces (lower pair solid at most).
-    face.iter().filter(|&&c| corners[base + c] > 0.0).count() >= 3
+    //
+    // DOWNWARD transit is stricter (2026-08-04, "stop it getting under the
+    // world, don't just delete it"): any solid corner on the down face means
+    // the floor surface touches it — block. Genuine shafts and waterfall
+    // drops have fully-open (0-corner) down faces, so real falls still fall;
+    // nicked floors become one-way ceilings instead of drains.
+    let need = if dy == -1 { 2 } else { 3 };
+    face.iter().filter(|&&c| corners[base + c] > 0.0).count() >= need
 }
 
 /// Minimum fluid level to consider non-empty.
