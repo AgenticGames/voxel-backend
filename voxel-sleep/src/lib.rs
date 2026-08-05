@@ -1003,8 +1003,17 @@ pub fn execute_sleep(
         const NEIGH: [(i32, i32, i32); 6] = [
             (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
         ];
-        let mut all: Vec<(i32, i32, i32)> = Vec::new();
+        // `guaranteed` carries each changed chunk's FIRST surface cell OUTSIDE
+        // the stride cap. UE derives the montage block's chunk set from these
+        // cells, and the plain stride dropped ENTIRE modest-change chunks when
+        // one hot chunk dominated the list (08-05 playtest: 52 manifest chunks
+        // → only 25 reached UE, stride ≈ 100 over a ~50k-cell list — visibly
+        // transformed areas then never animated in the reveal; which chunks
+        // dropped even varied run-to-run with HashMap order).
+        let mut guaranteed: Vec<(i32, i32, i32)> = Vec::new();
+        let mut rest: Vec<(i32, i32, i32)> = Vec::new();
         for ((cx, cy, cz), delta) in result_manifest.chunk_deltas.iter() {
+            let mut chunk_represented = false;
             for vc in &delta.voxel_changes {
                 let wx = cx * cs + vc.lx as i32;
                 let wy = cy * cs + vc.ly as i32;
@@ -1025,18 +1034,25 @@ pub fn execute_sleep(
                     let b = ((pop_t * SURFACE_ACTIVITY_BUCKETS as f32) as usize)
                         .min(SURFACE_ACTIVITY_BUCKETS - 1);
                     surface_step_activity[b] = surface_step_activity[b].saturating_add(1);
-                    all.push((wx, wy, wz));
+                    if !chunk_represented {
+                        chunk_represented = true;
+                        guaranteed.push((wx, wy, wz));
+                    } else {
+                        rest.push((wx, wy, wz));
+                    }
                 }
             }
         }
-        // Stride-cap to ~512 representative cells (preserves spatial spread).
+        // Stride-cap the remainder to ~512 total (preserves spatial spread).
         const MAX_CELLS: usize = 512;
-        if all.len() > MAX_CELLS {
-            let stride = (all.len() + MAX_CELLS - 1) / MAX_CELLS;
-            all.into_iter().step_by(stride).collect()
+        let budget = MAX_CELLS.saturating_sub(guaranteed.len()).max(1);
+        if rest.len() > budget {
+            let stride = (rest.len() + budget - 1) / budget;
+            guaranteed.extend(rest.into_iter().step_by(stride));
         } else {
-            all
+            guaranteed.extend(rest);
         }
+        guaranteed
     };
 
     trace(&format!("execute_sleep returning: dirty_chunks={} metamorphosed={} veins={} collapses={} elapsed={:.2}ms",
