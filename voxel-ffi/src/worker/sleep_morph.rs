@@ -498,6 +498,39 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
                 crate::panic_log::note(&format!(
                     "[MORPH-CLASS] chunks={} block_recolor={} synth={} signflip={} norecord={}",
                     chunks.len(), snap.block_recolor, synth_count, signflip_count, norecord_count));
+                // ── Hybrid classification (2026-08-05 playtest 3) ──
+                // Chunks with substantial sign-flip (solid↔air) change carry real
+                // GEOMETRY transformation the frozen-recolor path can never show
+                // ("no change down in the hole until the montage is over"). They
+                // re-run the faithful per-step DC morph inside the fast path;
+                // sparse-flip chunks stay frozen (invisible difference). Top-K by
+                // flip count bounds per-step DC cost.
+                snap.geo_chunks.clear();
+                snap.base_seams.clear();
+                {
+                    const GEO_MIN_SIGNFLIPS: usize = 24;
+                    const GEO_MAX_CHUNKS: usize = 12;
+                    let mut flips: Vec<((i32, i32, i32), usize)> = Vec::new();
+                    for key in &chunks {
+                        if let Some(d) = manifest.chunk_deltas.get(key) {
+                            if d.synthesize_growth { continue; }
+                            let n = d.voxel_changes.iter()
+                                .filter(|c| (c.old_density > 0.0) != (c.new_density > 0.0))
+                                .count();
+                            if n >= GEO_MIN_SIGNFLIPS { flips.push((*key, n)); }
+                        }
+                    }
+                    flips.sort_by(|a, b| b.1.cmp(&a.1));
+                    flips.truncate(GEO_MAX_CHUNKS);
+                    snap.geo_chunks = flips.iter().map(|(k, _)| *k).collect();
+                    if !snap.geo_chunks.is_empty() {
+                        crate::panic_log::note(&format!(
+                            "[MORPH-GEO] {} geometry-animated chunk(s): {}",
+                            flips.len(),
+                            flips.iter().map(|(k, n)| format!("({},{},{}):{}", k.0, k.1, k.2, n))
+                                .collect::<Vec<_>>().join(" ")));
+                    }
+                }
                 // ── Fidelity census (2026-08-05 playtest: montage-end != reality;
                 // player-made Scoria absent from every displayed frame). One run of
                 // these lines answers: is the material in the live snapshot, what
@@ -559,14 +592,17 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
             if block_recolor && snap.base_built {
                 let recolor_t0 = std::time::Instant::now();
                 let force_all = step >= total_steps; // final step ships every chunk
-                let (meshes, shipped) =
+                let (mut meshes, shipped) =
                     recolor_cached_meshes(&mut snap, &chunks, &cfg, world_scale, t, force_all);
+                // Hybrid: overwrite the geometry-animated chunks' entries with
+                // faithful per-step DC morphs (interpolated densities).
+                let geo_shipped = geo_animate_chunks(&snap, &chunks, manifest, &cfg, world_scale, t, &mut meshes);
                 drop(snap);
                 drop(manifest_guard);
                 // panic_log, not eprintln — stderr is invisible under a GUI app.
                 crate::panic_log::note(&format!(
-                    "[MORPH-STEP] {}/{} recolored {} chunks ({} shipped, rest unchanged) in {}ms (direct push)",
-                    step, total_steps, meshes.len(), shipped, recolor_t0.elapsed().as_millis()));
+                    "[MORPH-STEP] {}/{} recolored {} chunks ({} recolor + {} geo shipped) in {}ms (direct push)",
+                    step, total_steps, meshes.len(), shipped, geo_shipped, recolor_t0.elapsed().as_millis()));
                 // Census: the FINAL displayed frame's material truth (t=1).
                 if step >= total_steps {
                     use voxel_core::material::Material;
@@ -1007,6 +1043,14 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
                         snap2.vertex_change.insert(k, vc);
                         snap2.base_reveal_t.insert(k, rt);
                     }
+                    // Hybrid: cache every in-block chunk's base seam data so the
+                    // geo chunks can re-seam per step against frozen neighbors
+                    // without re-running DC on them.
+                    for &key in &chunks {
+                        if let Some(sd) = seam_data_map.get(&key) {
+                            snap2.base_seams.insert(key, std::sync::Arc::clone(sd));
+                        }
+                    }
                     snap2.base_built = true;
                     eprintln!("[MORPH] Recolor base cached for {} chunks — later steps skip DC", snap2.base_meshes.len());
                     crate::panic_log::note(&format!(
@@ -1037,6 +1081,151 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
             if let Ok(mut mq) = ctx.morph_results.lock() {
                 mq.push_back(crate::engine::MorphStepResult { step, total_steps, meshes });
             }
+}
+
+/// Hybrid geometry animation (2026-08-05): the recolor fast path freezes DC
+/// geometry, so chunks whose sleep change is substantially GEOMETRIC (erosion
+/// carving space, growth filling it — sign-flip voxels) played as static rock
+/// until the post-montage resync. For the classified `snap.geo_chunks` this
+/// re-runs the ORIGINAL faithful per-step morph — interpolate densities by the
+/// staggered per-voxel t, hermite + DC + smooth, seam against frozen neighbors
+/// — and overwrites their entries in `meshes`. Returns how many geo chunks
+/// shipped. Cost is bounded by GEO_MAX_CHUNKS (top-12 by flip count), parallel.
+fn geo_animate_chunks(
+    snap: &super::MorphSnapshot,
+    chunks: &[(i32, i32, i32)],
+    manifest: &voxel_sleep::manifest::ChangeManifest,
+    cfg: &voxel_gen::config::GenerationConfig,
+    world_scale: f32,
+    t: f32,
+    meshes: &mut Vec<crate::types::ConvertedMesh>,
+) -> usize {
+    if snap.geo_chunks.is_empty() { return 0; }
+    let chunk_size = cfg.chunk_size;
+
+    // 1) Interpolated density fields for the geo chunks (recorded-change rule,
+    //    identical to the full pipeline's Phase 1).
+    let geo_list: Vec<(usize, (i32, i32, i32))> = chunks.iter().enumerate()
+        .filter(|(_, k)| snap.geo_chunks.contains(*k))
+        .map(|(i, k)| (i, *k))
+        .collect();
+    if geo_list.is_empty() { return 0; }
+    let mut fields: Vec<((usize, (i32, i32, i32)), voxel_core::density::DensityField)> =
+        Vec::with_capacity(geo_list.len());
+    for &(i, key) in &geo_list {
+        let Some(d) = snap.densities.get(&key) else { continue; };
+        let mut df = d.clone();
+        if let Some(delta) = manifest.chunk_deltas.get(&key) {
+            for change in &delta.voxel_changes {
+                let sample = df.get_mut(change.lx, change.ly, change.lz);
+                let voxel_delay = change.spread_distance * 0.6_f32;
+                let voxel_t = ((t - voxel_delay) / (1.0 - voxel_delay)).clamp(0.0, 1.0);
+                sample.density = change.old_density + (change.new_density - change.old_density) * voxel_t;
+                let old_mat = voxel_core::material::Material::from_u8(change.old_material);
+                let new_mat = voxel_core::material::Material::from_u8(change.new_material);
+                sample.material = if voxel_t >= 0.5 { new_mat } else { old_mat };
+            }
+        }
+        fields.push(((i, key), df));
+    }
+
+    // 2) Face-sync adjacent GEO pairs (mirror of the full pipeline's Phase 2)
+    //    so two moving neighbors don't crack. Frozen-recolor neighbors keep
+    //    their post-sleep boundary — same "reads as already-transformed"
+    //    trade-off the seam path already accepts.
+    {
+        let cs = chunk_size; // boundary index = size-1 handled via df.size below
+        for a in 0..fields.len() {
+            for b in 0..fields.len() {
+                if a == b { continue; }
+                let (ka, kb) = ((fields[a].0).1, (fields[b].0).1);
+                let (dx, dy, dz) = (kb.0 - ka.0, kb.1 - ka.1, kb.2 - ka.2);
+                let axis = match (dx, dy, dz) {
+                    (1, 0, 0) => Some(0usize),
+                    (0, 1, 0) => Some(1usize),
+                    (0, 0, 1) => Some(2usize),
+                    _ => None,
+                };
+                let Some(axis) = axis else { continue; };
+                let boundary: Vec<(usize, usize, f32, voxel_core::material::Material)> = {
+                    let src = &fields[a].1;
+                    let hi = src.size - 1;
+                    let mut out = Vec::with_capacity((cs + 1) * (cs + 1));
+                    for u in 0..=hi.min(cs) {
+                        for v in 0..=hi.min(cs) {
+                            let s = match axis {
+                                0 => src.get(hi, u, v),
+                                1 => src.get(u, hi, v),
+                                _ => src.get(u, v, hi),
+                            };
+                            out.push((u, v, s.density, s.material));
+                        }
+                    }
+                    out
+                };
+                let dst = &mut fields[b].1;
+                for &(u, v, density, material) in &boundary {
+                    let s = match axis {
+                        0 => dst.get_mut(0, u, v),
+                        1 => dst.get_mut(u, 0, v),
+                        _ => dst.get_mut(u, v, 0),
+                    };
+                    s.density = density;
+                    s.material = material;
+                }
+            }
+        }
+    }
+
+    // 3) DC-mesh each interpolated field in parallel (Phase 3 mirror).
+    use rayon::prelude::*;
+    type GeoEdges = Vec<(voxel_core::hermite::EdgeKey, voxel_core::hermite::EdgeIntersection)>;
+    let dc_results: Vec<((usize, (i32, i32, i32)), voxel_core::mesh::Mesh, Vec<glam::Vec3>, Vec<glam::Vec3>, GeoEdges)> =
+        fields.par_iter().map(|((i, key), df)| {
+            let h = extract_hermite_data(df);
+            let cell_size = df.size - 1;
+            let dc_verts = solve_dc_vertices(&h, cell_size);
+            let mut mesh = generate_mesh(&h, &dc_verts, cell_size);
+            mesh.smooth(cfg.mesh_smooth_iterations, cfg.mesh_smooth_strength, cfg.mesh_boundary_smooth, Some(cell_size));
+            let boundary_edges = region_gen::extract_boundary_edges(&h, chunk_size);
+            let d_normals = compute_cell_normals(&h, cell_size);
+            ((*i, *key), mesh, dc_verts, d_normals, boundary_edges)
+        }).collect();
+
+    // 4) Seam map: frozen base seams (in-block) + out-of-block snapshot seams,
+    //    with the geo chunks' entries replaced by THIS step's fresh DC data.
+    let mut seam_map: std::collections::HashMap<(i32, i32, i32), std::sync::Arc<ChunkSeamData>> =
+        snap.base_seams.clone();
+    for (k, v) in snap.neighbor_seams.iter() {
+        seam_map.entry(*k).or_insert_with(|| std::sync::Arc::clone(v));
+    }
+    for ((_, key), _, dc_verts, d_normals, boundary_edges) in &dc_results {
+        seam_map.insert(*key, std::sync::Arc::new(ChunkSeamData {
+            dc_vertices: dc_verts.clone(),
+            dc_normals: d_normals.clone(),
+            world_origin: glam::Vec3::ZERO,
+            boundary_edges: boundary_edges.clone(),
+        }));
+    }
+
+    // 5) Seam quads + convert + bucket; overwrite the meshes[] entries.
+    let mut shipped = 0usize;
+    for ((i, key), mut mesh, _, _, _) in dc_results {
+        let seam_mesh = region_gen::generate_chunk_seam_quads(key, &seam_map, chunk_size);
+        if !seam_mesh.triangles.is_empty() {
+            mesh.append(seam_mesh);
+        }
+        if cfg.mesh_recalc_normals > 0 { mesh.recalculate_normals(); }
+        let mut converted = convert_mesh_to_ue_scaled(&mesh, cfg.voxel_scale(), world_scale);
+        // reveal_t is the GPU dissolve's channel; geometry changes per step so
+        // the base bake no longer aligns — ship empty (CPU path ignores it).
+        crate::convert::bucket_mesh_by_material(&mut converted);
+        if i < meshes.len() {
+            meshes[i] = converted;
+            shipped += 1;
+        }
+    }
+    shipped
 }
 
 /// Recolor fast path: rebuild each chunk's ConvertedMesh from the cached base
@@ -1075,6 +1264,12 @@ fn recolor_cached_meshes(
     let results: Vec<(crate::types::ConvertedMesh, Option<Vec<u8>>)> = chunks
         .par_iter()
         .map(|&key| {
+            // Hybrid: geometry-animated chunks are computed by geo_animate_chunks
+            // AFTER this pass and overwrite their (empty) entries — skip here so
+            // the diff-skip cache never tracks them.
+            if snap_ref.geo_chunks.contains(&key) {
+                return (empty(), None);
+            }
             let base = match snap_ref.base_meshes.get(&key) {
                 Some(m) => m,
                 None => return (empty(), None), // no surface at base build

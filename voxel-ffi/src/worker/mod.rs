@@ -83,6 +83,17 @@ pub struct MorphSnapshot {
     /// the array-order apply ripple that read as "minerals receding"). Seeded
     /// at base capture; the FINAL step force-ships everything.
     pub last_materials: std::collections::HashMap<(i32, i32, i32), Vec<u8>>,
+    /// Hybrid morph (2026-08-05 playtest 3: "still no change down in the hole
+    /// until the montage is over"): chunks whose sign-flip (solid↔air) change
+    /// count crosses the GEO threshold — geometry genuinely moves there, which
+    /// the frozen-recolor path cannot show. These re-run the faithful per-step
+    /// DC morph (interpolated densities) INSIDE the recolor fast path; the
+    /// rest keep the cached recolor + diff-skip.
+    pub geo_chunks: std::collections::HashSet<(i32, i32, i32)>,
+    /// Seam data captured at base build for every in-block chunk — the geo
+    /// chunks' per-step seam generation needs their frozen-recolor neighbors'
+    /// DC vertices without re-running DC on them.
+    pub base_seams: std::collections::HashMap<(i32, i32, i32), std::sync::Arc<voxel_gen::region_gen::ChunkSeamData>>,
 }
 
 /// Per-region generation claim used by `handle_generate`'s slow path.
