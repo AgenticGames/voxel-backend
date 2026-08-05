@@ -497,6 +497,49 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
                 crate::panic_log::note(&format!(
                     "[MORPH-CLASS] chunks={} block_recolor={} synth={} signflip={} norecord={}",
                     chunks.len(), snap.block_recolor, synth_count, signflip_count, norecord_count));
+                // ── Fidelity census (2026-08-05 playtest: montage-end != reality;
+                // player-made Scoria absent from every displayed frame). One run of
+                // these lines answers: is the material in the live snapshot, what
+                // did the manifest record about it, and do the sleep's most-changed
+                // chunks sit OUTSIDE the filmed block entirely.
+                {
+                    use voxel_core::material::Material;
+                    let mut snap_scoria = 0usize;
+                    let mut snap_chunks_with = 0usize;
+                    for d in snap.densities.values() {
+                        let c = d.samples.iter().filter(|s| s.material == Material::Scoria).count();
+                        if c > 0 { snap_chunks_with += 1; }
+                        snap_scoria += c;
+                    }
+                    let mut old_scoria = 0usize;
+                    let mut new_scoria = 0usize;
+                    let mut scoria_to: std::collections::BTreeMap<u8, usize> = Default::default();
+                    for d in manifest.chunk_deltas.values() {
+                        for c in &d.voxel_changes {
+                            if c.old_material == Material::Scoria as u8 {
+                                old_scoria += 1;
+                                *scoria_to.entry(c.new_material).or_insert(0) += 1;
+                            }
+                            if c.new_material == Material::Scoria as u8 { new_scoria += 1; }
+                        }
+                    }
+                    crate::panic_log::note(&format!(
+                        "[MORPH-CENSUS] snapshot scoria_voxels={} in {}/{} block chunks; manifest old=Scoria changes={} (to {:?}) new=Scoria={}",
+                        snap_scoria, snap_chunks_with, chunks.len(), old_scoria, scoria_to, new_scoria));
+                    // Block coverage: the sleep's most-changed chunks vs the filmed block.
+                    let mut counts: Vec<((i32, i32, i32), usize)> = manifest.chunk_deltas.iter()
+                        .map(|(k, d)| (*k, d.voxel_changes.len())).collect();
+                    counts.sort_by(|a, b| b.1.cmp(&a.1));
+                    let top: Vec<String> = counts.iter().take(10)
+                        .map(|(k, n)| format!("({},{},{}):{}{}", k.0, k.1, k.2, n,
+                            if chunks_set.contains(k) { "" } else { "|OUT" }))
+                        .collect();
+                    let changed_total = counts.iter().filter(|(_, n)| *n > 0).count();
+                    let changed_in_block = counts.iter().filter(|(k, n)| *n > 0 && chunks_set.contains(k)).count();
+                    crate::panic_log::note(&format!(
+                        "[MORPH-CENSUS] manifest chunks_with_changes={} (in filmed block: {}); top10 by changes: {}",
+                        changed_total, changed_in_block, top.join(" ")));
+                }
             }
             // Out-of-block neighbor seams for Phase 3 (cloned once from the snapshot).
             // Arc-valued since the store maps went Arc (f15ae6f) — cloning the
@@ -521,6 +564,16 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
                 crate::panic_log::note(&format!(
                     "[MORPH-STEP] {}/{} recolored {} chunks in {}ms (direct push)",
                     step, total_steps, meshes.len(), recolor_t0.elapsed().as_millis()));
+                // Census: the FINAL displayed frame's material truth (t=1).
+                if step >= total_steps {
+                    use voxel_core::material::Material;
+                    let sc: usize = meshes.iter()
+                        .map(|m| m.material_ids.iter().filter(|&&id| id == Material::Scoria as u8).count())
+                        .sum();
+                    let verts: usize = meshes.iter().map(|m| m.material_ids.len()).sum();
+                    crate::panic_log::note(&format!(
+                        "[MORPH-CENSUS] final step: verts={} scoria_verts={}", verts, sc));
+                }
                 // Direct push (2026-08-05): result_tx routed morph steps through
                 // the MAIN result queue, where they sat behind fluid/gen results
                 // drained under UE's throttled reveal budgets (~0.5-1s extra
@@ -954,6 +1007,25 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
                     crate::panic_log::note(&format!(
                         "[MORPH-FASTPATH] base cached for {} chunks at step {}/{} — later steps recolor-only (no DC)",
                         snap2.base_meshes.len(), step, total_steps));
+                    // Census: does the DISPLAYED base carry the live-store materials?
+                    {
+                        use voxel_core::material::Material;
+                        let mut base_scoria = 0usize;
+                        let mut verts = 0usize;
+                        let mut covered = 0usize;
+                        for m in snap2.base_meshes.values() {
+                            base_scoria += m.vertices.iter().filter(|v| v.material == Material::Scoria).count();
+                            verts += m.vertices.len();
+                        }
+                        for vc in snap2.vertex_change.values() {
+                            covered += vc.iter().filter(|e| e.is_some()).count();
+                        }
+                        crate::panic_log::note(&format!(
+                            "[MORPH-CENSUS] base meshes: verts={} scoria_verts={} vchange_covered={} ({:.1}%) at build t={:.2}",
+                            verts, base_scoria, covered,
+                            if verts > 0 { covered as f32 * 100.0 / verts as f32 } else { 0.0 },
+                            t));
+                    }
                 }
             }
 
