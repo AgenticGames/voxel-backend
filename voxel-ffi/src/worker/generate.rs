@@ -318,7 +318,7 @@ pub(super) fn handle_generate(
                 if profiling { t_worm_forward_sharing = t_fwd.elapsed(); }
 
                 // Check for pending mine requests between phases
-                try_handle_mine(mine_rx, result_tx, store, config, ctx.stress_config, world_scale, fluid_event_tx);
+                try_handle_mine(mine_rx, ctx.mine_tx, result_tx, store, config, ctx.stress_config, world_scale, fluid_event_tx);
 
                 // Pre-extract hermite data BEFORE acquiring write lock (expensive part).
                 // Round 6 Fix B experiment: tried serial here to avoid rayon contention
@@ -457,7 +457,7 @@ pub(super) fn handle_generate(
                     backward_dirty_count = backward_dirty.len() as u32;
 
                     // Check for pending mine requests between phases
-                    try_handle_mine(mine_rx, result_tx, store, config, ctx.stress_config, world_scale, fluid_event_tx);
+                    try_handle_mine(mine_rx, ctx.mine_tx, result_tx, store, config, ctx.stress_config, world_scale, fluid_event_tx);
 
                     let t_bwd_remesh = Instant::now();
                     for &key in &backward_dirty {

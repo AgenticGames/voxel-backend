@@ -1540,9 +1540,10 @@ mod lava_quench_tests {
         let generation_counters = Arc::new(DashMap::new());
         let profiler = Arc::new(StreamingProfiler::new(1));
         let (_gtx, generate_rx) = crossbeam_channel::unbounded::<WorkerRequest>();
-        let (_mtx, mine_rx) = crossbeam_channel::unbounded::<WorkerRequest>();
+        let (mtx, mine_rx) = crossbeam_channel::unbounded::<WorkerRequest>();
         let morph_manifest = Arc::new(Mutex::new(None));
         let morph_snapshot = Arc::new(Mutex::new(MorphSnapshot::default()));
+        let morph_results = Arc::new(Mutex::new(std::collections::VecDeque::new()));
         let regions_in_flight = Arc::new(DashMap::new());
         let crystal_anchors =
             Arc::new(Mutex::new(crate::crystal_anchors::CrystalAnchorManager::default()));
@@ -1563,8 +1564,10 @@ mod lava_quench_tests {
             worker_id: 0,
             generate_rx: &generate_rx,
             mine_rx: &mine_rx,
+            mine_tx: &mtx,
             morph_manifest: &morph_manifest,
             morph_snapshot: &morph_snapshot,
+            morph_results: &morph_results,
             regions_in_flight: &regions_in_flight,
             crystal_anchors: &crystal_anchors,
             deferred_region_stress: &deferred_region_stress,

@@ -385,7 +385,12 @@ pub(super) fn handle_aureole_only(ctx: &super::HandlerCtx<'_>, player_chunk: (i3
 }
 
 pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i32, i32)>, step: u32, total_steps: u32) {
-    let result_tx = ctx.result_tx;
+    // Entry note (2026-08-05): run-5 saw a morph request dequeue and produce
+    // NOTHING (no result, no log, worker back to idle) — UE timed the step out
+    // at 4s. This line pins dequeue-vs-handler when it recurs.
+    crate::panic_log::note(&format!(
+        "[MORPH-REQ] step {}/{} dequeued by worker {} ({} chunks)",
+        step, total_steps, ctx.worker_id, chunks.len()));
     let store = ctx.store;
     let config = ctx.config;
     let world_scale = ctx.world_scale;
@@ -410,9 +415,11 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
                 None => {
                     eprintln!("[MORPH] No cached manifest — call set_morph_manifest first");
                     drop(manifest_guard);
-                    let _ = result_tx.send(WorkerResult::MorphMeshes {
-                        step, total_steps, meshes: Vec::new(),
-                    });
+                    if let Ok(mut mq) = ctx.morph_results.lock() {
+                        mq.push_back(crate::engine::MorphStepResult {
+                            step, total_steps, meshes: Vec::new(),
+                        });
+                    }
                     return;
                 }
             };
@@ -506,11 +513,21 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
             let block_recolor = snap.block_recolor;
             let building_base = block_recolor && !snap.base_built;
             if block_recolor && snap.base_built {
+                let recolor_t0 = std::time::Instant::now();
                 let meshes = recolor_cached_meshes(&snap, &chunks, &cfg, world_scale, t);
                 drop(snap);
                 drop(manifest_guard);
-                eprintln!("[MORPH] Step {}/{}: recolored {} cached chunks (no DC)", step, total_steps, meshes.len());
-                let _ = result_tx.send(WorkerResult::MorphMeshes { step, total_steps, meshes });
+                // panic_log, not eprintln — stderr is invisible under a GUI app.
+                crate::panic_log::note(&format!(
+                    "[MORPH-STEP] {}/{} recolored {} chunks in {}ms (direct push)",
+                    step, total_steps, meshes.len(), recolor_t0.elapsed().as_millis()));
+                // Direct push (2026-08-05): result_tx routed morph steps through
+                // the MAIN result queue, where they sat behind fluid/gen results
+                // drained under UE's throttled reveal budgets (~0.5-1s extra
+                // latency per step — the reveal ran 15.8s against a 5.95s arc).
+                if let Ok(mut mq) = ctx.morph_results.lock() {
+                    mq.push_back(crate::engine::MorphStepResult { step, total_steps, meshes });
+                }
                 return;
             }
 
@@ -940,9 +957,9 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
                 }
             }
 
-            let _ = result_tx.send(WorkerResult::MorphMeshes {
-                step, total_steps, meshes,
-            });
+            if let Ok(mut mq) = ctx.morph_results.lock() {
+                mq.push_back(crate::engine::MorphStepResult { step, total_steps, meshes });
+            }
 }
 
 /// Recolor fast path: rebuild each chunk's ConvertedMesh from the cached base
@@ -958,42 +975,49 @@ fn recolor_cached_meshes(
     world_scale: f32,
     t: f32,
 ) -> Vec<crate::types::ConvertedMesh> {
-    let mut meshes = Vec::with_capacity(chunks.len());
-    for &key in chunks {
-        let base = match snap.base_meshes.get(&key) {
-            Some(m) => m,
-            None => {
-                // Chunk had no surface at base build (None) → empty mesh; UE's
-                // DrainPendingMorph preserves the prior actor mesh on VertexCount==0.
-                meshes.push(crate::types::ConvertedMesh {
-                    positions: Vec::new(), normals: Vec::new(), material_ids: Vec::new(),
-                    indices: Vec::new(), submeshes: Vec::new(), reveal_t: Vec::new(),
-                });
-                continue;
-            }
-        };
-        // Clone the frozen base geometry and recolor it for this step using the
-        // per-vertex change baked at base build (±1-dilated, matches the dissolve).
-        let mut mesh = base.clone();
-        if let Some(vchange) = snap.vertex_change.get(&key) {
-            for (vi, v) in mesh.vertices.iter_mut().enumerate() {
-                if let Some(Some((spread, old_m, new_m))) = vchange.get(vi).copied() {
-                    let voxel_delay = spread * 0.6;
-                    let voxel_t = ((t - voxel_delay) / (1.0 - voxel_delay)).clamp(0.0, 1.0);
-                    let m = if voxel_t >= 0.5 { new_m } else { old_m };
-                    v.material = voxel_core::material::Material::from_u8(m);
+    use rayon::prelude::*;
+    // Parallel per chunk (2026-08-05): each chunk's clone→recolor→convert→
+    // bucket is pure and independent, and the sequential loop WAS the reveal's
+    // pacing ceiling (~0.8-1.4s/step for ~40 chunks against the 350ms step
+    // budget — the whole montage overran its camera arc ~2.7x). par_iter's
+    // indexed collect preserves input order, so the UE index-pair contract
+    // (Meshes[i] ↔ ShowcaseChunkActors[i]) is untouched.
+    chunks
+        .par_iter()
+        .map(|&key| {
+            let base = match snap.base_meshes.get(&key) {
+                Some(m) => m,
+                None => {
+                    // Chunk had no surface at base build (None) → empty mesh; UE's
+                    // DrainPendingMorph preserves the prior actor mesh on VertexCount==0.
+                    return crate::types::ConvertedMesh {
+                        positions: Vec::new(), normals: Vec::new(), material_ids: Vec::new(),
+                        indices: Vec::new(), submeshes: Vec::new(), reveal_t: Vec::new(),
+                    };
+                }
+            };
+            // Clone the frozen base geometry and recolor it for this step using the
+            // per-vertex change baked at base build (±1-dilated, matches the dissolve).
+            let mut mesh = base.clone();
+            if let Some(vchange) = snap.vertex_change.get(&key) {
+                for (vi, v) in mesh.vertices.iter_mut().enumerate() {
+                    if let Some(Some((spread, old_m, new_m))) = vchange.get(vi).copied() {
+                        let voxel_delay = spread * 0.6;
+                        let voxel_t = ((t - voxel_delay) / (1.0 - voxel_delay)).clamp(0.0, 1.0);
+                        let m = if voxel_t >= 0.5 { new_m } else { old_m };
+                        v.material = voxel_core::material::Material::from_u8(m);
+                    }
                 }
             }
-        }
-        let mut converted = convert_mesh_to_ue_scaled(&mesh, cfg.voxel_scale(), world_scale);
-        // Re-attach the frozen (spread-only) reveal_t baked at base build.
-        if let Some(rt) = snap.base_reveal_t.get(&key) {
-            if rt.len() == converted.positions.len() {
-                converted.reveal_t = rt.clone();
+            let mut converted = convert_mesh_to_ue_scaled(&mesh, cfg.voxel_scale(), world_scale);
+            // Re-attach the frozen (spread-only) reveal_t baked at base build.
+            if let Some(rt) = snap.base_reveal_t.get(&key) {
+                if rt.len() == converted.positions.len() {
+                    converted.reveal_t = rt.clone();
+                }
             }
-        }
-        crate::convert::bucket_mesh_by_material(&mut converted);
-        meshes.push(converted);
-    }
-    meshes
+            crate::convert::bucket_mesh_by_material(&mut converted);
+            converted
+        })
+        .collect()
 }

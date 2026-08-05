@@ -231,8 +231,16 @@ pub(crate) struct HandlerCtx<'a> {
     pub worker_id: usize,
     pub generate_rx: &'a Receiver<WorkerRequest>,
     pub mine_rx: &'a Receiver<WorkerRequest>,
+    // Requeue handle for the mid-generate preemption drain (try_handle_mine):
+    // non-Mine requests it pulls go BACK on the channel instead of vanishing.
+    pub mine_tx: &'a Sender<WorkerRequest>,
     pub morph_manifest: &'a Arc<Mutex<Option<voxel_sleep::ChangeManifest>>>,
     pub morph_snapshot: &'a Arc<Mutex<MorphSnapshot>>,
+    // Direct push target for finished morph steps (2026-08-05): the shared
+    // engine queue voxel_poll_morph_result pops. Bypasses result_tx — a morph
+    // result on the main channel sat behind fluid/gen traffic that UE drains
+    // under throttled reveal budgets (~0.5-1s added latency per step).
+    pub morph_results: &'a Arc<Mutex<std::collections::VecDeque<crate::engine::MorphStepResult>>>,
     pub regions_in_flight: &'a Arc<DashMap<(i32, i32, i32), Arc<RegionInFlight>>>,
     pub crystal_anchors: &'a Arc<Mutex<crate::crystal_anchors::CrystalAnchorManager>>,
     pub deferred_region_stress: &'a Arc<DeferredRegionStress>,
@@ -248,6 +256,7 @@ pub fn worker_loop(
     generation_paused: Arc<AtomicBool>,
     generate_rx: Receiver<WorkerRequest>,
     mine_rx: Receiver<WorkerRequest>,
+    mine_tx: Sender<WorkerRequest>,
     result_tx: Sender<WorkerResult>,
     store: Arc<RwLock<ChunkStore>>,
     config: Arc<RwLock<GenerationConfig>>,
@@ -259,6 +268,7 @@ pub fn worker_loop(
     worker_id: usize,
     morph_manifest: Arc<Mutex<Option<voxel_sleep::ChangeManifest>>>,
     morph_snapshot: Arc<Mutex<MorphSnapshot>>,
+    morph_results: Arc<Mutex<std::collections::VecDeque<crate::engine::MorphStepResult>>>,
     regions_in_flight: Arc<DashMap<(i32, i32, i32), Arc<RegionInFlight>>>,
     crystal_anchors: Arc<Mutex<crate::crystal_anchors::CrystalAnchorManager>>,
     // Per-worker activity heartbeat (this worker writes only `heartbeats[worker_id]`).
@@ -290,7 +300,7 @@ pub fn worker_loop(
             hb.enter(act, coord);
             handle_request(
                 req, &result_tx, &store, &config, &stress_config, &generation_counters,
-                world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &mine_rx, &morph_manifest, &morph_snapshot,
+                world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &mine_rx, &mine_tx, &morph_manifest, &morph_snapshot, &morph_results,
                 &regions_in_flight, &crystal_anchors, &deferred_region_stress, &pending_seams, &parked_generates, &slow_path_permits, &shutdown,
             );
             hb.idle();
@@ -328,7 +338,7 @@ pub fn worker_loop(
             hb.enter(act, coord);
             handle_request(
                 req, &result_tx, &store, &config, &stress_config, &generation_counters,
-                world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &mine_rx, &morph_manifest, &morph_snapshot,
+                world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &mine_rx, &mine_tx, &morph_manifest, &morph_snapshot, &morph_results,
                 &regions_in_flight, &crystal_anchors, &deferred_region_stress, &pending_seams, &parked_generates, &slow_path_permits, &shutdown,
             );
             hb.idle();
@@ -344,7 +354,7 @@ pub fn worker_loop(
                 hb.enter(act, coord);
                 handle_request(
                     req, &result_tx, &store, &config, &stress_config, &generation_counters,
-                    world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &mine_rx, &morph_manifest, &morph_snapshot,
+                    world_scale, &fluid_event_tx, &profiler, worker_id, &generate_rx, &mine_rx, &mine_tx, &morph_manifest, &morph_snapshot, &morph_results,
                     &regions_in_flight, &crystal_anchors, &deferred_region_stress, &pending_seams, &parked_generates, &slow_path_permits, &shutdown,
                 );
                 hb.idle();
@@ -460,6 +470,7 @@ pub fn worker_loop(
 /// Check mine queue and handle any pending mine request. Returns true if one was handled.
 pub(crate) fn try_handle_mine(
     mine_rx: &Receiver<WorkerRequest>,
+    mine_requeue_tx: &Sender<WorkerRequest>,
     result_tx: &Sender<WorkerResult>,
     store: &Arc<RwLock<ChunkStore>>,
     config: &Arc<RwLock<GenerationConfig>>,
@@ -511,7 +522,17 @@ pub(crate) fn try_handle_mine(
                 batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, fluid_event_tx, world_scale);
                 return true;
             }
-            _ => {} // non-mine request, ignore
+            // ⚠ NOT ours to eat (2026-08-05): this preemption drain used to
+            // `_ => {}` DISCARD any non-Mine request it pulled off the shared
+            // mine channel — a MorphStep (or PlaceSupport / Sleep / WorldScan)
+            // arriving while a worker was mid-Generate simply VANISHED. Cost:
+            // the dormancy reveal's first step died to the 4s timeout in every
+            // run that overlapped the montage's POI gen burst. Requeue at the
+            // tail instead; the main worker loops handle it properly.
+            other => {
+                crate::panic_log::note("[MINE-PREEMPT] non-mine request pulled mid-generate — requeued");
+                let _ = mine_requeue_tx.try_send(other);
+            }
         }
     }
     false
@@ -534,8 +555,10 @@ fn handle_request(
     worker_id: usize,
     generate_rx: &Receiver<WorkerRequest>,
     mine_rx: &Receiver<WorkerRequest>,
+    mine_tx: &Sender<WorkerRequest>,
     morph_manifest: &Arc<Mutex<Option<voxel_sleep::ChangeManifest>>>,
     morph_snapshot: &Arc<Mutex<MorphSnapshot>>,
+    morph_results: &Arc<Mutex<std::collections::VecDeque<crate::engine::MorphStepResult>>>,
     regions_in_flight: &Arc<DashMap<(i32, i32, i32), Arc<RegionInFlight>>>,
     crystal_anchors: &Arc<Mutex<crate::crystal_anchors::CrystalAnchorManager>>,
     deferred_region_stress: &Arc<DeferredRegionStress>,
@@ -556,8 +579,10 @@ fn handle_request(
         worker_id,
         generate_rx,
         mine_rx,
+        mine_tx,
         morph_manifest,
         morph_snapshot,
+        morph_results,
         regions_in_flight,
         crystal_anchors,
         deferred_region_stress,

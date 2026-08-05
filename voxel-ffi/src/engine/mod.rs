@@ -295,6 +295,11 @@ impl VoxelEngine {
         let profiler = Arc::new(StreamingProfiler::new(num_workers));
         let morph_manifest: Arc<Mutex<Option<voxel_sleep::ChangeManifest>>> = Arc::new(Mutex::new(None));
         let morph_snapshot: Arc<Mutex<crate::worker::MorphSnapshot>> = Arc::new(Mutex::new(crate::worker::MorphSnapshot::default()));
+        // Created pre-spawn so workers can push finished morph steps STRAIGHT
+        // into the queue voxel_poll_morph_result pops (bypasses result_tx —
+        // see HandlerCtx::morph_results).
+        let morph_results: Arc<Mutex<std::collections::VecDeque<MorphStepResult>>> =
+            Arc::new(Mutex::new(std::collections::VecDeque::new()));
 
         // Per-region generation-in-flight claims. Prevents 2+ workers from
         // redundantly generating the same region's base_density (wasted CPU).
@@ -364,6 +369,7 @@ impl VoxelEngine {
             let generation_paused = Arc::clone(&generation_paused);
             let generate_rx = generate_rx.clone();
             let mine_rx = mine_rx.clone();
+            let mine_tx_w = mine_tx.clone();
             let result_tx = result_tx.clone();
             let store = Arc::clone(&store);
             let config = Arc::clone(&config);
@@ -373,6 +379,7 @@ impl VoxelEngine {
             let prof = Arc::clone(&profiler);
             let morph_man = Arc::clone(&morph_manifest);
             let morph_snap = Arc::clone(&morph_snapshot);
+            let morph_resq = Arc::clone(&morph_results);
             let rif = Arc::clone(&regions_in_flight);
             let anchors = Arc::clone(&crystal_anchors);
             let heartbeats = Arc::clone(&heartbeats);
@@ -399,6 +406,7 @@ impl VoxelEngine {
                             let generation_paused = Arc::clone(&generation_paused);
                             let generate_rx = generate_rx.clone();
                             let mine_rx = mine_rx.clone();
+                            let mine_tx_w = mine_tx_w.clone();
                             let result_tx = result_tx.clone();
                             let store = Arc::clone(&store);
                             let config = Arc::clone(&config);
@@ -408,6 +416,7 @@ impl VoxelEngine {
                             let prof = Arc::clone(&prof);
                             let morph_man = Arc::clone(&morph_man);
                             let morph_snap = Arc::clone(&morph_snap);
+                            let morph_resq = Arc::clone(&morph_resq);
                             let rif = Arc::clone(&rif);
                             let anchors = Arc::clone(&anchors);
                             let heartbeats = Arc::clone(&heartbeats);
@@ -421,6 +430,7 @@ impl VoxelEngine {
                                     generation_paused,
                                     generate_rx,
                                     mine_rx,
+                                    mine_tx_w,
                                     result_tx,
                                     store,
                                     config,
@@ -432,6 +442,7 @@ impl VoxelEngine {
                                     worker_id,
                                     morph_man,
                                     morph_snap,
+                                    morph_resq,
                                     rif,
                                     anchors,
                                     heartbeats,
@@ -750,7 +761,7 @@ impl VoxelEngine {
             shutdown,
             generation_paused,
             sleep_complete: Arc::new(Mutex::new(None)),
-            morph_results: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            morph_results,
             morph_manifest,
             morph_snapshot,
             scan_complete: Arc::new(Mutex::new(None)),
