@@ -75,6 +75,14 @@ pub struct MorphSnapshot {
     pub vertex_change: std::collections::HashMap<(i32, i32, i32), Vec<Option<(f32, u8, u8)>>>,
     /// Per-vertex reveal_t (spread-only, t-independent), baked once at base build.
     pub base_reveal_t: std::collections::HashMap<(i32, i32, i32), Vec<f32>>,
+    /// Per-chunk material assignment (base-vertex order) of the last SHIPPED
+    /// step. Diff-skip (2026-08-05): a step only re-ships chunks whose material
+    /// vec changed since the previous step — the recolor "front" is a handful
+    /// of chunks, but shipping all ~41 forced UE to rebuild every proc-mesh
+    /// section every step (drains up to 1.4s → the reveal's 8fps bursts and
+    /// the array-order apply ripple that read as "minerals receding"). Seeded
+    /// at base capture; the FINAL step force-ships everything.
+    pub last_materials: std::collections::HashMap<(i32, i32, i32), Vec<u8>>,
 }
 
 /// Per-region generation claim used by `handle_generate`'s slow path.
