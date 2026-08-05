@@ -384,7 +384,7 @@ pub(super) fn handle_aureole_only(ctx: &super::HandlerCtx<'_>, player_chunk: (i3
             });
 }
 
-pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i32, i32)>, step: u32, total_steps: u32) {
+pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i32, i32)>, step: u32, total_steps: u32, prev_step: u32) {
     // Entry note (2026-08-05): run-5 saw a morph request dequeue and produce
     // NOTHING (no result, no log, worker back to idle) — UE timed the step out
     // at 4s. This line pins dequeue-vs-handler when it recurs.
@@ -468,7 +468,6 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
                 snap.base_meshes.clear();
                 snap.vertex_change.clear();
                 snap.base_reveal_t.clear();
-                snap.last_materials.clear();
                 snap.base_built = false;
                 // Classify the block. The fast path is gated ONLY on the absence of
                 // synthesized growth (the POI "rise from air" genuinely animates geometry
@@ -591,9 +590,12 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
             let building_base = block_recolor && !snap.base_built;
             if block_recolor && snap.base_built {
                 let recolor_t0 = std::time::Instant::now();
-                let force_all = step >= total_steps; // final step ships every chunk
+                // Final step ships everything; prev >= step means "no baseline"
+                // (step 0, GPU jump, retries) and also ships everything.
+                let force_all = step >= total_steps || prev_step >= step;
+                let t_prev = if total_steps > 0 { prev_step as f32 / total_steps as f32 } else { 0.0 };
                 let (mut meshes, shipped) =
-                    recolor_cached_meshes(&mut snap, &chunks, &cfg, world_scale, t, force_all);
+                    recolor_cached_meshes(&snap, &chunks, &cfg, world_scale, t, t_prev, force_all);
                 // Hybrid: overwrite the geometry-animated chunks' entries with
                 // faithful per-step DC morphs (interpolated densities).
                 let geo_shipped = geo_animate_chunks(&snap, &chunks, manifest, &cfg, world_scale, t, &mut meshes);
@@ -1037,8 +1039,6 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
                 let mut snap2 = morph_snapshot.lock().unwrap();
                 if snap2.keys == chunks {
                     for (k, m, vc, rt) in base_capture {
-                        // Diff-skip seed: the base paint is the last shipped state.
-                        snap2.last_materials.insert(k, m.vertices.iter().map(|v| v.material as u8).collect());
                         snap2.base_meshes.insert(k, m);
                         snap2.vertex_change.insert(k, vc);
                         snap2.base_reveal_t.insert(k, rt);
@@ -1235,17 +1235,16 @@ fn geo_animate_chunks(
 /// submeshes/index order) change. Mirrors the recorded-change material rule used
 /// by Phase 1 (`material = new if voxel_t>=0.5 else old`, staggered by spread).
 fn recolor_cached_meshes(
-    snap: &mut super::MorphSnapshot,
+    snap: &super::MorphSnapshot,
     chunks: &[(i32, i32, i32)],
     cfg: &voxel_gen::config::GenerationConfig,
     world_scale: f32,
     t: f32,
+    t_prev: f32,
     force_all: bool,
 ) -> (Vec<crate::types::ConvertedMesh>, usize) {
     use rayon::prelude::*;
-    // Shared reborrow for the parallel read phase; `snap` is only mutated in
-    // the sequential post-pass below (last_materials updates).
-    let snap_ref: &super::MorphSnapshot = &*snap;
+    let snap_ref: &super::MorphSnapshot = snap;
     // Parallel per chunk (2026-08-05): each chunk's clone→recolor→convert→
     // bucket is pure and independent, and the sequential loop WAS the reveal's
     // pacing ceiling (~0.8-1.4s/step for ~40 chunks against the 350ms step
@@ -1274,23 +1273,34 @@ fn recolor_cached_meshes(
                 Some(m) => m,
                 None => return (empty(), None), // no surface at base build
             };
-            // This step's material assignment, in base-vertex order.
-            let mut mats: Vec<u8> = base.vertices.iter().map(|v| v.material as u8).collect();
-            if let Some(vchange) = snap_ref.vertex_change.get(&key) {
-                for (vi, m) in mats.iter_mut().enumerate() {
-                    if let Some(Some((spread, old_m, new_m))) = vchange.get(vi).copied() {
+            // Stateless diff (lookahead-safe): evaluate the per-vertex material
+            // rule at BOTH t(step) and t(prev_step). Identical → the display
+            // already shows this chunk correctly → ship empty (UE preserves).
+            // Pure function of the request, so steps may compute ahead and even
+            // out of order without corrupting the baseline.
+            let vchange = snap_ref.vertex_change.get(&key);
+            let mat_at = |q: f32, vi: usize, base_m: u8| -> u8 {
+                if let Some(vc) = vchange {
+                    if let Some(Some((spread, old_m, new_m))) = vc.get(vi).copied() {
                         let voxel_delay = spread * 0.6;
-                        let voxel_t = ((t - voxel_delay) / (1.0 - voxel_delay)).clamp(0.0, 1.0);
-                        *m = if voxel_t >= 0.5 { new_m } else { old_m };
+                        let voxel_t = ((q - voxel_delay) / (1.0 - voxel_delay)).clamp(0.0, 1.0);
+                        return if voxel_t >= 0.5 { new_m } else { old_m };
                     }
                 }
+                base_m
+            };
+            let mut mats: Vec<u8> = Vec::with_capacity(base.vertices.len());
+            let mut changed = force_all;
+            for (vi, v) in base.vertices.iter().enumerate() {
+                let base_m = v.material as u8;
+                let m_now = mat_at(t, vi, base_m);
+                if !changed && m_now != mat_at(t_prev, vi, base_m) {
+                    changed = true;
+                }
+                mats.push(m_now);
             }
-            if !force_all {
-                if let Some(prev) = snap_ref.last_materials.get(&key) {
-                    if *prev == mats {
-                        return (empty(), None); // unchanged since last shipped step
-                    }
-                }
+            if !changed {
+                return (empty(), None); // no visible difference vs prev_step
             }
             // Clone the frozen base geometry and stamp this step's materials.
             let mut mesh = base.clone();
@@ -1311,9 +1321,8 @@ fn recolor_cached_meshes(
 
     let mut meshes = Vec::with_capacity(results.len());
     let mut shipped = 0usize;
-    for (i, (mesh, mats)) in results.into_iter().enumerate() {
-        if let Some(m) = mats {
-            snap.last_materials.insert(chunks[i], m);
+    for (mesh, mats) in results.into_iter() {
+        if mats.is_some() {
             shipped += 1;
         }
         meshes.push(mesh);

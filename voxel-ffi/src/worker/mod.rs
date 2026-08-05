@@ -75,14 +75,10 @@ pub struct MorphSnapshot {
     pub vertex_change: std::collections::HashMap<(i32, i32, i32), Vec<Option<(f32, u8, u8)>>>,
     /// Per-vertex reveal_t (spread-only, t-independent), baked once at base build.
     pub base_reveal_t: std::collections::HashMap<(i32, i32, i32), Vec<f32>>,
-    /// Per-chunk material assignment (base-vertex order) of the last SHIPPED
-    /// step. Diff-skip (2026-08-05): a step only re-ships chunks whose material
-    /// vec changed since the previous step — the recolor "front" is a handful
-    /// of chunks, but shipping all ~41 forced UE to rebuild every proc-mesh
-    /// section every step (drains up to 1.4s → the reveal's 8fps bursts and
-    /// the array-order apply ripple that read as "minerals receding"). Seeded
-    /// at base capture; the FINAL step force-ships everything.
-    pub last_materials: std::collections::HashMap<(i32, i32, i32), Vec<u8>>,
+    // (Diff-skip is now STATELESS — 2026-08-05 lookahead: each step computes
+    // materials at t(step) and t(prev_step from the request) and ships only
+    // chunks that differ. The old `last_materials` cache was order-dependent
+    // and would corrupt under ahead-of-display step computation.)
     /// Hybrid morph (2026-08-05 playtest 3: "still no change down in the hole
     /// until the montage is over"): chunks whose sign-flip (solid↔air) change
     /// count crosses the GEO threshold — geometry genuinely moves there, which
@@ -730,8 +726,8 @@ fn handle_request(
         WorkerRequest::AureoleOnly { player_chunk, sleep_config: sc } => {
             sleep_morph::handle_aureole_only(&ctx, player_chunk, sc);
         }
-        WorkerRequest::MorphStep { chunks, step, total_steps } => {
-            sleep_morph::handle_morph_step(&ctx, chunks, step, total_steps);
+        WorkerRequest::MorphStep { chunks, step, total_steps, prev_step } => {
+            sleep_morph::handle_morph_step(&ctx, chunks, step, total_steps, prev_step);
         }
         WorkerRequest::WorldScan => {
             scan_support::handle_world_scan(&ctx);

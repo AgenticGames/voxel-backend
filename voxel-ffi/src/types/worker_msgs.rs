@@ -121,6 +121,7 @@ pub enum WorkerRequest {
         chunks: Vec<(i32, i32, i32)>,
         step: u32,
         total_steps: u32,
+        prev_step: u32,
     },
     /// Sphere brush (paint/carve/fill) at a UE world position.
     BrushSphere {

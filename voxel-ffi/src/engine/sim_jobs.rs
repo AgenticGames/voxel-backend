@@ -221,11 +221,13 @@ impl VoxelEngine {
         chunks: Vec<(i32, i32, i32)>,
         step: u32,
         total_steps: u32,
+        prev_step: u32,
     ) -> u32 {
         match self.mine_tx.try_send(WorkerRequest::MorphStep {
             chunks,
             step,
             total_steps,
+            prev_step,
         }) {
             Ok(()) => 1,
             Err(_) => 0,

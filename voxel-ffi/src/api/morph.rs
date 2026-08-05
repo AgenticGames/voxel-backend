@@ -53,6 +53,11 @@ pub unsafe extern "C" fn voxel_set_generation_paused(engine: *mut c_void, paused
 /// Request a morph step using the cached manifest.
 /// step: current step (0..total_steps)
 /// total_steps: total number of morph steps
+/// prev_step: the last step the CALLER displayed — the diff-skip baseline.
+///   Stateless (2026-08-05 lookahead): steps may be requested AHEAD and even
+///   complete out of order; each computes materials at t(step) and t(prev_step)
+///   and ships only chunks that differ. prev_step >= step disables the diff
+///   (ship everything: step 0, GPU final, retries).
 /// Returns 1 on success, 0 if queue full.
 #[no_mangle]
 pub unsafe extern "C" fn voxel_request_morph_step(
@@ -61,6 +66,7 @@ pub unsafe extern "C" fn voxel_request_morph_step(
     chunk_count: u32,
     step: u32,
     total_steps: u32,
+    prev_step: u32,
 ) -> u32 {
     if engine.is_null() || chunks.is_null() || chunk_count == 0 {
         return 0;
@@ -72,7 +78,7 @@ pub unsafe extern "C" fn voxel_request_morph_step(
         .map(|c| (c.x, c.y, c.z))
         .collect();
 
-    engine.request_morph_step(chunk_vec, step, total_steps)
+    engine.request_morph_step(chunk_vec, step, total_steps, prev_step)
 }
 
 /// Poll for a completed morph step result.
