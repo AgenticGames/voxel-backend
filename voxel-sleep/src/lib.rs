@@ -94,6 +94,16 @@ pub struct SleepTimings {
 /// array length.
 pub const SURFACE_ACTIVITY_BUCKETS: usize = 64;
 
+/// Reveal pop-band constants (2026-08-05 dissolve pass). A voxel's material
+/// flips at t = spread·MORPH_POP_DELAY_SPAN + MORPH_POP_RAMP_WIDTH/2, so pops
+/// span t ∈ [0.05, 0.95] of the reveal — the ENTIRE step timeline carries
+/// change (the old 0.6/variable-width ramp compressed every pop into
+/// t ∈ [0.5, 0.8]: only ~13 of 45 steps were alive). Each voxel's density ramp
+/// is a fixed MORPH_POP_RAMP_WIDTH slice of the timeline. voxel-ffi's morph
+/// interpolation/recolor MUST use these same constants (it imports them).
+pub const MORPH_POP_DELAY_SPAN: f32 = 0.9;
+pub const MORPH_POP_RAMP_WIDTH: f32 = 0.1;
+
 /// Results of a deep sleep cycle.
 #[derive(Debug, Clone)]
 pub struct SleepResult {
@@ -1019,14 +1029,67 @@ pub fn execute_sleep(
             }
         }
         let inv_max = if max_d2 > 0.0 { 1.0 / max_d2.sqrt() } else { 0.0 };
-        for (key, delta) in result_manifest.chunk_deltas.iter_mut() {
-            let (cx, cy, cz) = *key;
-            for vc in delta.voxel_changes.iter_mut() {
-                let dx = (cx * cs + vc.lx as i32) as f32 - epicenter.0;
-                let dy = (cy * cs + vc.ly as i32) as f32 - epicenter.1;
-                let dz = (cz * cs + vc.lz as i32) as f32 - epicenter.2;
-                let dist_norm = ((dx * dx + dy * dy + dz * dz).sqrt() * inv_max).clamp(0.0, 1.0);
-                vc.spread_distance = vc.spread_distance.max(dist_norm);
+
+        // Deterministic per-voxel jitter (±4% of the world radius, hashed from
+        // the world coord — NEVER an RNG, runs must reproduce): fuzzes the wave
+        // front into an organic dissolve and breaks equidistant shells apart
+        // before ranking.
+        let hash01 = |x: i32, y: i32, z: i32| -> f32 {
+            let mut h = (x as u32).wrapping_mul(0x8da6_b343)
+                ^ (y as u32).wrapping_mul(0xd816_3841)
+                ^ (z as u32).wrapping_mul(0xcb1a_b31f);
+            h ^= h >> 13;
+            h = h.wrapping_mul(0x9e37_79b1);
+            h ^= h >> 16;
+            (h & 0x00FF_FFFF) as f32 / 16_777_216.0
+        };
+
+        // RANK-equalized spread (2026-08-05 playtest: "most of the ground floor
+        // comes in at one time"): raw distance CLUMPS — a floor is a dense ring
+        // at one radius from an epicenter that sits on it, so linear dist→spread
+        // dumped it into 1-2 steps. Sort every change by its jittered effective
+        // distance and assign spread by PERCENTILE instead: each reveal step
+        // then pops the SAME number of voxels — the wave sweeps fast through
+        // sparse gaps and slows through dense bands. Ordering stays radial;
+        // only the timing density changes. Chunk keys are walked SORTED so the
+        // flat index mapping never depends on HashMap iteration order.
+        let mut chunk_keys: Vec<(i32, i32, i32)> = result_manifest.chunk_deltas.keys().copied().collect();
+        chunk_keys.sort();
+        let mut keys_flat: Vec<(usize, f32)> = Vec::new();
+        {
+            let mut flat = 0usize;
+            for ck in &chunk_keys {
+                let delta = &result_manifest.chunk_deltas[ck];
+                for vc in &delta.voxel_changes {
+                    let wx = ck.0 * cs + vc.lx as i32;
+                    let wy = ck.1 * cs + vc.ly as i32;
+                    let wz = ck.2 * cs + vc.lz as i32;
+                    let dx = wx as f32 - epicenter.0;
+                    let dy = wy as f32 - epicenter.1;
+                    let dz = wz as f32 - epicenter.2;
+                    let dist_norm = ((dx * dx + dy * dy + dz * dz).sqrt() * inv_max).clamp(0.0, 1.0);
+                    let key = vc.spread_distance.max(dist_norm) + (hash01(wx, wy, wz) - 0.5) * 0.08;
+                    keys_flat.push((flat, key));
+                    flat += 1;
+                }
+            }
+        }
+        keys_flat.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let total = keys_flat.len();
+        let denom = total.saturating_sub(1).max(1) as f32;
+        let mut spread_by_flat = vec![0f32; total];
+        for (rank, (fi, _)) in keys_flat.iter().enumerate() {
+            spread_by_flat[*fi] = rank as f32 / denom;
+        }
+        {
+            let mut flat = 0usize;
+            for ck in &chunk_keys {
+                if let Some(delta) = result_manifest.chunk_deltas.get_mut(ck) {
+                    for vc in delta.voxel_changes.iter_mut() {
+                        vc.spread_distance = spread_by_flat[flat];
+                        flat += 1;
+                    }
+                }
             }
         }
     }
@@ -1077,10 +1140,11 @@ pub fn execute_sleep(
                     }
                 }
                 if is_surface {
-                    // Pop-time bucket (matches the morph's per-voxel timing in
-                    // voxel-ffi/src/worker.rs: voxel material flips at
-                    // voxel_t=0.5 → t = 0.5 + 0.3·spread_distance).
-                    let pop_t = (0.5 + 0.3 * vc.spread_distance).clamp(0.0, 1.0);
+                    // Pop-time bucket (matches the morph's per-voxel timing:
+                    // flip at t = spread·SPAN + WIDTH/2 — see the pop-band
+                    // constants at the top of this file).
+                    let pop_t = (vc.spread_distance * MORPH_POP_DELAY_SPAN
+                        + MORPH_POP_RAMP_WIDTH * 0.5).clamp(0.0, 1.0);
                     let b = ((pop_t * SURFACE_ACTIVITY_BUCKETS as f32) as usize)
                         .min(SURFACE_ACTIVITY_BUCKETS - 1);
                     surface_step_activity[b] = surface_step_activity[b].saturating_add(1);

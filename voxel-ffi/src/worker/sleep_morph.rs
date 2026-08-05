@@ -706,9 +706,9 @@ pub(super) fn handle_morph_step(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i
                                     let new_d = change.new_density;
                                     // Per-voxel spreading: voxels near heat source (spread=0)
                                     // transform first, farthest (spread=1) start at t=0.6
-                                    let delay_factor = 0.6_f32;
-                                    let voxel_delay = change.spread_distance * delay_factor;
-                                    let voxel_t = ((t - voxel_delay) / (1.0 - voxel_delay)).clamp(0.0, 1.0);
+                                    // Pop-band ramp (see voxel_sleep pop-band consts).
+                                    let voxel_delay = change.spread_distance * voxel_sleep::MORPH_POP_DELAY_SPAN;
+                                    let voxel_t = ((t - voxel_delay) / voxel_sleep::MORPH_POP_RAMP_WIDTH).clamp(0.0, 1.0);
                                     sample.density = old_d + (new_d - old_d) * voxel_t;
                                     let old_mat = voxel_core::material::Material::from_u8(change.old_material);
                                     let new_mat = voxel_core::material::Material::from_u8(change.new_material);
@@ -1118,8 +1118,8 @@ fn geo_animate_chunks(
         if let Some(delta) = manifest.chunk_deltas.get(&key) {
             for change in &delta.voxel_changes {
                 let sample = df.get_mut(change.lx, change.ly, change.lz);
-                let voxel_delay = change.spread_distance * 0.6_f32;
-                let voxel_t = ((t - voxel_delay) / (1.0 - voxel_delay)).clamp(0.0, 1.0);
+                let voxel_delay = change.spread_distance * voxel_sleep::MORPH_POP_DELAY_SPAN;
+                let voxel_t = ((t - voxel_delay) / voxel_sleep::MORPH_POP_RAMP_WIDTH).clamp(0.0, 1.0);
                 sample.density = change.old_density + (change.new_density - change.old_density) * voxel_t;
                 let old_mat = voxel_core::material::Material::from_u8(change.old_material);
                 let new_mat = voxel_core::material::Material::from_u8(change.new_material);
@@ -1282,8 +1282,8 @@ fn recolor_cached_meshes(
             let mat_at = |q: f32, vi: usize, base_m: u8| -> u8 {
                 if let Some(vc) = vchange {
                     if let Some(Some((spread, old_m, new_m))) = vc.get(vi).copied() {
-                        let voxel_delay = spread * 0.6;
-                        let voxel_t = ((q - voxel_delay) / (1.0 - voxel_delay)).clamp(0.0, 1.0);
+                        let voxel_delay = spread * voxel_sleep::MORPH_POP_DELAY_SPAN;
+                        let voxel_t = ((q - voxel_delay) / voxel_sleep::MORPH_POP_RAMP_WIDTH).clamp(0.0, 1.0);
                         return if voxel_t >= 0.5 { new_m } else { old_m };
                     }
                 }
