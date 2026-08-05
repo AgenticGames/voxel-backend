@@ -981,6 +981,56 @@ pub fn execute_sleep(
     // visible (surface) change — so it can skip pacing on the dead steps that
     // would otherwise play as unmoving rock. Built over the FULL surface set
     // (not the stride-capped sample) for an accurate profile.
+    // ── Reveal dramaturgy: one wave radiating out from the heat epicenter ──
+    // (2026-08-05 playtest: "the stuff down far away changed before the lava
+    // even went down".) Several phases record spread_distance as a flat
+    // default (erosion 0.0, hydrothermal veins 0.5), so DISTANT change popped
+    // in the reveal's FIRST steps. Rewrite every change's spread to
+    // max(recorded, normalized distance from the aureole epicenter): change at
+    // the heart keeps its recorded timing, far change always lands late.
+    // MUST run before the activity histogram below so dead-step culling stays
+    // consistent with the rewritten pop times.
+    {
+        let cs = chunk_size as i32;
+        let epicenter: (f32, f32, f32) = match aureole_glimpse_pos {
+            Some((x, y, z)) => (x as f32, y as f32, z as f32),
+            None => {
+                // No aureole this sleep — use the weighted centroid of changes.
+                let (mut sx, mut sy, mut sz, mut n) = (0f64, 0f64, 0f64, 0f64);
+                for ((cx, cy, cz), delta) in result_manifest.chunk_deltas.iter() {
+                    for vc in &delta.voxel_changes {
+                        sx += (cx * cs + vc.lx as i32) as f64;
+                        sy += (cy * cs + vc.ly as i32) as f64;
+                        sz += (cz * cs + vc.lz as i32) as f64;
+                        n += 1.0;
+                    }
+                }
+                if n > 0.0 { ((sx / n) as f32, (sy / n) as f32, (sz / n) as f32) } else { (0.0, 0.0, 0.0) }
+            }
+        };
+        let mut max_d2 = 0f32;
+        for ((cx, cy, cz), delta) in result_manifest.chunk_deltas.iter() {
+            for vc in &delta.voxel_changes {
+                let dx = (cx * cs + vc.lx as i32) as f32 - epicenter.0;
+                let dy = (cy * cs + vc.ly as i32) as f32 - epicenter.1;
+                let dz = (cz * cs + vc.lz as i32) as f32 - epicenter.2;
+                let d2 = dx * dx + dy * dy + dz * dz;
+                if d2 > max_d2 { max_d2 = d2; }
+            }
+        }
+        let inv_max = if max_d2 > 0.0 { 1.0 / max_d2.sqrt() } else { 0.0 };
+        for (key, delta) in result_manifest.chunk_deltas.iter_mut() {
+            let (cx, cy, cz) = *key;
+            for vc in delta.voxel_changes.iter_mut() {
+                let dx = (cx * cs + vc.lx as i32) as f32 - epicenter.0;
+                let dy = (cy * cs + vc.ly as i32) as f32 - epicenter.1;
+                let dz = (cz * cs + vc.lz as i32) as f32 - epicenter.2;
+                let dist_norm = ((dx * dx + dy * dy + dz * dz).sqrt() * inv_max).clamp(0.0, 1.0);
+                vc.spread_distance = vc.spread_distance.max(dist_norm);
+            }
+        }
+    }
+
     let mut surface_step_activity = [0u16; SURFACE_ACTIVITY_BUCKETS];
     let surface_changed_cells: Vec<(i32, i32, i32)> = {
         let cs = chunk_size as i32;
