@@ -39,6 +39,56 @@ const BUTTRESS_R_TIP: f32 = 0.8;
 const ADJACENT_Y_CAP: f32 = 1.0;       // max apron Y delta per voxel (1:1 slope)
 const FLAT_MATCH_THRESHOLD: f32 = 1.0; // skip ramp if existing surface within this
 
+// ── Low-poly wall facets ──────────────────────────────────────────────────
+//
+// The vertical rock face a building cuts into a wall is EMERGENT — there is
+// no wall-carving routine. It is the lateral boundary of the carve below:
+// every column inside the region gets its clearance stripped to air, so
+// wherever neighbouring rock stands higher than the pad, the edge of the
+// region is left standing as a cut face.
+//
+// Untouched, that boundary is a Euclidean offset of the footprint rect — a
+// rounded rectangle — so the face meshes as one smooth curved bite. These
+// knobs polygonalise the boundary instead, resolving the face into a few
+// large planes that meet at hard vertical creases.
+//
+// ⚠️ This deliberately does NOT go through `edge_dist`. That value does two
+// jobs: region inclusion AND the apron's height profile (`t = edge_dist /
+// apron_radius` shaping, `max_drop = ADJACENT_Y_CAP * edge_dist`). Faceting
+// it would restep the ramp the player walks up. The facet distance is a
+// SEPARATE value consumed only by the inclusion test, so pad and apron keep
+// their exact sub-voxel target heights and only the plan-view silhouette
+// changes.
+//
+// Corner blend for the octagon chamfer. Both terms are <= the L2 distance
+// they replace (max(a,b) <= hypot trivially; 0.7071*(a+b) <= hypot by
+// Cauchy-Schwarz, equality on the diagonal), so the faceted region is a
+// strict SUPERSET of the round one. That matters: a subset would leave
+// slivers of rock standing on ground the floor pass had already flattened.
+//   1.0    = pure L1, 45° corners cut hard to a diamond
+//   0.7071 = regular octagon (8 planes)
+//   <= 0.5 = term never wins, pure L-inf square (4 planes, sharp corners)
+const WALL_FACET_CHAMFER: f32 = 0.7071;
+// Snap the facet distance DOWN to a multiple of this many voxels, giving a
+// stepped silhouette instead of clean planes (floor, not round — keeps the
+// superset property above). 0 disables. Set 2-4 for the blockier tile-wall
+// read if the octagon lands too smooth.
+const WALL_FACET_STEP: i32 = 0;
+
+/// Plan-view distance used ONLY to decide whether a column is inside the
+/// carve region. `dx_out`/`dz_out` are the per-axis distances outside the
+/// footprint rect, exactly as `edge_dist` consumes them.
+#[inline]
+fn facet_region_dist(dx_out: f32, dz_out: f32) -> f32 {
+    let d = dx_out.max(dz_out).max((dx_out + dz_out) * WALL_FACET_CHAMFER);
+    if WALL_FACET_STEP > 0 {
+        let step = WALL_FACET_STEP as f32;
+        (d / step).floor() * step
+    } else {
+        d
+    }
+}
+
 #[inline]
 fn apron_radius_for(terrace_size: i32) -> i32 {
     ((terrace_size as f32) * APRON_FRAC).round().max(APRON_MIN as f32) as i32
@@ -273,9 +323,15 @@ pub fn flatten_terrace_sdf_carve(
 
             let dx_out = 0.max(-dx).max(dx - interior_max) as f32;
             let dz_out = 0.max(-dz).max(dz - interior_max) as f32;
+            // L2 — feeds resolve_target_y, i.e. the apron's HEIGHT profile.
+            // Deliberately not faceted: the ground stays smooth and walkable.
             let edge_dist = (dx_out * dx_out + dz_out * dz_out).sqrt();
             let in_interior = edge_dist <= 0.0;
-            if !in_interior && edge_dist > apron_radius_f { continue; }
+            // Polygonal — feeds only the SILHOUETTE, which is what the wall
+            // cut face inherits.
+            if !in_interior && facet_region_dist(dx_out, dz_out) > apron_radius_f {
+                continue;
+            }
 
             let target_y_float = match resolve_target_y(
                 &store.density_fields, cs, base, base_y_float, apron_radius_f, config,
@@ -369,6 +425,42 @@ mod tests {
         assert_eq!(apron_radius_for(1), 3);
         assert_eq!(apron_radius_for(4), 3);
         assert!(apron_radius_for(10) >= 5);
+    }
+
+    /// THE load-bearing invariant for the low-poly wall carve. The facet
+    /// distance gates region inclusion while L2 still drives the height
+    /// profile, so if the facet distance could ever EXCEED L2 the region
+    /// would shrink below the round one — and the floor pass would flatten
+    /// ground whose rock above never got cleared, leaving slivers standing
+    /// on the pad. Superset is what makes the decoupling safe.
+    #[test]
+    fn facet_region_is_never_tighter_than_the_round_one() {
+        for dxi in 0..=64 {
+            for dzi in 0..=64 {
+                let (dx, dz) = (dxi as f32 * 0.25, dzi as f32 * 0.25);
+                let l2 = (dx * dx + dz * dz).sqrt();
+                let facet = facet_region_dist(dx, dz);
+                assert!(facet <= l2 + 1e-4,
+                    "facet dist {} exceeds L2 {} at ({}, {}) — region would shrink",
+                    facet, l2, dx, dz);
+            }
+        }
+    }
+
+    /// The chamfer should leave the axis-aligned and 45° reaches exactly
+    /// where the circle had them (so footprint-adjacent geometry is
+    /// unchanged) and push out only in between — that widening IS the
+    /// octagon's flat corner planes.
+    #[test]
+    fn facet_region_is_octagonal() {
+        assert!((facet_region_dist(4.0, 0.0) - 4.0).abs() < 1e-4, "axis reach moved");
+        let diag = facet_region_dist(4.0, 4.0);
+        assert!((diag - 4.0 * 2.0_f32.sqrt()).abs() < 1e-3, "45° reach moved: {}", diag);
+        // Halfway between axis and diagonal the octagon cuts a corner plane,
+        // so the same column sits closer than the circle would call it.
+        let l2 = (4.0_f32 * 4.0 + 1.657 * 1.657).sqrt();
+        assert!(facet_region_dist(4.0, 1.657) < l2 - 0.05,
+            "no corner chamfer at 22.5° — outline is still round");
     }
 
     fn make_flat_ground(ground_y: i32, chunks: i32) -> ChunkStore {
