@@ -39,6 +39,29 @@ const BUTTRESS_R_TIP: f32 = 0.8;
 const ADJACENT_Y_CAP: f32 = 1.0;       // max apron Y delta per voxel (1:1 slope)
 const FLAT_MATCH_THRESHOLD: f32 = 1.0; // skip ramp if existing surface within this
 
+// ── Carve rim smoothing ───────────────────────────────────────────────────
+//
+// The clearance pass leaves a knife-sharp edge where the carve boundary
+// meets standing rock — a machine-cut bite in organic cave. A small
+// Laplacian pass over a band straddling that boundary lets the cut read as
+// an eroded alcove instead. Same idea as `mining::smooth_mine_boundary`,
+// which has done this for mine walls for a long time.
+//
+// ⚠️ Deliberately NOT the pad. The floor's iso crossing lives between
+// target_y and target_y+1, and the sub-voxel alignment that lands it exactly
+// under the building is the thing belt drags took several rounds to get
+// right. The band starts two voxels above pad height so those cells are
+// never candidates.
+//
+// ⚠️ Cells the carve CLEARED are clamped to stay air. Blending is otherwise
+// free to grow rock back into the clearance volume — lips over the floor,
+// slivers in the space the player and the building occupy. Smoothing may
+// round rock away; it may never put it back.
+const RIM_SMOOTH_ITERATIONS: u32 = 2;
+const RIM_SMOOTH_STRENGTH: f32 = 0.5;
+const RIM_BAND_IN: f32 = 2.0;   // voxels inside the boundary
+const RIM_BAND_OUT: f32 = 2.0;  // voxels outside, into natural rock
+
 /// Destination for the per-placement carve diagnostic, or None to write
 /// nothing. Read once from `MITHRIL_FLATTEN_LOG`.
 ///
@@ -204,6 +227,96 @@ fn resolve_target_y(
     None
 }
 
+// ── Carve rim smoothing ───────────────────────────────────────────────────
+
+/// Laplacian pass over the band straddling the carve boundary. Returns the
+/// number of cell writes made.
+///
+/// Works in WORLD space via `read_density` rather than per-chunk like
+/// `smooth_mine_boundary`. Chunk fields overlap by a cell, so a per-chunk
+/// blur gives each copy of a shared boundary cell a different answer — its
+/// neighbourhood is clipped differently in each — and the seam shows. Going
+/// through `read_density`/`write_all_locations` means one value is computed
+/// per world cell and fanned out to every copy.
+#[allow(clippy::too_many_arguments)]
+fn smooth_carve_rim(
+    fields: &mut std::collections::HashMap<(i32, i32, i32), DensityField>,
+    cs: i32,
+    base: glam::IVec3,
+    terrace_size: i32,
+    apron_radius_f: f32,
+    clear: i32,
+    host_material: Material,
+    dirty_set: &mut HashSet<(i32, i32, i32)>,
+    written: &mut Vec<WrittenCell>,
+    changed_count: &mut u32,
+) -> u32 {
+    if RIM_SMOOTH_ITERATIONS == 0 || RIM_SMOOTH_STRENGTH <= 0.0 {
+        return 0;
+    }
+
+    let interior_max = terrace_size - 1;
+    let reach = (apron_radius_f + RIM_BAND_OUT).ceil() as i32;
+
+    // (wx, wy, wz, was_cleared_by_the_carve)
+    let mut cells: Vec<(i32, i32, i32, bool)> = Vec::new();
+    for dx in -reach..(terrace_size + reach) {
+        for dz in -reach..(terrace_size + reach) {
+            let dx_out = 0.max(-dx).max(dx - interior_max) as f32;
+            let dz_out = 0.max(-dz).max(dz - interior_max) as f32;
+            let edge_dist = (dx_out * dx_out + dz_out * dz_out).sqrt();
+            if edge_dist < apron_radius_f - RIM_BAND_IN { continue; }
+            if edge_dist > apron_radius_f + RIM_BAND_OUT { continue; }
+            let cleared = edge_dist <= apron_radius_f;
+            for y in (base.y + 2)..=(base.y + clear + 1) {
+                cells.push((base.x + dx, y, base.z + dz, cleared));
+            }
+        }
+    }
+
+    const NEIGHBOURS: [(i32, i32, i32); 6] = [
+        (-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1),
+    ];
+
+    let mut writes = 0u32;
+    for _ in 0..RIM_SMOOTH_ITERATIONS {
+        // Double-buffered: every new value is computed against the field as
+        // it stood at the start of the sweep, so the result does not depend
+        // on the order cells happen to be visited in.
+        let mut updates: Vec<(i32, i32, i32, f32)> = Vec::with_capacity(cells.len());
+        for &(wx, wy, wz, cleared) in &cells {
+            let cur = density_ops::read_density(fields, cs, wx, wy, wz);
+            let mut sum = 0.0f32;
+            for (nx, ny, nz) in NEIGHBOURS {
+                sum += density_ops::read_density(fields, cs, wx + nx, wy + ny, wz + nz);
+            }
+            let avg = sum / NEIGHBOURS.len() as f32;
+            let mut new_d = cur * (1.0 - RIM_SMOOTH_STRENGTH) + avg * RIM_SMOOTH_STRENGTH;
+            // Never re-solidify what the carve cleared.
+            if cleared { new_d = new_d.min(-1e-3); }
+            if (new_d - cur).abs() > 1e-3 {
+                updates.push((wx, wy, wz, new_d));
+            }
+        }
+        if updates.is_empty() { break; }
+        for (wx, wy, wz, new_d) in updates {
+            density_ops::write_all_locations(fields, cs, wx, wy, wz, |_cur_d, cur_m| {
+                // Density moves; material only follows when the sign flips.
+                // Repainting eroding natural rock with host_material would
+                // stripe the cave with the building's stone.
+                let new_m = if new_d >= 0.0 {
+                    if cur_m.is_solid() { cur_m } else { host_material }
+                } else {
+                    Material::Air
+                };
+                Some((new_d, new_m))
+            }, dirty_set, written, changed_count);
+            writes += 1;
+        }
+    }
+    writes
+}
+
 // ── Public entry ──────────────────────────────────────────────────────────
 
 pub fn flatten_terrace_sdf(
@@ -343,6 +456,16 @@ pub fn flatten_terrace_sdf_carve(
         }
     }
 
+    // Rim smoothing runs BEFORE sync_boundary_density on purpose. Its writes
+    // land in `written` after the carve's, and restore_written_cells replays
+    // that list in order — so the smoothed value is what survives the seam
+    // merge. Smoothing after the restore instead would need a second sync,
+    // whose min() merge would then start undoing the carve.
+    let rim_writes = smooth_carve_rim(
+        &mut store.density_fields, cs, base, terrace_size, apron_radius_f, clear,
+        host_material, &mut dirty_set, &mut written, &mut changed_count,
+    );
+
     // Diagnostic dump (file-based — eprintln isn't visible in UE).
     // Runtime-gated on MITHRIL_FLATTEN_LOG; see flatten_log_path().
     if let Some(log_path) = flatten_log_path() {
@@ -357,7 +480,8 @@ pub fn flatten_terrace_sdf_carve(
         } else { f32::NAN };
         let log_line = format!(
             "[flatten_sdf] base=({},{},{}) y_float={:.4} size={} (+{}apron) clearance={} cones={} formations_carved={} written={} cells changed={} voxels dirty={} chunks | center_col(wx={},wz={}): y{}={:.4} y{}={:.4} iso_y={:.4} (UE={:.2}) | base_y_float_UE={:.2}\n\
-             [flatten_sdf.cut] apron_radius={} cols={} | cols that removed rock={} ({} cells) | carve spans {}x{} voxels = {:.0}x{:.0} UU | cut face height <= {} voxels = {:.0} UU\n",
+             [flatten_sdf.cut] apron_radius={} cols={} | cols that removed rock={} ({} cells) | carve spans {}x{} voxels = {:.0}x{:.0} UU | cut face height <= {} voxels = {:.0} UU\n\
+             [flatten_sdf.rim] smoothing iters={} strength={:.2} band=-{:.0}/+{:.0} | cell writes={}\n",
             base.x, base.y, base.z, base_y_float, terrace_size, apron_radius, clear,
             hull.cones.len(), formations_carved, written.len(), changed_count, dirty_set.len(),
             cx_diag, cz_diag,
@@ -367,7 +491,9 @@ pub fn flatten_terrace_sdf_carve(
             terrace_size + 2 * apron_radius, terrace_size + 2 * apron_radius,
             (terrace_size + 2 * apron_radius) as f32 * world_scale,
             (terrace_size + 2 * apron_radius) as f32 * world_scale,
-            clear - 1, (clear - 1) as f32 * world_scale);
+            clear - 1, (clear - 1) as f32 * world_scale,
+            RIM_SMOOTH_ITERATIONS, RIM_SMOOTH_STRENGTH, RIM_BAND_IN, RIM_BAND_OUT,
+            rim_writes);
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log_path)
         {
@@ -433,6 +559,116 @@ mod tests {
             }
         }
         store
+    }
+
+    /// Flat floor with a solid wall rising from `wall_x` upward in +X — the
+    /// geometry the rim smoothing actually has to deal with, and the case
+    /// `make_flat_ground` cannot produce.
+    fn make_ground_with_wall(ground_y: i32, wall_x: i32, wall_top_y: i32, chunks: i32) -> ChunkStore {
+        let cs: usize = 16;
+        let mut store = ChunkStore::new(cs as i32);
+        for cx in -chunks..=chunks {
+            for cz in -chunks..=chunks {
+                for cy in -chunks..=chunks {
+                    let mut df = DensityField::new(cs + 1);
+                    for z in 0..=cs {
+                        for y in 0..=cs {
+                            for x in 0..=cs {
+                                let wx = cx * cs as i32 + x as i32;
+                                let wy = cy * cs as i32 + y as i32;
+                                let solid = wy < ground_y || (wx >= wall_x && wy < wall_top_y);
+                                let s = df.get_mut(x, y, z);
+                                if solid {
+                                    s.density = 1.0;
+                                    s.material = Material::Granite;
+                                } else {
+                                    s.density = -1.0;
+                                    s.material = Material::Air;
+                                }
+                            }
+                        }
+                    }
+                    store.density_fields.insert((cx, cy, cz), df);
+                }
+            }
+        }
+        store
+    }
+
+    /// THE safety invariant for rim smoothing. Blending a carve boundary
+    /// into the rock beside it will happily pull solid back across the
+    /// boundary — which would leave lips hanging over the pad and slivers in
+    /// the volume the building and the player stand in. Cleared cells are
+    /// clamped to air for exactly this reason; if that clamp is ever
+    /// loosened, this fails.
+    #[test]
+    fn rim_smoothing_never_puts_rock_back_in_the_clearance() {
+        let ground_y = 10;
+        let clearance = 4;
+        // Wall starts 6 voxels along +X, so the carve's +X rim cuts into it.
+        let mut store = make_ground_with_wall(ground_y, 6, 20, 1);
+        let cfg = GenerationConfig::default();
+        let base = glam::IVec3::new(0, ground_y, 0);
+
+        let _ = flatten_terrace_sdf(
+            &mut store, base, ground_y as f32,
+            Material::Granite, &cfg, 30.0, 4, clearance,
+        );
+
+        let cs = cfg.chunk_size as i32;
+        let apron = apron_radius_for(4);
+        let mut solid_in_clearance = Vec::new();
+        for dx in -apron..(4 + apron) {
+            for dz in -apron..(4 + apron) {
+                let dx_out = 0.max(-dx).max(dx - 3) as f32;
+                let dz_out = 0.max(-dz).max(dz - 3) as f32;
+                if (dx_out * dx_out + dz_out * dz_out).sqrt() > apron as f32 { continue; }
+                for y in (ground_y + 2)..=(ground_y + clearance) {
+                    let d = density_ops::read_density(
+                        &store.density_fields, cs, base.x + dx, y, base.z + dz);
+                    if d > 0.0 {
+                        solid_in_clearance.push((base.x + dx, y, base.z + dz, d));
+                    }
+                }
+            }
+        }
+        assert!(solid_in_clearance.is_empty(),
+            "rim smoothing pulled rock back into the cleared volume at {:?}",
+            &solid_in_clearance[..solid_in_clearance.len().min(6)]);
+    }
+
+    /// The rim pass must not disturb the pad. Its band starts two voxels up
+    /// for this reason — the floor's iso crossing sits between target_y and
+    /// target_y+1, and moving it puts buildings through the ground.
+    #[test]
+    fn rim_smoothing_leaves_the_pad_iso_alone() {
+        let ground_y = 10;
+        let mut store = make_ground_with_wall(ground_y, 6, 20, 1);
+        let cfg = GenerationConfig::default();
+        let base = glam::IVec3::new(0, ground_y, 0);
+        let base_y_float = ground_y as f32;
+
+        let _ = flatten_terrace_sdf(
+            &mut store, base, base_y_float,
+            Material::Granite, &cfg, 30.0, 4, 4,
+        );
+
+        let cs = cfg.chunk_size as i32;
+        // Sample a pad column on the wall side, where smoothing is closest.
+        let (px, pz) = (base.x + 3, base.z + 2);
+        let mut crossing = None;
+        for y in 5..18 {
+            let lo = density_ops::read_density(&store.density_fields, cs, px, y, pz);
+            let hi = density_ops::read_density(&store.density_fields, cs, px, y + 1, pz);
+            if lo > 0.0 && hi <= 0.0 {
+                crossing = Some(y as f32 + lo / (lo - hi));
+                break;
+            }
+        }
+        let crossing = crossing.expect("pad column should still have an iso surface");
+        assert!((crossing - base_y_float).abs() < 0.05,
+            "pad iso moved to {} (wanted {}) — the rim band is reaching the floor",
+            crossing, base_y_float);
     }
 
     #[test]
