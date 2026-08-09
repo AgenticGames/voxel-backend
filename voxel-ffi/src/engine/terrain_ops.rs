@@ -264,6 +264,198 @@ impl VoxelEngine {
         (solid, total, mat as u8, snapped_ue_x, snapped_ue_y, snapped_ue_z)
     }
 
+    // ─── Cell-rect building API ──────────────────────────────────────────
+    //
+    // The float entry points above take a UE world position and then snap and
+    // re-centre it themselves. UE also snaps, on its own per-type grid. Two
+    // independent snappers is exactly how the placement grid drifted: they
+    // agreed for even footprints and disagreed for odd ones, and neither side
+    // owned the answer.
+    //
+    // These take an ALREADY-SNAPPED cell rect. UE owns snapping; Rust owns
+    // terrain truth. Nothing here rounds, re-centres or second-guesses the
+    // caller's rect.
+    //
+    // COORD CONTRACT — per-function, do NOT generalise to other exports:
+    //   Inputs are UE-space CELL indices, where cell `i` spans world
+    //   [i*scale, (i+1)*scale). Mapping to Rust space:
+    //       rust_x =  ue_x
+    //       rust_y =  ue_z                      (UE Z is up; Rust Y is up)
+    //       rust_z = -ue_y                      (negated, so a UE Y span
+    //                [y0, y0+size) becomes a Rust Z span from -(y0+size))
+    //   Cells in, cells out — no `scale` is needed or accepted, which is the
+    //   point: a scale parameter is what invites a second rounding step.
+
+    /// Support under an already-snapped footprint rect.
+    ///
+    /// Returns `(solid_columns, total_columns, host_material, surface_cell_ue_z)`
+    /// where `surface_cell_ue_z` indexes the TOP SOLID cell — the caller's
+    /// building body starts one cell above it.
+    pub fn query_building_support_cells(
+        &self,
+        ue_min_x: i32,
+        ue_min_y: i32,
+        ue_approx_z: i32,
+        size_x: i32,
+        size_y: i32,
+    ) -> (u8, u8, u8, i32) {
+        let sx = size_x.max(1);
+        let sy = size_y.max(1);
+        let (rust_x0, rust_z0) = crate::terrain_ops::ue_cell_rect_to_rust_xz(ue_min_x, ue_min_y, sy);
+
+        let cs = { self.config.read().unwrap().chunk_size as i32 };
+        let store = match self.store.try_read() {
+            Ok(s) => s,
+            // Worker holds the write lock mid-carve: report "no support" rather
+            // than blocking the game thread on a placement preview.
+            Err(_) => return (0, 0, 0, ue_approx_z),
+        };
+
+        // Walk the centre column to the real surface. The caller's approx Z is
+        // a ray hit, which lands anywhere within a cell of the truth.
+        let centre_x = rust_x0 + sx / 2;
+        let centre_z = rust_z0 + sy / 2;
+        let probe_cx = centre_x.div_euclid(cs);
+        let probe_cz = centre_z.div_euclid(cs);
+        let probe_lx = centre_x.rem_euclid(cs) as usize;
+        let probe_lz = centre_z.rem_euclid(cs) as usize;
+
+        let solid_at = |y: i32| -> bool {
+            store
+                .density_fields
+                .get(&(probe_cx, y.div_euclid(cs), probe_cz))
+                .map(|df| df.get(probe_lx, y.rem_euclid(cs) as usize, probe_lz).density > 0.0)
+                .unwrap_or(false)
+        };
+
+        let mut surface_y = ue_approx_z;
+        if solid_at(ue_approx_z) {
+            // Buried — climb to the last solid cell before air.
+            for dy in 1..=8i32 {
+                if !solid_at(ue_approx_z + dy) {
+                    surface_y = ue_approx_z + dy - 1;
+                    break;
+                }
+            }
+        } else {
+            // In air — drop to the first solid cell.
+            for dy in 1..=8i32 {
+                if solid_at(ue_approx_z - dy) {
+                    surface_y = ue_approx_z - dy;
+                    break;
+                }
+            }
+        }
+
+        let (solid, total, mat) = crate::terrain_ops::query_building_support_rect(
+            &*store,
+            glam::IVec3::new(rust_x0, surface_y, rust_z0),
+            cs,
+            sx,
+            sy,
+        );
+        (solid, total, mat as u8, surface_y)
+    }
+
+    /// Flatten a pad under an already-snapped footprint rect.
+    ///
+    /// `ue_base_z` is the surface cell from `query_building_support_cells`.
+    ///
+    /// ⚠️ The SDF carve underneath (`flatten_terrace_sdf`) is square-only, so a
+    /// non-square footprint gets a CENTRED SQUARE pad of `max(size_x, size_y)`.
+    /// That is deliberate: an oversized flat pad under a building is harmless,
+    /// an undersized one would leave it hanging over a hole. Every shipping
+    /// footprint is square today, so this is exact; make the carve rectangular
+    /// before shipping a non-square building.
+    pub fn request_building_flatten_cells(
+        &self,
+        ue_min_x: i32,
+        ue_min_y: i32,
+        ue_base_z: i32,
+        size_x: i32,
+        size_y: i32,
+        clearance_cells: i32,
+    ) -> u32 {
+        let sx = size_x.max(1);
+        let sy = size_y.max(1);
+        let pad = sx.max(sy);
+
+        // Centre the square pad on the rect (a no-op while footprints are square).
+        let (rx0, rz0) = crate::terrain_ops::ue_cell_rect_to_rust_xz(ue_min_x, ue_min_y, sy);
+        let base_x = rx0 - (pad - sx) / 2;
+        let base_z = rz0 - (pad - sy) / 2;
+
+        let host_material = {
+            let cfg = self.config.read().unwrap();
+            voxel_gen::density::host_rock_for_depth(ue_base_z as f64, &cfg.ore.host_rock) as u8
+        };
+
+        match self.mine_tx.send_timeout(
+            WorkerRequest::BuildingFlatten {
+                base_x,
+                base_y: ue_base_z,
+                base_z,
+                // Cells are exact integers here — there is no sub-voxel
+                // remainder to carry, unlike the float entry point where UE's
+                // world Z could land anywhere inside a cell.
+                base_y_float: ue_base_z as f32,
+                host_material,
+                footprint_voxels: pad,
+                clearance_voxels: clearance_cells.max(2),
+            },
+            std::time::Duration::from_millis(100),
+        ) {
+            Ok(()) => 1,
+            Err(e) => {
+                eprintln!("[voxel] request_building_flatten_cells: send failed: {}", e);
+                0
+            }
+        }
+    }
+
+    /// Batch form of `request_building_flatten_cells` — one worker job, one
+    /// seam pass, for a whole belt drag chain.
+    pub fn request_building_flatten_cells_batch(
+        &self,
+        rects: &[(i32, i32, i32)],
+        size_x: i32,
+        size_y: i32,
+        clearance_cells: i32,
+    ) -> u32 {
+        if rects.is_empty() {
+            return 0;
+        }
+        let sx = size_x.max(1);
+        let sy = size_y.max(1);
+        let pad = sx.max(sy);
+        let clr = clearance_cells.max(2);
+        let cfg = self.config.read().unwrap();
+        let buildings: Vec<(i32, i32, i32, f32, u8, i32, i32)> = rects
+            .iter()
+            .map(|&(ue_min_x, ue_min_y, ue_base_z)| {
+                let (rx0, rz0) = crate::terrain_ops::ue_cell_rect_to_rust_xz(ue_min_x, ue_min_y, sy);
+                let base_x = rx0 - (pad - sx) / 2;
+                let base_z = rz0 - (pad - sy) / 2;
+                let host_material =
+                    voxel_gen::density::host_rock_for_depth(ue_base_z as f64, &cfg.ore.host_rock)
+                        as u8;
+                (base_x, ue_base_z, base_z, ue_base_z as f32, host_material, pad, clr)
+            })
+            .collect();
+        drop(cfg);
+
+        match self.mine_tx.send_timeout(
+            WorkerRequest::BuildingFlattenBatch { buildings },
+            std::time::Duration::from_millis(500),
+        ) {
+            Ok(()) => 1,
+            Err(e) => {
+                eprintln!("[voxel] request_building_flatten_cells_batch: send failed: {}", e);
+                0
+            }
+        }
+    }
+
     /// Request auto-terrace for a building placement.
     /// footprint_voxels controls the NxN footprint (e.g. 4 = 4x4, 2 = 2x2).
     /// clearance_voxels controls how many air voxels to carve above the floor.

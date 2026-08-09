@@ -448,12 +448,53 @@ pub fn query_flatten_support(store: &ChunkStore, base: glam::IVec3, chunk_size: 
 
 /// Query floor support for a building placement footprint.
 /// Returns (solid_count, total_columns, first_floor_material).
+/// UE-space cell rect origin → Rust-space cell rect origin, for the cell-rect
+/// building API.
+///
+/// THE coord contract, in one place, so the two engine methods that need it
+/// cannot drift apart:
+///     rust_x =  ue_x                  (same axis, same direction)
+///     rust_z = -(ue_y + size_y)       (UE Y is NEGATED, so the half-open span
+///                                      [ue_y, ue_y+size_y) becomes
+///                                      [-(ue_y+size_y), -ue_y) in Rust Z)
+/// UE Z (up) maps to Rust Y unchanged and is passed through separately.
+///
+/// ⚠️ This mapping is specific to THIS API. Other FFI entry points carry their
+/// own conventions — never reuse this for them without re-deriving it.
+#[inline]
+pub fn ue_cell_rect_to_rust_xz(ue_min_x: i32, ue_min_y: i32, size_y: i32) -> (i32, i32) {
+    (ue_min_x, -(ue_min_y + size_y))
+}
+
 pub fn query_building_support(store: &ChunkStore, base: glam::IVec3, chunk_size: i32, terrace_size: i32) -> (u8, u8, Material) {
-    let total_columns = (terrace_size * terrace_size) as u8;
+    query_building_support_rect(store, base, chunk_size, terrace_size, terrace_size)
+}
+
+/// Rectangular form of `query_building_support`.
+///
+/// Buildings carry an authored footprint in cells that rotates with their yaw,
+/// so a 2x4 machine turned 90 degrees is a 4x2 one — the support test has to
+/// follow, or a rotated building would be checked against the wrong columns.
+/// The square entry point above delegates here.
+///
+/// `base.y` is the TOP SOLID cell (not the first body cell); the columns
+/// probed are the two directly beneath it, which is the long-standing
+/// behaviour the 40%-support threshold in UE was tuned against.
+pub fn query_building_support_rect(
+    store: &ChunkStore,
+    base: glam::IVec3,
+    chunk_size: i32,
+    size_x: i32,
+    size_z: i32,
+) -> (u8, u8, Material) {
+    // Counts are u8 on the FFI boundary, so a footprint above 15x15 would wrap.
+    // Saturate instead: a clamped count still reads as "well supported" against
+    // the ratio test, whereas a wrapped one reads as "no floor at all".
+    let total_columns = (size_x * size_z).clamp(0, u8::MAX as i32) as u8;
     let mut solid_count = 0u8;
     let mut first_mat = Material::Air;
-    for dx in 0..terrace_size {
-        for dz in 0..terrace_size {
+    for dx in 0..size_x {
+        for dz in 0..size_z {
             let wx = base.x + dx;
             let wz = base.z + dz;
 
@@ -469,7 +510,7 @@ pub fn query_building_support(store: &ChunkStore, base: glam::IVec3, chunk_size:
                 if let Some(df) = store.density_fields.get(&(cx, cy, cz)) {
                     let sample = df.get(lx, ly, lz);
                     if sample.density > 0.0 {
-                        solid_count += 1;
+                        solid_count = solid_count.saturating_add(1);
                         if first_mat == Material::Air {
                             first_mat = sample.material;
                         }
@@ -536,4 +577,116 @@ pub fn query_nearby_terrace_y(
         }
     }
     best_y
+}
+
+#[cfg(test)]
+mod cell_rect_tests {
+    use super::*;
+    use voxel_core::density::DensityField;
+
+    /// The whole point of the cell-rect API: the Rust cells it probes must be
+    /// EXACTLY the cells UE reserved — no more, no fewer, no off-by-one from
+    /// the Y negation. This is the check that would have caught the
+    /// "convert at each call site" coord bugs the hard way.
+    #[test]
+    fn ue_rect_maps_onto_exactly_the_same_cells() {
+        for &(ue_min_y, size_y) in &[(0, 2), (0, 4), (-6, 2), (5, 3), (-1, 1), (100, 12)] {
+            let (_, rz0) = ue_cell_rect_to_rust_xz(0, ue_min_y, size_y);
+            let rust_span = rz0..(rz0 + size_y);
+
+            for ue_y in ue_min_y..(ue_min_y + size_y) {
+                // UE cell `ue_y` spans world [ue_y*C, (ue_y+1)*C). Negating puts
+                // that span in Rust Z at floor index -ue_y - 1.
+                let rust_cell = -ue_y - 1;
+                assert!(
+                    rust_span.contains(&rust_cell),
+                    "UE cell {} (rect {}..{}) mapped to Rust {}, outside {:?}",
+                    ue_y, ue_min_y, ue_min_y + size_y, rust_cell, rust_span
+                );
+            }
+        }
+    }
+
+    /// X passes straight through; only Y is negated.
+    #[test]
+    fn ue_rect_x_axis_is_untouched() {
+        for &x in &[-9, 0, 3, 77] {
+            assert_eq!(ue_cell_rect_to_rust_xz(x, 0, 2).0, x);
+        }
+    }
+
+    fn flat_ground(ground_y: i32) -> ChunkStore {
+        let cs: usize = 16;
+        let mut store = ChunkStore::new(cs as i32);
+        for cx in -1..=1 {
+            for cz in -1..=1 {
+                for cy in -1..=1 {
+                    let mut df = DensityField::new(cs + 1);
+                    for z in 0..=cs {
+                        for y in 0..=cs {
+                            for x in 0..=cs {
+                                let wy = cy * cs as i32 + y as i32;
+                                let s = df.get_mut(x, y, z);
+                                if wy < ground_y {
+                                    s.density = 1.0;
+                                    s.material = Material::Granite;
+                                } else {
+                                    s.density = -1.0;
+                                    s.material = Material::Air;
+                                }
+                            }
+                        }
+                    }
+                    store.density_fields.insert((cx, cy, cz), df);
+                }
+            }
+        }
+        store
+    }
+
+    #[test]
+    fn rect_support_counts_every_column() {
+        let ground_y = 8;
+        let store = flat_ground(ground_y);
+        // base.y is the top SOLID cell, and the helper probes the two below it.
+        let base = glam::IVec3::new(2, ground_y - 1, 2);
+
+        let (solid, total, mat) = query_building_support_rect(&store, base, 16, 2, 4);
+        assert_eq!(total, 8, "2x4 rect is 8 columns");
+        assert_eq!(solid, 8, "flat ground supports every column");
+        assert_eq!(mat, Material::Granite);
+
+        // Rotating the footprint swaps the axes and must not change the verdict
+        // on uniform ground — but it IS a different set of columns.
+        let (solid_rot, total_rot, _) = query_building_support_rect(&store, base, 16, 4, 2);
+        assert_eq!((solid_rot, total_rot), (8, 8));
+    }
+
+    /// The square entry point must stay a pure delegation — if these ever
+    /// disagree, every existing caller silently changed behaviour.
+    #[test]
+    fn square_query_matches_rect_query() {
+        let store = flat_ground(8);
+        let base = glam::IVec3::new(0, 7, 0);
+        for n in 1..=6 {
+            assert_eq!(
+                query_building_support(&store, base, 16, n),
+                query_building_support_rect(&store, base, 16, n, n),
+                "square/rect disagree at size {}", n
+            );
+        }
+    }
+
+    /// Unsupported air must report zero, not a wrapped or defaulted count —
+    /// UE's 40% threshold turns a bogus high count into a building placed on
+    /// nothing.
+    #[test]
+    fn rect_support_reports_zero_over_air() {
+        let store = flat_ground(8);
+        // Well above the ground: the two cells probed below are both air.
+        let base = glam::IVec3::new(2, 14, 2);
+        let (solid, total, _) = query_building_support_rect(&store, base, 16, 2, 2);
+        assert_eq!(solid, 0);
+        assert_eq!(total, 4);
+    }
 }

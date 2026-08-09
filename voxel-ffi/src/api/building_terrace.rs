@@ -67,6 +67,92 @@ pub unsafe extern "C" fn voxel_query_building_support(
     1
 }
 
+// ─── Cell-rect building API ──────────────────────────────────────────────
+//
+// Preferred over the float entry points below: the caller passes an
+// ALREADY-SNAPPED cell rect and Rust does no rounding of its own. See
+// `VoxelEngine::query_building_support_cells` for the full coord contract —
+// inputs are UE-space cell indices, and the UE-Y-to-Rust-Z negation happens
+// inside, so callers pass their own cells unchanged.
+//
+// The float `voxel_query_building_support` / `voxel_request_building_flatten`
+// below are retained for callers that have not moved over yet.
+
+/// Support under an already-snapped footprint rect.
+/// Writes solid/total column counts, host material, and the TOP SOLID cell's
+/// UE Z index (the building body starts one cell above it).
+/// Returns 1 on success, 0 if engine null.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_query_building_support_cells(
+    engine: *mut c_void,
+    ue_min_x: i32,
+    ue_min_y: i32,
+    ue_approx_z: i32,
+    size_x: i32,
+    size_y: i32,
+    out_solid: *mut u8,
+    out_total: *mut u8,
+    out_mat: *mut u8,
+    out_surface_z: *mut i32,
+) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let (solid, total, mat, surface_z) =
+        engine.query_building_support_cells(ue_min_x, ue_min_y, ue_approx_z, size_x, size_y);
+    if !out_solid.is_null() { *out_solid = solid; }
+    if !out_total.is_null() { *out_total = total; }
+    if !out_mat.is_null() { *out_mat = mat; }
+    if !out_surface_z.is_null() { *out_surface_z = surface_z; }
+    1
+}
+
+/// Flatten a pad under an already-snapped footprint rect.
+/// `ue_base_z` is the surface cell from `voxel_query_building_support_cells`.
+/// Returns 1 on success, 0 if the queue is full.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_request_building_flatten_cells(
+    engine: *mut c_void,
+    ue_min_x: i32,
+    ue_min_y: i32,
+    ue_base_z: i32,
+    size_x: i32,
+    size_y: i32,
+    clearance_cells: i32,
+) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    engine.request_building_flatten_cells(ue_min_x, ue_min_y, ue_base_z, size_x, size_y, clearance_cells)
+}
+
+/// Batch cell-rect flatten: every rect shares one footprint and clearance,
+/// one worker job, one seam pass. Used by the belt drag chain.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_request_building_flatten_cells_batch(
+    engine: *mut c_void,
+    min_xs: *const i32,
+    min_ys: *const i32,
+    base_zs: *const i32,
+    count: u32,
+    size_x: i32,
+    size_y: i32,
+    clearance_cells: i32,
+) -> u32 {
+    if engine.is_null() || min_xs.is_null() || min_ys.is_null() || base_zs.is_null() || count == 0 {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let n = count as usize;
+    let min_xs = std::slice::from_raw_parts(min_xs, n);
+    let min_ys = std::slice::from_raw_parts(min_ys, n);
+    let base_zs = std::slice::from_raw_parts(base_zs, n);
+    let rects: Vec<(i32, i32, i32)> = (0..n).map(|i| (min_xs[i], min_ys[i], base_zs[i])).collect();
+    engine.request_building_flatten_cells_batch(&rects, size_x, size_y, clearance_cells)
+}
+
 /// Request auto-terrace for a building placement.
 /// footprint_voxels controls the NxN footprint (e.g. 4 = 4x4, 2 = 2x2).
 /// clearance_voxels controls how many air voxels to carve above the floor.
