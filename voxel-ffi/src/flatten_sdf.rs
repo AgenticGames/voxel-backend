@@ -39,6 +39,21 @@ const BUTTRESS_R_TIP: f32 = 0.8;
 const ADJACENT_Y_CAP: f32 = 1.0;       // max apron Y delta per voxel (1:1 slope)
 const FLAT_MATCH_THRESHOLD: f32 = 1.0; // skip ramp if existing surface within this
 
+/// Destination for the per-placement carve diagnostic, or None to write
+/// nothing. Read once from `MITHRIL_FLATTEN_LOG`.
+///
+/// This used to be `#[cfg(debug_assertions)]` with a path hardcoded to the
+/// MAIN checkout. Both halves were wrong for how the project is actually
+/// driven: release DLLs are what get shipped to the editor for visual
+/// checks, so the diagnostic was dead exactly when it was needed, and every
+/// parallel worktree would have logged over the same file.
+fn flatten_log_path() -> Option<&'static str> {
+    static LOG_PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    LOG_PATH
+        .get_or_init(|| std::env::var("MITHRIL_FLATTEN_LOG").ok().filter(|s| !s.is_empty()))
+        .as_deref()
+}
+
 #[inline]
 fn apron_radius_for(terrace_size: i32) -> i32 {
     ((terrace_size as f32) * APRON_FRAC).round().max(APRON_MIN as f32) as i32
@@ -220,8 +235,6 @@ pub fn flatten_terrace_sdf(
 /// Carving all buildings first and remeshing the union once produces
 /// bit-identical meshes (densities are fully persistent after each carve;
 /// meshing is pure derived output of the final density state).
-// `world_scale` only feeds the debug-build diagnostic dump below.
-#[cfg_attr(not(debug_assertions), allow(unused_variables))]
 pub fn flatten_terrace_sdf_carve(
     store: &mut ChunkStore,
     base: glam::IVec3,
@@ -266,6 +279,16 @@ pub fn flatten_terrace_sdf_carve(
     let extent = apron_radius;
     let interior_max = terrace_size - 1;
 
+    // How many columns the carve touches at all.
+    let mut region_cols = 0u32;
+    // Columns whose clearance pass actually removed SOLID ROCK, i.e. columns
+    // that genuinely produced cut face. `region_cols` only counts columns
+    // admitted to the carve — a column admitted over open air writes nothing
+    // and shows nothing, so admitted-vs-round cannot tell us whether the
+    // squared corners are cutting a wall or waving at thin air.
+    let mut cut_cols = 0u32;
+    let mut cut_cells = 0u32;
+
     for dx in -extent..(terrace_size + extent) {
         for dz in -extent..(terrace_size + extent) {
             let wx = base.x + dx;
@@ -276,6 +299,7 @@ pub fn flatten_terrace_sdf_carve(
             let edge_dist = (dx_out * dx_out + dz_out * dz_out).sqrt();
             let in_interior = edge_dist <= 0.0;
             if !in_interior && edge_dist > apron_radius_f { continue; }
+            region_cols += 1;
 
             let target_y_float = match resolve_target_y(
                 &store.density_fields, cs, base, base_y_float, apron_radius_f, config,
@@ -297,9 +321,19 @@ pub fn flatten_terrace_sdf_carve(
             density_ops::write_force(&mut store.density_fields, cs, wx, target_y + 1, wz, d_air,
                 host_material, &mut dirty_set, &mut written, &mut changed_count);
 
+            // write_lower is conditional, so changed_count only moves when
+            // there was solid rock here to take away. Snapshotting it around
+            // the clearance pass is what separates "cut a wall" from "swept
+            // through air that was already empty".
+            let changed_before_clearance = changed_count;
             for y in (target_y + 2)..=(target_y + clear) {
                 density_ops::write_lower(&mut store.density_fields, cs, wx, y, wz, -1.0,
                     &mut dirty_set, &mut written, &mut changed_count);
+            }
+            let cut_here = changed_count - changed_before_clearance;
+            if cut_here > 0 {
+                cut_cols += 1;
+                cut_cells += cut_here;
             }
 
             if in_interior {
@@ -310,12 +344,8 @@ pub fn flatten_terrace_sdf_carve(
     }
 
     // Diagnostic dump (file-based — eprintln isn't visible in UE).
-    // Gated behind debug_assertions so release builds don't pay for an
-    // open/write/close on every single building placement, plus the column
-    // sample work that feeds it. Flip on a feature flag if you need the
-    // log in a release/profiled build.
-    #[cfg(debug_assertions)]
-    {
+    // Runtime-gated on MITHRIL_FLATTEN_LOG; see flatten_log_path().
+    if let Some(log_path) = flatten_log_path() {
         let cx_diag = base.x + terrace_size / 2;
         let cz_diag = base.z + terrace_size / 2;
         let center_y = base_y_float.floor() as i32;
@@ -326,15 +356,20 @@ pub fn flatten_terrace_sdf_carve(
             center_y as f32 + d_below / denom
         } else { f32::NAN };
         let log_line = format!(
-            "[flatten_sdf] base=({},{},{}) y_float={:.4} size={} (+{}apron) clearance={} cones={} formations_carved={} written={} cells changed={} voxels dirty={} chunks | center_col(wx={},wz={}): y{}={:.4} y{}={:.4} iso_y={:.4} (UE={:.2}) | base_y_float_UE={:.2}\n",
+            "[flatten_sdf] base=({},{},{}) y_float={:.4} size={} (+{}apron) clearance={} cones={} formations_carved={} written={} cells changed={} voxels dirty={} chunks | center_col(wx={},wz={}): y{}={:.4} y{}={:.4} iso_y={:.4} (UE={:.2}) | base_y_float_UE={:.2}\n\
+             [flatten_sdf.cut] apron_radius={} cols={} | cols that removed rock={} ({} cells) | carve spans {}x{} voxels = {:.0}x{:.0} UU | cut face height <= {} voxels = {:.0} UU\n",
             base.x, base.y, base.z, base_y_float, terrace_size, apron_radius, clear,
             hull.cones.len(), formations_carved, written.len(), changed_count, dirty_set.len(),
             cx_diag, cz_diag,
             center_y, d_below, center_y + 1, d_above, iso_y, iso_y * world_scale,
-            base_y_float * world_scale);
+            base_y_float * world_scale,
+            apron_radius, region_cols, cut_cols, cut_cells,
+            terrace_size + 2 * apron_radius, terrace_size + 2 * apron_radius,
+            (terrace_size + 2 * apron_radius) as f32 * world_scale,
+            (terrace_size + 2 * apron_radius) as f32 * world_scale,
+            clear - 1, (clear - 1) as f32 * world_scale);
         use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-            .open("D:/Unreal Projects/Mithril2026/Saved/flatten_sdf_log.txt")
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log_path)
         {
             let _ = f.write_all(log_line.as_bytes());
         }
