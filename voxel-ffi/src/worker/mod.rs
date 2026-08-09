@@ -628,8 +628,8 @@ fn handle_request(
         WorkerRequest::BuildingFlattenBatch { buildings } => {
             brush::handle_building_flatten_batch(&ctx, buildings);
         }
-        WorkerRequest::BuildingFlatten { base_x, base_y, base_z, base_y_float, host_material, footprint_voxels, clearance_voxels } => {
-            brush::handle_building_flatten(&ctx, base_x, base_y, base_z, base_y_float, host_material, footprint_voxels, clearance_voxels);
+        WorkerRequest::BuildingFlatten { base_x, base_y, base_z, base_y_float, host_material, footprint_x, footprint_z, clearance_voxels } => {
+            brush::handle_building_flatten(&ctx, base_x, base_y, base_z, base_y_float, host_material, footprint_x, footprint_z, clearance_voxels);
         }
         WorkerRequest::Mine { request } => {
             brush::handle_mine(&ctx, request);

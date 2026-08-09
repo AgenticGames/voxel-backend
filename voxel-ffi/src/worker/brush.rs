@@ -59,7 +59,7 @@ pub(super) fn handle_flatten_batch(ctx: &super::HandlerCtx<'_>, tiles: Vec<(glam
             batched_seam_pass_mine(&dirty_keys, &cfg, store, result_tx, fluid_event_tx, world_scale);
 }
 
-pub(super) fn handle_building_flatten_batch(ctx: &super::HandlerCtx<'_>, buildings: Vec<(i32, i32, i32, f32, u8, i32, i32)>) {
+pub(super) fn handle_building_flatten_batch(ctx: &super::HandlerCtx<'_>, buildings: Vec<(i32, i32, i32, f32, u8, i32, i32, i32)>) {
     let result_tx = ctx.result_tx;
     let store = ctx.store;
     let config = ctx.config;
@@ -83,9 +83,8 @@ pub(super) fn handle_building_flatten_batch(ctx: &super::HandlerCtx<'_>, buildin
             let cfg = config.read().unwrap().clone();
             let mut s = store.write().unwrap();
             let mut dirty_bounds: Vec<((i32, i32, i32), usize, usize, usize, usize, usize, usize)> = Vec::new();
-            for &(bx, by, bz, by_f, host_mat, footprint, clearance) in &buildings {
+            for &(bx, by, bz, by_f, host_mat, fp_x, fp_z, clearance) in &buildings {
                 let mat = voxel_core::material::Material::from_u8(host_mat);
-                let bts = footprint.max(1);
                 dirty_bounds.extend(crate::flatten_sdf::flatten_terrace_sdf_carve(
                     &mut s,
                     glam::IVec3::new(bx, by, bz),
@@ -93,7 +92,8 @@ pub(super) fn handle_building_flatten_batch(ctx: &super::HandlerCtx<'_>, buildin
                     mat,
                     &cfg,
                     world_scale,
-                    bts,
+                    fp_x.max(1),
+                    fp_z.max(1),
                     clearance.max(2),
                 ));
             }
@@ -112,7 +112,7 @@ pub(super) fn handle_building_flatten_batch(ctx: &super::HandlerCtx<'_>, buildin
             batched_seam_pass_mine(&all_dirty, &cfg, store, result_tx, fluid_event_tx, world_scale);
 }
 
-pub(super) fn handle_building_flatten(ctx: &super::HandlerCtx<'_>, base_x: i32, base_y: i32, base_z: i32, base_y_float: f32, host_material: u8, footprint_voxels: i32, clearance_voxels: i32) {
+pub(super) fn handle_building_flatten(ctx: &super::HandlerCtx<'_>, base_x: i32, base_y: i32, base_z: i32, base_y_float: f32, host_material: u8, footprint_x: i32, footprint_z: i32, clearance_voxels: i32) {
     let result_tx = ctx.result_tx;
     let store = ctx.store;
     let config = ctx.config;
@@ -121,7 +121,6 @@ pub(super) fn handle_building_flatten(ctx: &super::HandlerCtx<'_>, base_x: i32, 
             let cfg = config.read().unwrap().clone();
             let mat = voxel_core::material::Material::from_u8(host_material);
             let mut s = store.write().unwrap();
-            let bts = footprint_voxels.max(1);
 
             // Single placement: route to the all-in SDF flatten (1C+3C+2C).
             // base_y_float carries the exact sub-voxel Y so the iso surface
@@ -134,7 +133,8 @@ pub(super) fn handle_building_flatten(ctx: &super::HandlerCtx<'_>, base_x: i32, 
                 mat,
                 &cfg,
                 world_scale,
-                bts,
+                footprint_x.max(1),
+                footprint_z.max(1),
                 clearance_voxels,
             );
             let dirty_keys: Vec<(i32, i32, i32)> = meshes.into_iter().map(|(k, _)| k).collect();

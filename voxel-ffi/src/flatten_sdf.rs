@@ -107,14 +107,15 @@ fn build_support_hull(
     cs: i32,
     base: glam::IVec3,
     base_y_float: f32,
-    terrace_size: i32,
+    size_x: i32,
+    size_z: i32,
 ) -> SupportHull {
-    let cap_dist = cap_distance_for(terrace_size);
+    let cap_dist = cap_distance_for(size_x.max(size_z));
     let base_y_int = base_y_float.floor() as i32;
     let mut cones: Vec<CompiledCone> = Vec::new();
 
-    for dx in 0..terrace_size {
-        for dz in 0..terrace_size {
+    for dx in 0..size_x {
+        for dz in 0..size_z {
             let wx = base.x + dx;
             let wz = base.z + dz;
 
@@ -213,12 +214,13 @@ pub fn flatten_terrace_sdf(
     host_material: Material,
     config: &GenerationConfig,
     world_scale: f32,
-    terrace_size: i32,
+    size_x: i32,
+    size_z: i32,
     clearance_voxels: i32,
 ) -> Vec<((i32, i32, i32), ConvertedMesh)> {
     let dirty_chunks = flatten_terrace_sdf_carve(
         store, base, base_y_float, host_material, config, world_scale,
-        terrace_size, clearance_voxels,
+        size_x, size_z, clearance_voxels,
     );
     store.remesh_dirty(&dirty_chunks, config, world_scale)
 }
@@ -242,15 +244,21 @@ pub fn flatten_terrace_sdf_carve(
     host_material: Material,
     config: &GenerationConfig,
     world_scale: f32,
-    terrace_size: i32,
+    // Footprint per axis. NOT necessarily equal even for a building that is
+    // square in cells — the 40 UU building lattice and the voxel lattice are
+    // incommensurate, so the outward rounding in BuildingCellsToVoxelSpanXY
+    // yields e.g. 8 x 9. This used to be squared off by the caller, which
+    // biased every such carve a whole voxel to one side.
+    size_x: i32,
+    size_z: i32,
     clearance_voxels: i32,
 ) -> Vec<((i32, i32, i32), usize, usize, usize, usize, usize, usize)> {
     let cs = config.chunk_size as i32;
     let clear = clearance_voxels.max(2);
-    let apron_radius = apron_radius_for(terrace_size);
+    let apron_radius = apron_radius_for(size_x.max(size_z));
     let apron_radius_f = apron_radius as f32;
 
-    let hull = build_support_hull(store, cs, base, base_y_float, terrace_size);
+    let hull = build_support_hull(store, cs, base, base_y_float, size_x, size_z);
 
     let mut dirty_set: HashSet<(i32, i32, i32)> = HashSet::new();
     let mut written: Vec<WrittenCell> = Vec::new();
@@ -260,10 +268,10 @@ pub fn flatten_terrace_sdf_carve(
     // around the building. Carves stalactites/stalagmites/columns/flowstone
     // tips so they don't leave mangled stubs after the main carve.
     let formation_cfg = FormationRemovalConfig {
-        anchor_x: base.x + terrace_size / 2,
-        anchor_z: base.z + terrace_size / 2,
-        footprint_x: terrace_size / 2,
-        footprint_z: terrace_size / 2,
+        anchor_x: base.x + size_x / 2,
+        anchor_z: base.z + size_z / 2,
+        footprint_x: size_x / 2,
+        footprint_z: size_z / 2,
         radius_extra: 4,
         anchor_y: base_y_float.floor() as i32,
         max_above: 12,
@@ -277,7 +285,8 @@ pub fn flatten_terrace_sdf_carve(
     );
 
     let extent = apron_radius;
-    let interior_max = terrace_size - 1;
+    let interior_max_x = size_x - 1;
+    let interior_max_z = size_z - 1;
 
     // How many columns the carve touches at all.
     let mut region_cols = 0u32;
@@ -289,13 +298,13 @@ pub fn flatten_terrace_sdf_carve(
     let mut cut_cols = 0u32;
     let mut cut_cells = 0u32;
 
-    for dx in -extent..(terrace_size + extent) {
-        for dz in -extent..(terrace_size + extent) {
+    for dx in -extent..(size_x + extent) {
+        for dz in -extent..(size_z + extent) {
             let wx = base.x + dx;
             let wz = base.z + dz;
 
-            let dx_out = 0.max(-dx).max(dx - interior_max) as f32;
-            let dz_out = 0.max(-dz).max(dz - interior_max) as f32;
+            let dx_out = 0.max(-dx).max(dx - interior_max_x) as f32;
+            let dz_out = 0.max(-dz).max(dz - interior_max_z) as f32;
             let edge_dist = (dx_out * dx_out + dz_out * dz_out).sqrt();
             let in_interior = edge_dist <= 0.0;
             if !in_interior && edge_dist > apron_radius_f { continue; }
@@ -346,8 +355,8 @@ pub fn flatten_terrace_sdf_carve(
     // Diagnostic dump (file-based — eprintln isn't visible in UE).
     // Runtime-gated on MITHRIL_FLATTEN_LOG; see flatten_log_path().
     if let Some(log_path) = flatten_log_path() {
-        let cx_diag = base.x + terrace_size / 2;
-        let cz_diag = base.z + terrace_size / 2;
+        let cx_diag = base.x + size_x / 2;
+        let cz_diag = base.z + size_z / 2;
         let center_y = base_y_float.floor() as i32;
         let d_below = density_ops::read_density(&store.density_fields, cs, cx_diag, center_y, cz_diag);
         let d_above = density_ops::read_density(&store.density_fields, cs, cx_diag, center_y + 1, cz_diag);
@@ -356,17 +365,17 @@ pub fn flatten_terrace_sdf_carve(
             center_y as f32 + d_below / denom
         } else { f32::NAN };
         let log_line = format!(
-            "[flatten_sdf] base=({},{},{}) y_float={:.4} size={} (+{}apron) clearance={} cones={} formations_carved={} written={} cells changed={} voxels dirty={} chunks | center_col(wx={},wz={}): y{}={:.4} y{}={:.4} iso_y={:.4} (UE={:.2}) | base_y_float_UE={:.2}\n\
+            "[flatten_sdf] base=({},{},{}) y_float={:.4} size={}x{} (+{}apron) clearance={} cones={} formations_carved={} written={} cells changed={} voxels dirty={} chunks | center_col(wx={},wz={}): y{}={:.4} y{}={:.4} iso_y={:.4} (UE={:.2}) | base_y_float_UE={:.2}\n\
              [flatten_sdf.cut] apron_radius={} cols={} | cols that removed rock={} ({} cells) | carve spans {}x{} voxels = {:.0}x{:.0} UU | cut face height <= {} voxels = {:.0} UU\n",
-            base.x, base.y, base.z, base_y_float, terrace_size, apron_radius, clear,
+            base.x, base.y, base.z, base_y_float, size_x, size_z, apron_radius, clear,
             hull.cones.len(), formations_carved, written.len(), changed_count, dirty_set.len(),
             cx_diag, cz_diag,
             center_y, d_below, center_y + 1, d_above, iso_y, iso_y * world_scale,
             base_y_float * world_scale,
             apron_radius, region_cols, cut_cols, cut_cells,
-            terrace_size + 2 * apron_radius, terrace_size + 2 * apron_radius,
-            (terrace_size + 2 * apron_radius) as f32 * world_scale,
-            (terrace_size + 2 * apron_radius) as f32 * world_scale,
+            size_x + 2 * apron_radius, size_z + 2 * apron_radius,
+            (size_x + 2 * apron_radius) as f32 * world_scale,
+            (size_z + 2 * apron_radius) as f32 * world_scale,
             clear - 1, (clear - 1) as f32 * world_scale);
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log_path)
@@ -435,6 +444,51 @@ mod tests {
         store
     }
 
+    /// Regression for the off-centre furnace pad reported from play
+    /// (2026-08-09). The carve must honour a NON-SQUARE footprint.
+    ///
+    /// The caller used to square the rect off — `pad = sx.max(sy)`, centred by
+    /// `(pad - sx) / 2` — believing footprints were square. They are square in
+    /// BUILDING CELLS, not in voxels: 40 UU cells against a 30 UU voxel
+    /// lattice round outward to different sizes per axis, so a furnace comes
+    /// through as 8 x 9. The integer divide then truncated `1 / 2` to 0 and
+    /// put the entire extra voxel on one side.
+    #[test]
+    fn carve_honours_a_non_square_footprint() {
+        let ground_y = 10;
+        let (size_x, size_z) = (3, 6);
+        let mut store = make_flat_ground(ground_y, 1);
+        let cfg = GenerationConfig::default();
+        let base = glam::IVec3::new(0, ground_y, 0);
+
+        let _ = flatten_terrace_sdf(
+            &mut store, base, ground_y as f32,
+            Material::Granite, &cfg, 30.0, size_x, size_z, 3,
+        );
+
+        // terraced_columns is populated for interior (footprint) columns only,
+        // so its extent IS the pad the building sits on.
+        let xs: Vec<i32> = store.terraced_columns.keys().map(|&(x, _)| x).collect();
+        let zs: Vec<i32> = store.terraced_columns.keys().map(|&(_, z)| z).collect();
+        let (min_x, max_x) = (*xs.iter().min().unwrap(), *xs.iter().max().unwrap());
+        let (min_z, max_z) = (*zs.iter().min().unwrap(), *zs.iter().max().unwrap());
+
+        assert_eq!((min_x, max_x), (base.x, base.x + size_x - 1),
+            "pad X span is {}..{}, wanted {}..{} — footprint was squared off",
+            min_x, max_x, base.x, base.x + size_x - 1);
+        assert_eq!((min_z, max_z), (base.z, base.z + size_z - 1),
+            "pad Z span is {}..{}, wanted {}..{} — footprint was squared off",
+            min_z, max_z, base.z, base.z + size_z - 1);
+
+        // And the apron must reach equally far on both sides of each axis, so
+        // neither side ends up roomier than the other.
+        let apron = apron_radius_for(size_x.max(size_z));
+        assert_eq!(min_x - (base.x - apron), (base.x + size_x - 1 + apron) - max_x,
+            "apron is lopsided in X");
+        assert_eq!(min_z - (base.z - apron), (base.z + size_z - 1 + apron) - max_z,
+            "apron is lopsided in Z");
+    }
+
     #[test]
     fn subvoxel_surface_lands_near_requested_y() {
         let mut store = make_flat_ground(10, 1);
@@ -444,7 +498,7 @@ mod tests {
         let base_y_float = 10.3;
         let _ = flatten_terrace_sdf(
             &mut store, base, base_y_float,
-            Material::Granite, &cfg, 40.0, 4, 3,
+            Material::Granite, &cfg, 40.0, 4, 4, 3,
         );
 
         let cs = cfg.chunk_size as i32;
@@ -475,7 +529,7 @@ mod tests {
         let base = glam::IVec3::new(0, 10, 0);
         let _ = flatten_terrace_sdf(
             &mut store, base, 10.2,
-            Material::Granite, &cfg, 40.0, 4, 3,
+            Material::Granite, &cfg, 40.0, 4, 4, 3,
         );
         let cs = cfg.chunk_size as i32;
         let d10 = density_ops::read_density(&store.density_fields, cs, base.x, 10, base.z);
@@ -503,7 +557,7 @@ mod tests {
         let mut old_remeshes = 0usize;
         for &base in &belts {
             old_remeshes += flatten_terrace_sdf(
-                &mut store_old, base, 10.3, Material::Granite, &cfg, ws, 2, 3,
+                &mut store_old, base, 10.3, Material::Granite, &cfg, ws, 2, 2, 3,
             ).len();
         }
 
@@ -511,7 +565,7 @@ mod tests {
         let mut dirty = Vec::new();
         for &base in &belts {
             dirty.extend(flatten_terrace_sdf_carve(
-                &mut store_new, base, 10.3, Material::Granite, &cfg, ws, 2, 3,
+                &mut store_new, base, 10.3, Material::Granite, &cfg, ws, 2, 2, 3,
             ));
         }
         dirty.sort_by_key(|&(k, ..)| k);
@@ -575,7 +629,7 @@ mod tests {
         let mut old_remeshes = 0usize;
         for &base in &belts {
             old_remeshes += flatten_terrace_sdf(
-                &mut store_old, base, 10.3, Material::Granite, &cfg, ws, 2, 3,
+                &mut store_old, base, 10.3, Material::Granite, &cfg, ws, 2, 2, 3,
             ).len();
         }
         let old_ms = t_old.elapsed().as_secs_f64() * 1e3;
@@ -585,7 +639,7 @@ mod tests {
         let mut dirty = Vec::new();
         for &base in &belts {
             dirty.extend(flatten_terrace_sdf_carve(
-                &mut store_new, base, 10.3, Material::Granite, &cfg, ws, 2, 3,
+                &mut store_new, base, 10.3, Material::Granite, &cfg, ws, 2, 2, 3,
             ));
         }
         dirty.sort_by_key(|&(k, ..)| k);

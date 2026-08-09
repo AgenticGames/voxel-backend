@@ -378,12 +378,21 @@ impl VoxelEngine {
     ) -> u32 {
         let sx = size_x.max(1);
         let sy = size_y.max(1);
-        let pad = sx.max(sy);
 
-        // Centre the square pad on the rect (a no-op while footprints are square).
+        // Carve the rect as given. This USED to square it off —
+        // `pad = sx.max(sy)` centred by `(pad - sx) / 2` — on the stated
+        // grounds that centring was "a no-op while footprints are square".
+        // Footprints are square in BUILDING CELLS, not in voxels: the 40 UU
+        // cell lattice and the WorldScale voxel lattice are incommensurate,
+        // so BuildingCellsToVoxelSpanXY rounds outward to different sizes per
+        // axis. A furnace's 240 UU span is 8 or 9 voxels depending where it
+        // lands, and X and Y resolve independently. With sx=8, sy=9 the pad
+        // was 9 and the offset `1 / 2` truncated to 0, so the whole extra
+        // voxel landed on one side — 30 UU more room there and none opposite.
+        // Reported from play as one side of a furnace always being roomier.
         let (rx0, rz0) = crate::terrain_ops::ue_cell_rect_to_rust_xz(ue_min_x, ue_min_y, sy);
-        let base_x = rx0 - (pad - sx) / 2;
-        let base_z = rz0 - (pad - sy) / 2;
+        let base_x = rx0;
+        let base_z = rz0;
 
         let host_material = {
             let cfg = self.config.read().unwrap();
@@ -400,7 +409,8 @@ impl VoxelEngine {
                 // world Z could land anywhere inside a cell.
                 base_y_float: ue_base_z as f32,
                 host_material,
-                footprint_voxels: pad,
+                footprint_x: sx,
+                footprint_z: sy,
                 clearance_voxels: clearance_cells.max(2),
             },
             std::time::Duration::from_millis(100),
@@ -427,19 +437,18 @@ impl VoxelEngine {
         }
         let sx = size_x.max(1);
         let sy = size_y.max(1);
-        let pad = sx.max(sy);
         let clr = clearance_cells.max(2);
         let cfg = self.config.read().unwrap();
-        let buildings: Vec<(i32, i32, i32, f32, u8, i32, i32)> = rects
+        // Same square-pad bias the single path had — see the note there.
+        let buildings: Vec<(i32, i32, i32, f32, u8, i32, i32, i32)> = rects
             .iter()
             .map(|&(ue_min_x, ue_min_y, ue_base_z)| {
-                let (rx0, rz0) = crate::terrain_ops::ue_cell_rect_to_rust_xz(ue_min_x, ue_min_y, sy);
-                let base_x = rx0 - (pad - sx) / 2;
-                let base_z = rz0 - (pad - sy) / 2;
+                let (base_x, base_z) =
+                    crate::terrain_ops::ue_cell_rect_to_rust_xz(ue_min_x, ue_min_y, sy);
                 let host_material =
                     voxel_gen::density::host_rock_for_depth(ue_base_z as f64, &cfg.ore.host_rock)
                         as u8;
-                (base_x, ue_base_z, base_z, ue_base_z as f32, host_material, pad, clr)
+                (base_x, ue_base_z, base_z, ue_base_z as f32, host_material, sx, sy, clr)
             })
             .collect();
         drop(cfg);
@@ -485,7 +494,8 @@ impl VoxelEngine {
             base_z,
             base_y_float,
             host_material,
-            footprint_voxels: bts,
+            footprint_x: bts,
+            footprint_z: bts,
             clearance_voxels: clearance_voxels.max(2),
         }, std::time::Duration::from_millis(100)) {
             Ok(()) => 1,
@@ -510,7 +520,7 @@ impl VoxelEngine {
         let bts = footprint_voxels.max(1);
         let clr = clearance_voxels.max(2);
         let cfg = self.config.read().unwrap();
-        let buildings: Vec<(i32, i32, i32, f32, u8, i32, i32)> = ue_positions
+        let buildings: Vec<(i32, i32, i32, f32, u8, i32, i32, i32)> = ue_positions
             .iter()
             .map(|&(ue_x, ue_y, ue_z)| {
                 let rust_x = ue_x / scale;
@@ -523,7 +533,7 @@ impl VoxelEngine {
                 let host_material =
                     voxel_gen::density::host_rock_for_depth(rust_y as f64, &cfg.ore.host_rock)
                         as u8;
-                (base_x, base_y, base_z, base_y_float, host_material, bts, clr)
+                (base_x, base_y, base_z, base_y_float, host_material, bts, bts, clr)
             })
             .collect();
         drop(cfg);

@@ -69,12 +69,17 @@ pub enum WorkerRequest {
         // surface within sub-voxel precision so buildings don't float/sink.
         base_y_float: f32,
         host_material: u8,
-        footprint_voxels: i32,
+        // Footprint in voxels per axis. NOT necessarily equal even for a
+        // building that is square in cells: the 40 UU building lattice and
+        // the WorldScale voxel lattice are incommensurate, so the outward
+        // rounding in BuildingCellsToVoxelSpanXY yields e.g. 8 x 9.
+        footprint_x: i32,
+        footprint_z: i32,
         clearance_voxels: i32,
     },
     BuildingFlattenBatch {
-        // (base_x, base_y, base_z, base_y_float, host_material, footprint, clearance)
-        buildings: Vec<(i32, i32, i32, f32, u8, i32, i32)>,
+        // (base_x, base_y, base_z, base_y_float, host_material, footprint_x, footprint_z, clearance)
+        buildings: Vec<(i32, i32, i32, f32, u8, i32, i32, i32)>,
     },
     Unload {
         chunk: (i32, i32, i32),
