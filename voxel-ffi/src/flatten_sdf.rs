@@ -344,6 +344,17 @@ pub fn flatten_terrace_sdf_carve(
     // doing NOTHING to the carve, which is the exact failure the octagon hit.
     let mut region_cols = 0u32;
     let mut round_cols = 0u32;
+    // Columns whose clearance pass actually removed SOLID ROCK, i.e. columns
+    // that genuinely produced cut face. `region_cols` only counts columns
+    // admitted to the carve — a column admitted over open air writes nothing
+    // and shows nothing, so admitted-vs-round cannot tell us whether the
+    // squared corners are cutting a wall or waving at thin air.
+    let mut cut_cols = 0u32;
+    let mut cut_cells = 0u32;
+    // Of the columns ONLY the faceted test admits (the corners squaring off),
+    // how many cut rock. This is the number that says whether the low-poly
+    // silhouette is landing on a wall face or on nothing.
+    let mut corner_cut_cols = 0u32;
 
     for dx in -extent..(terrace_size + extent) {
         for dz in -extent..(terrace_size + extent) {
@@ -363,6 +374,9 @@ pub fn flatten_terrace_sdf_carve(
                 continue;
             }
             region_cols += 1;
+            // True for exactly the columns the round test would have thrown
+            // away — the corner fill that IS the low-poly change.
+            let facet_only = !in_interior && edge_dist > apron_radius_f;
 
             let target_y_float = match resolve_target_y(
                 &store.density_fields, cs, base, base_y_float, apron_radius_f, config,
@@ -384,9 +398,20 @@ pub fn flatten_terrace_sdf_carve(
             density_ops::write_force(&mut store.density_fields, cs, wx, target_y + 1, wz, d_air,
                 host_material, &mut dirty_set, &mut written, &mut changed_count);
 
+            // write_lower is conditional, so changed_count only moves when
+            // there was solid rock here to take away. Snapshotting it around
+            // the clearance pass is what separates "cut a wall" from "swept
+            // through air that was already empty".
+            let changed_before_clearance = changed_count;
             for y in (target_y + 2)..=(target_y + clear) {
                 density_ops::write_lower(&mut store.density_fields, cs, wx, y, wz, -1.0,
                     &mut dirty_set, &mut written, &mut changed_count);
+            }
+            let cut_here = changed_count - changed_before_clearance;
+            if cut_here > 0 {
+                cut_cols += 1;
+                cut_cells += cut_here;
+                if facet_only { corner_cut_cols += 1; }
             }
 
             if in_interior {
@@ -410,7 +435,8 @@ pub fn flatten_terrace_sdf_carve(
         } else { f32::NAN };
         let log_line = format!(
             "[flatten_sdf] base=({},{},{}) y_float={:.4} size={} (+{}apron) clearance={} cones={} formations_carved={} written={} cells changed={} voxels dirty={} chunks | center_col(wx={},wz={}): y{}={:.4} y{}={:.4} iso_y={:.4} (UE={:.2}) | base_y_float_UE={:.2}\n\
-             [flatten_sdf.facet] chamfer={} step={} apron_radius={} | cols faceted={} round={} delta={} | carve spans {}x{} voxels = {:.0}x{:.0} UU\n",
+             [flatten_sdf.facet] chamfer={} step={} apron_radius={} | cols faceted={} round={} delta={} | carve spans {}x{} voxels = {:.0}x{:.0} UU\n\
+             [flatten_sdf.cut] cols that removed rock={} ({} cells) | of the {} corner cols the facet added, {} cut rock | cut face height <= {} voxels = {:.0} UU\n",
             base.x, base.y, base.z, base_y_float, terrace_size, apron_radius, clear,
             hull.cones.len(), formations_carved, written.len(), changed_count, dirty_set.len(),
             cx_diag, cz_diag,
@@ -420,7 +446,10 @@ pub fn flatten_terrace_sdf_carve(
             region_cols, round_cols, region_cols as i64 - round_cols as i64,
             terrace_size + 2 * apron_radius, terrace_size + 2 * apron_radius,
             (terrace_size + 2 * apron_radius) as f32 * world_scale,
-            (terrace_size + 2 * apron_radius) as f32 * world_scale);
+            (terrace_size + 2 * apron_radius) as f32 * world_scale,
+            cut_cols, cut_cells,
+            region_cols as i64 - round_cols as i64, corner_cut_cols,
+            clear - 1, (clear - 1) as f32 * world_scale);
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log_path)
         {
