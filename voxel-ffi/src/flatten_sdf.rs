@@ -57,10 +57,19 @@ const FLAT_MATCH_THRESHOLD: f32 = 1.0; // skip ramp if existing surface within t
 // free to grow rock back into the clearance volume — lips over the floor,
 // slivers in the space the player and the building occupy. Smoothing may
 // round rock away; it may never put it back.
+// ⚠️ Measured 2026-08-09: selecting this band GEOMETRICALLY — a fixed
+// annulus around the footprint — smoothed 1761 cells to blend a cut that
+// removed 643, and 776 against 127 on a small building. Most of the writes
+// landed on untouched cave that the carve never touched. Worse, a blur
+// applied inside a hard-edged region just relocates the hard edge to that
+// region's boundary, leaving a ring seam where smoothing stops.
+//
+// So the band is now seeded from the columns that ACTUALLY removed rock,
+// grown by RIM_SMOOTH_RADIUS, and the strength falls off to zero across
+// that growth. No cut, no smoothing, and no discontinuity at the edge.
 const RIM_SMOOTH_ITERATIONS: u32 = 2;
 const RIM_SMOOTH_STRENGTH: f32 = 0.5;
-const RIM_BAND_IN: f32 = 2.0;   // voxels inside the boundary
-const RIM_BAND_OUT: f32 = 2.0;  // voxels outside, into natural rock
+const RIM_SMOOTH_RADIUS: i32 = 2;   // falloff distance from a cutting column
 
 /// Destination for the per-placement carve diagnostic, or None to write
 /// nothing. Read once from `MITHRIL_FLATTEN_LOG`.
@@ -242,35 +251,45 @@ fn resolve_target_y(
 fn smooth_carve_rim(
     fields: &mut std::collections::HashMap<(i32, i32, i32), DensityField>,
     cs: i32,
-    base: glam::IVec3,
-    terrace_size: i32,
-    apron_radius_f: f32,
+    cut_columns: &[(i32, i32, i32)],
+    carved_columns: &std::collections::HashSet<(i32, i32)>,
     clear: i32,
     host_material: Material,
     dirty_set: &mut HashSet<(i32, i32, i32)>,
     written: &mut Vec<WrittenCell>,
     changed_count: &mut u32,
 ) -> u32 {
-    if RIM_SMOOTH_ITERATIONS == 0 || RIM_SMOOTH_STRENGTH <= 0.0 {
+    if RIM_SMOOTH_ITERATIONS == 0 || RIM_SMOOTH_STRENGTH <= 0.0 || cut_columns.is_empty() {
         return 0;
     }
 
-    let interior_max = terrace_size - 1;
-    let reach = (apron_radius_f + RIM_BAND_OUT).ceil() as i32;
-
-    // (wx, wy, wz, was_cleared_by_the_carve)
-    let mut cells: Vec<(i32, i32, i32, bool)> = Vec::new();
-    for dx in -reach..(terrace_size + reach) {
-        for dz in -reach..(terrace_size + reach) {
-            let dx_out = 0.max(-dx).max(dx - interior_max) as f32;
-            let dz_out = 0.max(-dz).max(dz - interior_max) as f32;
-            let edge_dist = (dx_out * dx_out + dz_out * dz_out).sqrt();
-            if edge_dist < apron_radius_f - RIM_BAND_IN { continue; }
-            if edge_dist > apron_radius_f + RIM_BAND_OUT { continue; }
-            let cleared = edge_dist <= apron_radius_f;
-            for y in (base.y + 2)..=(base.y + clear + 1) {
-                cells.push((base.x + dx, y, base.z + dz, cleared));
+    // Grow the cutting columns outward, weight falling to zero at the edge.
+    // Keeping the STRONGEST weight and the LOWEST floor per column means
+    // overlapping cut columns reinforce rather than fight.
+    let mut band: std::collections::HashMap<(i32, i32), (i32, f32)> =
+        std::collections::HashMap::new();
+    for &(wx, wz, target_y) in cut_columns {
+        for dx in -RIM_SMOOTH_RADIUS..=RIM_SMOOTH_RADIUS {
+            for dz in -RIM_SMOOTH_RADIUS..=RIM_SMOOTH_RADIUS {
+                let d = dx.abs().max(dz.abs());
+                let w = 1.0 - (d as f32) / (RIM_SMOOTH_RADIUS as f32 + 1.0);
+                let e = band.entry((wx + dx, wz + dz)).or_insert((target_y, 0.0));
+                e.0 = e.0.min(target_y);
+                if w > e.1 { e.1 = w; }
             }
+        }
+    }
+
+    // (wx, wy, wz, cleared_by_the_carve, weight)
+    let mut cells: Vec<(i32, i32, i32, bool, f32)> = Vec::new();
+    for (&(wx, wz), &(target_y, w)) in &band {
+        let cleared_col = carved_columns.contains(&(wx, wz));
+        let top = target_y + clear;
+        for y in (target_y + 2)..=top {
+            // Taper the top two cells as well, so the band does not end in a
+            // horizontal step the way its lateral edge used to.
+            let vy = ((top - y + 1) as f32 / 3.0).min(1.0);
+            cells.push((wx, y, wz, cleared_col, w * vy));
         }
     }
 
@@ -284,14 +303,16 @@ fn smooth_carve_rim(
         // it stood at the start of the sweep, so the result does not depend
         // on the order cells happen to be visited in.
         let mut updates: Vec<(i32, i32, i32, f32)> = Vec::with_capacity(cells.len());
-        for &(wx, wy, wz, cleared) in &cells {
+        for &(wx, wy, wz, cleared, weight) in &cells {
+            let s = RIM_SMOOTH_STRENGTH * weight;
+            if s <= 0.0 { continue; }
             let cur = density_ops::read_density(fields, cs, wx, wy, wz);
             let mut sum = 0.0f32;
             for (nx, ny, nz) in NEIGHBOURS {
                 sum += density_ops::read_density(fields, cs, wx + nx, wy + ny, wz + nz);
             }
             let avg = sum / NEIGHBOURS.len() as f32;
-            let mut new_d = cur * (1.0 - RIM_SMOOTH_STRENGTH) + avg * RIM_SMOOTH_STRENGTH;
+            let mut new_d = cur * (1.0 - s) + avg * s;
             // Never re-solidify what the carve cleared.
             if cleared { new_d = new_d.min(-1e-3); }
             if (new_d - cur).abs() > 1e-3 {
@@ -401,6 +422,12 @@ pub fn flatten_terrace_sdf_carve(
     // squared corners are cutting a wall or waving at thin air.
     let mut cut_cols = 0u32;
     let mut cut_cells = 0u32;
+    // Seeds for the rim smoothing: the columns that genuinely produced cut
+    // face, and every column the carve touched (so smoothing knows which
+    // cells it must not re-solidify).
+    let mut cut_columns: Vec<(i32, i32, i32)> = Vec::new();
+    let mut carved_columns: std::collections::HashSet<(i32, i32)> =
+        std::collections::HashSet::new();
 
     for dx in -extent..(terrace_size + extent) {
         for dz in -extent..(terrace_size + extent) {
@@ -444,9 +471,11 @@ pub fn flatten_terrace_sdf_carve(
                     &mut dirty_set, &mut written, &mut changed_count);
             }
             let cut_here = changed_count - changed_before_clearance;
+            carved_columns.insert((wx, wz));
             if cut_here > 0 {
                 cut_cols += 1;
                 cut_cells += cut_here;
+                cut_columns.push((wx, wz, target_y));
             }
 
             if in_interior {
@@ -462,7 +491,7 @@ pub fn flatten_terrace_sdf_carve(
     // merge. Smoothing after the restore instead would need a second sync,
     // whose min() merge would then start undoing the carve.
     let rim_writes = smooth_carve_rim(
-        &mut store.density_fields, cs, base, terrace_size, apron_radius_f, clear,
+        &mut store.density_fields, cs, &cut_columns, &carved_columns, clear,
         host_material, &mut dirty_set, &mut written, &mut changed_count,
     );
 
@@ -481,7 +510,7 @@ pub fn flatten_terrace_sdf_carve(
         let log_line = format!(
             "[flatten_sdf] base=({},{},{}) y_float={:.4} size={} (+{}apron) clearance={} cones={} formations_carved={} written={} cells changed={} voxels dirty={} chunks | center_col(wx={},wz={}): y{}={:.4} y{}={:.4} iso_y={:.4} (UE={:.2}) | base_y_float_UE={:.2}\n\
              [flatten_sdf.cut] apron_radius={} cols={} | cols that removed rock={} ({} cells) | carve spans {}x{} voxels = {:.0}x{:.0} UU | cut face height <= {} voxels = {:.0} UU\n\
-             [flatten_sdf.rim] smoothing iters={} strength={:.2} band=-{:.0}/+{:.0} | cell writes={}\n",
+             [flatten_sdf.rim] smoothing iters={} strength={:.2} radius={} | seeded from {} cutting cols | cell writes={}\n",
             base.x, base.y, base.z, base_y_float, terrace_size, apron_radius, clear,
             hull.cones.len(), formations_carved, written.len(), changed_count, dirty_set.len(),
             cx_diag, cz_diag,
@@ -492,7 +521,7 @@ pub fn flatten_terrace_sdf_carve(
             (terrace_size + 2 * apron_radius) as f32 * world_scale,
             (terrace_size + 2 * apron_radius) as f32 * world_scale,
             clear - 1, (clear - 1) as f32 * world_scale,
-            RIM_SMOOTH_ITERATIONS, RIM_SMOOTH_STRENGTH, RIM_BAND_IN, RIM_BAND_OUT,
+            RIM_SMOOTH_ITERATIONS, RIM_SMOOTH_STRENGTH, RIM_SMOOTH_RADIUS, cut_cols,
             rim_writes);
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log_path)
@@ -623,6 +652,14 @@ mod tests {
                 let dx_out = 0.max(-dx).max(dx - 3) as f32;
                 let dz_out = 0.max(-dz).max(dz - 3) as f32;
                 if (dx_out * dx_out + dz_out * dz_out).sqrt() > apron as f32 { continue; }
+                // Columns buried in solid wall get no natural floor, so
+                // resolve_target_y returns None and the carve SKIPS them —
+                // they are legitimately still rock and are not part of the
+                // cleared volume. Detect that by the floor cell: a carved
+                // column has air directly above pad height.
+                let above_pad = density_ops::read_density(
+                    &store.density_fields, cs, base.x + dx, ground_y + 1, base.z + dz);
+                if above_pad > 0.0 { continue; }
                 for y in (ground_y + 2)..=(ground_y + clearance) {
                     let d = density_ops::read_density(
                         &store.density_fields, cs, base.x + dx, y, base.z + dz);
