@@ -667,6 +667,8 @@ fn handle_event(
             let _ = reply_tx.send(snapshot);
         }
         FluidEvent::DrainLavaChunks { chunks: drain_chunks } => {
+            let mut live_chunks = 0u32;
+            let mut purged_pending = 0u32;
             for chunk_key in drain_chunks {
                 if let Some(grid) = chunks.get_mut(&chunk_key) {
                     let total = grid.size * grid.size * grid.size;
@@ -682,8 +684,28 @@ fn handle_event(
                     // the next scan immediately.)
                     grid.has_lava = false;
                     grid.dirty = true;
+                    live_chunks += 1;
+                }
+                // 2026-08-13 ("lava popped back and BURNED me"): unloaded
+                // chunks keep their fluid in pending_fluid at FULL level with
+                // LIVE is_source flags — the drain only touched live grids, so
+                // any chunk fluid-unloaded at drain time (montage pin/unpin
+                // churn guarantees some) resurrected its whole lava pool,
+                // sources included, the moment it re-streamed. Purge lava from
+                // the stash too; water entries are untouched.
+                if let Some(pending) = pending_fluid.get_mut(&chunk_key) {
+                    let before = pending.len();
+                    pending.retain(|p| !p.fluid_type.is_lava());
+                    purged_pending += (before - pending.len()) as u32;
+                    if pending.is_empty() {
+                        pending_fluid.remove(&chunk_key);
+                    }
                 }
             }
+            eprintln!(
+                "[LAVA-DRAIN] drained {} live chunks, purged {} stashed lava cells from unloaded chunks",
+                live_chunks, purged_pending
+            );
         }
         FluidEvent::PlaceGeologicalSprings { chunk, springs } => {
             // Same once-per-chunk guard as PlaceSources (worker re-sends on
@@ -1074,6 +1096,37 @@ mod tests {
         let mut pending = HashMap::new();
         let mut placed = HashSet::new();
         handle_event(event, &mut chunks, &mut densities, &mut pending, &mut placed, config.chunk_size, config);
+    }
+
+    /// 2026-08-13 regression ("lava popped back and burned me"): DrainLavaChunks
+    /// only touched LIVE grids — a chunk fluid-unloaded at drain time kept its
+    /// lava in pending_fluid at FULL level with is_source=true, and re-streaming
+    /// re-injected the whole pool, sources included. The drain must purge
+    /// stashed lava too; water entries stay untouched.
+    #[test]
+    fn drain_lava_purges_pending_stash() {
+        let mut config = FluidConfig::default();
+        let mut chunks = HashMap::new();
+        let mut densities = HashMap::new();
+        let mut placed = HashSet::new();
+        let mut pending: HashMap<(i32, i32, i32), Vec<PendingFluidCell>> = HashMap::new();
+        pending.insert((3, -4, 0), vec![
+            PendingFluidCell { idx: 5, fluid_type: crate::cell::FluidType::Lava, level: 1.0, is_source: true, max_flow_dist: 12 },
+            PendingFluidCell { idx: 9, fluid_type: crate::cell::FluidType::Water, level: 0.5, is_source: false, max_flow_dist: 0 },
+        ]);
+        // A chunk whose stash is lava-only must be removed entirely.
+        pending.insert((4, -4, 0), vec![
+            PendingFluidCell { idx: 1, fluid_type: crate::cell::FluidType::Lava, level: 1.0, is_source: true, max_flow_dist: 12 },
+        ]);
+        handle_event(
+            FluidEvent::DrainLavaChunks { chunks: vec![(3, -4, 0), (4, -4, 0)] },
+            &mut chunks, &mut densities, &mut pending, &mut placed,
+            config.chunk_size, &mut config,
+        );
+        let kept = pending.get(&(3, -4, 0)).expect("water entry must survive the drain");
+        assert_eq!(kept.len(), 1);
+        assert!(!kept[0].fluid_type.is_lava());
+        assert!(!pending.contains_key(&(4, -4, 0)), "lava-only stash must be removed");
     }
 
     /// Bug #216 regression: the worker re-sends PlaceSources on every chunk
