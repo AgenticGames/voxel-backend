@@ -553,6 +553,57 @@ pub(crate) fn try_handle_mine(
     false
 }
 
+/// Dedicated morph-step lane (2026-08-13). Morph steps used to ride the
+/// shared mine channel: during a procedural sleep's aftermath (halo
+/// generation bursts, stress recalcs on the solidified block, the quench
+/// cascade) every pool worker sat on multi-second jobs and the reveal
+/// starved in bursts — heartbeats showed mine_wait 2.0s with 7 workers on
+/// 2-5s jobs while the camera visibly froze 3 times (one 4.3s). One thread
+/// owns `morph_rx`; steps never queue behind anything else. Mirrors the
+/// path-lane precedent (path_tx). The loop reuses `handle_request` so the
+/// morph handler itself stays single-sourced.
+pub fn morph_worker_loop(
+    shutdown: Arc<AtomicBool>,
+    morph_rx: Receiver<WorkerRequest>,
+    generate_rx: Receiver<WorkerRequest>,
+    mine_rx: Receiver<WorkerRequest>,
+    mine_tx: Sender<WorkerRequest>,
+    result_tx: Sender<WorkerResult>,
+    store: Arc<RwLock<ChunkStore>>,
+    config: Arc<RwLock<GenerationConfig>>,
+    stress_config: Arc<RwLock<StressConfig>>,
+    generation_counters: Arc<DashMap<(i32, i32, i32), AtomicU64>>,
+    world_scale: f32,
+    fluid_event_tx: Sender<FluidEvent>,
+    profiler: Arc<StreamingProfiler>,
+    morph_manifest: Arc<Mutex<Option<voxel_sleep::ChangeManifest>>>,
+    morph_snapshot: Arc<Mutex<MorphSnapshot>>,
+    morph_results: Arc<Mutex<std::collections::VecDeque<crate::engine::MorphStepResult>>>,
+    regions_in_flight: Arc<DashMap<(i32, i32, i32), Arc<RegionInFlight>>>,
+    crystal_anchors: Arc<Mutex<crate::crystal_anchors::CrystalAnchorManager>>,
+    deferred_region_stress: Arc<DeferredRegionStress>,
+    pending_seams: Arc<seam::PendingSeams>,
+    parked_generates: Arc<ParkedGenerates>,
+    slow_path_permits: Arc<SlowPathPermits>,
+) {
+    // Distinct id in [MORPH-REQ] logs so "dequeued by worker 98" reads as
+    // the dedicated lane at a glance.
+    const MORPH_WORKER_ID: usize = 98;
+    while !shutdown.load(Ordering::Relaxed) {
+        match morph_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(req) => {
+                handle_request(
+                    req, &result_tx, &store, &config, &stress_config, &generation_counters,
+                    world_scale, &fluid_event_tx, &profiler, MORPH_WORKER_ID, &generate_rx, &mine_rx, &mine_tx,
+                    &morph_manifest, &morph_snapshot, &morph_results, &regions_in_flight, &crystal_anchors,
+                    &deferred_region_stress, &pending_seams, &parked_generates, &slow_path_permits, &shutdown,
+                );
+            }
+            Err(_) => {} // timeout — re-check shutdown
+        }
+    }
+}
+
 /// Thin dispatcher: builds a `HandlerCtx` and routes each `WorkerRequest`
 /// variant to its extracted handler. An early `return` inside a handler is
 /// equivalent to falling off the matched arm — the dispatcher does no

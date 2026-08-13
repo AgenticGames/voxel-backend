@@ -170,6 +170,9 @@ pub struct VoxelEngine {
     /// Dedicated channel for path requests so heavy `BrushCavernStamp` /
     /// `Sleep` / etc. on `mine_tx` don't head-of-line block AI path queries.
     path_tx: Sender<WorkerRequest>,
+    /// Dedicated lane for sleep-montage morph steps — never queues behind
+    /// gen/stress/quench work on `mine_tx` (2026-08-13 reveal-stall fix).
+    morph_tx: Sender<WorkerRequest>,
     /// Stash of completed path results, keyed by request_id. Drained by
     /// `voxel_path_poll` and TTL-pruned in `poll_result`.
     path_results: Arc<Mutex<PathResultStore>>,
@@ -272,6 +275,8 @@ impl VoxelEngine {
         let (generate_tx, generate_rx) = bounded::<WorkerRequest>(256);
         let (mine_tx, mine_rx) = bounded::<WorkerRequest>(16);
         let (path_tx, path_rx) = bounded::<WorkerRequest>(256);
+        // Dedicated morph-step lane (2026-08-13, see worker::morph_worker_loop).
+        let (morph_tx, morph_rx) = bounded::<WorkerRequest>(16);
         let (result_tx, result_rx) = bounded::<WorkerResult>(2048);
 
         // Fluid event channel
@@ -577,6 +582,97 @@ impl VoxelEngine {
             workers.push(handle);
         }
 
+        // ─── Dedicated morph-step worker (2026-08-13) — one thread owns
+        // morph_rx so sleep-montage reveal steps never queue behind gen /
+        // stress / quench bursts on the shared pool (see
+        // worker::morph_worker_loop for the stall forensics). Same
+        // catch_unwind respawn pattern as the path workers.
+        {
+            let shutdown_m = Arc::clone(&shutdown);
+            let morph_rx_m = morph_rx.clone();
+            let generate_rx_m = generate_rx.clone();
+            let mine_rx_m = mine_rx.clone();
+            let mine_tx_m = mine_tx.clone();
+            let result_tx_m = result_tx.clone();
+            let store_m = Arc::clone(&store);
+            let config_m = Arc::clone(&config);
+            let stress_cfg_m = Arc::clone(&stress_config);
+            let gen_counters_m = Arc::clone(&generation_counters);
+            let fluid_tx_m = fluid_event_tx.clone();
+            let prof_m = Arc::clone(&profiler);
+            let morph_man_m = Arc::clone(&morph_manifest);
+            let morph_snap_m = Arc::clone(&morph_snapshot);
+            let morph_resq_m = Arc::clone(&morph_results);
+            let rif_m = Arc::clone(&regions_in_flight);
+            let anchors_m = Arc::clone(&crystal_anchors);
+            let deferred_stress_m = Arc::clone(&deferred_region_stress);
+            let pending_seams_m = Arc::clone(&pending_seams);
+            let parked_generates_m = Arc::clone(&parked_generates);
+            let slow_path_permits_m = Arc::clone(&slow_path_permits);
+            let world_scale_m = world_scale;
+            let builder = thread::Builder::new().name("voxel-morph-worker".to_string());
+            let handle = builder
+                .spawn(move || {
+                    const MAX_RESPAWNS: u32 = 16;
+                    let mut respawn = 0u32;
+                    crate::panic_log::worker_started();
+                    loop {
+                        let outcome = {
+                            let shutdown = Arc::clone(&shutdown_m);
+                            let morph_rx = morph_rx_m.clone();
+                            let generate_rx = generate_rx_m.clone();
+                            let mine_rx = mine_rx_m.clone();
+                            let mine_tx = mine_tx_m.clone();
+                            let result_tx = result_tx_m.clone();
+                            let store = Arc::clone(&store_m);
+                            let config = Arc::clone(&config_m);
+                            let stress_cfg = Arc::clone(&stress_cfg_m);
+                            let gen_counters = Arc::clone(&gen_counters_m);
+                            let fluid_tx = fluid_tx_m.clone();
+                            let prof = Arc::clone(&prof_m);
+                            let morph_man = Arc::clone(&morph_man_m);
+                            let morph_snap = Arc::clone(&morph_snap_m);
+                            let morph_resq = Arc::clone(&morph_resq_m);
+                            let rif = Arc::clone(&rif_m);
+                            let anchors = Arc::clone(&anchors_m);
+                            let deferred_stress = Arc::clone(&deferred_stress_m);
+                            let pending_seams = Arc::clone(&pending_seams_m);
+                            let parked_generates = Arc::clone(&parked_generates_m);
+                            let slow_path_permits = Arc::clone(&slow_path_permits_m);
+                            std::panic::catch_unwind(AssertUnwindSafe(move || {
+                                crate::worker::morph_worker_loop(
+                                    shutdown, morph_rx, generate_rx, mine_rx, mine_tx, result_tx,
+                                    store, config, stress_cfg, gen_counters, world_scale_m,
+                                    fluid_tx, prof, morph_man, morph_snap, morph_resq,
+                                    rif, anchors, deferred_stress, pending_seams,
+                                    parked_generates, slow_path_permits,
+                                );
+                            }))
+                        };
+                        if shutdown_m.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        match outcome {
+                            Ok(()) => break,
+                            Err(payload) => {
+                                respawn += 1;
+                                let msg = crate::panic_log::payload_string(&*payload);
+                                crate::panic_log::note(&format!(
+                                    "morph-worker PANIC ({}/{}): {}", respawn, MAX_RESPAWNS, msg));
+                                if respawn >= MAX_RESPAWNS {
+                                    crate::panic_log::note("morph-worker GIVING UP after respawn limit");
+                                    break;
+                                }
+                                std::thread::sleep(std::time::Duration::from_millis(100));
+                            }
+                        }
+                    }
+                    crate::panic_log::worker_exited();
+                })
+                .expect("failed to spawn voxel morph worker thread");
+            workers.push(handle);
+        }
+
         // ─── POI Tracker — background thread, scores chunks for the
         // sleep-montage POI rotation. Same catch_unwind respawn pattern.
         {
@@ -780,6 +876,7 @@ impl VoxelEngine {
             workers,
             worker_heartbeats: heartbeats,
             path_tx,
+            morph_tx,
             path_results: Arc::new(Mutex::new(PathResultStore::default())),
             strut_broken_stash: Arc::new(Mutex::new(Vec::new())),
             next_path_request_id: Arc::new(AtomicU32::new(1)),

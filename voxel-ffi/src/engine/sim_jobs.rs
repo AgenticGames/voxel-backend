@@ -223,7 +223,11 @@ impl VoxelEngine {
         total_steps: u32,
         prev_step: u32,
     ) -> u32 {
-        match self.mine_tx.try_send(WorkerRequest::MorphStep {
+        // Dedicated lane (2026-08-13): morph steps used to ride mine_tx and
+        // queued behind gen/stress/quench bursts during procedural sleeps —
+        // the reveal camera visibly froze waiting (worst 4.3s). See
+        // worker::morph_worker_loop.
+        match self.morph_tx.try_send(WorkerRequest::MorphStep {
             chunks,
             step,
             total_steps,
