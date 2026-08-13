@@ -137,6 +137,9 @@ pub(super) fn handle_sleep(ctx: &super::HandlerCtx<'_>, player_chunk: (i32, i32,
             let meshes = s.remesh_dirty(&dirty_bounds, &cfg, world_scale);
             drop(s);
             let t_remesh_elapsed = t_remesh.elapsed();
+            crate::panic_log::note(&format!(
+                "[SLEEP_TRACE] remesh_dirty done ({} meshes from {} dirty+neighbors, {:.0}ms) — store write lock RELEASED",
+                meshes.len(), dirty_bounds.len(), t_remesh_elapsed.as_secs_f64() * 1000.0));
 
             // Send each dirty chunk mesh through the normal ChunkMesh pipeline
             // so UE auto-remeshes existing chunk actors
@@ -189,6 +192,13 @@ pub(super) fn handle_sleep(ctx: &super::HandlerCtx<'_>, player_chunk: (i32, i32,
             eprintln!("[SLEEP_SEAM] sent base+seam: {} chunks with seams, {} solid chunks WITHOUT seams, {} total seam tris",
                 dbg_chunks_with_seams, dbg_chunks_no_seams, dbg_total_seam_tris);
             let t_mesh_send_elapsed = t_mesh_send.elapsed();
+            // Sends above block when the bounded result queue is full — that is
+            // EXPECTED backpressure (game thread drains it) and now survivable
+            // since the game thread can no longer block on mine_tx (2026-08-13).
+            // A long duration here = UE draining slowly, not a Rust bug.
+            crate::panic_log::note(&format!(
+                "[SLEEP_TRACE] mesh send done ({:.0}ms — includes result-queue backpressure)",
+                t_mesh_send_elapsed.as_secs_f64() * 1000.0));
 
             // Send collapse events through the normal CollapseResult pipeline
             let t_collapse_send = Instant::now();
@@ -212,6 +222,9 @@ pub(super) fn handle_sleep(ctx: &super::HandlerCtx<'_>, player_chunk: (i32, i32,
             let seam_count = sleep_result.dirty_chunks.len();
             batched_seam_pass(&sleep_result.dirty_chunks, &cfg, store, result_tx, fluid_event_tx, world_scale);
             let t_seam_elapsed = t_seam.elapsed();
+            crate::panic_log::note(&format!(
+                "[SLEEP_TRACE] seam pass done ({} chunks, {:.0}ms)",
+                seam_count, t_seam_elapsed.as_secs_f64() * 1000.0));
 
             // Build combined profile report with worker timings appended
             let t_worker_total = t_worker_start.elapsed();

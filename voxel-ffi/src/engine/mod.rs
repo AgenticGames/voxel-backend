@@ -111,6 +111,15 @@ pub struct VoxelEngine {
     result_rx: Receiver<WorkerResult>,
     /// Priority queue for re-queued results (mine batch expansion)
     priority_results: std::sync::Mutex<std::collections::VecDeque<WorkerResult>>,
+    /// Worker requests the game thread could not place because `mine_tx` was
+    /// full. The game thread must NEVER block on a channel send: 2026-08-13 a
+    /// sleep's ~800-mesh result flood parked every worker on the bounded
+    /// result queue, nobody pulled `mine_rx`, it filled to capacity, and the
+    /// old blocking ApplyLavaQuench re-dispatch froze the game thread MID-
+    /// DRAIN — permanent engine-wide gridlock (game thread was the only
+    /// consumer that could have freed the result queue). Deferred requests
+    /// are flushed with try_send at the top of every `poll_result`.
+    pending_mine_redispatch: std::sync::Mutex<std::collections::VecDeque<WorkerRequest>>,
 
     // Fluid
     fluid_event_tx: Sender<FluidEvent>,
@@ -751,6 +760,7 @@ impl VoxelEngine {
             mine_tx,
             result_rx,
             priority_results: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            pending_mine_redispatch: std::sync::Mutex::new(std::collections::VecDeque::new()),
             fluid_event_tx,
             fluid_thread: Some(fluid_thread),
             store,

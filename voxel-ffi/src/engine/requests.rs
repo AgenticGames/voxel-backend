@@ -104,6 +104,27 @@ impl VoxelEngine {
     }
 
     pub fn poll_result(&self) -> Option<WorkerResult> {
+        // Flush re-dispatches an earlier poll couldn't place (mine channel was
+        // full). try_send only — the game thread must never block here; see
+        // `pending_mine_redispatch` in engine/mod.rs for the 2026-08-13
+        // gridlock this prevents. Stop at the first Full so ordering holds.
+        {
+            let mut pending = self.pending_mine_redispatch.lock().unwrap();
+            while let Some(req) = pending.pop_front() {
+                match self.mine_tx.try_send(req) {
+                    Ok(()) => {}
+                    Err(crossbeam_channel::TrySendError::Full(req)) => {
+                        pending.push_front(req);
+                        break;
+                    }
+                    Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                        pending.clear();
+                        break;
+                    }
+                }
+            }
+        }
+
         // Priority results first (mine batch expansions)
         if let Some(r) = self.priority_results.lock().unwrap().pop_front() {
             return Some(r);
@@ -205,10 +226,20 @@ impl VoxelEngine {
                 // Re-dispatch to the worker thread so the voxel writes +
                 // remesh happen off the API/game thread. The worker emits
                 // ChunkMesh results normally; UE picks them up via poll.
+                //
+                // try_send ONLY — this runs on the game thread inside the
+                // result drain, and a blocking send here caused the 2026-08-13
+                // engine-wide gridlock (see `pending_mine_redispatch`). On a
+                // full channel the request is deferred and flushed by the next
+                // poll_result call; the quench is never lost.
                 if !obsidian.is_empty() || !scoria.is_empty() || !drained_water.is_empty() {
-                    let _ = self.mine_tx.send(WorkerRequest::ApplyLavaQuench {
+                    let req = WorkerRequest::ApplyLavaQuench {
                         obsidian, scoria, drained_water,
-                    });
+                    };
+                    if let Err(crossbeam_channel::TrySendError::Full(req)) = self.mine_tx.try_send(req) {
+                        crate::panic_log::note("[QUENCH-DEFER] mine channel full — lava-quench re-dispatch deferred to next poll");
+                        self.pending_mine_redispatch.lock().unwrap().push_back(req);
+                    }
                 }
                 None
             }
