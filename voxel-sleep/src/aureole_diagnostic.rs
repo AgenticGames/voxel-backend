@@ -204,7 +204,7 @@ mod tests {
 
         let result = apply_aureole(
             &config, &groundwater, &mut density_fields, &mut fluid,
-            &heat_map, &chunks, CHUNK_SIZE, &mut rng, &census,
+            &heat_map, &chunks, CHUNK_SIZE, &mut rng, &census, (0, 0, 0),
         );
 
         eprintln!("  Result: {} zones, {} hornfels, {} skarn, {} veins",
@@ -357,7 +357,7 @@ mod tests {
 
         let result = apply_aureole(
             &config, &groundwater, &mut density_fields, &mut fluid,
-            &heat_map, &chunks, CHUNK_SIZE, &mut rng, &census,
+            &heat_map, &chunks, CHUNK_SIZE, &mut rng, &census, (0, 0, 0),
         );
 
         eprintln!("  Result: {} zones, {} skarn, {} hornfels",
@@ -468,7 +468,7 @@ mod tests {
 
         let result = apply_aureole(
             &config, &groundwater, &mut density_fields, &mut fluid,
-            &heat_map, &chunks, CHUNK_SIZE, &mut rng, &census,
+            &heat_map, &chunks, CHUNK_SIZE, &mut rng, &census, (0, 0, 0),
         );
 
         eprintln!("  Result: {} zones, {} skarn", result.lava_zones_found, result.skarn_placed);
@@ -543,7 +543,7 @@ mod tests {
 
         let result = apply_aureole(
             &config, &groundwater, &mut density_fields, &mut fluid,
-            &heat_map, &chunks, CHUNK_SIZE, &mut rng, &census,
+            &heat_map, &chunks, CHUNK_SIZE, &mut rng, &census, (0, 0, 0),
         );
 
         eprintln!("  Result: {} hornfels, {} skarn", result.hornfels_placed, result.skarn_placed);
@@ -601,7 +601,7 @@ mod tests {
 
         let result = apply_aureole(
             &config, &groundwater, &mut density_fields, &mut fluid,
-            &heat_map, &chunks, CHUNK_SIZE, &mut rng, &census,
+            &heat_map, &chunks, CHUNK_SIZE, &mut rng, &census, (0, 0, 0),
         );
 
         eprintln!("  Result: {} amphibolite, {} hornfels, {} skarn, {} veins",
@@ -654,7 +654,7 @@ mod tests {
 
         let result = apply_aureole(
             &config, &groundwater, &mut density_fields, &mut fluid.clone(),
-            &heat_map, &chunks, CHUNK_SIZE, &mut rng, &census,
+            &heat_map, &chunks, CHUNK_SIZE, &mut rng, &census, (0, 0, 0),
         );
 
         assert_eq!(result.lava_zones_found, 0);
@@ -799,7 +799,7 @@ mod tests {
 
         let result = apply_aureole(
             &aureole_config, &groundwater, &mut density_fields, &mut fluid,
-            &heat_map, &chunks_list, CHUNK_SIZE, &mut rng, &census,
+            &heat_map, &chunks_list, CHUNK_SIZE, &mut rng, &census, (0, 0, 0),
         );
 
         eprintln!("\n  ─── RESULTS ───");

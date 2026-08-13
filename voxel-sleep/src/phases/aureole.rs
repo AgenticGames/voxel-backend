@@ -496,6 +496,19 @@ fn place_metamorphic_shell(
     chunk_size: usize,
     manifest: &mut ChangeManifest,
 ) -> (u32, u32, u32, HashSet<(i32, i32, i32)>) {
+    // Level-synchronous parallel BFS (2026-08-13). The original cell-at-a-time
+    // VecDeque walk was the whole Phase-2 cost on procedural worlds — 33.1s
+    // for a 155k-cell lava network (1.96M conversions) on one worker thread,
+    // which blew the 5s sleep budget and starved everything after it. Each
+    // depth level now expands + classifies its whole frontier with rayon
+    // (reads only), then commits writes with interior voxels sharded per
+    // chunk in parallel; only boundary voxels (need cross-chunk mirror
+    // copies) go through the serial set_voxel_synced path. BFS semantics are
+    // preserved: level-sync gives every cell its MINIMUM lava distance (same
+    // spread value as the FIFO walk) and the visited-set dedup keeps each
+    // cell classified exactly once.
+    use rayon::prelude::*;
+
     let mut hornfels_count = 0u32;
     let mut skarn_count = 0u32;
     let mut amphibolite_count = 0u32;
@@ -504,73 +517,110 @@ fn place_metamorphic_shell(
     // Build lava position set for O(1) lookup
     let lava_set: HashSet<(i32, i32, i32)> = zone.cells.iter().copied().collect();
 
-    // Multi-source BFS: seed with all lava cells at distance 0
-    let mut queue: VecDeque<((i32, i32, i32), i32)> = VecDeque::new();
-    let mut visited: HashSet<(i32, i32, i32)> = HashSet::new();
-    for &pos in &zone.cells {
-        queue.push_back((pos, 0));
-        visited.insert(pos);
-    }
+    let mut visited: HashSet<(i32, i32, i32)> = lava_set.clone();
+    let mut frontier: Vec<(i32, i32, i32)> = zone.cells.clone();
 
-    while let Some((pos, dist)) = queue.pop_front() {
-        for &(dx, dy, dz) in &FACE_OFFSETS {
-            let n = (pos.0 + dx, pos.1 + dy, pos.2 + dz);
-            if !visited.insert(n) {
-                continue;
-            }
-            if lava_set.contains(&n) {
-                continue; // already a lava cell
-            }
-            let next_dist = dist + 1;
-            if next_dist > max_depth {
-                continue;
-            }
+    // (world pos, chunk key, lx, ly, lz, old mat, old density, new mat, passthrough)
+    type Classified = ((i32, i32, i32), (i32, i32, i32), usize, usize, usize, Material, f32, Material, bool);
 
-            let (key, lx, ly, lz) = world_to_chunk_local(n.0, n.1, n.2, chunk_size);
-            let (mat, density) = match density_fields.get(&key) {
-                Some(df) => {
-                    let s = df.get(lx, ly, lz);
-                    (s.material, s.density)
+    for depth in 1..=max_depth.max(0) {
+        if frontier.is_empty() {
+            break;
+        }
+
+        // 1) Parallel expand: all face-neighbors of the frontier.
+        let mut cand: Vec<(i32, i32, i32)> = frontier
+            .par_iter()
+            .flat_map_iter(|&pos| {
+                FACE_OFFSETS
+                    .iter()
+                    .map(move |&(dx, dy, dz)| (pos.0 + dx, pos.1 + dy, pos.2 + dz))
+            })
+            .collect();
+
+        // 2) Serial dedup vs everything seen so far (insert returns false for dups).
+        cand.retain(|n| visited.insert(*n));
+
+        // 3) Parallel classify — read-only over density_fields.
+        let classified: Vec<Classified> = cand
+            .par_iter()
+            .filter_map(|&n| {
+                if lava_set.contains(&n) {
+                    return None; // already a lava cell
                 }
-                None => continue,
-            };
+                let (key, lx, ly, lz) = world_to_chunk_local(n.0, n.1, n.2, chunk_size);
+                let df = density_fields.get(&key)?;
+                let s = df.get(lx, ly, lz);
+                let (mat, density) = (s.material, s.density);
 
-            if !mat.is_solid() {
-                // Air/non-solid: don't enqueue (aureole doesn't cross air gaps)
+                if !mat.is_solid() {
+                    // Air/non-solid: don't enqueue (aureole doesn't cross air gaps)
+                    return None;
+                }
+                if mat == Material::Hornfels || mat == Material::Skarn || mat == Material::Amphibolite {
+                    // Already metamorphosed — continue BFS through but don't re-convert
+                    return Some((n, key, lx, ly, lz, mat, density, mat, true));
+                }
+                let new_mat = if mat == Material::Limestone {
+                    Material::Skarn
+                } else if mat == Material::Basalt {
+                    Material::Amphibolite
+                } else if mat.is_host_rock() {
+                    Material::Hornfels
+                } else {
+                    // Non-host-rock solid (ore, etc.) — block BFS
+                    return None;
+                };
+                Some((n, key, lx, ly, lz, mat, density, new_mat, false))
+            })
+            .collect();
+
+        // 4) Commit. Interior voxels (no face on a chunk boundary) write only
+        //    their own chunk — shard them by chunk and write in parallel.
+        //    Boundary voxels need up-to-8 mirror copies in neighbor chunks —
+        //    serial via set_voxel_synced (≈19% of voxels at chunk_size 30).
+        let spread = if max_depth > 0 { depth as f32 / max_depth as f32 } else { 0.0 };
+        let mut interior_by_chunk: HashMap<(i32, i32, i32), Vec<(usize, usize, usize, Material)>> =
+            HashMap::new();
+        for &(_n, key, lx, ly, lz, _mat, _density, new_mat, passthrough) in &classified {
+            if passthrough {
                 continue;
             }
-
-            if mat == Material::Hornfels || mat == Material::Skarn || mat == Material::Amphibolite {
-                // Already metamorphosed — continue BFS through but don't re-convert
-                queue.push_back((n, next_dist));
-                continue;
-            }
-
-            let new_mat = if mat == Material::Limestone {
-                Material::Skarn
-            } else if mat == Material::Basalt {
-                Material::Amphibolite
-            } else if mat.is_host_rock() {
-                Material::Hornfels
+            let boundary = lx == 0 || ly == 0 || lz == 0
+                || lx == chunk_size || ly == chunk_size || lz == chunk_size;
+            if boundary {
+                set_voxel_synced(density_fields, key, lx, ly, lz, new_mat, None, chunk_size);
             } else {
-                // Non-host-rock solid (ore, etc.) — block BFS
-                continue;
-            };
+                interior_by_chunk.entry(key).or_default().push((lx, ly, lz, new_mat));
+            }
+        }
+        if !interior_by_chunk.is_empty() {
+            density_fields.par_iter_mut().for_each(|(key, df)| {
+                if let Some(writes) = interior_by_chunk.get(key) {
+                    for &(lx, ly, lz, new_mat) in writes {
+                        df.get_mut(lx, ly, lz).material = new_mat;
+                    }
+                }
+            });
+        }
 
-            // Convert with boundary sync
-            let spread = if max_depth > 0 { next_dist as f32 / max_depth as f32 } else { 0.0 };
-            set_voxel_synced(density_fields, key, lx, ly, lz, new_mat, None, chunk_size);
+        // Manifest records + counts (serial — Vec pushes).
+        for &(n, key, lx, ly, lz, mat, density, new_mat, passthrough) in &classified {
+            if passthrough {
+                continue;
+            }
             manifest.record_voxel_change_with_spread(key, lx, ly, lz, mat, density, new_mat, density, spread);
             converted.insert(n);
-
             match new_mat {
                 Material::Skarn => skarn_count += 1,
                 Material::Amphibolite => amphibolite_count += 1,
                 _ => hornfels_count += 1,
             }
-
-            queue.push_back((n, next_dist));
         }
+
+        // 5) Next frontier: converted AND passthrough cells continue the BFS
+        //    (air / ore / missing chunks were filtered out in classify).
+        frontier = classified.iter().map(|c| c.0).collect();
     }
 
     (hornfels_count, skarn_count, amphibolite_count, converted)
@@ -1228,6 +1278,7 @@ pub fn apply_aureole(
     chunk_size: usize,
     rng: &mut ChaCha8Rng,
     census: &ResourceCensus,
+    player_chunk: (i32, i32, i32),
 ) -> AureoleResult {
     let mut result = AureoleResult::default();
 
@@ -1245,9 +1296,32 @@ pub fn apply_aureole(
     // ═══ Lava Zone Contact Metamorphism + Ore Veins ═══
     if config.zone_enabled && config.metamorphism_enabled && !heat_map.is_empty() {
         crate::trace(&format!("aureole: clustering {} heat sources", heat_map.len()));
-        let zones = cluster_lava_zones(heat_map, config.min_lava_zone_size);
+        let mut zones = cluster_lava_zones(heat_map, config.min_lava_zone_size);
         crate::trace(&format!("aureole: {} zones found", zones.len()));
         result.lava_zones_found = zones.len() as u32;
+
+        // Nearest-first + work budget (user 2026-08-13): process zones by
+        // distance from the player so the area the montage films is always
+        // complete, and defer FAR zones once the budget is spent instead of
+        // letting a 291-chunk network starve everything after Phase 2 (the
+        // old order was cluster-discovery order; the 5s total sleep budget
+        // then skipped lava solidification entirely). Deferred zones simply
+        // mature on a later sleep — geologically fine. Zone 0 (nearest)
+        // always runs regardless of budget.
+        let cs = chunk_size as i32;
+        let pv = (
+            player_chunk.0 * cs + cs / 2,
+            player_chunk.1 * cs + cs / 2,
+            player_chunk.2 * cs + cs / 2,
+        );
+        zones.sort_by_key(|z| {
+            let dx = (z.centroid.0 - pv.0) as i64;
+            let dy = (z.centroid.1 - pv.1) as i64;
+            let dz = (z.centroid.2 - pv.2) as i64;
+            dx * dx + dy * dy + dz * dz
+        });
+        const AUREOLE_ZONE_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
+        let t_zones = std::time::Instant::now();
 
         let mut best_glimpse_score: u32 = 0;
 
@@ -1256,6 +1330,12 @@ pub fn apply_aureole(
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
         for (zone_idx, zone) in zones.iter().enumerate() {
+            if zone_idx > 0 && t_zones.elapsed() > AUREOLE_ZONE_BUDGET {
+                crate::trace(&format!(
+                    "aureole: phase-2 budget spent ({:.1}s) — deferring {} of {} zones to a later sleep",
+                    t_zones.elapsed().as_secs_f32(), zones.len() - zone_idx, zones.len()));
+                break;
+            }
             crate::trace(&format!("aureole: zone {} starting ({} cells)", zone_idx, zone.cells.len()));
             let mut stats = ZoneStats::default();
             stats.lava_cells = zone.cells.len() as u32;

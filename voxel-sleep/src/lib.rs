@@ -583,7 +583,7 @@ pub fn execute_sleep(
     if config.phase2_enabled {
         let aureole_result = apply_aureole(
             &config.aureole, &config.groundwater, density_fields, fluid_snapshot,
-            &heat_map, &all_chunks, chunk_size, &mut rng, &census,
+            &heat_map, &all_chunks, chunk_size, &mut rng, &census, player_chunk,
         );
         total_metamorphosed = aureole_result.voxels_metamorphosed;
         total_coal_matured = aureole_result.coal_matured;
@@ -799,7 +799,7 @@ pub fn execute_sleep(
                 let scaled = scale_aureole_config(&config.aureole, 3.83);
                 let r = apply_aureole(
                     &scaled, &config.groundwater, density_fields, fluid_snapshot,
-                    &heat_map, &all_chunks, chunk_size, &mut iter_rng, &iter_census,
+                    &heat_map, &all_chunks, chunk_size, &mut iter_rng, &iter_census, player_chunk,
                 );
                 accum_metamorphosed += r.voxels_metamorphosed;
                 accum_eroded += r.channels_eroded;
@@ -847,15 +847,15 @@ pub fn execute_sleep(
     let t_accum_elapsed = t_accum.elapsed();
 
     // --- Lava Solidification ---
+    // NOT budget-gated (user 2026-08-13: "all lava detected drains away during
+    // montage, gone finito"). The old deadline skip silently produced
+    // "0 lava solidified" whenever Phase 2 blew the 5s budget — the montage
+    // then played its lava-drain visual while the real fluid lava survived
+    // and popped back in. Solidification is the dormancy's signature effect;
+    // it always runs (linear pass over snapshot lava cells, fast).
     let mut total_lava_solidified = 0u32;
     let t_lava = std::time::Instant::now();
-    if std::time::Instant::now() >= sleep_deadline {
-        trace(&format!(
-            "Lava solidification SKIPPED — total sleep budget exceeded. Elapsed {:.2}ms / budget {}ms",
-            t_total.elapsed().as_secs_f32() * 1000.0,
-            TOTAL_SLEEP_BUDGET.as_millis()
-        ));
-    } else if config.lava_solidification_enabled {
+    if config.lava_solidification_enabled {
         let (count, entries) = solidify_lava(density_fields, fluid_snapshot, &mut result_manifest, &mut all_dirty, chunk_size);
         total_lava_solidified = count;
         transform_log.extend(entries);
@@ -1662,7 +1662,7 @@ pub fn execute_aureole_only(
     // Run aureole
     let aureole_result = apply_aureole(
         &config.aureole, &config.groundwater, density_fields, fluid_snapshot,
-        &heat_map, &all_chunks, chunk_size, &mut rng, &census,
+        &heat_map, &all_chunks, chunk_size, &mut rng, &census, player_chunk,
     );
     let total_metamorphosed = aureole_result.voxels_metamorphosed;
     let aureole_debug_zones = aureole_result.debug_zones.clone();
