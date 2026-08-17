@@ -25,6 +25,18 @@ pub(super) struct CrossChunkTransfer {
     /// marking them lets retention-held neighbors sustain each other forever
     /// (perched lava across chunk seams).
     pub feeds: bool,
+    /// Sender cell, for refunding whatever the apply pass can't deposit.
+    /// The amount was computed against the dest's state at THIS chunk's tick;
+    /// the dest's own tick can fill the cell before transfers apply (order is
+    /// HashMap-random), so the apply-time clamp must return the residual to
+    /// the sender instead of evaporating it (was a real conservation leak:
+    /// cross_chunk_horizontal_pool lost 2.3% in one ordering, 0.3% in the other).
+    pub src_key: (i32, i32, i32),
+    pub src_x: usize,
+    pub src_y: usize,
+    pub src_z: usize,
+    /// False for source/grace senders — they never deducted, nothing to refund.
+    pub src_deducted: bool,
 }
 
 /// Number of hops at the tail of a bounded source where flow tapers from 1.0 → 0.
@@ -496,6 +508,11 @@ pub(super) fn tick_chunk(
                                             dest_hops: new_hops,
                                             dest_max_flow: cell.max_flow_dist,
                                             feeds: true,
+                                            src_key: key,
+                                            src_x: x,
+                                            src_y: y,
+                                            src_z: z,
+                                            src_deducted: !is_source && !has_grace,
                                         });
                                         changed = true;
                                     }
@@ -687,6 +704,11 @@ pub(super) fn tick_chunk(
                                         dest_hops: new_hops,
                                         dest_max_flow: cell.max_flow_dist,
                                         feeds: true,
+                                        src_key: key,
+                                        src_x: x,
+                                        src_y: y,
+                                        src_z: z,
+                                        src_deducted: !is_source && !has_grace,
                                     });
                                 } else {
                                     new_cells[ni].level += transfer;
@@ -827,6 +849,11 @@ pub(super) fn tick_chunk(
                                                     dest_hops: new_hops_h,
                                                     dest_max_flow: cell.max_flow_dist,
                                                     feeds: false,
+                                                    src_key: key,
+                                                    src_x: x,
+                                                    src_y: y,
+                                                    src_z: z,
+                                                    src_deducted: !is_source && !has_grace,
                                                 });
                                                 changed = true;
                                             }

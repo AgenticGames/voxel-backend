@@ -78,48 +78,78 @@ pub fn tick_fluid(
         all_transfers.extend(transfers);
     }
 
-    // Apply cross-chunk transfers (second pass — no borrow conflicts)
+    // Apply cross-chunk transfers (second pass — no borrow conflicts).
+    // The amount was computed against the dest's state at the SENDER's tick;
+    // the dest chunk's own tick can fill the cell in between (chunk order is
+    // HashMap-random), so whatever doesn't fit is REFUNDED to the sender —
+    // the sender already deducted it, and dropping the residual was a real
+    // conservation leak (order-dependent ~2% loss in cross-chunk pools).
     for xfer in &all_transfers {
+        let mut applied = 0.0f32;
+
         // If target chunk has no grid but density exists, create grid on demand
-        if !chunks.contains_key(&xfer.dest_key) {
-            if let Some(cache) = chunk_densities.get(&xfer.dest_key) {
+        let dest_reachable = chunks.contains_key(&xfer.dest_key)
+            || if let Some(cache) = chunk_densities.get(&xfer.dest_key) {
                 // from_density_cache already fills cell_cap from corners.
                 let grid = ChunkFluidGrid::from_density_cache(cache);
                 chunks.insert(xfer.dest_key, grid);
+                true
             } else {
-                continue; // no density data, can't create grid
+                false // no density data, can't create grid
+            };
+
+        if dest_reachable {
+            if let Some(grid) = chunks.get_mut(&xfer.dest_key) {
+                let capacity = grid.cell_capacity(xfer.dest_x, xfer.dest_y, xfer.dest_z);
+                if capacity >= MIN_LEVEL {
+                    let cell = grid.get_mut(xfer.dest_x, xfer.dest_y, xfer.dest_z);
+                    let space = capacity - cell.level;
+                    let actual = xfer.amount.min(space).max(0.0);
+                    if actual > MIN_LEVEL {
+                        cell.level += actual;
+                        cell.fluid_type = xfer.fluid_type;
+                        applied = actual;
+                        // Propagate bounded-flow tracking. Only overwrite if we're tightening
+                        // the limit (or the dst has no recorded source yet) — otherwise an
+                        // existing closer source's tracking wins.
+                        if cell.hops_from_source == 255 || xfer.dest_hops < cell.hops_from_source {
+                            cell.hops_from_source = xfer.dest_hops;
+                            cell.max_flow_dist = xfer.dest_max_flow;
+                        }
+                        // Cross-chunk CASCADE arrivals count as "fed" for transit
+                        // retention, same as in-chunk gravity/slope receives. Spread
+                        // arrivals (feeds=false) don't — retention-held unequal
+                        // neighbors would otherwise sustain each other forever
+                        // across the seam (perched lava).
+                        if is_lava_tick && xfer.feeds {
+                            grid.mark_influx(xfer.dest_x, xfer.dest_y, xfer.dest_z);
+                        }
+                        grid.dirty = true;
+                        grid.has_fluid = true;
+                        dirty.insert(xfer.dest_key);
+                    }
+                }
             }
         }
 
-        if let Some(grid) = chunks.get_mut(&xfer.dest_key) {
-            let capacity = grid.cell_capacity(xfer.dest_x, xfer.dest_y, xfer.dest_z);
-            if capacity < MIN_LEVEL {
-                continue; // solid cell
-            }
-            let cell = grid.get_mut(xfer.dest_x, xfer.dest_y, xfer.dest_z);
-            let space = capacity - cell.level;
-            let actual = xfer.amount.min(space).max(0.0);
-            if actual > MIN_LEVEL {
-                cell.level += actual;
-                cell.fluid_type = xfer.fluid_type;
-                // Propagate bounded-flow tracking. Only overwrite if we're tightening
-                // the limit (or the dst has no recorded source yet) — otherwise an
-                // existing closer source's tracking wins.
-                if cell.hops_from_source == 255 || xfer.dest_hops < cell.hops_from_source {
-                    cell.hops_from_source = xfer.dest_hops;
-                    cell.max_flow_dist = xfer.dest_max_flow;
+        // Refund the un-deposited residual to the sender (source/grace cells
+        // never deducted, so there's nothing to give back). Deliberately NOT
+        // clamped to the sender's capacity: in-chunk gravity often refills the
+        // sender within the same tick (the seam cell's space got promised
+        // twice), and tick_chunk's excess-redistribution pass already handles
+        // transiently overfull cells by backing the water up into neighbors.
+        let residual = xfer.amount - applied;
+        if xfer.src_deducted && residual > 1e-6 {
+            if let Some(grid) = chunks.get_mut(&xfer.src_key) {
+                let cell = grid.get_mut(xfer.src_x, xfer.src_y, xfer.src_z);
+                if cell.level < MIN_LEVEL {
+                    // Cell fully drained this tick — restore its type.
+                    cell.fluid_type = xfer.fluid_type;
                 }
-                // Cross-chunk CASCADE arrivals count as "fed" for transit
-                // retention, same as in-chunk gravity/slope receives. Spread
-                // arrivals (feeds=false) don't — retention-held unequal
-                // neighbors would otherwise sustain each other forever
-                // across the seam (perched lava).
-                if is_lava_tick && xfer.feeds {
-                    grid.mark_influx(xfer.dest_x, xfer.dest_y, xfer.dest_z);
-                }
+                cell.level += residual;
                 grid.dirty = true;
                 grid.has_fluid = true;
-                dirty.insert(xfer.dest_key);
+                dirty.insert(xfer.src_key);
             }
         }
     }
@@ -1665,6 +1695,52 @@ mod tests {
         let mut rw = 0.0f64;
         for z in 0..size { for y in 0..size { for x in 0..4 { rw += right_grid.get(x, y, z).level as f64; } } }
         assert!(rw > 0.01, "Water should spread to right chunk, got {:.3}", rw);
+    }
+
+    /// 2026-08-17 regression: cross-chunk transfer amounts are computed against
+    /// the dest's state at the SENDER's tick, but the dest chunk's own tick can
+    /// fill the cell before transfers apply (chunk order is HashMap-random).
+    /// The apply-time clamp used to EVAPORATE the residual instead of refunding
+    /// the sender — this exact pool lost 2.27% when the left chunk ticked first
+    /// and 0.20% when the right did (flaked ~50% of CI runs). Each iteration
+    /// builds fresh HashMaps (each gets its own hash seed), so a handful of
+    /// iterations exercises both tick orders within one run: pre-fix this fails
+    /// near-deterministically, post-fix every ordering conserves.
+    #[test]
+    fn cross_chunk_transfer_clamp_refunds_sender() {
+        let size = 16;
+        for _ in 0..6 {
+            let mut d_left = make_density_field_solid(size);
+            carve_box(&mut d_left, size, 0..17, 3..12, 3..14);
+            let mut d_right = make_density_field_solid(size);
+            carve_box(&mut d_right, size, 0..17, 3..12, 3..14);
+
+            let mut config = crate::FluidConfig::default();
+            config.water_spread_rate = 0.6;
+            config.water_flow_rate = 1.0;
+            let mut left = ChunkFluidGrid::new(size);
+            apply_density(&mut left, &d_left, &config);
+            let mut right = ChunkFluidGrid::new(size);
+            apply_density(&mut right, &d_right, &config);
+
+            for z in 0..size { for y in 3..5 { for x in 12..size {
+                let cap = left.cell_capacity(x, y, z);
+                if cap > MIN_LEVEL { let cell = left.get_mut(x, y, z); cell.level = cap; cell.fluid_type = FluidType::Water; }
+            }}}
+            left.has_fluid = true;
+
+            let mut chunks = HashMap::new();
+            chunks.insert((0, 0, 0), left);
+            chunks.insert((1, 0, 0), right);
+            let initial = total_water(&chunks);
+            let dc = empty_density_cache();
+            // The clamp loss lands in the first ~12 ticks (1.8 of the 2.0 units);
+            // 100 ticks is plenty and keeps 6 iterations cheap.
+            for _ in 0..100 { tick_fluid(&mut chunks, &dc, size, false, &config, true); }
+            let final_w = total_water(&chunks);
+            let loss_pct = ((initial - final_w) / initial * 100.0).abs();
+            assert!(loss_pct < 1.0, "Order-invariant conservation ±1%: initial={:.2}, final={:.2}, loss={:.2}%", initial, final_w, loss_pct);
+        }
     }
 
     #[test]
