@@ -17,6 +17,16 @@ use crate::types::{FfiCollapseEvent, WorkerResult};
 
 use super::seam::{batched_seam_pass, retrieve_crystal_data, retrieve_mushroom_data};
 
+/// Gate for the deferred FAR remesh + seam pass (2026-08-18): the sleep
+/// handler finishes the montage-critical NEAR work, then holds the remaining
+/// ~2000-chunk remesh + full seam pass until UE raises the reveal curtain
+/// (voxel_sleep_far_work_go) — the prebuffered reveal does zero Rust compute,
+/// so the far work runs on an otherwise-idle pool instead of contending with
+/// the morph-step prebuffer. 30s timeout so an aborted montage can never
+/// strand the far work (it then runs exactly as the pre-gate flow did).
+pub(crate) static SLEEP_FAR_GO: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 pub(super) fn handle_sleep(ctx: &super::HandlerCtx<'_>, player_chunk: (i32, i32, i32), sleep_count: u32, sc: voxel_sleep::SleepConfig) {
     let result_tx = ctx.result_tx;
     let store = ctx.store;
@@ -27,6 +37,10 @@ pub(super) fn handle_sleep(ctx: &super::HandlerCtx<'_>, player_chunk: (i32, i32,
             let cfg = config.read().unwrap().clone();
             let sleep_config = sc;
             let t_worker_start = Instant::now();
+            // Arm the far-work gate for THIS sleep (one sleep at a time —
+            // UE's bDeepSleepActive enforces it). A stale go-signal from a
+            // prior montage just starts the far phase early = harmless.
+            SLEEP_FAR_GO.store(false, std::sync::atomic::Ordering::Relaxed);
             crate::panic_log::note(&format!("[SLEEP_TRACE] enter Sleep handler player_chunk=({},{},{})", player_chunk.0, player_chunk.1, player_chunk.2));
 
             // Request fluid snapshot for geological processes
@@ -84,23 +98,33 @@ pub(super) fn handle_sleep(ctx: &super::HandlerCtx<'_>, player_chunk: (i32, i32,
             // sorts the tracker map + merges live bridges from the anchor
             // manager at query time.
 
-            // Drain solidified lava from the real fluid system
-            if sleep_result.lava_solidified > 0 {
-                let lava_chunks: Vec<(i32, i32, i32)> = fluid_snapshot.chunks.keys().copied().collect();
-                let _ = fluid_event_tx.send(voxel_fluid::FluidEvent::DrainLavaChunks { chunks: lava_chunks });
-            }
-
-            // Remesh all dirty chunks (full chunk bounds)
-            let t_remesh = Instant::now();
-            let dirty_count = sleep_result.dirty_chunks.len();
-            let mut dirty_bounds: Vec<_> = sleep_result.dirty_chunks.iter().map(|&key| {
-                (key, 0usize, 0usize, 0usize, cfg.chunk_size, cfg.chunk_size, cfg.chunk_size)
-            }).collect();
-
-            // Mark sleep-modified chunks for save persistence.
-            // (Re-locking `store.write()` here would deadlock — the outer scope
-            // already holds the write guard `s` from before execute_sleep.)
+            // Mark sleep-modified chunks for save persistence (uses the write
+            // guard `s` we still hold from before execute_sleep).
             s.modification_tracker.mark_dirty_many(&sleep_result.dirty_chunks);
+
+            // ── RESEQUENCED POST-PROCESSING (2026-08-18, montage wait time) ──
+            // The montage holds a black "Time passes.." card until SleepComplete
+            // lands, but the old order did ALL post-processing first — remesh
+            // ~3.1s + mesh send ~2-3s + seam pass ~2.2s + manifest ~0.9s on a
+            // 380-dirty-chunk save — pure added black-screen wait. New order:
+            //   1. release the store lock right after the sim,
+            //   2. serialize the manifest and send SleepComplete IMMEDIATELY,
+            //   3. remesh + send the player-NEAR chunks first (the montage's
+            //      stream gate + camera planner only need those, and Text2
+            //      gives them ~4s of apply margin),
+            //   4. stream the FAR remainder in small sliced write-locks so the
+            //      morph lane's snapshot read (step 0) can interleave,
+            //   5. run the full seam pass last — NEAR/FAR boundary seams are
+            //      transiently stale under the black curtain and heal here.
+            // UE side: ProcessResults DROPS streamed ChunkMesh applies for
+            // morph-touched chunks while the montage is filming (the late seam
+            // re-sends of block chunks would otherwise stamp post-sleep state
+            // over the rewound morph meshes); the post-montage resync restores
+            // those chunks authoritatively.
+            let loaded_keys: std::collections::HashSet<(i32, i32, i32)> =
+                s.density_fields.keys().copied().collect();
+            drop(s);
+            crate::panic_log::note("[SLEEP_TRACE] store write lock RELEASED post-sim (resequenced: result before remesh)");
 
             // NOTE: Do NOT call sync_boundaries here. Sleep uses set_voxel_synced()
             // which already keeps boundary overlap voxels consistent. Running
@@ -108,152 +132,43 @@ pub(super) fn handle_sleep(ctx: &super::HandlerCtx<'_>, player_chunk: (i32, i32,
             // its average_boundary_voxel() picks material by density comparison,
             // which can propagate hornfels/skarn to distant chunk boundaries.
 
-            // However, set_voxel_synced writes mirror copies into neighbor chunks'
-            // density fields. Those neighbors need remeshing too. Add all 26
-            // face/edge/corner neighbors of dirty chunks that are loaded.
-            {
-                let dirty_set: std::collections::HashSet<(i32,i32,i32)> =
-                    sleep_result.dirty_chunks.iter().copied().collect();
-                let mut extra: Vec<((i32,i32,i32), usize, usize, usize, usize, usize, usize)> = Vec::new();
-                for &(cx, cy, cz) in &sleep_result.dirty_chunks {
-                    for dx in -1i32..=1 {
-                        for dy in -1i32..=1 {
-                            for dz in -1i32..=1 {
-                                if dx == 0 && dy == 0 && dz == 0 { continue; }
-                                let nk = (cx + dx, cy + dy, cz + dz);
-                                if !dirty_set.contains(&nk) && s.density_fields.contains_key(&nk) {
-                                    extra.push((nk, 0, 0, 0, cfg.chunk_size, cfg.chunk_size, cfg.chunk_size));
-                                }
-                            }
-                        }
-                    }
-                }
-                // Deduplicate
-                extra.sort_by_key(|e| e.0);
-                extra.dedup_by_key(|e| e.0);
-                dirty_bounds.extend(extra);
-            }
-
-            let meshes = s.remesh_dirty(&dirty_bounds, &cfg, world_scale);
-            drop(s);
-            let t_remesh_elapsed = t_remesh.elapsed();
-            crate::panic_log::note(&format!(
-                "[SLEEP_TRACE] remesh_dirty done ({} meshes from {} dirty+neighbors, {:.0}ms) — store write lock RELEASED",
-                meshes.len(), dirty_bounds.len(), t_remesh_elapsed.as_secs_f64() * 1000.0));
-
-            // Send each dirty chunk mesh through the normal ChunkMesh pipeline
-            // so UE auto-remeshes existing chunk actors
-            let t_mesh_send = Instant::now();
-            // ROOT FIX (2026-05-29): remesh_dirty returns BASE-only meshes (it
-            // refreshes seam DATA in the store but does not append seam QUADS to
-            // the returned mesh). Sending those directly leaves EVERY sleep-
-            // touched chunk + neighbour SEAMLESS — the "seams vanish the moment
-            // the montage begins, across the whole cave, and never recover" bug
-            // (normal mining does a follow-up seam combine; the sleep path never
-            // did). remesh_dirty already updated chunk_seam_data above, so here
-            // we re-combine base + seam quads per chunk (same as the mining /
-            // force-resync seam pass) before sending, so post-sleep chunks carry
-            // their seams.
-            let dirty_keys: Vec<(i32, i32, i32)> = meshes.iter().map(|(k, _)| *k).collect();
-            let mut dbg_total_seam_tris = 0usize;
-            let mut dbg_chunks_with_seams = 0usize;
-            let mut dbg_chunks_no_seams = 0usize;
-            eprintln!("[SLEEP_SEAM] base+seam remesh: {} chunks (from {} dirty + neighbors)", dirty_keys.len(), dirty_count);
-            for chunk in dirty_keys {
-                let (converted, dbg_seam_tris) = {
-                    let s = store.read().unwrap();
-                    let base = match s.base_meshes.get(&chunk) { Some(m) => (**m).clone(), None => continue };
-                    let seam = region_gen::generate_chunk_seam_quads(chunk, &s.chunk_seam_data, cfg.chunk_size);
-                    let st = seam.triangles.len();
-                    let mut combined = base;
-                    if !seam.triangles.is_empty() { combined.append(seam); }
-                    if cfg.mesh_recalc_normals > 0 { combined.recalculate_normals(); }
-                    let mut c = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
-                    crate::convert::bucket_mesh_by_material(&mut c);
-                    (c, st)
-                };
-                dbg_total_seam_tris += dbg_seam_tris;
-                if dbg_seam_tris > 0 { dbg_chunks_with_seams += 1; } else if !converted.positions.is_empty() { dbg_chunks_no_seams += 1; }
-                let crystal_data = retrieve_crystal_data(store, chunk, cfg.voxel_scale(), world_scale);
-                let mushroom_data = retrieve_mushroom_data(store, chunk, cfg.voxel_scale(), world_scale);
-                let _ = result_tx.send(WorkerResult::ChunkMesh {
-                    chunk,
-                    mesh: converted,
-                    generation: 0, // Sleep remesh
-                    crystal_data,
-                    mushroom_data,
-                    zone_descriptors: Vec::new(),
-                });
-            }
-            // [SLEEP_SEAM DBG 2026-05-29] Verify the post-sleep remesh carries
-            // seams. If chunks_with_seams is high and seams are STILL missing
-            // in-world, the loss is downstream (UE apply); if it's ~0, the seam
-            // generation itself is failing for the sleep region.
-            eprintln!("[SLEEP_SEAM] sent base+seam: {} chunks with seams, {} solid chunks WITHOUT seams, {} total seam tris",
-                dbg_chunks_with_seams, dbg_chunks_no_seams, dbg_total_seam_tris);
-            let t_mesh_send_elapsed = t_mesh_send.elapsed();
-            // Sends above block when the bounded result queue is full — that is
-            // EXPECTED backpressure (game thread drains it) and now survivable
-            // since the game thread can no longer block on mine_tx (2026-08-13).
-            // A long duration here = UE draining slowly, not a Rust bug.
-            crate::panic_log::note(&format!(
-                "[SLEEP_TRACE] mesh send done ({:.0}ms — includes result-queue backpressure)",
-                t_mesh_send_elapsed.as_secs_f64() * 1000.0));
-
-            // Send collapse events through the normal CollapseResult pipeline
-            let t_collapse_send = Instant::now();
-            if !sleep_result.collapse_events.is_empty() {
-                let ffi_events: Vec<FfiCollapseEvent> = sleep_result.collapse_events.iter().map(|e| {
-                    FfiCollapseEvent {
-                        center_x: e.center.0 * world_scale,
-                        center_y: -e.center.2 * world_scale,  // Rust Y-up -> UE Z-up
-                        center_z: e.center.1 * world_scale,
-                        volume: e.volume,
-                    }
-                }).collect();
-                let _ = result_tx.send(WorkerResult::CollapseResult {
-                    events: ffi_events,
-                });
-            }
-            let t_collapse_send_elapsed = t_collapse_send.elapsed();
-
-            // Regenerate seams for dirty chunks
-            let t_seam = Instant::now();
-            let seam_count = sleep_result.dirty_chunks.len();
-            batched_seam_pass(&sleep_result.dirty_chunks, &cfg, store, result_tx, fluid_event_tx, world_scale);
-            let t_seam_elapsed = t_seam.elapsed();
-            crate::panic_log::note(&format!(
-                "[SLEEP_TRACE] seam pass done ({} chunks, {:.0}ms)",
-                seam_count, t_seam_elapsed.as_secs_f64() * 1000.0));
-
-            // Build combined profile report with worker timings appended
-            let t_worker_total = t_worker_start.elapsed();
-            let worker_post_total = t_remesh_elapsed + t_mesh_send_elapsed + t_collapse_send_elapsed + t_seam_elapsed;
-            let dur_ms = |d: Duration| d.as_secs_f64() * 1000.0;
-            let mut report = sleep_result.profile_report.clone();
-            use std::fmt::Write as FmtWrite;
-            let _ = writeln!(report);
-            let _ = writeln!(report, "─── Worker Post-Processing ─────────────────────────");
-            let _ = writeln!(report, "  Remesh ({} chunks):  {:.2} ms", dirty_count, dur_ms(t_remesh_elapsed));
-            let _ = writeln!(report, "  Mesh send:           {:.2} ms", dur_ms(t_mesh_send_elapsed));
-            let _ = writeln!(report, "  Collapse events:     {:.2} ms", dur_ms(t_collapse_send_elapsed));
-            let _ = writeln!(report, "  Seam regen ({}):     {:.2} ms", seam_count, dur_ms(t_seam_elapsed));
-            let _ = writeln!(report, "  Worker post total:   {:.2} ms", dur_ms(worker_post_total));
-            let _ = writeln!(report);
-            let _ = writeln!(report, "═══════════════════════════════════════════════════════");
-            let _ = writeln!(report, "  GRAND TOTAL (worker): {:.2} ms", dur_ms(t_worker_total));
-            let _ = writeln!(report, "═══════════════════════════════════════════════════════");
-
-            // Compact & serialize manifest for morph system — filter to aureole block only
-            // Compact manifest (merge multi-phase changes per voxel) but don't filter by block —
-            // cinematic mode uses a player-aimed block that differs from Rust's showcase block.
-            // Manifest is cached once via set_morph_manifest, so full size (~30MB) is acceptable.
-            crate::panic_log::note("[SLEEP_TRACE] cloning + compacting manifest");
+            // Compact the manifest and cache it ENGINE-SIDE directly (2026-08-18).
+            // It used to ride SleepComplete as JSON and come BACK over the FFI at
+            // step 0 (voxel_set_morph_manifest) — on this save that is a 78MB
+            // JSON serialize, a 156MB UTF-16 FString on the UE heap (GC churn),
+            // a UTF-8 reconversion, and a full JSON re-parse, all on the montage
+            // critical path. The worker holds the same engine-side slot the FFI
+            // setter writes, so cache the struct here and ship an EMPTY
+            // manifest_json; UE skips voxel_set_morph_manifest when it is empty.
+            // (Don't block-filter: cinematic mode uses a player-aimed block that
+            // differs from Rust's showcase block.)
+            let t_manifest = Instant::now();
+            crate::panic_log::note("[SLEEP_TRACE] cloning + compacting manifest (engine-side cache, no JSON round-trip)");
             let mut compact_manifest = sleep_result.manifest.clone();
             compact_manifest.compact();
-            crate::panic_log::note("[SLEEP_TRACE] serializing manifest to JSON");
-            let manifest_json = compact_manifest.to_json().unwrap_or_default();
-            crate::panic_log::note(&format!("[SLEEP_TRACE] manifest JSON serialized ({} bytes), sending SleepComplete", manifest_json.len()));
+            {
+                *ctx.morph_manifest.lock().unwrap() = Some(compact_manifest);
+                // A fresh manifest = a new montage: drop the prior morph snapshot
+                // so the first step rebuilds it (mirrors engine.set_morph_manifest
+                // / R5 semantics — the FFI setter is bypassed on this path).
+                *ctx.morph_snapshot.lock().unwrap() = super::MorphSnapshot::default();
+            }
+            let manifest_json = String::new();
+            crate::panic_log::note(&format!(
+                "[SLEEP_TRACE] manifest cached engine-side ({:.0}ms) — sending SleepComplete EARLY (worker wall so far {:.0}ms)",
+                t_manifest.elapsed().as_secs_f64() * 1000.0,
+                t_worker_start.elapsed().as_secs_f64() * 1000.0));
+
+            let mut report = sleep_result.profile_report.clone();
+            {
+                use std::fmt::Write as FmtWrite;
+                let _ = writeln!(report);
+                let _ = writeln!(report, "─── Worker Post-Processing ─────────────────────────");
+                let _ = writeln!(report, "  Resequenced 2026-08-18: SleepComplete is sent BEFORE the");
+                let _ = writeln!(report, "  remesh/seam work so the montage stops waiting on it.");
+                let _ = writeln!(report, "  Per-phase timings: voxel_panic.log [SLEEP_TRACE] lines");
+                let _ = writeln!(report, "  (near-remesh / far-remesh slices / final seam pass).");
+            }
 
             // Send sleep completion stats (intercepted by engine.poll_result)
             let _ = result_tx.send(WorkerResult::SleepComplete {
@@ -282,6 +197,195 @@ pub(super) fn handle_sleep(ctx: &super::HandlerCtx<'_>, player_chunk: (i32, i32,
                 surface_changed_cells: sleep_result.surface_changed_cells,
                 surface_step_activity: sleep_result.surface_step_activity,
             });
+            let result_sent_ms = t_worker_start.elapsed().as_secs_f64() * 1000.0;
+
+            // Drain solidified lava from the real fluid system — AFTER the
+            // completion result (2026-08-18). Sent before it, the fluid thread
+            // pumped ~471 chunks of fluid-mesh results into the bounded result
+            // queue AHEAD of SleepComplete, and UE's budgeted drain took ~3.3s
+            // to reach it — pure added black-screen wait. The drain itself is
+            // invisible (screen is black; the montage spawns its own lava mesh
+            // from LavaCells and runs its own drain envelope).
+            if sleep_result.lava_solidified > 0 {
+                let lava_chunks: Vec<(i32, i32, i32)> = fluid_snapshot.chunks.keys().copied().collect();
+                let _ = fluid_event_tx.send(voxel_fluid::FluidEvent::DrainLavaChunks { chunks: lava_chunks });
+            }
+
+            // Collapse events ride right behind the completion result (tiny).
+            if !sleep_result.collapse_events.is_empty() {
+                let ffi_events: Vec<FfiCollapseEvent> = sleep_result.collapse_events.iter().map(|e| {
+                    FfiCollapseEvent {
+                        center_x: e.center.0 * world_scale,
+                        center_y: -e.center.2 * world_scale,  // Rust Y-up -> UE Z-up
+                        center_z: e.center.1 * world_scale,
+                        volume: e.volume,
+                    }
+                }).collect();
+                let _ = result_tx.send(WorkerResult::CollapseResult {
+                    events: ffi_events,
+                });
+            }
+
+            // ── Mesh work, now BEHIND the running montage ────────────────────
+            // set_voxel_synced writes mirror copies into neighbor chunks'
+            // density fields, so the 26-neighborhood needs remeshing too.
+            let dirty_count = sleep_result.dirty_chunks.len();
+            let mut all_keys: Vec<(i32, i32, i32)> = sleep_result.dirty_chunks.clone();
+            {
+                let dirty_set: std::collections::HashSet<(i32, i32, i32)> =
+                    sleep_result.dirty_chunks.iter().copied().collect();
+                for &(cx, cy, cz) in &sleep_result.dirty_chunks {
+                    for dx in -1i32..=1 {
+                        for dy in -1i32..=1 {
+                            for dz in -1i32..=1 {
+                                if dx == 0 && dy == 0 && dz == 0 { continue; }
+                                let nk = (cx + dx, cy + dy, cz + dz);
+                                if !dirty_set.contains(&nk) && loaded_keys.contains(&nk) {
+                                    all_keys.push(nk);
+                                }
+                            }
+                        }
+                    }
+                }
+                all_keys.sort();
+                all_keys.dedup();
+            }
+
+            // NEAR = within this Chebyshev chunk radius of the player (Rust
+            // chunk space — the same space execute_sleep sorts zones in).
+            // Covers the camera-planner envelope around the hero focal (the
+            // nearest lava sub-cluster, typically ≤3-4 chunks from the player:
+            // focal ± rings/pullback ~4). 10 → 7 (2026-08-18): at 10 a
+            // player-adjacent lava network put 1926 of 2408 keys in NEAR and
+            // the "priority" phase took 6.9s — NEAR must stay small enough to
+            // finish during Text2. FAR covers the rest during the reveal.
+            const NEAR_CHEB_RADIUS: i32 = 7;
+            let cheb = |k: &(i32, i32, i32)| -> i32 {
+                (k.0 - player_chunk.0).abs()
+                    .max((k.1 - player_chunk.1).abs())
+                    .max((k.2 - player_chunk.2).abs())
+            };
+            all_keys.sort_by_key(|k| cheb(k));
+            let split_at = all_keys.iter().position(|k| cheb(k) > NEAR_CHEB_RADIUS).unwrap_or(all_keys.len());
+            let (near_keys, far_keys) = all_keys.split_at(split_at);
+
+            let full_bounds = |keys: &[(i32, i32, i32)]| -> Vec<((i32, i32, i32), usize, usize, usize, usize, usize, usize)> {
+                keys.iter()
+                    .map(|&key| (key, 0usize, 0usize, 0usize, cfg.chunk_size, cfg.chunk_size, cfg.chunk_size))
+                    .collect()
+            };
+
+            // ROOT FIX (2026-05-29) preserved: remesh_dirty returns BASE-only
+            // meshes (it refreshes seam DATA but does not append seam QUADS),
+            // so each send re-combines base + seam quads per chunk — post-sleep
+            // chunks must carry their seams.
+            let mut dbg_total_seam_tris = 0usize;
+            let mut dbg_chunks_with_seams = 0usize;
+            let mut dbg_chunks_no_seams = 0usize;
+            let mut send_meshed = |keys: &[(i32, i32, i32)]| {
+                for &chunk in keys {
+                    let (converted, dbg_seam_tris) = {
+                        let s = store.read().unwrap();
+                        let base = match s.base_meshes.get(&chunk) { Some(m) => (**m).clone(), None => continue };
+                        let seam = region_gen::generate_chunk_seam_quads(chunk, &s.chunk_seam_data, cfg.chunk_size);
+                        let st = seam.triangles.len();
+                        let mut combined = base;
+                        if !seam.triangles.is_empty() { combined.append(seam); }
+                        if cfg.mesh_recalc_normals > 0 { combined.recalculate_normals(); }
+                        let mut c = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
+                        crate::convert::bucket_mesh_by_material(&mut c);
+                        (c, st)
+                    };
+                    dbg_total_seam_tris += dbg_seam_tris;
+                    if dbg_seam_tris > 0 { dbg_chunks_with_seams += 1; } else if !converted.positions.is_empty() { dbg_chunks_no_seams += 1; }
+                    let crystal_data = retrieve_crystal_data(store, chunk, cfg.voxel_scale(), world_scale);
+                    let mushroom_data = retrieve_mushroom_data(store, chunk, cfg.voxel_scale(), world_scale);
+                    // Sends block when the bounded result queue is full — that is
+                    // EXPECTED backpressure (game thread drains it) and survivable
+                    // since the game thread can no longer block on mine_tx
+                    // (2026-08-13). Long wall time here = UE draining slowly.
+                    let _ = result_tx.send(WorkerResult::ChunkMesh {
+                        chunk,
+                        mesh: converted,
+                        generation: 0, // Sleep remesh
+                        crystal_data,
+                        mushroom_data,
+                        zone_descriptors: Vec::new(),
+                    });
+                }
+            };
+
+            eprintln!("[SLEEP_SEAM] resequenced base+seam remesh: {} near + {} far chunks (from {} dirty + neighbors)",
+                near_keys.len(), far_keys.len(), dirty_count);
+
+            // NEAR phase: one write lock — the montage's stream gate needs
+            // these applied before PrepareAureoleShowcase.
+            let t_near = Instant::now();
+            let near_meshed: Vec<(i32, i32, i32)> = {
+                let mut s = store.write().unwrap();
+                s.remesh_dirty(&full_bounds(near_keys), &cfg, world_scale)
+                    .iter().map(|(k, _)| *k).collect()
+            };
+            send_meshed(&near_meshed);
+            crate::panic_log::note(&format!(
+                "[SLEEP_TRACE] near-remesh done ({} meshes of {} keys, {:.0}ms incl send/backpressure)",
+                near_meshed.len(), near_keys.len(), t_near.elapsed().as_secs_f64() * 1000.0));
+
+            // Hold the FAR phase until UE raises the reveal curtain (or 30s):
+            // the far remesh + seam pass then run against an idle worker pool
+            // (the prebuffered reveal touches no Rust compute) instead of
+            // stealing cores from the morph-step prebuffer. This blocks the
+            // mine lane — acceptable: input is frozen for the whole montage,
+            // and the timeout bounds a montage abort.
+            {
+                let t_wait = Instant::now();
+                while !SLEEP_FAR_GO.load(std::sync::atomic::Ordering::Relaxed)
+                    && t_wait.elapsed() < Duration::from_secs(30)
+                {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                crate::panic_log::note(&format!(
+                    "[SLEEP_TRACE] far-work gate {} after {:.0}ms wait",
+                    if SLEEP_FAR_GO.load(std::sync::atomic::Ordering::Relaxed) { "OPENED (curtain-up)" } else { "TIMED OUT (proceeding)" },
+                    t_wait.elapsed().as_secs_f64() * 1000.0));
+            }
+
+            // FAR phase: sliced write locks so morph-step snapshot reads (and
+            // mine traffic) interleave between slices.
+            let t_far = Instant::now();
+            let mut far_meshed_count = 0usize;
+            for slice in far_keys.chunks(24) {
+                let meshed: Vec<(i32, i32, i32)> = {
+                    let mut s = store.write().unwrap();
+                    s.remesh_dirty(&full_bounds(slice), &cfg, world_scale)
+                        .iter().map(|(k, _)| *k).collect()
+                };
+                far_meshed_count += meshed.len();
+                send_meshed(&meshed);
+            }
+            crate::panic_log::note(&format!(
+                "[SLEEP_TRACE] far-remesh done ({} meshes of {} keys in {} slices, {:.0}ms incl send/backpressure)",
+                far_meshed_count, far_keys.len(), (far_keys.len() + 23) / 24, t_far.elapsed().as_secs_f64() * 1000.0));
+
+            // [SLEEP_SEAM DBG 2026-05-29] Verify the post-sleep remesh carries
+            // seams. If chunks_with_seams is high and seams are STILL missing
+            // in-world, the loss is downstream (UE apply); if it's ~0, the seam
+            // generation itself is failing for the sleep region.
+            eprintln!("[SLEEP_SEAM] sent base+seam: {} chunks with seams, {} solid chunks WITHOUT seams, {} total seam tris",
+                dbg_chunks_with_seams, dbg_chunks_no_seams, dbg_total_seam_tris);
+
+            // Final seam pass over the FULL dirty set — authoritative stitch;
+            // re-sends dirty + neighbors. Montage-filmed chunks among them are
+            // DROPPED UE-side while the montage is filming; the post-montage
+            // resync restores them with fresh seams + collision.
+            let t_seam = Instant::now();
+            let seam_count = sleep_result.dirty_chunks.len();
+            batched_seam_pass(&sleep_result.dirty_chunks, &cfg, store, result_tx, fluid_event_tx, world_scale);
+            crate::panic_log::note(&format!(
+                "[SLEEP_TRACE] seam pass done ({} chunks, {:.0}ms) — worker total {:.0}ms (SleepComplete was sent at {:.0}ms)",
+                seam_count, t_seam.elapsed().as_secs_f64() * 1000.0,
+                t_worker_start.elapsed().as_secs_f64() * 1000.0,
+                result_sent_ms));
 }
 
 pub(super) fn handle_aureole_only(ctx: &super::HandlerCtx<'_>, player_chunk: (i32, i32, i32), sc: voxel_sleep::SleepConfig) {

@@ -146,6 +146,20 @@ pub unsafe extern "C" fn voxel_montage_clear_protected(engine: *mut c_void) -> u
     1
 }
 
+/// Release the sleep handler's deferred FAR remesh + seam pass (2026-08-18).
+/// UE calls this when the montage reveal curtain rises (and again from
+/// CleanupMontage as a backstop) — the far work then runs on the idle pool
+/// during the prebuffered reveal instead of contending with the morph-step
+/// prebuffer. Idempotent; the handler also self-releases after 30s.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_sleep_far_work_go(engine: *mut c_void) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    crate::worker::sleep_morph::SLEEP_FAR_GO.store(true, std::sync::atomic::Ordering::Relaxed);
+    1
+}
+
 /// Start a deep sleep cycle. player_chunk coordinates are in UE space.
 /// Returns 1 on success, 0 if queue full.
 #[no_mangle]

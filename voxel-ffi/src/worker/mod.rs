@@ -24,7 +24,7 @@ mod pathing;
 pub mod region_stress;
 mod scan_support;
 mod seam;
-mod sleep_morph;
+pub(crate) mod sleep_morph; // pub(crate): the FFI (api/sleep.rs) pokes SLEEP_FAR_GO
 mod stress;
 
 pub use region_stress::DeferredRegionStress;

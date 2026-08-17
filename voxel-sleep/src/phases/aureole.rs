@@ -1337,6 +1337,11 @@ pub fn apply_aureole(
                 break;
             }
             crate::trace(&format!("aureole: zone {} starting ({} cells)", zone_idx, zone.cells.len()));
+            // Per-zone wall time (2026-08-18): the 8s AUREOLE_ZONE_BUDGET runs
+            // to cap on lava-heavy saves — the [ZONE_MS] lines show whether the
+            // spend is the big near zones (irreducible) or a long small-zone
+            // tail (budget-tunable). Report-visible via debug_lines.
+            let t_zone = std::time::Instant::now();
             let mut stats = ZoneStats::default();
             stats.lava_cells = zone.cells.len() as u32;
             // Compute BFS depth from zone size using ln() for sensible shell thicknesses
@@ -1399,6 +1404,7 @@ pub fn apply_aureole(
             crate::trace(&format!("aureole: zone {} type={:?} depth={}", zone_idx, aureole_type, final_depth));
 
             // Pass 1: metamorphic shell via BFS from lava cells
+            let t_shell = std::time::Instant::now();
             let (hornfels_n, skarn_n, amphibolite_n, converted) = place_metamorphic_shell(
                 zone,
                 final_depth,
@@ -1406,6 +1412,7 @@ pub fn apply_aureole(
                 chunk_size,
                 &mut result.manifest,
             );
+            let shell_ms = t_shell.elapsed().as_secs_f64() * 1000.0;
             result.hornfels_placed += hornfels_n;
             result.skarn_placed += skarn_n;
             result.amphibolite_placed += amphibolite_n;
@@ -1462,6 +1469,7 @@ pub fn apply_aureole(
             // Build the lava_set once so vein placement can bias seeds toward
             // surfaces facing the original chamber (visible from the pit).
             let zone_cell_count = zone.cells.len() as u32;
+            let t_veins = std::time::Instant::now();
             let lava_set: HashSet<(i32, i32, i32)> = zone.cells.iter().copied().collect();
             crate::trace(&format!("aureole: zone {} shell done (h={} s={} a={}, converted={}), placing veins ({:?})", zone_idx, hornfels_n, skarn_n, amphibolite_n, converted.len(), aureole_type));
             let veins_placed = match aureole_type {
@@ -1488,6 +1496,14 @@ pub fn apply_aureole(
             stats.total_vein_voxels = veins_placed;
             write_experiment_row(&stats, run_ts, zone_idx);
             result.veins_placed += veins_placed;
+            result.debug_lines.push(format!(
+                "[ZONE_MS] zone_idx={} cells={} depth={} shell_ms={:.0} veins_ms={:.0} total_ms={:.0} budget_used_ms={:.0}",
+                zone_idx, zone.cells.len(), final_depth,
+                shell_ms,
+                t_veins.elapsed().as_secs_f64() * 1000.0,
+                t_zone.elapsed().as_secs_f64() * 1000.0,
+                t_zones.elapsed().as_secs_f64() * 1000.0,
+            ));
 
             // Glimpse selection: pick the zone with the most total transformation
             // (metamorphic shell + ore veins) for the montage showcase
