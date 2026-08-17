@@ -145,7 +145,9 @@ pub fn deserialize(
         if cell_count > 10_000_000 {
             return Err(FluidSaveError::TooManyCells(cell_count));
         }
-        let mut cells = Vec::with_capacity(cell_count as usize);
+        // Cap the eager reservation (count is already hard-limited above, but
+        // 10M cells * 16 B is ~160 MB a tiny truncated file could force).
+        let mut cells = Vec::with_capacity((cell_count as usize).min(65_536));
         for _ in 0..cell_count {
             let idx = read_u32(&mut cur)?;
             let level = read_f32(&mut cur)?;

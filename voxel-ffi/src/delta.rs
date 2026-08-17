@@ -8,7 +8,6 @@ use std::collections::{BTreeMap, HashSet};
 use std::io::{self, Read, Write};
 
 use voxel_core::material::Material;
-use voxel_core::octree::node::VoxelSample;
 use voxel_core::stress::{StressField, SupportField, SupportType, STRUT_TUNING};
 use voxel_gen::density::DensityField;
 
@@ -563,7 +562,9 @@ impl WorldSaveData {
         if cell_count > 10_000_000 {
             return Err(DeltaError::TooManyTerraces(cell_count));
         }
-        let mut terraced_cells = Vec::with_capacity(cell_count);
+        // Cap the eager reservation so a tiny crafted save can't force a large
+        // up-front allocation; the Vec still grows to hold whatever follows.
+        let mut terraced_cells = Vec::with_capacity(cell_count.min(65_536));
         for _ in 0..cell_count {
             let wx = read_i32(r)?;
             let wy = read_i32(r)?;
@@ -956,7 +957,8 @@ fn read_trigger<R: Read>(
     if slab_count > 10_000_000 {
         return Err(DeltaError::TooManyTerraces(slab_count));
     }
-    let mut target_slab_voxels = Vec::with_capacity(slab_count);
+    // Cap the eager reservation (see terraced_cells above).
+    let mut target_slab_voxels = Vec::with_capacity(slab_count.min(65_536));
     for _ in 0..slab_count {
         let x = read_i32(r)?;
         let y = read_i32(r)?;
@@ -968,7 +970,8 @@ fn read_trigger<R: Read>(
     if pile_count > 1_000_000 {
         return Err(DeltaError::TooManyTerraces(pile_count));
     }
-    let mut pile_chunks = Vec::with_capacity(pile_count);
+    // Cap the eager reservation (see terraced_cells above).
+    let mut pile_chunks = Vec::with_capacity(pile_count.min(65_536));
     for _ in 0..pile_count {
         let x = read_i32(r)?;
         let y = read_i32(r)?;
