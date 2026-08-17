@@ -64,7 +64,17 @@ pub fn worker_exited() {
 pub fn note(msg: &str) {
     let Some(path) = LOG_PATH.get() else { return; };
     let Ok(_g) = LOG_MUTEX.lock() else { return; };
-    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
+    // PERSISTENT HANDLE (2026-08-18): open+close per note was an AV-scanned
+    // syscall pair on every call — [MORPH-REQ]/[MORPH-STEP] alone note twice
+    // per morph step, taxing the reveal prebuffer ~20-40ms per step. Per-line
+    // write+flush is kept (a crash still pins the last line); only the
+    // open/close churn is gone. Guarded by LOG_MUTEX like before.
+    static NOTE_FILE: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
+    let Ok(mut guard) = NOTE_FILE.lock() else { return; };
+    if guard.is_none() {
+        *guard = OpenOptions::new().create(true).append(true).open(path).ok();
+    }
+    if let Some(f) = guard.as_mut() {
         let ts = unix_secs();
         let _ = writeln!(f, "[{:.3}] {}", ts, msg);
         let _ = f.flush();

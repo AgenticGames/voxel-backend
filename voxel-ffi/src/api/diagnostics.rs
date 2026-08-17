@@ -113,6 +113,30 @@ pub unsafe extern "C" fn voxel_force_chunk_resync(
     engine.request_force_chunk_resync(rust_chunk.0, rust_chunk.1, rust_chunk.2)
 }
 
+/// Bulk force-resync (2026-08-18): one request for a whole chunk set — the
+/// post-montage truth-restore. Caller passes UE chunk coords (an array of
+/// i32 triples, len = count*3), ALREADY neighbor-expanded; each chunk is
+/// remeshed exactly once via the slice-parallel path. Coord contract matches
+/// voxel_force_chunk_resync (UE coords in, converted per-chunk here).
+/// Returns 1 if queued, 0 if engine null / empty / queue full.
+#[no_mangle]
+pub unsafe extern "C" fn voxel_force_chunk_resync_batch(
+    engine: *mut c_void,
+    ue_coords: *const i32,
+    count: u32,
+) -> u32 {
+    if engine.is_null() || ue_coords.is_null() || count == 0 {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    let triples = std::slice::from_raw_parts(ue_coords, (count as usize) * 3);
+    let chunks: Vec<(i32, i32, i32)> = triples
+        .chunks_exact(3)
+        .map(|t| crate::convert::ue_chunk_to_rust(t[0], t[1], t[2]))
+        .collect();
+    engine.request_force_chunk_resync_batch(chunks)
+}
+
 /// Lightweight zone scan: generates density fields (noise only, no worms/ores)
 /// for chunks in a radius, then runs zone detection. Writes results into caller-provided buffer.
 /// Returns 0 on success, non-zero on error.

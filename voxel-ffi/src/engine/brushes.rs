@@ -401,6 +401,21 @@ impl VoxelEngine {
         }
     }
 
+    /// Bulk force-resync (2026-08-18): one request for the whole post-montage
+    /// truth-restore set (already neighbor-expanded by the caller). Each chunk
+    /// is remeshed exactly once via the slice-parallel path instead of the
+    /// per-chunk handler's chunk+6-neighbors duplication.
+    /// Returns 1 if queued, 0 if queue full or empty input.
+    pub fn request_force_chunk_resync_batch(&self, chunks: Vec<(i32, i32, i32)>) -> u32 {
+        if chunks.is_empty() {
+            return 0;
+        }
+        match self.mine_tx.try_send(WorkerRequest::ForceChunkResyncBatch { chunks }) {
+            Ok(()) => 1,
+            Err(_) => 0,
+        }
+    }
+
     /// Creative-mode cavern stamp brush — chunk-snapped cave generator.
     /// `chunk_x/y/z` is the lo-corner chunk in Rust chunk coords; the brush
     /// affects an `extent_x × extent_y × extent_z` chunk region.

@@ -351,19 +351,33 @@ fn compute_resource_census(
 /// Phase 4: "The Deep Time" (1,250,000 years) — enrichment, thickening, formations, collapse
 /// Append one line to a debug trace file so we can diagnose sleep hangs.
 /// Best-effort, ignored if the file can't be opened.
+///
+/// PERSISTENT HANDLE (2026-08-18): this used to open+close the file on EVERY
+/// call. The aureole zone loop traces ~4 lines per zone, so a lava-heavy save
+/// paid ~300 file opens per sleep — on this machine each open is an AV scan,
+/// and [ZONE_MS] showed 50-130ms of fixed overhead per zone against 2-40ms of
+/// actual geology (the 8s phase-2 budget was mostly buying syscalls: 75 of
+/// 334 zones processed). Per-line write+flush is KEPT so a hang still pins
+/// the last line; only the open/close churn is gone.
 pub(crate) fn trace(msg: &str) {
     use std::io::Write;
     eprintln!("{}", msg);
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true).append(true)
-        .open("D:/Unreal Projects/Mithril2026/Saved/sleep_trace.log")
-    {
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs_f64())
-            .unwrap_or(0.0);
-        let _ = writeln!(f, "[{:.3}] {}", ts, msg);
-        let _ = f.flush();
+    static TRACE_FILE: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
+    if let Ok(mut guard) = TRACE_FILE.lock() {
+        if guard.is_none() {
+            *guard = std::fs::OpenOptions::new()
+                .create(true).append(true)
+                .open("D:/Unreal Projects/Mithril2026/Saved/sleep_trace.log")
+                .ok();
+        }
+        if let Some(f) = guard.as_mut() {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            let _ = writeln!(f, "[{:.3}] {}", ts, msg);
+            let _ = f.flush();
+        }
     }
 }
 

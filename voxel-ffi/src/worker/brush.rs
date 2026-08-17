@@ -783,6 +783,94 @@ pub(super) fn handle_force_chunk_resync(ctx: &super::HandlerCtx<'_>, chunk: (i32
             log_line(format!("END chunk={:?}", chunk));
 }
 
+/// Bulk force-resync (2026-08-18): the post-montage truth-restore path.
+/// The caller has ALREADY neighbor-expanded the set (touched + face
+/// neighbors), so each chunk is remeshed exactly ONCE via the slice-parallel
+/// remesh_dirty path — the per-chunk handler above re-meshes chunk+6
+/// neighbors per call (~7x duplicated DC work across a 262-chunk montage
+/// backlog) and its per-line file logging opens the trace file thousands of
+/// times. One summary line, base+seam combined sends, hash force-invalidated
+/// so hash-skip can't suppress the refresh.
+pub(super) fn handle_force_chunk_resync_batch(ctx: &super::HandlerCtx<'_>, chunks: Vec<(i32, i32, i32)>) {
+    let result_tx = ctx.result_tx;
+    let store = ctx.store;
+    let config = ctx.config;
+    let world_scale = ctx.world_scale;
+    let cfg = config.read().unwrap().clone();
+    let t0 = std::time::Instant::now();
+
+    // Phase 1: boundary sync + hash invalidation for the whole set under one
+    // write lock (same sync_chunk_full_boundaries the single handler runs).
+    {
+        let mut s = store.write().unwrap();
+        for &c in &chunks {
+            let _ = s.sync_chunk_full_boundaries(c, cfg.chunk_size);
+            s.last_sent_mesh_hash.remove(&c);
+        }
+    }
+
+    // Phase 2: remesh every chunk once, in slices so mine/morph traffic can
+    // interleave between write holds (same pattern as the sleep far phase).
+    let bounds_of = |keys: &[(i32, i32, i32)]| -> Vec<((i32, i32, i32), usize, usize, usize, usize, usize, usize)> {
+        keys.iter()
+            .map(|&key| (key, 0usize, 0usize, 0usize, cfg.chunk_size, cfg.chunk_size, cfg.chunk_size))
+            .collect()
+    };
+    let mut meshed_keys: Vec<(i32, i32, i32)> = Vec::with_capacity(chunks.len());
+    for slice in chunks.chunks(24) {
+        let mut s = store.write().unwrap();
+        meshed_keys.extend(
+            s.remesh_dirty(&bounds_of(slice), &cfg, world_scale)
+                .iter()
+                .map(|(k, _)| *k),
+        );
+    }
+
+    // Phase 3: combine base + seam quads and send as ChunkMesh results
+    // (crystal/mushroom decorations re-attached — an empty vec clears the
+    // chunk's HISMs on UE, same disease as the #50 quench path).
+    let mut sent = 0usize;
+    for &target in &meshed_keys {
+        let converted = {
+            let s = store.read().unwrap();
+            let base = match s.base_meshes.get(&target) { Some(m) => (**m).clone(), None => continue };
+            let seam = voxel_gen::region_gen::generate_chunk_seam_quads(target, &s.chunk_seam_data, cfg.chunk_size);
+            let mut combined = base;
+            if !seam.triangles.is_empty() { combined.append(seam); }
+            if cfg.mesh_recalc_normals > 0 { combined.recalculate_normals(); }
+            let mut c = convert_mesh_to_ue_scaled(&combined, cfg.voxel_scale(), world_scale);
+            crate::convert::bucket_mesh_by_material(&mut c);
+            c
+        };
+        let crystal_data = retrieve_crystal_data(store, target, cfg.voxel_scale(), world_scale);
+        let mushroom_data = retrieve_mushroom_data(store, target, cfg.voxel_scale(), world_scale);
+        let _ = result_tx.send(WorkerResult::ChunkMesh {
+            chunk: target,
+            mesh: converted,
+            generation: 0,
+            crystal_data,
+            mushroom_data,
+            zone_descriptors: Vec::new(),
+        });
+        sent += 1;
+    }
+
+    // One summary line (the per-chunk handler's per-line appends were a
+    // hot-path file-I/O trap at batch sizes).
+    {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+            .open("D:/Unreal Projects/Mithril2026/Saved/voxel_force_resync.txt")
+        {
+            let _ = writeln!(f, "[ForceResyncBatch] {} chunks requested, {} meshed+sent in {:.0}ms",
+                chunks.len(), sent, t0.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+    crate::panic_log::note(&format!(
+        "[RESYNC_BATCH] {} chunks requested, {} meshed+sent in {:.0}ms",
+        chunks.len(), sent, t0.elapsed().as_secs_f64() * 1000.0));
+}
+
 pub(super) fn handle_brush_cavern_stamp(ctx: &super::HandlerCtx<'_>, chunk_origin: (i32, i32, i32), extent: (u8, u8, u8), decorate: bool, fluids: bool, seed: u32) {
     let result_tx = ctx.result_tx;
     let store = ctx.store;

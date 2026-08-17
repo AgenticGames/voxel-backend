@@ -709,6 +709,9 @@ fn handle_request(
         WorkerRequest::ForceChunkResync { chunk } => {
             brush::handle_force_chunk_resync(&ctx, chunk);
         }
+        WorkerRequest::ForceChunkResyncBatch { chunks } => {
+            brush::handle_force_chunk_resync_batch(&ctx, chunks);
+        }
         WorkerRequest::BrushCavernStamp { chunk_origin, extent, decorate, fluids, seed } => {
             brush::handle_brush_cavern_stamp(&ctx, chunk_origin, extent, decorate, fluids, seed);
         }

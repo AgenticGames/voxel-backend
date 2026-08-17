@@ -296,6 +296,7 @@ fn compute_water_boost(
     zone: &LavaZone,
     fluid_snapshot: &FluidSnapshot,
     config: &AureoleConfig,
+    water_chunk_keys: &[(i32, i32, i32)],
 ) -> (f32, f32, f32, u32, u32, f32, f32, f32) {
     let search_r = config.aureole_water_search_radius.max(1) as i32;
     let net_max_hops = config.aureole_water_network_max_hops.max(0) as i32;
@@ -304,35 +305,69 @@ fn compute_water_boost(
 
     let lava_set: HashSet<(i32, i32, i32)> = zone.cells.iter().copied().collect();
 
+    // ── Early-out (2026-08-18) ─────────────────────────────────────────
+    // The Phase-1 BFS visits the FULL search_r-deep shell around every zone
+    // even when no water exists within reach — [ZONE_MS] showed it as a
+    // ~50-110ms FIXED cost per zone (334 zones vs water in only 8 fluid
+    // chunks on the probe save); the phase-2 budget was mostly buying empty
+    // shell walks. Phase 1 can only reach cells within search_r face-steps
+    // (Chebyshev <= search_r) of a zone cell, so if the zone AABB expanded
+    // by search_r intersects no water-bearing fluid chunk, the BFS provably
+    // finds nothing: skip it and fall through to the identical
+    // empty-collection math (byte-identical outputs).
+    let water_maybe_reachable = {
+        let cs = fluid_snapshot.chunk_size as i32;
+        if cs <= 0 || water_chunk_keys.is_empty() || zone.cells.is_empty() {
+            false
+        } else {
+            let (mut lo, mut hi) = (zone.cells[0], zone.cells[0]);
+            for &c in &zone.cells {
+                lo = (lo.0.min(c.0), lo.1.min(c.1), lo.2.min(c.2));
+                hi = (hi.0.max(c.0), hi.1.max(c.1), hi.2.max(c.2));
+            }
+            let lo = (lo.0 - search_r, lo.1 - search_r, lo.2 - search_r);
+            let hi = (hi.0 + search_r, hi.1 + search_r, hi.2 + search_r);
+            water_chunk_keys.iter().any(|&(kx, ky, kz)| {
+                let cl = (kx * cs, ky * cs, kz * cs);
+                let ch = (cl.0 + cs - 1, cl.1 + cs - 1, cl.2 + cs - 1);
+                cl.0 <= hi.0 && ch.0 >= lo.0
+                    && cl.1 <= hi.1 && ch.1 >= lo.1
+                    && cl.2 <= hi.2 && ch.2 >= lo.2
+            })
+        }
+    };
+
     // ── Phase 1: BFS-outward-from-lava ─────────────────────────────────
     // Visits each cell once via a face-neighbor BFS up to `search_r` deep.
     // Water cells found enter `phase1_water` (which seeds Phase 2).
     // Cost: O(|union of r-shell|) instead of the legacy O(N_lava * (2r+1)^3),
     // so r=15 is ~15ms instead of multiple seconds.
-    let mut visited: HashSet<(i32, i32, i32)> = lava_set.clone();
-    let mut frontier: Vec<(i32, i32, i32)> = zone.cells.clone();
     let mut phase1_water: Vec<(i32, i32, i32)> = Vec::new();
-    // Single cache hoisted across every BFS shell — face neighbors of a
-    // frontier cell, and consecutive frontier cells inside one shell, mostly
-    // share a chunk. Collapses ~6N HashMap probes into ~N + chunk-transitions.
-    let mut fluid_cache = FluidChunkCache::new();
-    for _depth in 0..search_r {
-        let mut next: Vec<(i32, i32, i32)> = Vec::new();
-        for pos in frontier.drain(..) {
-            for &(dx, dy, dz) in &FACE_OFFSETS {
-                let n = (pos.0 + dx, pos.1 + dy, pos.2 + dz);
-                if !visited.insert(n) { continue; }
-                if lava_set.contains(&n) { continue; }
-                if let Some(cell) = fluid_cache.cell(fluid_snapshot, n.0, n.1, n.2) {
-                    if cell.level > 0.001 && cell.fluid_type.is_water() {
-                        phase1_water.push(n);
+    if water_maybe_reachable {
+        let mut visited: HashSet<(i32, i32, i32)> = lava_set.clone();
+        let mut frontier: Vec<(i32, i32, i32)> = zone.cells.clone();
+        // Single cache hoisted across every BFS shell — face neighbors of a
+        // frontier cell, and consecutive frontier cells inside one shell, mostly
+        // share a chunk. Collapses ~6N HashMap probes into ~N + chunk-transitions.
+        let mut fluid_cache = FluidChunkCache::new();
+        for _depth in 0..search_r {
+            let mut next: Vec<(i32, i32, i32)> = Vec::new();
+            for pos in frontier.drain(..) {
+                for &(dx, dy, dz) in &FACE_OFFSETS {
+                    let n = (pos.0 + dx, pos.1 + dy, pos.2 + dz);
+                    if !visited.insert(n) { continue; }
+                    if lava_set.contains(&n) { continue; }
+                    if let Some(cell) = fluid_cache.cell(fluid_snapshot, n.0, n.1, n.2) {
+                        if cell.level > 0.001 && cell.fluid_type.is_water() {
+                            phase1_water.push(n);
+                        }
                     }
+                    next.push(n);
                 }
-                next.push(n);
             }
+            frontier = next;
+            if frontier.is_empty() { break; }
         }
-        frontier = next;
-        if frontier.is_empty() { break; }
     }
 
     // ── Phase 2: BFS through connected water network ───────────────────
@@ -451,12 +486,22 @@ pub(super) fn add_vein_count(stats: &mut ZoneStats, ore: Material, count: u32) {
 fn write_experiment_row(stats: &ZoneStats, run_ts: f64, zone_idx: usize) {
     use std::io::Write;
     const PATH: &str = "D:/Unreal Projects/Mithril2026/Saved/aureole_experiment.csv";
-    let exists = std::path::Path::new(PATH).exists();
-    let needs_header = !exists || std::fs::metadata(PATH).map(|m| m.len() == 0).unwrap_or(true);
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(PATH) {
+    // PERSISTENT HANDLE (2026-08-18): exists+metadata+open per zone was three
+    // filesystem ops x ~75 zones per sleep on an AV-scanned disk — part of the
+    // 50-130ms/zone fixed overhead [ZONE_MS] exposed. Open once, append after.
+    static EXP_FILE: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
+    let Ok(mut guard) = EXP_FILE.lock() else { return; };
+    if guard.is_none() {
+        let exists = std::path::Path::new(PATH).exists();
+        let needs_header = !exists || std::fs::metadata(PATH).map(|m| m.len() == 0).unwrap_or(true);
+        *guard = std::fs::OpenOptions::new().create(true).append(true).open(PATH).ok();
         if needs_header {
-            let _ = writeln!(f, "run_ts,zone_idx,aureole_type,lava_cells,water_phase1,water_phase2,weighted_water,water_cap_zone,water_frac,water_search_r,legacy_boost,water_dep_mult,water_count_mult,lava_dep_mult,lava_count_mult,combined_dep_mult,combined_count_mult,final_depth,hornfels,skarn,amphibolite,converted,total_vein_voxels,outer_seeds,veins_copper,veins_iron,veins_tin,veins_gold,veins_sulfide,veins_pyrite,veins_garnet,veins_diopside,pockets_pyrite,pockets_garnet,pockets_diopside");
+            if let Some(f) = guard.as_mut() {
+                let _ = writeln!(f, "run_ts,zone_idx,aureole_type,lava_cells,water_phase1,water_phase2,weighted_water,water_cap_zone,water_frac,water_search_r,legacy_boost,water_dep_mult,water_count_mult,lava_dep_mult,lava_count_mult,combined_dep_mult,combined_count_mult,final_depth,hornfels,skarn,amphibolite,converted,total_vein_voxels,outer_seeds,veins_copper,veins_iron,veins_tin,veins_gold,veins_sulfide,veins_pyrite,veins_garnet,veins_diopside,pockets_pyrite,pockets_garnet,pockets_diopside");
+            }
         }
+    }
+    if let Some(f) = guard.as_mut() {
         let _ = writeln!(f,
             "{:.3},{},{},{},{},{},{:.2},{:.2},{:.4},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             run_ts, zone_idx, stats.aureole_type,
@@ -1320,8 +1365,38 @@ pub fn apply_aureole(
             let dz = (z.centroid.2 - pv.2) as i64;
             dx * dx + dy * dy + dz * dz
         });
-        const AUREOLE_ZONE_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
+        // 8s → 2.5s (2026-08-18, paired with the compute_water_boost
+        // early-out): the old per-zone cost was ~110ms of which ~50-100ms was
+        // an EMPTY water-shell BFS (water existed in only 8 fluid chunks), so
+        // 8s bought just ~75 of 334 zones — and deferred zones are
+        // PERMANENTLY lost (solidification removes their heat sources).
+        // Post-fix, zones near water still pay the real BFS (~45-70ms) but
+        // far zones drop to ~7-15ms, so coverage-per-second is NONLINEAR:
+        // measured on the montagconnor probe save — 1.5s → 21 zones (too
+        // few), 2.5s → parity-plus vs the shipped 75, 4s → 232 zones / 1.27M
+        // voxels (3x shipped, but downstream remesh/prebuffer scale with the
+        // change volume: ~44s total montage vs ~36s). THE DIAL: raise it
+        // deliberately if more per-sleep maturation is worth ~+1s of "Time
+        // passes.." per ~+60 zones. Zone 0 (nearest) always runs regardless.
+        const AUREOLE_ZONE_BUDGET: std::time::Duration = std::time::Duration::from_millis(2500);
         let t_zones = std::time::Instant::now();
+
+        // Water-bearing fluid chunks, computed ONCE per sleep — feeds every
+        // zone's water-boost early-out (2026-08-18). One linear scan of the
+        // snapshot (~15-40ms) replaces a full search_r-deep shell BFS per
+        // zone on the (majority) zones that have no water within reach.
+        let water_chunk_keys: Vec<(i32, i32, i32)> = if fluid_snapshot.chunk_size == 0 {
+            Vec::new()
+        } else {
+            fluid_snapshot
+                .chunks
+                .iter()
+                .filter(|(_, cells)| {
+                    cells.iter().any(|c| c.level > 0.001 && c.fluid_type.is_water())
+                })
+                .map(|(&k, _)| k)
+                .collect()
+        };
 
         let mut best_glimpse_score: u32 = 0;
 
@@ -1359,7 +1434,8 @@ pub fn apply_aureole(
                 weighted_water,
                 water_cap_for_zone,
                 water_frac,
-            ) = compute_water_boost(zone, fluid_snapshot, config);
+            ) = compute_water_boost(zone, fluid_snapshot, config, &water_chunk_keys);
+            let water_ms = t_zone.elapsed().as_secs_f64() * 1000.0;
             let final_depth = (base_depth * water_boost).ceil() as i32;
 
             // Lava volume scaling: fraction of zone cells vs max_cells cap
@@ -1497,8 +1573,9 @@ pub fn apply_aureole(
             write_experiment_row(&stats, run_ts, zone_idx);
             result.veins_placed += veins_placed;
             result.debug_lines.push(format!(
-                "[ZONE_MS] zone_idx={} cells={} depth={} shell_ms={:.0} veins_ms={:.0} total_ms={:.0} budget_used_ms={:.0}",
+                "[ZONE_MS] zone_idx={} cells={} depth={} water_ms={:.0} shell_ms={:.0} veins_ms={:.0} total_ms={:.0} budget_used_ms={:.0}",
                 zone_idx, zone.cells.len(), final_depth,
+                water_ms,
                 shell_ms,
                 t_veins.elapsed().as_secs_f64() * 1000.0,
                 t_zone.elapsed().as_secs_f64() * 1000.0,

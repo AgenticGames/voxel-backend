@@ -142,6 +142,9 @@ pub fn classify(req: &WorkerRequest) -> (u8, (i32, i32, i32)) {
             (activity::MINE, (0, 0, 0))
         }
         WorkerRequest::ForceChunkResync { chunk } => (activity::RESYNC, *chunk),
+        WorkerRequest::ForceChunkResyncBatch { chunks } => {
+            (activity::RESYNC, chunks.first().copied().unwrap_or((0, 0, 0)))
+        }
         WorkerRequest::ComputePath { .. } => (activity::OTHER, (0, 0, 0)),
         _ => (activity::BRUSH, (0, 0, 0)),
     }

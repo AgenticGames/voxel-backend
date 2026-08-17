@@ -168,6 +168,14 @@ pub enum WorkerRequest {
     /// quit+reload — handy when the in-memory state has drifted from
     /// neighbors via mid-session brush/snapshot/regen paths.
     ForceChunkResync { chunk: (i32, i32, i32) },
+    /// Bulk force-resync (2026-08-18): the post-montage truth-restore. The
+    /// caller (UE QueueMontageResync) has ALREADY expanded the set to touched
+    /// chunks + face neighbors, so this remeshes each chunk exactly once via
+    /// the slice-parallel remesh_dirty path — the per-chunk ForceChunkResync
+    /// re-meshed every chunk PLUS its 6 neighbors per call (~7x duplicated
+    /// work across a 262-chunk backlog) and serialized through the bounded
+    /// mine channel at ~5-8s per montage, blowing the ReturnToPlayer 5s cap.
+    ForceChunkResyncBatch { chunks: Vec<(i32, i32, i32)> },
     /// Axis-aligned-or-yawed box brush.
     BrushBox {
         center_rust: glam::Vec3,
