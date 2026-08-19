@@ -44,6 +44,12 @@ struct OreSurface {
     x: usize,
     y: usize,
     z: usize,
+    /// Isosurface anchor: average of the density-crossing points along each
+    /// air-facing lattice edge. This is where the rendered mesh actually is —
+    /// the sample point itself sits up to a full voxel behind it.
+    anchor_x: f32,
+    anchor_y: f32,
+    anchor_z: f32,
     normal_x: f32,
     normal_y: f32,
     normal_z: f32,
@@ -163,23 +169,52 @@ fn detect_ore_surfaces(density: &DensityField, size: usize) -> Vec<OreSurface> {
                     continue;
                 }
 
+                // Density samples are LATTICE POINTS, not cell centers: the
+                // dual-contoured surface crosses each solid→air edge at
+                // t = d_solid / (d_solid - d_air) (see voxel-core
+                // dual_contouring::edge). Anchor the placement on the average
+                // of those crossings. The old "sample + 0.5 = voxel center"
+                // assumption biased every crystal half a voxel toward
+                // +X/+Y/+Z regardless of facing — burying them inside
+                // -facing walls (#217) and floating them off +facing ones (#259).
+                let d0 = sample.density;
                 let mut nx = 0.0f32;
                 let mut ny = 0.0f32;
                 let mut nz = 0.0f32;
-                let mut has_air = false;
+                let mut cx = 0.0f32;
+                let mut cy = 0.0f32;
+                let mut cz = 0.0f32;
+                let mut crossings = 0u32;
 
-                if x > 0 && density.get(x - 1, y, z).density <= 0.0 { nx -= 1.0; has_air = true; }
-                if x + 1 < size && density.get(x + 1, y, z).density <= 0.0 { nx += 1.0; has_air = true; }
-                if y > 0 && density.get(x, y - 1, z).density <= 0.0 { ny -= 1.0; has_air = true; }
-                if y + 1 < size && density.get(x, y + 1, z).density <= 0.0 { ny += 1.0; has_air = true; }
-                if z > 0 && density.get(x, y, z - 1).density <= 0.0 { nz -= 1.0; has_air = true; }
-                if z + 1 < size && density.get(x, y, z + 1).density <= 0.0 { nz += 1.0; has_air = true; }
+                let mut visit = |dx: f32, dy: f32, dz: f32, d_air: f32| {
+                    let t = (d0 / (d0 - d_air)).clamp(0.0, 1.0);
+                    nx += dx; ny += dy; nz += dz;
+                    cx += x as f32 + dx * t;
+                    cy += y as f32 + dy * t;
+                    cz += z as f32 + dz * t;
+                    crossings += 1;
+                };
 
-                if !has_air { continue; }
+                let d = density.get(x - 1, y, z).density;
+                if d <= 0.0 { visit(-1.0, 0.0, 0.0, d); }
+                let d = density.get(x + 1, y, z).density;
+                if d <= 0.0 { visit(1.0, 0.0, 0.0, d); }
+                let d = density.get(x, y - 1, z).density;
+                if d <= 0.0 { visit(0.0, -1.0, 0.0, d); }
+                let d = density.get(x, y + 1, z).density;
+                if d <= 0.0 { visit(0.0, 1.0, 0.0, d); }
+                let d = density.get(x, y, z - 1).density;
+                if d <= 0.0 { visit(0.0, 0.0, -1.0, d); }
+                let d = density.get(x, y, z + 1).density;
+                if d <= 0.0 { visit(0.0, 0.0, 1.0, d); }
 
+                if crossings == 0 { continue; }
+
+                let inv = 1.0 / crossings as f32;
                 let len = (nx * nx + ny * ny + nz * nz).sqrt().max(0.001);
                 surfaces.push(OreSurface {
                     x, y, z,
+                    anchor_x: cx * inv, anchor_y: cy * inv, anchor_z: cz * inv,
                     normal_x: nx / len, normal_y: ny / len, normal_z: nz / len,
                     material: mat,
                 });
@@ -199,15 +234,22 @@ fn generate_cluster(
     let cluster_count = rng.gen_range(1..=ore_config.cluster_size.max(1));
 
     for c in 0..cluster_count {
-        // Cluster offset (first crystal at exact position)
+        // Cluster offset (first crystal at exact position). Random offsets
+        // are projected onto the surface's tangent plane so members spread
+        // ACROSS the wall — a raw 3D scatter pushes half the cluster into
+        // the rock and floats the other half in the air.
         let (ox, oy, oz) = if c == 0 {
             (0.0f32, 0.0f32, 0.0f32)
         } else {
             let r = ore_config.cluster_radius;
+            let rx = rng.gen_range(-r..=r);
+            let ry = rng.gen_range(-r..=r);
+            let rz = rng.gen_range(-r..=r);
+            let dot = rx * surface.normal_x + ry * surface.normal_y + rz * surface.normal_z;
             (
-                rng.gen_range(-r..=r),
-                rng.gen_range(-r..=r),
-                rng.gen_range(-r..=r),
+                rx - dot * surface.normal_x,
+                ry - dot * surface.normal_y,
+                rz - dot * surface.normal_z,
             )
         };
 
@@ -234,10 +276,14 @@ fn generate_cluster(
         let ny = ny / len;
         let nz = nz / len;
 
-        // Position: at voxel center + configurable offset along blended normal
-        let px = surface.x as f32 + 0.5 + ox + nx * ore_config.surface_offset;
-        let py = surface.y as f32 + 0.5 + oy + ny * ore_config.surface_offset;
-        let pz = surface.z as f32 + 0.5 + oz + nz * ore_config.surface_offset;
+        // Position: isosurface anchor + tangential cluster offset + the
+        // configured lift along the TRUE surface normal. The blended normal
+        // above is orientation-only — pushing the position along it sent
+        // low-alignment ores off in a near-random direction (report #217's
+        // "randomish world normal").
+        let px = surface.anchor_x + ox + surface.normal_x * ore_config.surface_offset;
+        let py = surface.anchor_y + oy + surface.normal_y * ore_config.surface_offset;
+        let pz = surface.anchor_z + oz + surface.normal_z * ore_config.surface_offset;
 
         placements.push(CrystalPlacement {
             x: px,
@@ -452,6 +498,80 @@ mod tests {
         for (i, &c) in counts.iter().enumerate() {
             assert!(c > 250, "Size class {} count {} too low", i, c);
             assert!(c < 420, "Size class {} count {} too high", i, c);
+        }
+    }
+
+    /// Helper: slab world split on X. Columns x < air_from are solid copper
+    /// (density +1), columns x >= air_from are air (density -1) — or the
+    /// mirror when `air_low` is true (air below, ore above).
+    fn make_wall_field(size: usize, boundary: usize, air_low: bool) -> DensityField {
+        let mut density = DensityField::new(size);
+        for z in 0..size {
+            for y in 0..size {
+                for x in 0..size {
+                    let s = density.get_mut(x, y, z);
+                    let solid = if air_low { x >= boundary } else { x < boundary };
+                    s.density = if solid { 1.0 } else { -1.0 };
+                    s.material = if solid { Material::Copper } else { Material::Air };
+                }
+            }
+        }
+        density
+    }
+
+    fn wall_config(cluster_size: u32, cluster_radius: f32) -> CrystalConfig {
+        let mut config = CrystalConfig::default();
+        config.copper.enabled = true;
+        config.copper.vein_enabled = false;
+        config.copper.chance = 1.0;
+        config.copper.density_threshold = 0.0;
+        config.copper.cluster_size = cluster_size;
+        config.copper.cluster_radius = cluster_radius;
+        config.copper.surface_offset = 0.25;
+        config
+    }
+
+    /// +X-facing wall: solid x<9, air x>=9. Surface samples at x=8, edge
+    /// crossing at x=8.5 (t=0.5 for +1/-1 densities). Crystals must sit at
+    /// the crossing + offset — NOT at "sample + 0.5" on y/z.
+    #[test]
+    fn test_wall_seating_positive_x() {
+        let density = make_wall_field(17, 9, false);
+        let config = wall_config(1, 0.0);
+        let placements = compute_crystal_placements(&density, &config, glam::Vec3::ZERO, 42, 100);
+        assert!(!placements.is_empty());
+        for p in &placements {
+            assert!((p.x - 8.75).abs() < 1e-3, "x should be crossing(8.5)+offset(0.25), got {}", p.x);
+            assert!((p.y - p.y.round()).abs() < 1e-3, "y should sit on the sample row (no +0.5 bias), got {}", p.y);
+            assert!((p.z - p.z.round()).abs() < 1e-3, "z should sit on the sample row (no +0.5 bias), got {}", p.z);
+        }
+    }
+
+    /// -X-facing wall (the #217 side): air x<9, solid x>=9. Surface samples
+    /// at x=9, crossing at x=8.5. The old center bias put crystals at
+    /// x=9.25 — 0.75 voxels INSIDE the rock. They must now be on the air side.
+    #[test]
+    fn test_wall_seating_negative_x_not_buried() {
+        let density = make_wall_field(17, 9, true);
+        let config = wall_config(1, 0.0);
+        let placements = compute_crystal_placements(&density, &config, glam::Vec3::ZERO, 42, 100);
+        assert!(!placements.is_empty());
+        for p in &placements {
+            assert!((p.x - 8.25).abs() < 1e-3, "x should be crossing(8.5)-offset(0.25), got {}", p.x);
+            assert!(p.x < 8.5, "crystal must be on the air side of the isosurface, got {}", p.x);
+        }
+    }
+
+    /// Cluster members scatter along the wall plane, never into/out of it.
+    #[test]
+    fn test_cluster_offsets_tangential() {
+        let density = make_wall_field(17, 9, false);
+        let config = wall_config(6, 0.5);
+        let placements = compute_crystal_placements(&density, &config, glam::Vec3::ZERO, 42, 100);
+        assert!(!placements.is_empty());
+        for p in &placements {
+            // Wall normal is +X, so every member keeps the seed's X seat.
+            assert!((p.x - 8.75).abs() < 1e-3, "cluster member drifted off the wall plane: x={}", p.x);
         }
     }
 
