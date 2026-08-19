@@ -251,6 +251,9 @@ impl VoxelEngine {
     }
 
     pub fn new(ffi_config: &FfiEngineConfig) -> Self {
+        // Global rayon pool must be claimed before any rayon use so its
+        // workers run below-normal (see thread_priority.rs).
+        crate::thread_priority::init_rayon_below_normal();
         // Install panic hook + log file as early as possible. Idempotent
         // across engine creation; first install wins.
         crate::panic_log::install("D:/Unreal Projects/Mithril2026/Saved/voxel_panic.log");
@@ -297,6 +300,7 @@ impl VoxelEngine {
         let fluid_shutdown = Arc::clone(&shutdown);
         let fluid_world_scale = voxel_scale * world_scale;
         let fluid_thread = thread::spawn(move || {
+            crate::thread_priority::set_current_below_normal();
             fluid_sim_loop_wrapper(
                 fluid_shutdown,
                 fluid_event_rx,
@@ -405,6 +409,7 @@ impl VoxelEngine {
             let builder = thread::Builder::new().name(format!("voxel-worker-{}", worker_id));
             let handle = builder
                 .spawn(move || {
+                    crate::thread_priority::set_current_below_normal();
                     // Each worker runs `worker_loop` inside `catch_unwind` so a
                     // single .unwrap() panic does not silently kill the thread
                     // (which previously left every queued chunk stuck forever).
@@ -530,6 +535,7 @@ impl VoxelEngine {
                 .name(format!("voxel-path-worker-{}", path_worker_id));
             let handle = builder
                 .spawn(move || {
+                    crate::thread_priority::set_current_below_normal();
                     const MAX_RESPAWNS: u32 = 16;
                     let mut respawn = 0u32;
                     crate::panic_log::worker_started();
@@ -613,6 +619,7 @@ impl VoxelEngine {
             let builder = thread::Builder::new().name("voxel-morph-worker".to_string());
             let handle = builder
                 .spawn(move || {
+                    crate::thread_priority::set_current_below_normal();
                     const MAX_RESPAWNS: u32 = 16;
                     let mut respawn = 0u32;
                     crate::panic_log::worker_started();
@@ -684,6 +691,7 @@ impl VoxelEngine {
             let builder = thread::Builder::new().name("voxel-poi-tracker".to_string());
             let handle = builder
                 .spawn(move || {
+                    crate::thread_priority::set_current_below_normal();
                     const MAX_RESPAWNS: u32 = 8;
                     let mut respawn = 0u32;
                     loop {
@@ -742,6 +750,7 @@ impl VoxelEngine {
             let builder = thread::Builder::new().name("voxel-world-memory-drift".to_string());
             let handle = builder
                 .spawn(move || {
+                    crate::thread_priority::set_current_below_normal();
                     const MAX_RESPAWNS: u32 = 8;
                     let mut respawn = 0u32;
                     loop {
@@ -801,6 +810,7 @@ impl VoxelEngine {
             let builder = thread::Builder::new().name("voxel-sleep-predictor".to_string());
             let handle = builder
                 .spawn(move || {
+                    crate::thread_priority::set_current_below_normal();
                     const MAX_RESPAWNS: u32 = 8;
                     let mut respawn = 0u32;
                     loop {

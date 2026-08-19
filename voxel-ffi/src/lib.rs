@@ -17,6 +17,7 @@ pub mod delta;
 pub mod fluid_save;
 pub mod triggers;
 pub mod panic_log;
+pub(crate) mod thread_priority;
 pub mod diagnostics;
 pub mod pathing;
 pub mod crystal_anchors;

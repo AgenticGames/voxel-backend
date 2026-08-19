@@ -107,7 +107,18 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
     }
     let engine = &*(engine as *const VoxelEngine);
 
-    match engine.poll_result() {
+    // [POLL-SLOW] (2026-08-19): UE-side profiler caught this FFI call blocking
+    // the game thread 112-188ms during generation storms. engine.poll_result()
+    // times its own sections; the ChunkMesh conversion below is the other
+    // candidate (big alloc+copy on a heap 8 workers are hammering).
+    let t_poll = std::time::Instant::now();
+    let polled = engine.poll_result();
+    let poll_ms = t_poll.elapsed().as_secs_f64() * 1000.0;
+    if poll_ms >= 20.0 {
+        crate::panic_log::note(&format!("[POLL-SLOW] engine.poll_result took {:.1}ms (see section note above)", poll_ms));
+    }
+
+    match polled {
         None => ptr::null_mut(),
         Some(worker_result) => match worker_result {
             WorkerResult::ChunkMesh {
@@ -118,7 +129,12 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                 mushroom_data,
                 zone_descriptors,
             } => {
+                let t_conv = std::time::Instant::now();
                 let result = convert_mesh_to_ffi_result(chunk, mesh, generation, crystal_data, mushroom_data, zone_descriptors);
+                let conv_ms = t_conv.elapsed().as_secs_f64() * 1000.0;
+                if conv_ms >= 20.0 {
+                    crate::panic_log::note(&format!("[POLL-SLOW] convert_mesh_to_ffi_result took {:.1}ms", conv_ms));
+                }
                 Box::into_raw(Box::new(result))
             }
             WorkerResult::MineBatchMesh { meshes } => {

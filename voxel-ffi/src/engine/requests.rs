@@ -104,6 +104,13 @@ impl VoxelEngine {
     }
 
     pub fn poll_result(&self) -> Option<WorkerResult> {
+        // [POLL-SLOW] section timing (2026-08-19): the UE game thread calls this
+        // every result drain; profiler caught single calls blocking 112-188ms
+        // during generation storms (P50 1us / P99 0.1ms — bimodal lock hit).
+        // When a call exceeds 20ms, note WHICH section ate it so the contended
+        // lock is named instead of guessed. Cost when fast: two Instant reads.
+        let t_start = std::time::Instant::now();
+
         // Flush re-dispatches an earlier poll couldn't place (mine channel was
         // full). try_send only — the game thread must never block here; see
         // `pending_mine_redispatch` in engine/mod.rs for the 2026-08-13
@@ -124,12 +131,23 @@ impl VoxelEngine {
                 }
             }
         }
+        let t_flush = t_start.elapsed();
 
         // Priority results first (mine batch expansions)
         if let Some(r) = self.priority_results.lock().unwrap().pop_front() {
+            let total = t_start.elapsed();
+            if total.as_millis() >= 20 {
+                crate::panic_log::note(&format!(
+                    "[POLL-SLOW] prio-hit total={:.1}ms flush={:.1}ms prio_lock={:.1}ms",
+                    total.as_secs_f64() * 1000.0,
+                    t_flush.as_secs_f64() * 1000.0,
+                    (total - t_flush).as_secs_f64() * 1000.0));
+            }
             return Some(r);
         }
-        match self.result_rx.try_recv() {
+        let t_prio = t_start.elapsed();
+
+        let polled = match self.result_rx.try_recv() {
             Ok(WorkerResult::SleepComplete {
                 chunks_changed,
                 voxels_metamorphosed,
@@ -274,7 +292,18 @@ impl VoxelEngine {
             }
             Ok(other) => Some(other),
             Err(_) => None,
+        };
+        let total = t_start.elapsed();
+        if total.as_millis() >= 20 {
+            crate::panic_log::note(&format!(
+                "[POLL-SLOW] total={:.1}ms flush={:.1}ms prio_lock={:.1}ms recv_arm={:.1}ms got={}",
+                total.as_secs_f64() * 1000.0,
+                t_flush.as_secs_f64() * 1000.0,
+                (t_prio - t_flush).as_secs_f64() * 1000.0,
+                (total - t_prio).as_secs_f64() * 1000.0,
+                if polled.is_some() { "result" } else { "none-or-intercepted" }));
         }
+        polled
     }
 
     /// Drain all pending broken-strut events. Called by UE per-frame via
