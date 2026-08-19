@@ -179,13 +179,13 @@ pub fn fluid_sim_loop(
         // Drain all pending events
         loop {
             match event_rx.try_recv() {
-                Ok(event) => handle_event(event, &mut chunks, &mut chunk_densities, &mut pending_fluid, &mut features_placed, chunk_size, &mut config),
+                Ok(event) => handle_event(event, &mut chunks, &mut chunk_densities, &mut pending_fluid, &mut features_placed, chunk_size, &mut config, &result_tx, &mut active_fluid_meshes),
                 Err(_) => break,
             }
         }
 
         // Save-restore imports (guaranteed delivery — see FluidImportStash).
-        drain_import_stash(&import_stash, &mut chunks, &mut chunk_densities, &mut pending_fluid, &mut features_placed, chunk_size, &mut config);
+        drain_import_stash(&import_stash, &mut chunks, &mut chunk_densities, &mut pending_fluid, &mut features_placed, chunk_size, &mut config, &result_tx, &mut active_fluid_meshes);
 
         // Rate knobs are read fresh every iteration (not latched before the
         // loop) so an `UpdateFluidRates` event actually changes sim speed on
@@ -546,6 +546,8 @@ fn handle_event(
     features_placed: &mut HashSet<((i32, i32, i32), u8)>,
     chunk_size: usize,
     config: &mut FluidConfig,
+    result_tx: &Sender<FluidResult>,
+    active_fluid_meshes: &mut HashSet<(i32, i32, i32)>,
 ) {
     // features_placed kinds: 0 = noise-lava sources, 1 = geological springs.
     const FEATURE_SOURCES: u8 = 0;
@@ -675,6 +677,7 @@ fn handle_event(
         FluidEvent::DrainLavaChunks { chunks: drain_chunks } => {
             let mut live_chunks = 0u32;
             let mut purged_pending = 0u32;
+            let mut cleared_unloaded = 0u32;
             for chunk_key in drain_chunks {
                 if let Some(grid) = chunks.get_mut(&chunk_key) {
                     let total = grid.size * grid.size * grid.size;
@@ -707,10 +710,31 @@ fn handle_event(
                         pending_fluid.remove(&chunk_key);
                     }
                 }
+                // 2026-08-20 residual of the above: with no live grid there is
+                // nothing to re-mesh, so the dirty→mesh-pass→empty-send path
+                // never fires and the UE actor keeps its last non-empty lava
+                // mesh — visible, and burning via #248 contact — until the
+                // actor recycles. Send the clearing empty mesh from here; the
+                // tracker gate keeps never-meshed chunks from spamming empties.
+                // Surviving stashed water re-meshes on re-stream as before.
+                if !chunks.contains_key(&chunk_key) && active_fluid_meshes.remove(&chunk_key) {
+                    let _ = result_tx.send(FluidResult::FluidMesh {
+                        chunk: chunk_key,
+                        mesh: crate::mesh::FluidMeshData {
+                            positions: Vec::new(),
+                            normals: Vec::new(),
+                            fluid_types: Vec::new(),
+                            indices: Vec::new(),
+                            uvs: Vec::new(),
+                            flow_directions: Vec::new(),
+                        },
+                    });
+                    cleared_unloaded += 1;
+                }
             }
             eprintln!(
-                "[LAVA-DRAIN] drained {} live chunks, purged {} stashed lava cells from unloaded chunks",
-                live_chunks, purged_pending
+                "[LAVA-DRAIN] drained {} live chunks, purged {} stashed lava cells, cleared {} stale meshes on unloaded chunks",
+                live_chunks, purged_pending, cleared_unloaded
             );
         }
         FluidEvent::PlaceGeologicalSprings { chunk, springs } => {
@@ -1084,6 +1108,8 @@ fn drain_import_stash(
     features_placed: &mut HashSet<((i32, i32, i32), u8)>,
     chunk_size: usize,
     config: &mut FluidConfig,
+    result_tx: &Sender<FluidResult>,
+    active_fluid_meshes: &mut HashSet<(i32, i32, i32)>,
 ) {
     let imported: Vec<((i32, i32, i32), Vec<PendingFluidCell>)> = {
         let mut guard = match stash.lock() {
@@ -1101,7 +1127,7 @@ fn drain_import_stash(
         handle_event(
             FluidEvent::PendingFluidLoad { chunk, cells },
             chunks, chunk_densities, pending_fluid, features_placed,
-            chunk_size, config,
+            chunk_size, config, result_tx, active_fluid_meshes,
         );
     }
     eprintln!("[FLUID-IMPORT] drained {n_chunks} chunks / {n_cells} cells from the import stash");
@@ -1135,7 +1161,9 @@ mod tests {
         let mut densities = HashMap::new();
         let mut pending = HashMap::new();
         let mut placed = HashSet::new();
-        handle_event(event, &mut chunks, &mut densities, &mut pending, &mut placed, config.chunk_size, config);
+        let (result_tx, _result_rx) = crossbeam_channel::unbounded();
+        let mut active_meshes = HashSet::new();
+        handle_event(event, &mut chunks, &mut densities, &mut pending, &mut placed, config.chunk_size, config, &result_tx, &mut active_meshes);
     }
 
     /// 2026-08-13 regression ("lava popped back and burned me"): DrainLavaChunks
@@ -1158,15 +1186,80 @@ mod tests {
         pending.insert((4, -4, 0), vec![
             PendingFluidCell { idx: 1, fluid_type: crate::cell::FluidType::Lava, level: 1.0, is_source: true, max_flow_dist: 12 },
         ]);
+        let (result_tx, _result_rx) = crossbeam_channel::unbounded();
+        let mut active_meshes = HashSet::new();
         handle_event(
             FluidEvent::DrainLavaChunks { chunks: vec![(3, -4, 0), (4, -4, 0)] },
             &mut chunks, &mut densities, &mut pending, &mut placed,
-            config.chunk_size, &mut config,
+            config.chunk_size, &mut config, &result_tx, &mut active_meshes,
         );
         let kept = pending.get(&(3, -4, 0)).expect("water entry must survive the drain");
         assert_eq!(kept.len(), 1);
         assert!(!kept[0].fluid_type.is_lava());
         assert!(!pending.contains_key(&(4, -4, 0)), "lava-only stash must be removed");
+    }
+
+    /// 2026-08-20 residual of the 08-13 stash purge: a chunk fluid-UNLOADED at
+    /// drain time has no live grid, so the dirty→re-mesh→empty-mesh path never
+    /// fires for it — the UE actor keeps its last non-empty lava mesh (visible,
+    /// and burning via #248 contact) until the actor recycles. The drain must
+    /// send an explicit empty FluidMesh for every drained key that has no live
+    /// grid but a previously-sent mesh (active_fluid_meshes gates the send so
+    /// never-meshed chunks don't spam empties). Live grids stay on the normal
+    /// dirty→re-mesh path, which also handles surviving water correctly.
+    #[test]
+    fn drain_lava_sends_empty_mesh_for_unloaded_chunks() {
+        let mut config = FluidConfig::default();
+        let size = config.chunk_size;
+        let mut chunks = HashMap::new();
+        let mut densities = HashMap::new();
+        let mut placed = HashSet::new();
+        let mut pending: HashMap<(i32, i32, i32), Vec<PendingFluidCell>> = HashMap::new();
+        let (result_tx, result_rx) = crossbeam_channel::unbounded();
+        let mut active_meshes: HashSet<(i32, i32, i32)> = HashSet::new();
+
+        // (3,-4,0): fluid-unloaded — UE holds a lava mesh, the stash holds the lava.
+        pending.insert((3, -4, 0), vec![
+            PendingFluidCell { idx: 5, fluid_type: crate::cell::FluidType::Lava, level: 1.0, is_source: true, max_flow_dist: 12 },
+        ]);
+        active_meshes.insert((3, -4, 0));
+        // (4,-4,0): stashed lava but no mesh was ever sent — no empty needed.
+        pending.insert((4, -4, 0), vec![
+            PendingFluidCell { idx: 1, fluid_type: crate::cell::FluidType::Lava, level: 1.0, is_source: true, max_flow_dist: 12 },
+        ]);
+        // (5,-4,0): live grid with a mesh — the dirty→re-mesh path owns it.
+        let mut grid = ChunkFluidGrid::new(size);
+        {
+            let cell = grid.get_mut(1, 1, 1);
+            cell.fluid_type = crate::cell::FluidType::Lava;
+            cell.level = 1.0;
+        }
+        grid.has_lava = true;
+        chunks.insert((5, -4, 0), grid);
+        active_meshes.insert((5, -4, 0));
+
+        handle_event(
+            FluidEvent::DrainLavaChunks { chunks: vec![(3, -4, 0), (4, -4, 0), (5, -4, 0)] },
+            &mut chunks, &mut densities, &mut pending, &mut placed,
+            size, &mut config, &result_tx, &mut active_meshes,
+        );
+
+        let results: Vec<FluidResult> = result_rx.try_iter().collect();
+        assert_eq!(
+            results.len(), 1,
+            "exactly one explicit empty mesh: the unloaded, previously-meshed chunk (got {})",
+            results.len()
+        );
+        match &results[0] {
+            FluidResult::FluidMesh { chunk, mesh } => {
+                assert_eq!(*chunk, (3, -4, 0));
+                assert!(mesh.positions.is_empty() && mesh.indices.is_empty(), "the clearing mesh must be empty");
+            }
+            _ => panic!("expected FluidResult::FluidMesh"),
+        }
+        assert!(!active_meshes.contains(&(3, -4, 0)), "cleared chunk must leave the tracker");
+        assert!(active_meshes.contains(&(5, -4, 0)), "live-grid chunk stays tracked for the mesh pass");
+        assert!(chunks[&(5, -4, 0)].dirty, "live-grid chunk must be dirty so the mesh pass re-sends truth");
     }
 
     /// 2026-08-19 regression ("fluid pick lava sometimes doesn't survive a
@@ -1192,7 +1285,9 @@ mod tests {
         let mut pending = HashMap::new();
         let mut placed = HashSet::new();
         let chunk_size = size;
-        drain_import_stash(&stash, &mut chunks, &mut densities, &mut pending, &mut placed, chunk_size, &mut config);
+        let (stash_tx, _stash_rx) = crossbeam_channel::unbounded();
+        let mut stash_meshes = HashSet::new();
+        drain_import_stash(&stash, &mut chunks, &mut densities, &mut pending, &mut placed, chunk_size, &mut config, &stash_tx, &mut stash_meshes);
 
         assert!(stash.lock().unwrap().is_empty(), "stash must drain");
         let parked = pending.get(&(2, 0, -1)).expect("no density yet: cells park in pending_fluid");
@@ -1201,10 +1296,12 @@ mod tests {
 
         // Density arrives (all-open chunk) -> the parked fluid lands in the grid.
         let lattice = (size + 1) * (size + 1) * (size + 1);
+        let (result_tx, _result_rx) = crossbeam_channel::unbounded();
+        let mut active_meshes = HashSet::new();
         handle_event(
             FluidEvent::DensityUpdate { chunk: (2, 0, -1), densities: vec![-1.0; lattice] },
             &mut chunks, &mut densities, &mut pending, &mut placed,
-            chunk_size, &mut config,
+            chunk_size, &mut config, &result_tx, &mut active_meshes,
         );
         let grid = chunks.get(&(2, 0, -1)).expect("grid exists after density");
         assert!(grid.cells[7].level > 0.5, "restored cell must hold its saved level");
@@ -1232,13 +1329,17 @@ mod tests {
         // Density must exist for ensure_grid to build the chunk.
         let stride = size + 1;
         let lattice = vec![-1.0f32; stride * stride * stride];
+        let (result_tx, _result_rx) = crossbeam_channel::unbounded();
+        let mut active_meshes = HashSet::new();
         handle_event(
             FluidEvent::DensityUpdate { chunk, densities: lattice },
             &mut chunks, &mut densities, &mut pending, &mut placed, size, &mut config,
+            &result_tx, &mut active_meshes,
         );
         handle_event(
             FluidEvent::PlaceSources { chunk },
             &mut chunks, &mut densities, &mut pending, &mut placed, size, &mut config,
+            &result_tx, &mut active_meshes,
         );
 
         // Find a planted source and simulate a self-extinguish + drain.
@@ -1251,6 +1352,7 @@ mod tests {
         handle_event(
             FluidEvent::PlaceSources { chunk },
             &mut chunks, &mut densities, &mut pending, &mut placed, size, &mut config,
+            &result_tx, &mut active_meshes,
         );
         let cell = &chunks[&chunk].cells[idx];
         assert!(!cell.is_source, "re-sent PlaceSources resurrected a demoted source");
