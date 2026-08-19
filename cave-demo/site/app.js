@@ -894,6 +894,11 @@
     var preSleepMeshData = null;   // JSON mesh data snapshot before sleep
     var postSleepMeshData = null;  // JSON mesh data snapshot after sleep
     var showingBefore = false;     // toggle state for before/after
+    // Latest true region mesh (generate/mine/water/sleep results). The
+    // Before/After toggle's own re-displays don't update this, so it's
+    // always the real current state — snapshotted as "Before" the moment
+    // Simulate is clicked, mining and lava included.
+    var lastDisplayedMeshData = null;
 
     function renderSleepLog(transformLog) {
         sleepLog.innerHTML = "";
@@ -1004,6 +1009,9 @@
         showingBefore = false;
         toggleBeforeAfterBtn.classList.remove("showing-before");
         toggleBeforeAfterBtn.textContent = "Before/After";
+        // "Before" = the world exactly as it stands right now, including
+        // every dig and lava pour since the last generate/sleep.
+        if (lastDisplayedMeshData) preSleepMeshData = lastDisplayedMeshData;
 
         try {
             var resp = await apiFetch(apiUrl("/api/sleep"), {
@@ -1056,11 +1064,11 @@
 
         showingBefore = !showingBefore;
         if (showingBefore) {
-            displayJsonMesh(preSleepMeshData, { resetCamera: false, reuseTransform: true });
+            displayJsonMesh(preSleepMeshData, { resetCamera: false, reuseTransform: true, isSnapshotView: true });
             toggleBeforeAfterBtn.textContent = "Showing: Before";
             toggleBeforeAfterBtn.classList.add("showing-before");
         } else {
-            displayJsonMesh(postSleepMeshData, { resetCamera: false, reuseTransform: true });
+            displayJsonMesh(postSleepMeshData, { resetCamera: false, reuseTransform: true, isSnapshotView: true });
             toggleBeforeAfterBtn.textContent = "Showing: After";
             toggleBeforeAfterBtn.classList.remove("showing-before");
         }
@@ -1196,6 +1204,7 @@
         opts = opts || {};
         var resetCam = opts.resetCamera !== false;
         var reuseTransform = opts.reuseTransform === true;
+        if (!opts.isSnapshotView) lastDisplayedMeshData = data;
         // Remove old mesh and free its resources
         if (currentMesh) {
             scene.remove(currentMesh);
