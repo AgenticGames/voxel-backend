@@ -1541,11 +1541,7 @@
                 "chunks_y=" + cy,
                 "chunks_z=" + cz,
             ];
-            if (closedEl) {
-                if (closedEl.checked) parts.push("closed=1");
-            } else {
-                // Public demo has no closed checkbox: always seal the shell
-                // so regenerated caves can't be mined into see-through holes.
+            if (closedEl && closedEl.checked) {
                 parts.push("closed=1");
             }
             // Noise settings (only send if user filled in a value)
@@ -1877,9 +1873,9 @@
             var parts = [
                 "seed=12348",
                 "chunks_x=6", "chunks_y=6", "chunks_z=6",
-                // Sealed world shell: mining at the edge hits bedrock instead
-                // of punching see-through holes in the mesh.
-                "closed=1",
+                // No closed=1: cave entrances stay open at the region faces.
+                // Mining past the edge lazily grows the world a few chunks
+                // before hitting sealed bedrock, so no see-through holes.
                 "cavern_freq=0.002",
                 "cavern_threshold=0.75",
                 "detail_octaves=12",

@@ -15,6 +15,7 @@ use voxel_core::export::{mesh_to_json_multi, JsonMesh};
 use voxel_core::hermite::HermiteData;
 use voxel_core::material::Material;
 use voxel_core::mesh::Mesh;
+use voxel_core::octree::node::VoxelSample;
 use voxel_core::stress::{StressField, SupportField};
 use voxel_gen::config::GenerationConfig;
 use voxel_gen::density::{self as gen_density, DensityField};
@@ -40,11 +41,21 @@ pub struct GeneratedRegion {
     /// Region chunk range, kept so mining can re-seal boundary faces.
     range_min: (i32, i32, i32),
     range_max: (i32, i32, i32),
-    /// Generated with sealed boundary faces ("closed"). When true, mining
-    /// re-clamps the outer voxel shell so digging can't punch through the
-    /// edge of the world and leave holes in the mesh.
+    /// Generated with sealed boundary faces ("closed"). When true, the world
+    /// is a sealed box from the start and never expands. When false, mining
+    /// past the original range lazily generates fresh chunks up to
+    /// EXPANSION_MARGIN further out; the hard limit is what gets sealed.
     closed: bool,
+    /// Mining may expand the world up to these chunk bounds (exclusive max).
+    /// Equal to range_min/range_max when closed; range ± EXPANSION_MARGIN
+    /// otherwise. The outer voxel shell at these bounds acts as bedrock.
+    hard_min: (i32, i32, i32),
+    hard_max: (i32, i32, i32),
 }
+
+/// How many chunks past the generated region mining may expand before
+/// hitting the sealed bedrock shell (open, non-closed regions only).
+const EXPANSION_MARGIN: i32 = 3;
 
 pub struct MineResult {
     pub mined_materials: HashMap<Material, u32>,
@@ -214,29 +225,140 @@ impl GeneratedRegion {
             range_min,
             range_max,
             closed,
+            hard_min: if closed { range_min } else {
+                (range_min.0 - EXPANSION_MARGIN, range_min.1 - EXPANSION_MARGIN, range_min.2 - EXPANSION_MARGIN)
+            },
+            hard_max: if closed { range_max } else {
+                (range_max.0 + EXPANSION_MARGIN, range_max.1 + EXPANSION_MARGIN, range_max.2 + EXPANSION_MARGIN)
+            },
         }
     }
 
     /// Re-seal the outer voxel shell of any listed chunk that sits on the
-    /// region boundary. No-op unless the region was generated closed.
-    /// Call after any density edit (mining) that may have carved the shell,
-    /// and before re-meshing.
+    /// hard (bedrock) boundary. For closed regions that's the region edge;
+    /// for open regions it's EXPANSION_MARGIN chunks further out, so the
+    /// original open faces are never touched. Call after any density edit
+    /// (mining) that may have carved the shell, and before re-meshing.
     fn reseal_boundary_chunks(&mut self, keys: &[(i32, i32, i32)]) {
-        if !self.closed {
-            return;
-        }
         for &(cx, cy, cz) in keys {
-            let neg_x = cx == self.range_min.0;
-            let pos_x = cx == self.range_max.0 - 1;
-            let neg_y = cy == self.range_min.1;
-            let pos_y = cy == self.range_max.1 - 1;
-            let neg_z = cz == self.range_min.2;
-            let pos_z = cz == self.range_max.2 - 1;
+            let neg_x = cx == self.hard_min.0;
+            let pos_x = cx == self.hard_max.0 - 1;
+            let neg_y = cy == self.hard_min.1;
+            let pos_y = cy == self.hard_max.1 - 1;
+            let neg_z = cz == self.hard_min.2;
+            let pos_z = cz == self.hard_max.2 - 1;
             if !(neg_x || pos_x || neg_y || pos_y || neg_z || pos_z) {
                 continue;
             }
             if let Some(density) = self.density_fields.get_mut(&(cx, cy, cz)) {
                 density.clamp_boundary_faces(neg_x, pos_x, neg_y, pos_y, neg_z, pos_z);
+            }
+        }
+    }
+
+    /// Lazily generate any missing chunks inside the given chunk bounds
+    /// (inclusive) that are still within the hard bounds, so mining can
+    /// expand past the original region instead of punching holes. New
+    /// chunks are base-density only (no worms/pools/formations), adopt
+    /// their existing neighbours' shared boundary samples so tunnels and
+    /// mined openings continue seamlessly, and get bedrock-clamped if they
+    /// sit on the hard boundary. Returns the created keys; the caller must
+    /// make sure every created chunk gets meshed.
+    fn ensure_chunks_in_bounds(
+        &mut self,
+        min_c: (i32, i32, i32),
+        max_c: (i32, i32, i32),
+    ) -> Vec<(i32, i32, i32)> {
+        let eb = self.config.effective_bounds();
+        let grid_size = self.config.chunk_size + 1;
+        let mut created: Vec<(i32, i32, i32)> = Vec::new();
+
+        for cz in min_c.2..=max_c.2 {
+            for cy in min_c.1..=max_c.1 {
+                for cx in min_c.0..=max_c.0 {
+                    let key = (cx, cy, cz);
+                    if self.density_fields.contains_key(&key) {
+                        continue;
+                    }
+                    if cx < self.hard_min.0 || cx >= self.hard_max.0
+                        || cy < self.hard_min.1 || cy >= self.hard_max.1
+                        || cz < self.hard_min.2 || cz >= self.hard_max.2
+                    {
+                        continue;
+                    }
+                    let coord = ChunkCoord::new(cx, cy, cz);
+                    let origin = coord.world_origin_bounds(eb);
+                    let density = match gen_density::try_coarse_solid_check(&self.config, origin) {
+                        Some(solid) => solid,
+                        None => gen_density::generate_density_field(&self.config, origin),
+                    };
+                    self.density_fields.insert(key, density);
+                    self.stress_fields.insert(key, StressField::new(grid_size));
+                    self.support_fields.insert(key, SupportField::new(grid_size));
+                    created.push(key);
+                }
+            }
+        }
+
+        for &key in &created {
+            self.adopt_neighbor_faces(key);
+        }
+        self.reseal_boundary_chunks(&created);
+        created
+    }
+
+    /// Copy each existing same-resolution face neighbour's shared boundary
+    /// plane into a freshly generated chunk. The neighbour is authoritative:
+    /// it may carry worm carving, mining edits, or bedrock clamping that the
+    /// fresh noise evaluation knows nothing about, and mismatched shared
+    /// samples produce cracks at the seam.
+    fn adopt_neighbor_faces(&mut self, key: (i32, i32, i32)) {
+        let size = match self.density_fields.get(&key) {
+            Some(d) => d.size,
+            None => return,
+        };
+        let (cx, cy, cz) = key;
+        // (neighbour offset, axis: 0=x 1=y 2=z, our plane index, their plane index)
+        let faces: [((i32, i32, i32), usize, usize, usize); 6] = [
+            ((-1, 0, 0), 0, 0, size - 1),
+            ((1, 0, 0), 0, size - 1, 0),
+            ((0, -1, 0), 1, 0, size - 1),
+            ((0, 1, 0), 1, size - 1, 0),
+            ((0, 0, -1), 2, 0, size - 1),
+            ((0, 0, 1), 2, size - 1, 0),
+        ];
+        for &((dx, dy, dz), axis, ours, theirs) in &faces {
+            let nkey = (cx + dx, cy + dy, cz + dz);
+            let plane: Vec<VoxelSample> = match self.density_fields.get(&nkey) {
+                Some(n) if n.size == size => {
+                    let mut samples = Vec::with_capacity(size * size);
+                    for b in 0..size {
+                        for a in 0..size {
+                            let (x, y, z) = match axis {
+                                0 => (theirs, a, b),
+                                1 => (a, theirs, b),
+                                _ => (a, b, theirs),
+                            };
+                            samples.push(*n.get(x, y, z));
+                        }
+                    }
+                    samples
+                }
+                _ => continue,
+            };
+            if let Some(d) = self.density_fields.get_mut(&key) {
+                let mut i = 0;
+                for b in 0..size {
+                    for a in 0..size {
+                        let (x, y, z) = match axis {
+                            0 => (ours, a, b),
+                            1 => (a, ours, b),
+                            _ => (a, b, ours),
+                        };
+                        *d.get_mut(x, y, z) = plane[i];
+                        i += 1;
+                    }
+                }
             }
         }
     }
@@ -502,6 +624,13 @@ impl GeneratedRegion {
         let min_cz = ((center.z - radius) / eb).floor() as i32;
         let max_cz = ((center.z + radius) / eb).floor() as i32;
 
+        // Open regions: grow the world into the void (up to the hard bounds)
+        // before carving, so digging past the edge finds rock, not holes.
+        let created = self.ensure_chunks_in_bounds(
+            (min_cx, min_cy, min_cz),
+            (max_cx, max_cy, max_cz),
+        );
+
         // Track dirty chunks with their local dirty bounds for incremental hermite patching
         let mut dirty_chunks: Vec<((i32, i32, i32), usize, usize, usize, usize, usize, usize)> = Vec::new();
 
@@ -557,10 +686,21 @@ impl GeneratedRegion {
             }
         }
 
-        // Closed regions: restore the outer shell before re-meshing so deep
-        // digging hits bedrock instead of punching holes in the world edge.
+        // Restore the bedrock shell before re-meshing so deep digging hits
+        // bedrock instead of punching holes in the edge of the world.
         let dirty_keys: Vec<(i32, i32, i32)> = dirty_chunks.iter().map(|d| d.0).collect();
         self.reseal_boundary_chunks(&dirty_keys);
+
+        // Every lazily created chunk must end up with a mesh, carved or not:
+        // an unmeshed chunk next to a dug opening reads as a hole in the world.
+        for key in created {
+            if !dirty_keys.contains(&key) {
+                if let Some(d) = self.density_fields.get(&key) {
+                    let cell = d.size - 1;
+                    dirty_chunks.push((key, 0, 0, 0, cell, cell, cell));
+                }
+            }
+        }
 
         // Re-mesh dirty chunks in parallel using incremental hermite patching
         self.remesh_dirty_parallel(&dirty_chunks);
@@ -584,6 +724,13 @@ impl GeneratedRegion {
         let max_cy = ((adjusted_center.y + radius) / eb).floor() as i32;
         let min_cz = ((adjusted_center.z - radius) / eb).floor() as i32;
         let max_cz = ((adjusted_center.z + radius) / eb).floor() as i32;
+
+        // Same lazy expansion as mine_sphere: peeling at the edge grows the
+        // world (up to the hard bounds) instead of exposing holes.
+        let created = self.ensure_chunks_in_bounds(
+            (min_cx, min_cy, min_cz),
+            (max_cx, max_cy, max_cz),
+        );
 
         let mut dirty_chunks: Vec<((i32, i32, i32), usize, usize, usize, usize, usize, usize)> = Vec::new();
 
@@ -661,6 +808,16 @@ impl GeneratedRegion {
         // must not open the shell.
         let dirty_keys: Vec<(i32, i32, i32)> = dirty_chunks.iter().map(|d| d.0).collect();
         self.reseal_boundary_chunks(&dirty_keys);
+
+        // Mesh every lazily created chunk, carved or not (see mine_sphere).
+        for key in created {
+            if !dirty_keys.contains(&key) {
+                if let Some(d) = self.density_fields.get(&key) {
+                    let cell = d.size - 1;
+                    dirty_chunks.push((key, 0, 0, 0, cell, cell, cell));
+                }
+            }
+        }
 
         self.remesh_dirty_parallel(&dirty_chunks);
 
