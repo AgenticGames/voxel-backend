@@ -107,20 +107,18 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
     }
     let engine = &*(engine as *const VoxelEngine);
 
-    // [POLL-SLOW] (2026-08-19): UE-side profiler caught this FFI call blocking
-    // the game thread 112-188ms during generation storms. engine.poll_result()
-    // times its own sections; the ChunkMesh conversion below is the other
-    // candidate (big alloc+copy on a heap 8 workers are hammering).
+    // FFI-level skip loop (2026-08-19): arms below that produce "nothing for
+    // UE" (should-not-reach intercept fallbacks, empty collapse/stress
+    // payloads, the CollapseSlabResult aggregate no-op) must NOT surface as
+    // null — UE's ProcessResults reads null as "queue empty" and ends the
+    // whole tick's result drain, so one such item made applies land in
+    // bursts. Loop to the next UE-facing result instead. [POLL-SLOW] notes
+    // >=20ms totals; engine.poll_result() times its own sections.
     let t_poll = std::time::Instant::now();
-    let polled = engine.poll_result();
-    let poll_ms = t_poll.elapsed().as_secs_f64() * 1000.0;
-    if poll_ms >= 20.0 {
-        crate::panic_log::note(&format!("[POLL-SLOW] engine.poll_result took {:.1}ms (see section note above)", poll_ms));
-    }
-
-    match polled {
-        None => ptr::null_mut(),
-        Some(worker_result) => match worker_result {
+    let out = loop {
+        match engine.poll_result() {
+            None => break ptr::null_mut(),
+            Some(worker_result) => match worker_result {
             WorkerResult::ChunkMesh {
                 chunk,
                 mesh,
@@ -135,7 +133,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                 if conv_ms >= 20.0 {
                     crate::panic_log::note(&format!("[POLL-SLOW] convert_mesh_to_ffi_result took {:.1}ms", conv_ms));
                 }
-                Box::into_raw(Box::new(result))
+                break Box::into_raw(Box::new(result));
             }
             WorkerResult::MineBatchMesh { meshes } => {
                 // Convert batch to individual results — send first one now, rest get re-queued
@@ -159,7 +157,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     mushroom_data: empty_mushroom_data(),
                     slab_fall: FfiSlabFallData::default(),
                 };
-                Box::into_raw(Box::new(result))
+                break Box::into_raw(Box::new(result));
             }
             WorkerResult::MinedMaterials { mined } => {
                 let result = FfiResult {
@@ -174,7 +172,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     mushroom_data: empty_mushroom_data(),
                     slab_fall: FfiSlabFallData::default(),
                 };
-                Box::into_raw(Box::new(result))
+                break Box::into_raw(Box::new(result));
             }
             WorkerResult::FluidMesh { chunk, mesh } => {
                 let ue = rust_chunk_to_ue(chunk.0, chunk.1, chunk.2);
@@ -190,7 +188,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     mushroom_data: empty_mushroom_data(),
                     slab_fall: FfiSlabFallData::default(),
                 };
-                Box::into_raw(Box::new(result))
+                break Box::into_raw(Box::new(result));
             }
             WorkerResult::Error { chunk, generation } => {
                 let ue = rust_chunk_to_ue(chunk.0, chunk.1, chunk.2);
@@ -206,21 +204,21 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     mushroom_data: empty_mushroom_data(),
                     slab_fall: FfiSlabFallData::default(),
                 };
-                Box::into_raw(Box::new(result))
+                break Box::into_raw(Box::new(result));
             }
             WorkerResult::SolidifyRequest { .. } => {
                 // SolidifyRequest is handled engine-internally; skip for now
-                ptr::null_mut()
+                continue;
             }
             WorkerResult::LavaQuench { .. } => {
                 // LavaQuench is intercepted by engine.poll_result() and
                 // re-dispatched to the worker as WorkerRequest::ApplyLavaQuench.
                 // If it reaches here, the intercept missed — just drop it.
-                ptr::null_mut()
+                continue;
             }
             WorkerResult::CollapseResult { mut events } => {
                 if events.is_empty() {
-                    return ptr::null_mut();
+                    continue;
                 }
 
                 // Sort by volume descending — biggest slab first
@@ -253,29 +251,29 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     mushroom_data: empty_mushroom_data(),
                     slab_fall: FfiSlabFallData::default(),
                 };
-                Box::into_raw(Box::new(result))
+                break Box::into_raw(Box::new(result));
             }
             WorkerResult::SleepComplete { .. } => {
                 // This should have been intercepted by engine.poll_result().
                 // If it somehow reaches here, ignore it.
-                ptr::null_mut()
+                continue;
             }
             WorkerResult::ScanComplete { .. } => {
                 // This should have been intercepted by engine.poll_result().
                 // If it somehow reaches here, ignore it.
-                ptr::null_mut()
+                continue;
             }
             WorkerResult::ForceSpawnPoolComplete { .. } => {
                 // Intercepted by engine.poll_result(); ignore if it reaches here.
-                ptr::null_mut()
+                continue;
             }
             WorkerResult::MorphMeshes { .. } => {
                 // Intercepted by engine.poll_result(); ignore if it reaches here.
-                ptr::null_mut()
+                continue;
             }
             WorkerResult::StressWarnings { warnings } => {
                 if warnings.is_empty() {
-                    return ptr::null_mut();
+                    continue;
                 }
                 // Pack summary into FfiResult:
                 // Chunk = position of highest-stress warning (UE coords, as integers)
@@ -307,12 +305,12 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     mushroom_data: empty_mushroom_data(),
                     slab_fall: FfiSlabFallData::default(),
                 };
-                Box::into_raw(Box::new(result))
+                break Box::into_raw(Box::new(result));
             }
             WorkerResult::CollapseSlabResult { .. } => {
                 // Aggregate variant — individual slabs are emitted via SlabFall
                 // (one result per slab fragment). Keep this as a no-op for now.
-                ptr::null_mut()
+                continue;
             }
             WorkerResult::SlabFall { mesh, fall_data } => {
                 // Individual falling-slab visual — real DC mesh + fall metadata.
@@ -334,7 +332,7 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     mushroom_data: empty_mushroom_data(),
                     slab_fall: fall_data,
                 };
-                Box::into_raw(Box::new(result))
+                break Box::into_raw(Box::new(result));
             }
             WorkerResult::CollapseWarning { center_ue, bounds_extent_ue, severity, eta_ms, volume } => {
                 // Localized pre-collapse warning. Drives Acts 1-2 of the
@@ -366,16 +364,16 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     mushroom_data: empty_mushroom_data(),
                     slab_fall: fall,
                 };
-                Box::into_raw(Box::new(result))
+                break Box::into_raw(Box::new(result));
             }
             // PathComputed is intercepted inside engine.poll_result() and
             // stashed into path_results — it never reaches this match in
             // practice. Listed here only for exhaustiveness.
-            WorkerResult::PathComputed { .. } => ptr::null_mut(),
+            WorkerResult::PathComputed { .. } => continue,
             // StrutsBroken is intercepted in engine.poll_result() and stashed
             // for UE to drain via voxel_take_struts_broken — reaching this
             // arm means the intercept missed; safe to drop.
-            WorkerResult::StrutsBroken { .. } => ptr::null_mut(),
+            WorkerResult::StrutsBroken { .. } => continue,
             WorkerResult::PilePreviewTier { mesh, fall_data } => {
                 // One tier of the pre-commit pile preview. fall_data carries
                 // tier_index in pile_tier_index, spawn_x/y/z is the pile
@@ -396,12 +394,19 @@ pub unsafe extern "C" fn voxel_poll_result(engine: *mut c_void) -> *mut FfiResul
                     mushroom_data: empty_mushroom_data(),
                     slab_fall: fall_data,
                 };
-                Box::into_raw(Box::new(result))
+                break Box::into_raw(Box::new(result));
             }
-        },
+            },
+        }
+    };
+    let poll_ms = t_poll.elapsed().as_secs_f64() * 1000.0;
+    if poll_ms >= 20.0 {
+        crate::panic_log::note(&format!(
+            "[POLL-SLOW] voxel_poll_result took {:.1}ms total (engine skip-loop + conversion)",
+            poll_ms));
     }
+    out
 }
-
 /// Free a result previously returned by `voxel_poll_result`.
 #[no_mangle]
 pub unsafe extern "C" fn voxel_free_result(result: *mut FfiResult) {

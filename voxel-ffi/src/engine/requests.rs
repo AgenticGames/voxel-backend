@@ -147,7 +147,15 @@ impl VoxelEngine {
         }
         let t_prio = t_start.elapsed();
 
-        let polled = match self.result_rx.try_recv() {
+        // Intercept-skip loop (2026-08-19): intercepted kinds (sleep/morph/
+        // scan/quench/path/strut) used to make this fn return None, which the
+        // FFI surfaced as null and UE's ProcessResults read as "queue empty" -
+        // ONE intercepted item ended the whole tick's result drain and applies
+        // landed in bursts. Keep consuming until a UE-facing result or a
+        // genuinely empty channel. Every intercepted arm is a cheap stash.
+        let mut intercepted = 0u32;
+        let polled = loop {
+            match self.result_rx.try_recv() {
             Ok(WorkerResult::SleepComplete {
                 chunks_changed,
                 voxels_metamorphosed,
@@ -219,26 +227,30 @@ impl VoxelEngine {
                     });
                 }
                 // Don't expose to the FfiResult pipeline; UE polls via voxel_poll_sleep_result
-                None
+                intercepted += 1;
+                continue;
             }
             Ok(WorkerResult::MorphMeshes { step, total_steps, meshes }) => {
                 if let Ok(mut mq) = self.morph_results.lock() {
                     mq.push_back(MorphStepResult { step, total_steps, meshes });
                 }
-                None
+                intercepted += 1;
+                continue;
             }
             Ok(WorkerResult::ScanComplete { json_report }) => {
                 if let Ok(mut sc) = self.scan_complete.lock() {
                     *sc = Some(json_report);
                 }
                 // Don't expose to the FfiResult pipeline; UE polls via voxel_poll_scan_result
-                None
+                intercepted += 1;
+                continue;
             }
             Ok(WorkerResult::ForceSpawnPoolComplete { json_report }) => {
                 if let Ok(mut fc) = self.force_spawn_complete.lock() {
                     *fc = Some(json_report);
                 }
-                None
+                intercepted += 1;
+                continue;
             }
             Ok(WorkerResult::LavaQuench { obsidian, scoria, drained_water }) => {
                 // Re-dispatch to the worker thread so the voxel writes +
@@ -259,7 +271,8 @@ impl VoxelEngine {
                         self.pending_mine_redispatch.lock().unwrap().push_back(req);
                     }
                 }
-                None
+                intercepted += 1;
+                continue;
             }
             Ok(WorkerResult::PathComputed { request_id, status, nodes_ue }) => {
                 // Stash for `voxel_path_poll`; UE polls per-request_id rather
@@ -282,26 +295,30 @@ impl VoxelEngine {
                     });
                     store.prune(PATH_RESULT_TTL_SECS);
                 }
-                None
+                intercepted += 1;
+                continue;
             }
             Ok(WorkerResult::StrutsBroken { struts }) => {
                 if let Ok(mut stash) = self.strut_broken_stash.lock() {
                     stash.extend(struts);
                 }
-                None
+                intercepted += 1;
+                continue;
             }
-            Ok(other) => Some(other),
-            Err(_) => None,
+            Ok(other) => break Some(other),
+            Err(_) => break None,
+            }
         };
         let total = t_start.elapsed();
         if total.as_millis() >= 20 {
             crate::panic_log::note(&format!(
-                "[POLL-SLOW] total={:.1}ms flush={:.1}ms prio_lock={:.1}ms recv_arm={:.1}ms got={}",
+                "[POLL-SLOW] total={:.1}ms flush={:.1}ms prio_lock={:.1}ms recv_arm={:.1}ms intercepted={} got={}",
                 total.as_secs_f64() * 1000.0,
                 t_flush.as_secs_f64() * 1000.0,
                 (t_prio - t_flush).as_secs_f64() * 1000.0,
                 (total - t_prio).as_secs_f64() * 1000.0,
-                if polled.is_some() { "result" } else { "none-or-intercepted" }));
+                intercepted,
+                if polled.is_some() { "result" } else { "empty" }));
         }
         polled
     }
