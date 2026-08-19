@@ -592,9 +592,56 @@
         renderer.render(scene, camera);
     }
 
+    // Left-drag orbit state: distinguishes a quick click (mine) from a
+    // hold-and-drag (rotate the view around the cave).
+    var leftDrag = { down: false, moved: false, lastX: 0, lastY: 0 };
+    var LEFT_DRAG_THRESHOLD = 5; // px of travel before a click becomes a drag
+
     // ── Fly Camera ───────────────────────────────────────────────────
     function initFlyCamera() {
         var canvas = renderer.domElement;
+
+        // ── Left-drag to orbit ───────────────────────────────────────
+        // Hold left click and drag to swing the camera around the cave
+        // centre (the displayed mesh is centred on the origin). A quick
+        // click without movement still mines — initMining checks
+        // leftDrag.moved and skips.
+        canvas.addEventListener("mousedown", function (e) {
+            if (e.button !== 0 || flyActive || cinemaMode) return;
+            leftDrag.down = true;
+            leftDrag.moved = false;
+            leftDrag.lastX = e.clientX;
+            leftDrag.lastY = e.clientY;
+        });
+
+        document.addEventListener("mousemove", function (e) {
+            if (!leftDrag.down || flyActive || cinemaMode) return;
+            var dx = e.clientX - leftDrag.lastX;
+            var dy = e.clientY - leftDrag.lastY;
+            if (!leftDrag.moved) {
+                if (Math.abs(dx) + Math.abs(dy) < LEFT_DRAG_THRESHOLD) return;
+                leftDrag.moved = true;
+                canvas.style.cursor = "grabbing";
+            }
+            leftDrag.lastX = e.clientX;
+            leftDrag.lastY = e.clientY;
+
+            var pivot = new THREE.Vector3(0, 0, 0);
+            var offset = camera.position.clone().sub(pivot);
+            var spherical = new THREE.Spherical().setFromVector3(offset);
+            spherical.theta -= dx * 0.005;
+            spherical.phi -= dy * 0.005;
+            spherical.phi = Math.max(0.05, Math.min(Math.PI - 0.05, spherical.phi));
+            offset.setFromSpherical(spherical);
+            camera.position.copy(pivot).add(offset);
+            camera.lookAt(pivot);
+        });
+
+        document.addEventListener("mouseup", function (e) {
+            if (e.button !== 0) return;
+            leftDrag.down = false;
+            canvas.style.cursor = "";
+        });
 
         // Right-click: engage fly mode
         canvas.addEventListener("mousedown", function (e) {
@@ -687,6 +734,11 @@
             // Only mine on left-click when NOT flying, and not while a request is pending
             if (flyActive) return;
             if (!currentMesh) return;
+            // A drag-to-orbit just ended: swallow the click, don't mine.
+            if (leftDrag.moved) {
+                leftDrag.moved = false;
+                return;
+            }
 
             var rect = canvas.getBoundingClientRect();
             mouseNDC.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
