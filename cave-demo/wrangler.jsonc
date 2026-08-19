@@ -1,0 +1,14 @@
+{
+  "$schema": "https://unpkg.com/wrangler/config-schema.json",
+  "name": "mithril-cave",
+  "compatibility_date": "2026-08-19",
+  "assets": {
+    "directory": "./site"
+  },
+  "routes": [
+    {
+      "pattern": "cave.playmithril.com",
+      "custom_domain": true
+    }
+  ]
+}

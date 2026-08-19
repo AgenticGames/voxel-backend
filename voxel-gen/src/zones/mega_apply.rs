@@ -34,7 +34,10 @@ pub fn apply_vault_to_chunk(
     blueprint: &MegaVaultBlueprint,
     eb: f32,
 ) {
+    #[cfg(not(target_arch = "wasm32"))]
     use std::time::Instant;
+    #[cfg(target_arch = "wasm32")]
+    use web_time::Instant;
     let chunk_start = Instant::now();
     let mut t_pass1 = std::time::Duration::ZERO;
     let mut t_2pre = std::time::Duration::ZERO;

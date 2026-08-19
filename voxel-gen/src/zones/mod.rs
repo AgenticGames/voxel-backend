@@ -102,7 +102,10 @@ pub fn place_zones(
         return (Vec::new(), Vec::new(), Vec::new());
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     use std::time::Instant;
+    #[cfg(target_arch = "wasm32")]
+    use web_time::Instant;
     let zones_total_start = Instant::now();
 
     let mut descriptors = Vec::new();
@@ -134,8 +137,15 @@ pub fn place_zones(
 
             // Parallel apply — limit to half CPU cores to avoid starving OS/audio/UE
             // Use global rayon pool (no custom thread pool creation per-call)
-            use rayon::prelude::*;
-            extracted.par_iter_mut().for_each(|(key, density)| {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                use rayon::prelude::*;
+                extracted.par_iter_mut().for_each(|(key, density)| {
+                    mega_apply::apply_vault_to_chunk(density, *key, bp, eb);
+                });
+            }
+            #[cfg(target_arch = "wasm32")]
+            extracted.iter_mut().for_each(|(key, density)| {
                 mega_apply::apply_vault_to_chunk(density, *key, bp, eb);
             });
 

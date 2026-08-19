@@ -1,4 +1,4 @@
-mod region;
+
 
 use std::time::Instant;
 use glam::Vec3;
@@ -6,7 +6,7 @@ use rand::SeedableRng;
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
 use voxel_gen::config::GenerationConfig;
-use region::GeneratedRegion;
+use voxel_region::GeneratedRegion;
 
 fn main() {
     let chunk_size: usize = 38;

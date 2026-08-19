@@ -9,7 +9,11 @@ mod aureole_diagnostic;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as FmtWrite;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 use crossbeam_channel::Sender;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -342,8 +346,11 @@ fn compute_resource_census(
 /// Append one line to a debug trace file so we can diagnose sleep hangs.
 /// Best-effort, ignored if the file can't be opened.
 pub(crate) fn trace(msg: &str) {
-    use std::io::Write;
     eprintln!("{}", msg);
+    // No filesystem on wasm; skip the trace file entirely.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+    use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true).append(true)
         .open("D:/Unreal Projects/Mithril2026/Saved/sleep_trace.log")
@@ -354,6 +361,7 @@ pub(crate) fn trace(msg: &str) {
             .unwrap_or(0.0);
         let _ = writeln!(f, "[{:.3}] {}", ts, msg);
         let _ = f.flush();
+    }
     }
 }
 
@@ -743,14 +751,14 @@ pub fn execute_sleep(
             "Accumulation pass start: iterations={} elapsed_so_far={:.2}ms remaining_budget={:.2}ms",
             n,
             t_total.elapsed().as_secs_f32() * 1000.0,
-            sleep_deadline.saturating_duration_since(std::time::Instant::now()).as_secs_f32() * 1000.0
+            sleep_deadline.saturating_duration_since(Instant::now()).as_secs_f32() * 1000.0
         ));
 
         for iter in 0..n {
             // B3.4: total-sleep-budget check at iteration boundary.
             // Cleanly skip remaining iterations if we've crossed the 5s
             // ceiling. World state stays consistent.
-            if std::time::Instant::now() >= sleep_deadline {
+            if Instant::now() >= sleep_deadline {
                 trace(&format!(
                     "Accumulation BUDGET EXCEEDED at iter {} of {} — skipping remaining iterations. Elapsed {:.2}ms / budget {}ms",
                     iter, n,
@@ -759,13 +767,13 @@ pub fn execute_sleep(
                 ));
                 break;
             }
-            let t_iter = std::time::Instant::now();
+            let t_iter = Instant::now();
             let iter_seed = sleep_count as u64 * 7919 + 42 + 1000 + iter as u64 * 1013;
             let mut iter_rng = ChaCha8Rng::seed_from_u64(iter_seed);
 
             // Recompute census each iteration (world evolved)
             let iter_census = compute_resource_census(density_fields, fluid_snapshot, &all_chunks, chunk_size);
-            let t_after_census = std::time::Instant::now();
+            let t_after_census = Instant::now();
 
             // Phase 1 accumulation (time_factor = 41.3: 1.24Ma remaining / 3 iters / 10Ka base)
             if config.phase1_enabled {
@@ -838,8 +846,8 @@ pub fn execute_sleep(
 
     // --- Lava Solidification ---
     let mut total_lava_solidified = 0u32;
-    let t_lava = std::time::Instant::now();
-    if std::time::Instant::now() >= sleep_deadline {
+    let t_lava = Instant::now();
+    if Instant::now() >= sleep_deadline {
         trace(&format!(
             "Lava solidification SKIPPED — total sleep budget exceeded. Elapsed {:.2}ms / budget {}ms",
             t_total.elapsed().as_secs_f32() * 1000.0,

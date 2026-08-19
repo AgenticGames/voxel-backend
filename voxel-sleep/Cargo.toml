@@ -18,3 +18,4 @@ voxel-gen = { path = "../voxel-gen" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { workspace = true }
+web-time = { workspace = true }

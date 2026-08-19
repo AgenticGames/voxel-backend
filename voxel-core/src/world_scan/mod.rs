@@ -11,7 +11,10 @@ mod worm;
 mod winding;
 
 use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use serde::{Serialize, Deserialize};
 
@@ -405,7 +408,10 @@ fn build_summary(issues: &[WorldIssue]) -> ScanSummary {
 
 fn chrono_timestamp() -> String {
     // Simple UTC timestamp without chrono dependency
+    #[cfg(not(target_arch = "wasm32"))]
     use std::time::SystemTime;
+    #[cfg(target_arch = "wasm32")]
+    use web_time::SystemTime;
     match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
         Ok(d) => {
             let secs = d.as_secs();

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use voxel_core::chunk::{Chunk, ChunkCoord};
 use crate::config::GenerationConfig;
@@ -37,8 +38,11 @@ impl ChunkManager {
             .collect();
 
         let config = &self.config;
-        let new_chunks: Vec<(ChunkCoord, Chunk)> = missing
-            .par_iter()
+        #[cfg(not(target_arch = "wasm32"))]
+        let missing_iter = missing.par_iter();
+        #[cfg(target_arch = "wasm32")]
+        let missing_iter = missing.iter();
+        let new_chunks: Vec<(ChunkCoord, Chunk)> = missing_iter
             .map(|&coord| {
                 let chunk = crate::generate_chunk(coord, config);
                 (coord, chunk)

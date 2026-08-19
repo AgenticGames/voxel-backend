@@ -23,7 +23,10 @@
 //! from the real result's `lava_cells`, the real one wins.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::time::Instant;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+#[cfg(target_arch = "wasm32")]
+use web_time::{Instant, SystemTime, UNIX_EPOCH};
 
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -251,8 +254,8 @@ pub fn predict_next_sleep(snap: &PredictSnapshot) -> PredictedManifest {
     });
 
     let wall_ms = t_start.elapsed().as_millis().min(u32::MAX as u128) as u32;
-    let computed_at_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let computed_at_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
 

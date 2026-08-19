@@ -175,7 +175,10 @@ fn density_timings_enabled() -> bool {
 }
 
 pub fn generate_density_field(config: &GenerationConfig, world_origin: glam::Vec3) -> DensityField {
+    #[cfg(not(target_arch = "wasm32"))]
     use std::time::Instant;
+    #[cfg(target_arch = "wasm32")]
+    use web_time::Instant;
     let collect_timings = density_timings_enabled();
     let _density_start = if collect_timings { Some(Instant::now()) } else { None };
     let size = config.chunk_size + 1;

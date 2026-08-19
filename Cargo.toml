@@ -1,5 +1,5 @@
 [workspace]
-members = ["voxel-noise", "voxel-core", "voxel-gen", "voxel-cli", "voxel-viewer", "nav-debug", "voxel-ffi", "voxel-fluid", "voxel-sleep", "voxel-path", "voxel-world-memory", "voxel-cinema"]
+members = ["voxel-noise", "voxel-core", "voxel-gen", "voxel-cli", "voxel-viewer", "nav-debug", "voxel-ffi", "voxel-fluid", "voxel-sleep", "voxel-path", "voxel-world-memory", "voxel-cinema", "voxel-region", "voxel-wasm"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -12,5 +12,8 @@ rand_chacha = "0.3"
 # Browsers have no OS entropy source; getrandom needs its JS backend on wasm32.
 # Declared here so every crate pulling `rand` can opt in consistently.
 getrandom = { version = "0.2", features = ["js"] }
+# Drop-in std::time replacement: Instant/SystemTime panic at runtime on
+# wasm32-unknown-unknown; web-time backs them with performance.now()/Date.
+web-time = "1"
 crossbeam-channel = "0.5"
 dashmap = "6"

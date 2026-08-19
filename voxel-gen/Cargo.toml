@@ -5,7 +5,6 @@ edition = "2021"
 
 [dependencies]
 glam.workspace = true
-rayon.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true
 serde = { workspace = true }
@@ -14,3 +13,9 @@ voxel-core = { path = "../voxel-core" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { workspace = true }
+web-time = { workspace = true }
+
+# Browsers can't spawn rayon's worker threads; wasm builds run these loops
+# sequentially (see the cfg'd iterator sites in region_gen/zones/chunk_manager).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rayon.workspace = true

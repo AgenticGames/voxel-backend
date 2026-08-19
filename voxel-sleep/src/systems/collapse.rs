@@ -1,5 +1,9 @@
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
 use voxel_core::density::DensityField;
@@ -191,7 +195,7 @@ pub fn apply_collapse(
         trace(&format!(
             "apply_collapse step 3 (cascade) start overstressed={} remaining_budget={:.2}s",
             stress_result.overstressed.len(),
-            collapse_deadline.saturating_duration_since(std::time::Instant::now()).as_secs_f32()
+            collapse_deadline.saturating_duration_since(Instant::now()).as_secs_f32()
         ));
         let mut broken_local: Vec<BrokenStrutEvent> = Vec::new();
         let (events, hit_dl) = detect_and_execute_collapses_v2_with_force_deadline(

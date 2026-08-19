@@ -4,6 +4,10 @@
 //! vein thickening, mature formations, and structural collapse.
 
 use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
 use voxel_core::density::DensityField;
@@ -159,7 +163,7 @@ pub fn apply_deeptime(
     // when exceeded, remaining sub-steps are skipped and Phase 4
     // returns whatever it had so far.
     const PHASE4_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
-    let t_deeptime_start = std::time::Instant::now();
+    let t_deeptime_start = Instant::now();
     let mut t_substep = t_deeptime_start;
     trace(&format!(
         "Phase 4 (deeptime) sub-steps begin chunks={} fluid_chunks={} nests={} corpses={} budget={}s",
@@ -173,7 +177,7 @@ pub fn apply_deeptime(
     let phase4_deadline = t_deeptime_start + PHASE4_BUDGET;
     macro_rules! check_phase4_budget {
         ($step_name:expr) => {
-            if std::time::Instant::now() >= phase4_deadline {
+            if Instant::now() >= phase4_deadline {
                 trace(&format!(
                     "Phase 4 BUDGET EXCEEDED after {} — skipping remaining sub-steps. Elapsed {:.2}ms / budget {}ms",
                     $step_name,
@@ -305,7 +309,7 @@ pub fn apply_deeptime(
         t_substep.elapsed().as_secs_f32() * 1000.0, candidates.len()
     ));
     check_phase4_budget!("step 1 (supergene enrichment)");
-    t_substep = std::time::Instant::now();
+    t_substep = Instant::now();
 
     // --- Ambient Groundwater Enrichment ---
     // Groundwater dissolves trace minerals from host rock over geological time
@@ -475,7 +479,7 @@ pub fn apply_deeptime(
         t_substep.elapsed().as_secs_f32() * 1000.0, candidates.len()
     ));
     check_phase4_budget!("step 2 (ambient groundwater enrichment)");
-    t_substep = std::time::Instant::now();
+    t_substep = Instant::now();
 
     // --- Vein Thickening (water-proximity coating + fracture fingers) ---
     if config.vein_thickening_enabled {
@@ -726,7 +730,7 @@ pub fn apply_deeptime(
         t_substep.elapsed().as_secs_f32() * 1000.0, candidates.len()
     ));
     check_phase4_budget!("step 3 (vein thickening)");
-    t_substep = std::time::Instant::now();
+    t_substep = Instant::now();
 
     // --- Mature Formations (stalactite growth, column formation) ---
     // Stalactites and columns are calcite speleothems — only form under limestone ceilings.
@@ -808,7 +812,7 @@ pub fn apply_deeptime(
         t_substep.elapsed().as_secs_f32() * 1000.0, candidates.len()
     ));
     check_phase4_budget!("step 4 (mature formations)");
-    t_substep = std::time::Instant::now();
+    t_substep = Instant::now();
 
     // --- Nest Fossilization ---
     let mut nests_fossilized = 0u32;
@@ -901,7 +905,7 @@ pub fn apply_deeptime(
         t_substep.elapsed().as_secs_f32() * 1000.0, candidates.len()
     ));
     check_phase4_budget!("step 5 (nest fossilization)");
-    t_substep = std::time::Instant::now();
+    t_substep = Instant::now();
 
     // --- Corpse Fossilization ---
     let mut corpses_fossilized = 0u32;
@@ -1008,7 +1012,7 @@ pub fn apply_deeptime(
         t_substep.elapsed().as_secs_f32() * 1000.0, candidates.len()
     ));
     check_phase4_budget!("step 6 (corpse fossilization)");
-    t_substep = std::time::Instant::now();
+    t_substep = Instant::now();
 
     // --- Apply all candidates ---
     let mut enrichment_count = 0u32;
@@ -1060,7 +1064,7 @@ pub fn apply_deeptime(
         t_substep.elapsed().as_secs_f32() * 1000.0, candidates.len()
     ));
     check_phase4_budget!("step 7 (apply candidates)");
-    t_substep = std::time::Instant::now();
+    t_substep = Instant::now();
 
     // --- Structural Collapse (delegated to existing collapse.rs) ---
     if config.collapse.collapse_enabled {

@@ -1,0 +1,11 @@
+{
+  "name": "voxel-wasm",
+  "version": "0.1.0",
+  "files": [
+    "voxel_wasm_bg.wasm",
+    "voxel_wasm.js",
+    "voxel_wasm.d.ts"
+  ],
+  "browser": "voxel_wasm.js",
+  "types": "voxel_wasm.d.ts"
+}

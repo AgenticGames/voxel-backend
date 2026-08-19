@@ -1251,10 +1251,14 @@ pub fn apply_aureole(
 
         let mut best_glimpse_score: u32 = 0;
 
+        // Only stamps experiment CSV rows; SystemTime panics on wasm32.
+        #[cfg(not(target_arch = "wasm32"))]
         let run_ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
+        #[cfg(target_arch = "wasm32")]
+        let run_ts = 0.0_f64;
         for (zone_idx, zone) in zones.iter().enumerate() {
             crate::trace(&format!("aureole: zone {} starting ({} cells)", zone_idx, zone.cells.len()));
             let mut stats = ZoneStats::default();

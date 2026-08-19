@@ -3,6 +3,9 @@ pub mod mesh;
 pub mod sim;
 pub mod sources;
 pub mod tables;
+// The threaded sim loop needs OS threads; browsers have none. The type-only
+// surface (FluidSnapshot, cell::*, mesh::*) stays available on wasm.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod thread;
 
 use std::collections::HashMap;

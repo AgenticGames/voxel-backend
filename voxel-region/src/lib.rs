@@ -1,5 +1,12 @@
+//! `GeneratedRegion`: the demo/viewer region state machine — generate,
+//! mine, place water, run Dormancy — shared by the native HTTP viewer
+//! and the browser/WASM cave demo.
+
+pub mod params;
+
 use std::collections::HashMap;
 use glam::Vec3;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use voxel_core::chunk::ChunkCoord;
 use voxel_core::dual_contouring::mesh_gen::generate_mesh;
@@ -62,8 +69,11 @@ impl GeneratedRegion {
         // Phase 5b: Ore detail supersampling — regenerate ore chunks at higher resolution
         let multiplier = config.ore_detail_multiplier.max(1).min(4) as usize;
         if multiplier > 1 {
-            let ore_chunks: Vec<(i32, i32, i32)> = coords
-                .par_iter()
+            #[cfg(not(target_arch = "wasm32"))]
+            let coords_iter = coords.par_iter();
+            #[cfg(target_arch = "wasm32")]
+            let coords_iter = coords.iter();
+            let ore_chunks: Vec<(i32, i32, i32)> = coords_iter
                 .filter(|&&key| {
                     density_fields.get(&key)
                         .map(|d| gen_density::has_exposed_ore(d))
@@ -74,8 +84,11 @@ impl GeneratedRegion {
 
             if !ore_chunks.is_empty() {
                 let eb = config.effective_bounds();
-                let hires_results: Vec<_> = ore_chunks
-                    .par_iter()
+                #[cfg(not(target_arch = "wasm32"))]
+                let ore_chunks_iter = ore_chunks.par_iter();
+                #[cfg(target_arch = "wasm32")]
+                let ore_chunks_iter = ore_chunks.iter();
+                let hires_results: Vec<_> = ore_chunks_iter
                     .map(|&(cx, cy, cz)| {
                         let mut hires_config = config.clone();
                         hires_config.chunk_size = gs * multiplier;
@@ -110,8 +123,11 @@ impl GeneratedRegion {
         // Each chunk meshes at its own resolution (base or high-res).
         // Seam data always uses base resolution for cross-chunk stitching.
         let eb = config.effective_bounds();
-        let chunk_results: Vec<_> = coords
-            .par_iter()
+        #[cfg(not(target_arch = "wasm32"))]
+        let mesh_coords_iter = coords.par_iter();
+        #[cfg(target_arch = "wasm32")]
+        let mesh_coords_iter = coords.iter();
+        let chunk_results: Vec<_> = mesh_coords_iter
             .map(|&(cx, cy, cz)| {
                 let density = &density_fields[&(cx, cy, cz)];
                 let coord = ChunkCoord::new(cx, cy, cz);
@@ -693,8 +709,11 @@ impl GeneratedRegion {
 
         // Process all dirty chunks in parallel
         let eb = self.config.effective_bounds();
-        let results: Vec<_> = work
-            .into_par_iter()
+        #[cfg(not(target_arch = "wasm32"))]
+        let work_iter = work.into_par_iter();
+        #[cfg(target_arch = "wasm32")]
+        let work_iter = work.into_iter();
+        let results: Vec<_> = work_iter
             .map(|(key, density, mut hermite, min_x, min_y, min_z, max_x, max_y, max_z)| {
                 let coord = ChunkCoord::new(key.0, key.1, key.2);
 

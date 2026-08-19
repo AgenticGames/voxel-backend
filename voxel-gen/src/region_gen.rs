@@ -4,9 +4,14 @@
 //! A "region" is a deterministic group of chunks that share global worm connections.
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use glam::Vec3;
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use voxel_core::chunk::ChunkCoord;
 use voxel_core::hermite::{EdgeIntersection, EdgeKey, HermiteData};
@@ -90,8 +95,12 @@ pub fn generate_region_densities(
     let t0 = Instant::now();
     let coarse_skipped = std::sync::atomic::AtomicU32::new(0);
     let slowest_chunk_ms = std::sync::atomic::AtomicU64::new(0);
-    let mut density_fields: HashMap<(i32, i32, i32), DensityField> = coords
-        .par_iter()
+    // wasm32 is single-threaded: same closure, sequential iterator.
+    #[cfg(not(target_arch = "wasm32"))]
+    let base_density_iter = coords.par_iter();
+    #[cfg(target_arch = "wasm32")]
+    let base_density_iter = coords.iter();
+    let mut density_fields: HashMap<(i32, i32, i32), DensityField> = base_density_iter
         .map(|&(cx, cy, cz)| {
             let chunk_t0 = Instant::now();
             let coord = ChunkCoord::new(cx, cy, cz);
@@ -110,7 +119,8 @@ pub fn generate_region_densities(
         .collect();
     timings.base_density = t0.elapsed();
 
-    // Log base density breakdown
+    // Log base density breakdown (native only; no filesystem on wasm)
+    #[cfg(not(target_arch = "wasm32"))]
     {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
@@ -151,8 +161,12 @@ pub fn generate_region_densities(
 
     // Phase 2: Collect cavern centers from ALL chunks
     let t1 = Instant::now();
-    let all_cavern_centers: Vec<Vec3> = coords
-        .par_iter()
+    // Order-preserving on both paths: worm planning depends on center order.
+    #[cfg(not(target_arch = "wasm32"))]
+    let cavern_center_iter = coords.par_iter();
+    #[cfg(target_arch = "wasm32")]
+    let cavern_center_iter = coords.iter();
+    let all_cavern_centers: Vec<Vec3> = cavern_center_iter
         .flat_map(|&(cx, cy, cz)| {
             let density = &density_fields[&(cx, cy, cz)];
             let coord = ChunkCoord::new(cx, cy, cz);

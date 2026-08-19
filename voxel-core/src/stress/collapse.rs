@@ -5,6 +5,10 @@
 //! Behavior-preserving split of the former `stress.rs` god file.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use voxel_noise::{simplex::Simplex3D, NoiseSource};
 
@@ -348,7 +352,7 @@ pub fn detect_and_execute_collapses_v2_with_force_deadline(
     force_collapse: bool,
     halt_at_struts: bool,
     broken_out: &mut Vec<BrokenStrutEvent>,
-    deadline: Option<std::time::Instant>,
+    deadline: Option<Instant>,
 ) -> (Vec<CollapseEventV2>, bool) {
     if overstressed.is_empty() {
         return (Vec::new(), false);
@@ -376,7 +380,7 @@ pub fn detect_and_execute_collapses_v2_with_force_deadline(
         // seed's BFS can stall is bounded by `config.max_collapse_volume`.
         // When `deadline` is None this is free.
         if let Some(t) = deadline {
-            if std::time::Instant::now() >= t {
+            if Instant::now() >= t {
                 hit_deadline = true;
                 eprintln!(
                     "[stress] detect_and_execute_collapses_v2 hit deadline: processed {}/{} seeds, {} events accumulated",
