@@ -10,3 +10,6 @@ rand = { workspace = true }
 rand_chacha = { workspace = true }
 voxel-core = { path = "../voxel-core" }
 voxel-noise = { path = "../voxel-noise" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { workspace = true }

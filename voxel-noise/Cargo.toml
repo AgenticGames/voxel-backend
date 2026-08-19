@@ -7,3 +7,6 @@ edition = "2021"
 glam.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { workspace = true }

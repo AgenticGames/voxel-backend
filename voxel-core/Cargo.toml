@@ -11,3 +11,6 @@ glam.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 voxel-noise = { path = "../voxel-noise" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { workspace = true }
