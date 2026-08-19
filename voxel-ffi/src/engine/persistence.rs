@@ -279,17 +279,35 @@ impl VoxelEngine {
     pub fn export_fluid_data(&self) -> Vec<u8> {
         use crossbeam_channel::bounded;
         let (reply_tx, reply_rx) = bounded::<voxel_fluid::FluidSnapshot>(1);
-        if self
-            .fluid_event_tx
-            .try_send(voxel_fluid::FluidEvent::SnapshotRequest { reply_tx })
-            .is_err()
-        {
+        // The request rides the same bounded event channel the streaming
+        // flood fills; one failed try_send used to abandon the save's fluid
+        // outright (the slot got no fluid file — silent data loss on the
+        // next load). A save is an explicit user action: a short bounded
+        // retry on the game thread is the right trade.
+        let mut event = voxel_fluid::FluidEvent::SnapshotRequest { reply_tx };
+        let mut queued = false;
+        for _ in 0..20 {
+            match self.fluid_event_tx.try_send(event) {
+                Ok(()) => {
+                    queued = true;
+                    break;
+                }
+                Err(crossbeam_channel::TrySendError::Full(ev)) => {
+                    event = ev;
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                Err(crossbeam_channel::TrySendError::Disconnected(_)) => break,
+            }
+        }
+        if !queued {
+            crate::panic_log::note("[FLUID-SAVE] snapshot request never enqueued - fluid NOT in this save");
             eprintln!("[voxel-ffi] export_fluid_data: failed to enqueue snapshot request");
             return Vec::new();
         }
-        match reply_rx.recv_timeout(std::time::Duration::from_millis(500)) {
+        match reply_rx.recv_timeout(std::time::Duration::from_millis(2000)) {
             Ok(snapshot) => crate::fluid_save::serialize(&snapshot),
             Err(_) => {
+                crate::panic_log::note("[FLUID-SAVE] snapshot timed out - fluid NOT in this save");
                 eprintln!("[voxel-ffi] export_fluid_data: fluid thread snapshot timed out");
                 Vec::new()
             }
@@ -308,13 +326,24 @@ impl VoxelEngine {
             Ok(per_chunk) => {
                 let chunks = per_chunk.len();
                 let cells: usize = per_chunk.values().map(|v| v.len()).sum();
-                for (chunk, cells) in per_chunk {
-                    let _ = self
-                        .fluid_event_tx
-                        .try_send(voxel_fluid::FluidEvent::PendingFluidLoad { chunk, cells });
+                // 2026-08-19: this was a try_send per chunk with the result
+                // discarded — under the load-time streaming flood the bounded
+                // event channel is routinely full, so whole chunks of saved
+                // fluid silently vanished (the same save restored all / none /
+                // a-sixth of its fluid across three loads). The stash cannot
+                // drop; the sim drains it every iteration.
+                {
+                    let mut stash = match self.fluid_import_stash.lock() {
+                        Ok(g) => g,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    stash.extend(per_chunk);
                 }
+                crate::panic_log::note(&format!(
+                    "[FLUID-IMPORT] stashed {chunks} chunks / {cells} cells for restore"
+                ));
                 eprintln!(
-                    "[voxel-ffi] import_fluid_data: queued {chunks} chunks / {cells} cells",
+                    "[voxel-ffi] import_fluid_data: stashed {chunks} chunks / {cells} cells",
                 );
                 true
             }

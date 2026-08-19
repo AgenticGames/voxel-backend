@@ -36,6 +36,7 @@ pub(crate) fn fluid_sim_loop_wrapper(
     result_tx: Sender<WorkerResult>,
     config: FluidConfig,
     world_scale: f32,
+    import_stash: voxel_fluid::FluidImportStash,
 ) {
     use voxel_fluid::FluidResult;
     use voxel_fluid::thread::fluid_sim_loop;
@@ -48,7 +49,7 @@ pub(crate) fn fluid_sim_loop_wrapper(
     let sim_shutdown = Arc::clone(&shutdown);
     let sim_config = config.clone();
     let sim_handle = thread::spawn(move || {
-        fluid_sim_loop(sim_shutdown, event_rx, internal_tx, sim_config);
+        fluid_sim_loop(sim_shutdown, event_rx, internal_tx, sim_config, import_stash);
     });
 
     // Relay loop: convert FluidResult -> WorkerResult with coord transform

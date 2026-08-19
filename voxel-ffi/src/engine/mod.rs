@@ -123,6 +123,10 @@ pub struct VoxelEngine {
 
     // Fluid
     fluid_event_tx: Sender<FluidEvent>,
+    /// Save-restore fluid import stash — the guaranteed-delivery lane the
+    /// sim drains every iteration. Never send `PendingFluidLoad` through
+    /// `fluid_event_tx`: the bounded channel drops under the load flood.
+    pub(crate) fluid_import_stash: voxel_fluid::FluidImportStash,
     fluid_thread: Option<JoinHandle<()>>,
 
     // Shared state
@@ -299,6 +303,10 @@ impl VoxelEngine {
         let fluid_result_tx = result_tx.clone();
         let fluid_shutdown = Arc::clone(&shutdown);
         let fluid_world_scale = voxel_scale * world_scale;
+        // Save-restore fluid bypasses the bounded event channel (which the
+        // load-time flood fills — dropped imports) via this shared stash.
+        let fluid_import_stash: voxel_fluid::FluidImportStash = Default::default();
+        let fluid_import_stash_for_thread = Arc::clone(&fluid_import_stash);
         let fluid_thread = thread::spawn(move || {
             crate::thread_priority::set_current_below_normal();
             fluid_sim_loop_wrapper(
@@ -307,6 +315,7 @@ impl VoxelEngine {
                 fluid_result_tx,
                 fluid_config,
                 fluid_world_scale,
+                fluid_import_stash_for_thread,
             );
         });
 
@@ -868,6 +877,7 @@ impl VoxelEngine {
             priority_results: std::sync::Mutex::new(std::collections::VecDeque::new()),
             pending_mine_redispatch: std::sync::Mutex::new(std::collections::VecDeque::new()),
             fluid_event_tx,
+            fluid_import_stash,
             fluid_thread: Some(fluid_thread),
             store,
             config,

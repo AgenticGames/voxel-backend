@@ -293,6 +293,17 @@ pub struct PendingFluidCell {
     pub max_flow_dist: u8,
 }
 
+/// Overflow-proof side channel for save-restore fluid imports.
+///
+/// The bounded event channel legitimately fills under the load-time
+/// streaming flood (hundreds of DensityUpdate/PlaceSources per sim
+/// iteration), and a `try_send` import burst dropped whole chunks of saved
+/// fluid — the same save restored all / none / a-sixth of its fluid across
+/// three loads. Imports go through this stash instead; the sim drains it
+/// at the top of every loop iteration, so delivery is guaranteed.
+pub type FluidImportStash =
+    std::sync::Arc<std::sync::Mutex<Vec<((i32, i32, i32), Vec<PendingFluidCell>)>>>;
+
 /// Results sent from the fluid simulation thread back to the engine.
 pub enum FluidResult {
     /// A fluid mesh update for a chunk.

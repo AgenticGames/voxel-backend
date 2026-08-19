@@ -97,17 +97,20 @@ struct HotInfo {
     depth: u8,
 }
 use crate::sources::place_sources;
-use crate::{FluidConfig, FluidEvent, FluidResult, FluidSnapshot, PendingFluidCell};
+use crate::{FluidConfig, FluidEvent, FluidImportStash, FluidResult, FluidSnapshot, PendingFluidCell};
 
 /// Main fluid simulation loop running on its own thread.
 ///
 /// Drains events from `event_rx`, ticks the simulation at the configured rate,
-/// meshes dirty chunks, and sends results through `result_tx`.
+/// meshes dirty chunks, and sends results through `result_tx`. Save-restore
+/// fluid arrives via `import_stash` (see `FluidImportStash` — the bounded
+/// event channel drops sends under the load-time flood).
 pub fn fluid_sim_loop(
     shutdown: Arc<AtomicBool>,
     event_rx: Receiver<FluidEvent>,
     result_tx: Sender<FluidResult>,
     config: FluidConfig,
+    import_stash: FluidImportStash,
 ) {
     let mut config = config;
     let mut chunks: HashMap<(i32, i32, i32), ChunkFluidGrid> = HashMap::new();
@@ -180,6 +183,9 @@ pub fn fluid_sim_loop(
                 Err(_) => break,
             }
         }
+
+        // Save-restore imports (guaranteed delivery — see FluidImportStash).
+        drain_import_stash(&import_stash, &mut chunks, &mut chunk_densities, &mut pending_fluid, &mut features_placed, chunk_size, &mut config);
 
         // Rate knobs are read fresh every iteration (not latched before the
         // loop) so an `UpdateFluidRates` event actually changes sim speed on
@@ -1067,6 +1073,40 @@ pub(crate) fn build_boundary_levels(
     boundary
 }
 
+/// Drain the save-restore import stash into the sim, routed through the
+/// same handler as `FluidEvent::PendingFluidLoad` so the feature guards and
+/// the wait-for-density semantics stay identical to the event path.
+fn drain_import_stash(
+    stash: &FluidImportStash,
+    chunks: &mut HashMap<(i32, i32, i32), ChunkFluidGrid>,
+    chunk_densities: &mut HashMap<(i32, i32, i32), ChunkDensityCache>,
+    pending_fluid: &mut HashMap<(i32, i32, i32), Vec<PendingFluidCell>>,
+    features_placed: &mut HashSet<((i32, i32, i32), u8)>,
+    chunk_size: usize,
+    config: &mut FluidConfig,
+) {
+    let imported: Vec<((i32, i32, i32), Vec<PendingFluidCell>)> = {
+        let mut guard = match stash.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        std::mem::take(&mut *guard)
+    };
+    if imported.is_empty() {
+        return;
+    }
+    let n_chunks = imported.len();
+    let n_cells: usize = imported.iter().map(|(_, c)| c.len()).sum();
+    for (chunk, cells) in imported {
+        handle_event(
+            FluidEvent::PendingFluidLoad { chunk, cells },
+            chunks, chunk_densities, pending_fluid, features_placed,
+            chunk_size, config,
+        );
+    }
+    eprintln!("[FLUID-IMPORT] drained {n_chunks} chunks / {n_cells} cells from the import stash");
+}
+
 /// Ensure a full fluid grid exists for a chunk, promoting from density cache if needed.
 fn ensure_grid(
     chunks: &mut HashMap<(i32, i32, i32), ChunkFluidGrid>,
@@ -1127,6 +1167,48 @@ mod tests {
         assert_eq!(kept.len(), 1);
         assert!(!kept[0].fluid_type.is_lava());
         assert!(!pending.contains_key(&(4, -4, 0)), "lava-only stash must be removed");
+    }
+
+    /// 2026-08-19 regression ("fluid pick lava sometimes doesn't survive a
+    /// load"): saved fluid used to arrive as try_send events on the bounded
+    /// event channel, which the load-time streaming flood fills — whole
+    /// chunks of saved fluid were silently dropped (same save restored
+    /// all / none / a-sixth across three loads). Imports now ride the
+    /// FluidImportStash, drained every sim iteration: delivery must be
+    /// guaranteed and must behave exactly like a PendingFluidLoad event —
+    /// parked until density arrives, feature guards marked so stream-in
+    /// placement can't stomp the restored state.
+    #[test]
+    fn import_stash_delivers_like_pending_fluid_load() {
+        let mut config = FluidConfig::default();
+        let size = config.chunk_size;
+        let stash: FluidImportStash = Default::default();
+        stash.lock().unwrap().push(((2, 0, -1), vec![
+            PendingFluidCell { idx: 7, fluid_type: crate::cell::FluidType::Lava, level: 0.8, is_source: false, max_flow_dist: 12 },
+        ]));
+
+        let mut chunks = HashMap::new();
+        let mut densities = HashMap::new();
+        let mut pending = HashMap::new();
+        let mut placed = HashSet::new();
+        let chunk_size = size;
+        drain_import_stash(&stash, &mut chunks, &mut densities, &mut pending, &mut placed, chunk_size, &mut config);
+
+        assert!(stash.lock().unwrap().is_empty(), "stash must drain");
+        let parked = pending.get(&(2, 0, -1)).expect("no density yet: cells park in pending_fluid");
+        assert_eq!(parked.len(), 1);
+        assert!(placed.contains(&((2, 0, -1), 0)), "restored chunks must be feature-guarded");
+
+        // Density arrives (all-open chunk) -> the parked fluid lands in the grid.
+        let lattice = (size + 1) * (size + 1) * (size + 1);
+        handle_event(
+            FluidEvent::DensityUpdate { chunk: (2, 0, -1), densities: vec![-1.0; lattice] },
+            &mut chunks, &mut densities, &mut pending, &mut placed,
+            chunk_size, &mut config,
+        );
+        let grid = chunks.get(&(2, 0, -1)).expect("grid exists after density");
+        assert!(grid.cells[7].level > 0.5, "restored cell must hold its saved level");
+        assert!(pending.get(&(2, 0, -1)).is_none(), "pending drains on density arrival");
     }
 
     /// Bug #216 regression: the worker re-sends PlaceSources on every chunk
