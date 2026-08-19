@@ -592,6 +592,16 @@
         renderer.render(scene, camera);
     }
 
+    // Mineral legend: collapsed to a pill; expands on hover (CSS) and a
+    // click pins it open until clicked again.
+    var legendToggle = document.getElementById("legend-toggle");
+    var materialLegend = document.getElementById("material-legend");
+    if (legendToggle && materialLegend) {
+        legendToggle.addEventListener("click", function () {
+            materialLegend.classList.toggle("pinned");
+        });
+    }
+
     // Left-drag orbit state: distinguishes a quick click (mine) from a
     // hold-and-drag (rotate the view around the cave).
     var leftDrag = { down: false, moved: false, lastX: 0, lastY: 0 };

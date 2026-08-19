@@ -1070,3 +1070,237 @@ body {
 @media (max-width: 640px) {
     #controls-help { display: none; } /* touch screens: keys don't apply */
 }
+
+/* ════════════════════════════════════════════════════════════════════
+   Demo glow-up overrides — collapsible mineral legend + a bigger,
+   roomier, warmer settings panel. Kept as one override block so the
+   diff against the dev viewer's stylesheet stays easy to read.
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── Collapsible mineral legend ── */
+#material-legend {
+    display: block;
+    padding: 8px 16px;
+}
+#legend-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 5px 14px;
+    background: rgba(255, 183, 77, 0.08);
+    border: 1px solid rgba(255, 183, 77, 0.35);
+    border-radius: 999px;
+    color: #ffb74d;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: background 0.2s, box-shadow 0.2s;
+}
+#legend-toggle:hover {
+    background: rgba(255, 183, 77, 0.16);
+    box-shadow: 0 0 12px rgba(255, 183, 77, 0.15);
+}
+.legend-caret {
+    transition: transform 0.25s ease;
+}
+#material-legend:hover .legend-caret,
+#material-legend.pinned .legend-caret {
+    transform: rotate(180deg);
+}
+#legend-items {
+    display: flex;
+    align-items: center;
+    gap: 12px 14px;
+    flex-wrap: wrap;
+    overflow: hidden;
+    max-height: 0;
+    opacity: 0;
+    transition: max-height 0.35s ease, opacity 0.3s ease, padding-top 0.35s ease;
+    padding-top: 0;
+}
+#material-legend:hover #legend-items,
+#material-legend.pinned #legend-items {
+    max-height: 200px;
+    opacity: 1;
+    padding-top: 10px;
+}
+.legend-item {
+    font-size: 13px;
+}
+.legend-swatch {
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+}
+
+/* ── Bigger, nicer settings panel ── */
+#app {
+    grid-template-columns: 400px 1fr;
+}
+#left-panel {
+    padding: 24px 22px;
+    background: linear-gradient(180deg, #0d0818 0%, #0a0612 100%);
+}
+#generate-panel h2 {
+    font-size: 19px;
+    color: #e8e2f4;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    margin-bottom: 16px;
+    padding-bottom: 10px;
+    border-bottom: 2px solid rgba(255, 183, 77, 0.35);
+}
+.gen-form {
+    gap: 16px;
+}
+.gen-row {
+    gap: 16px;
+}
+.gen-row label {
+    font-size: 15px;
+    gap: 8px;
+    color: #c9c2dd;
+}
+.gen-row input[type="number"] {
+    width: 74px;
+    padding: 9px 10px;
+    font-size: 15px;
+    border-radius: 8px;
+    border: 1px solid #352a52;
+    background: #120b22;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+.gen-row input[type="number"]:focus {
+    outline: none;
+    border-color: #ffb74d;
+    box-shadow: 0 0 0 3px rgba(255, 183, 77, 0.15);
+}
+#gen-btn {
+    padding: 12px 28px;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    border-radius: 10px;
+    background: linear-gradient(120deg, #2dd4bf 0%, #4fd8c6 50%, #2dd4bf 100%);
+    background-size: 200% 100%;
+    transition: background-position 0.4s ease, box-shadow 0.25s, transform 0.15s;
+}
+#gen-btn:hover:not(:disabled) {
+    background-position: 100% 0;
+    box-shadow: 0 4px 18px rgba(45, 212, 191, 0.35);
+    transform: translateY(-1px);
+}
+#gen-status {
+    font-size: 14px;
+}
+.preset-bar {
+    gap: 10px;
+    padding: 12px 14px;
+    border-radius: 10px;
+}
+.preset-label {
+    font-size: 13px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: #9d92bb;
+}
+.preset-slot {
+    width: 34px;
+    height: 34px;
+    font-size: 14px;
+    border-radius: 8px;
+}
+.mode-bar {
+    gap: 12px;
+    padding: 14px;
+    margin: 4px 0;
+    border-radius: 10px;
+    background: rgba(45, 212, 191, 0.06);
+    border: 1px solid rgba(45, 212, 191, 0.2);
+}
+.mode-bar label {
+    font-size: 13px;
+    color: #9d92bb;
+    letter-spacing: 0.5px;
+}
+.mode-bar select {
+    padding: 9px 10px;
+    font-size: 14px;
+    border-radius: 8px;
+    background: #120b22;
+    color: #e4dff0;
+    border: 1px solid #352a52;
+}
+.mode-bar input[type="range"] {
+    width: 80px !important;
+    accent-color: #2dd4bf;
+}
+#mine-radius-val {
+    font-size: 14px;
+    color: #2dd4bf;
+    font-weight: 600;
+    min-width: 20px;
+}
+#advanced-toggle {
+    width: 100%;
+    padding: 12px;
+    font-size: 14px;
+    letter-spacing: 1px;
+    border-radius: 10px;
+}
+.settings-section {
+    margin-top: 12px;
+    border-radius: 10px;
+    border: 1px solid #352a52;
+}
+.settings-section summary {
+    padding: 12px 16px;
+    font-size: 14.5px;
+    font-weight: 600;
+    color: #d8d1ea;
+    letter-spacing: 0.5px;
+    transition: background 0.2s, color 0.2s;
+}
+.settings-section summary:hover {
+    background: rgba(255, 183, 77, 0.07);
+    color: #ffb74d;
+}
+.settings-section[open] summary {
+    color: #ffb74d;
+    border-bottom: 1px solid #352a52;
+}
+.settings-grid {
+    gap: 12px 14px;
+    padding: 14px 16px;
+}
+.settings-grid label {
+    font-size: 13.5px;
+    color: #b6adcf;
+    gap: 8px;
+}
+.settings-grid input[type="number"] {
+    padding: 7px 9px;
+    font-size: 14px;
+    border-radius: 7px;
+    background: #120b22;
+    border: 1px solid #352a52;
+    color: #e4dff0;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+.settings-grid input[type="number"]:focus {
+    outline: none;
+    border-color: #ffb74d;
+    box-shadow: 0 0 0 3px rgba(255, 183, 77, 0.12);
+}
+.toggle-label {
+    font-size: 14px;
+    gap: 9px;
+    color: #b6adcf;
+}
+.toggle-label input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    accent-color: #ffb74d;
+}
