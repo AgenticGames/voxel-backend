@@ -37,6 +37,13 @@ pub struct GeneratedRegion {
     pub fluid_seeds: Vec<FluidSeed>,
     /// Manually placed water cells (world x, y, z) for hydrothermal testing
     pub placed_water: Vec<(i32, i32, i32)>,
+    /// Region chunk range, kept so mining can re-seal boundary faces.
+    range_min: (i32, i32, i32),
+    range_max: (i32, i32, i32),
+    /// Generated with sealed boundary faces ("closed"). When true, mining
+    /// re-clamps the outer voxel shell so digging can't punch through the
+    /// edge of the world and leave holes in the mesh.
+    closed: bool,
 }
 
 pub struct MineResult {
@@ -204,6 +211,33 @@ impl GeneratedRegion {
             zone_descriptors,
             fluid_seeds,
             placed_water: Vec::new(),
+            range_min,
+            range_max,
+            closed,
+        }
+    }
+
+    /// Re-seal the outer voxel shell of any listed chunk that sits on the
+    /// region boundary. No-op unless the region was generated closed.
+    /// Call after any density edit (mining) that may have carved the shell,
+    /// and before re-meshing.
+    fn reseal_boundary_chunks(&mut self, keys: &[(i32, i32, i32)]) {
+        if !self.closed {
+            return;
+        }
+        for &(cx, cy, cz) in keys {
+            let neg_x = cx == self.range_min.0;
+            let pos_x = cx == self.range_max.0 - 1;
+            let neg_y = cy == self.range_min.1;
+            let pos_y = cy == self.range_max.1 - 1;
+            let neg_z = cz == self.range_min.2;
+            let pos_z = cz == self.range_max.2 - 1;
+            if !(neg_x || pos_x || neg_y || pos_y || neg_z || pos_z) {
+                continue;
+            }
+            if let Some(density) = self.density_fields.get_mut(&(cx, cy, cz)) {
+                density.clamp_boundary_faces(neg_x, pos_x, neg_y, pos_y, neg_z, pos_z);
+            }
         }
     }
 
@@ -523,6 +557,11 @@ impl GeneratedRegion {
             }
         }
 
+        // Closed regions: restore the outer shell before re-meshing so deep
+        // digging hits bedrock instead of punching holes in the world edge.
+        let dirty_keys: Vec<(i32, i32, i32)> = dirty_chunks.iter().map(|d| d.0).collect();
+        self.reseal_boundary_chunks(&dirty_keys);
+
         // Re-mesh dirty chunks in parallel using incremental hermite patching
         self.remesh_dirty_parallel(&dirty_chunks);
 
@@ -617,6 +656,11 @@ impl GeneratedRegion {
                 }
             }
         }
+
+        // Same boundary reseal as mine_sphere: peeling at the world edge
+        // must not open the shell.
+        let dirty_keys: Vec<(i32, i32, i32)> = dirty_chunks.iter().map(|d| d.0).collect();
+        self.reseal_boundary_chunks(&dirty_keys);
 
         self.remesh_dirty_parallel(&dirty_chunks);
 
