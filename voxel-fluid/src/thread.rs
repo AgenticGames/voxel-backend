@@ -690,6 +690,20 @@ fn handle_event(
                         if grid.cells[idx].fluid_type.is_lava() {
                             grid.cells[idx].level = 0.0;
                             grid.cells[idx].is_source = false;
+                            grid.cells[idx].grace_ticks = 0;
+                            // Render-state clear (round 2): ribbon/fringe
+                            // stream marks mesh at STREAM_FLOOR with no
+                            // raw-level gate, and they only decay inside
+                            // tick_chunk — which a drained lava-only chunk
+                            // never enters again. Left alone, pool rims and
+                            // falls (the flux-carrying cells) freeze as
+                            // burning ghost meshes.
+                            if idx < grid.render_level.len() { grid.render_level[idx] = 0.0; }
+                            if idx < grid.flux_ema.len() { grid.flux_ema[idx] = 0.0; }
+                            if idx < grid.stream_mark.len() { grid.stream_mark[idx] = false; }
+                            if idx < grid.mesh_sticky.len() { grid.mesh_sticky[idx] = false; }
+                            if idx < grid.influx_hold.len() { grid.influx_hold[idx] = 0; }
+                            if idx < grid.momentum.len() { grid.momentum[idx] = [0.0, 0.0]; }
                         }
                     }
                     // All lava in this chunk is drained — clear the flag so the
@@ -1347,6 +1361,67 @@ mod tests {
             !cell.is_source,
             "zero-level lava source must be extinguished by the drain (it re-pumps the stream otherwise)"
         );
+    }
+
+    /// 2026-08-20 round 2 (user verify: "pool interiors drained, but the
+    /// EDGES and the lavafall persist as burning lava mixed with water
+    /// material"): the ribbon/fringe renderer meshes stream-marked cells at
+    /// STREAM_FLOOR with NO raw-level gate, and stream_mark only exits when
+    /// flux_ema decays below STREAM_FLUX_OFF — but flux only decays in
+    /// tick_chunk, which a drained lava-only chunk never enters again. The
+    /// pool rims and falls (exactly the flux-carrying cells) froze as ghost
+    /// lava meshes that still burn via #248. The drain must zero the
+    /// per-cell render state along with the fluid.
+    #[test]
+    fn drain_lava_clears_ribbon_and_render_state() {
+        let mut config = FluidConfig::default();
+        let size = config.chunk_size;
+        let total = size * size * size;
+        let mut chunks = HashMap::new();
+        let mut densities = HashMap::new();
+        let mut placed = HashSet::new();
+        let mut pending = HashMap::new();
+        let (result_tx, _result_rx) = crossbeam_channel::unbounded();
+        let mut active_meshes = HashSet::new();
+
+        let mut grid = ChunkFluidGrid::new(size);
+        let rim = grid.index(4, 2, 4);
+        {
+            // Pool-rim spill cell as the live game leaves it: modest raw
+            // level, ribbon-marked, high flux average, held in hysteresis.
+            let cell = grid.get_mut(4, 2, 4);
+            cell.fluid_type = crate::cell::FluidType::Lava;
+            cell.level = 0.08;
+        }
+        grid.has_lava = true;
+        grid.render_flux = true;
+        grid.render_ribbon = true;
+        grid.render_level = vec![0.0; total];
+        grid.render_level[rim] = 0.9;
+        grid.flux_ema = vec![0.0; total];
+        grid.flux_ema[rim] = 0.3;
+        grid.stream_mark = vec![false; total];
+        grid.stream_mark[rim] = true;
+        grid.mesh_sticky = vec![false; total];
+        grid.mesh_sticky[rim] = true;
+        chunks.insert((2, 0, 2), grid);
+
+        handle_event(
+            FluidEvent::DrainLavaChunks { chunks: vec![(2, 0, 2)] },
+            &mut chunks, &mut densities, &mut pending, &mut placed,
+            size, &mut config, &result_tx, &mut active_meshes,
+        );
+
+        let grid = &chunks[&(2, 0, 2)];
+        assert!(
+            grid.mesh_level(4, 2, 4) < crate::cell::MESH_STICKY_ON,
+            "drained rim cell must not mesh (got mesh_level={}) — ribbon floor / EMA ghost",
+            grid.mesh_level(4, 2, 4)
+        );
+        assert!(!grid.stream_mark[rim], "stream mark must clear with the lava");
+        assert_eq!(grid.flux_ema[rim], 0.0, "flux average must clear with the lava");
+        assert_eq!(grid.render_level[rim], 0.0, "render EMA must clear with the lava");
+        assert!(!grid.mesh_sticky[rim], "hysteresis hold must clear with the lava");
     }
 
     /// 2026-08-20 companion to the montage teardown: RestoreMontageFluidState
