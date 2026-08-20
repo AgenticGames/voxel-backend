@@ -87,15 +87,25 @@ pub struct PathNode {
 /// Returns a [`PathOutcome`] with status + nodes. The nodes list is empty on
 /// failure but the status conveys *why*.
 pub fn compute_path<G: CellGrid>(grid: &G, request: PathRequest) -> PathOutcome {
-    // Validate endpoints — solid start/goal means we can't even begin.
-    if !can_traverse(grid, request.from, request.mode)
-        || !can_traverse(grid, request.to, request.mode)
-    {
+    // Endpoint tolerance: callers hand in cells quantized from live actor
+    // positions — a capsule centre hovers 1-2 cells above the floor its
+    // Walking/Surface mode needs adjacency to, and either agent may be
+    // mid-jump when the query fires. Rejecting those as InvalidEndpoint made
+    // "chase the player" fail for entire seconds at a time even though a
+    // perfectly good route ended one cell below the requested goal. Snap each
+    // endpoint to the nearest traversable cell (deterministic near-to-far;
+    // ties prefer the floorward candidate) before validating.
+    let snapped = snapped_endpoint(grid, request.from, request.mode)
+        .zip(snapped_endpoint(grid, request.to, request.mode));
+    let Some((from, to)) = snapped else {
         return PathOutcome {
             status: PathStatus::InvalidEndpoint,
             nodes: Vec::new(),
         };
-    }
+    };
+    let mut request = request;
+    request.from = from;
+    request.to = to;
 
     // Same cell — trivial path of one node.
     if request.from == request.to {
@@ -431,6 +441,44 @@ fn partial_nodes<G: CellGrid>(
         nodes = smooth_path(grid, request.mode, nodes);
     }
     nodes
+}
+
+/// How far an off-grid endpoint may be nudged to find a traversable cell.
+/// 3 cells covers a capsule centre's hover height at both grid resolutions
+/// without letting a goal jump across meaningful geometry (a snap through a
+/// thin wall just yields an honest NoPath/partial to the near side).
+const SNAP_RADIUS: i32 = 3;
+
+fn snapped_endpoint<G: CellGrid>(grid: &G, cell: IVec3, mode: MovementMode) -> Option<IVec3> {
+    if can_traverse(grid, cell, mode) {
+        return Some(cell);
+    }
+    snap_offsets()
+        .iter()
+        .map(|&off| cell + off)
+        .find(|&c| can_traverse(grid, c, mode))
+}
+
+/// Offsets within SNAP_RADIUS ordered near-to-far, ties broken floorward
+/// (-y first; +Y is up in this grid) then by x/z for full determinism.
+fn snap_offsets() -> &'static [IVec3] {
+    use std::sync::OnceLock;
+    static OFFSETS: OnceLock<Vec<IVec3>> = OnceLock::new();
+    OFFSETS.get_or_init(|| {
+        let r = SNAP_RADIUS;
+        let mut v = Vec::new();
+        for y in -r..=r {
+            for x in -r..=r {
+                for z in -r..=r {
+                    if (x, y, z) != (0, 0, 0) {
+                        v.push(IVec3::new(x, y, z));
+                    }
+                }
+            }
+        }
+        v.sort_by_key(|o| (o.x * o.x + o.y * o.y + o.z * o.z, o.y, o.x, o.z));
+        v
+    })
 }
 
 // ─── Internals ───────────────────────────────────────────────────

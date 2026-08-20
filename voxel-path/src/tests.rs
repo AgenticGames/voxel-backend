@@ -473,13 +473,78 @@ fn same_cell_trivial_path() {
     assert_eq!(outcome.nodes.len(), 1);
 }
 
+// ─── Endpoint snapping ──────────────────────────────────────────
+
 #[test]
-fn solid_start_invalid_endpoint() {
+fn solid_start_snaps_to_adjacent_open_cell() {
+    // A start cell inside a lone solid voxel is no longer a hard failure —
+    // it snaps to the nearest open neighbor and the path proceeds.
     let mut grid = StubGrid::default();
     grid.set_solid(IVec3::new(0, 0, 0));
     let req = PathRequest {
         from: IVec3::new(0, 0, 0),
         to: IVec3::new(5, 0, 0),
+        mode: MovementMode::Flying { agent_radius_cells: 0.5 },
+        smooth: false,
+        ..Default::default()
+    };
+    let outcome = compute_path(&grid, req);
+    assert_eq!(outcome.status, PathStatus::Success);
+    assert_eq!(outcome.nodes.last().unwrap().cell, IVec3::new(5, 0, 0));
+}
+
+#[test]
+fn surface_goal_floating_above_floor_snaps_down() {
+    // Floor slab at y=-1; the goal floats two cells above the surface row —
+    // the capsule-centre case that used to InvalidEndpoint every chase query
+    // against a jumping player.
+    let mut grid = StubGrid::default();
+    grid.fill_box(IVec3::new(-2, -1, -2), IVec3::new(8, -1, 2));
+    let req = PathRequest {
+        from: IVec3::new(0, 0, 0),
+        to: IVec3::new(6, 2, 0),
+        mode: MovementMode::Surface { agent_radius_cells: 0.5 },
+        smooth: false,
+        ..Default::default()
+    };
+    let outcome = compute_path(&grid, req);
+    assert_eq!(outcome.status, PathStatus::Success);
+    assert_eq!(
+        outcome.nodes.last().unwrap().cell,
+        IVec3::new(6, 0, 0),
+        "goal should snap to the floor-adjacent surface cell"
+    );
+}
+
+#[test]
+fn walking_start_hovering_snaps_to_floor() {
+    let mut grid = StubGrid::default();
+    grid.fill_box(IVec3::new(-2, -1, -2), IVec3::new(8, -1, 2));
+    let req = PathRequest {
+        from: IVec3::new(0, 2, 0),
+        to: IVec3::new(6, 0, 0),
+        mode: MovementMode::Walking { agent_radius_cells: 0.5 },
+        smooth: false,
+        ..Default::default()
+    };
+    let outcome = compute_path(&grid, req);
+    assert_eq!(outcome.status, PathStatus::Success);
+    assert_eq!(
+        outcome.nodes.first().unwrap().cell,
+        IVec3::new(0, 0, 0),
+        "start should snap down onto the floor cell"
+    );
+}
+
+#[test]
+fn deeply_buried_endpoint_still_invalid() {
+    // Goal at the centre of a 13-cell solid block — nothing traversable
+    // within snap range, so the query still fails honestly.
+    let mut grid = StubGrid::default();
+    grid.fill_box(IVec3::new(-6, -6, -6), IVec3::new(6, 6, 6));
+    let req = PathRequest {
+        from: IVec3::new(0, 10, 0),
+        to: IVec3::new(0, 0, 0),
         mode: MovementMode::Flying { agent_radius_cells: 0.5 },
         ..Default::default()
     };
