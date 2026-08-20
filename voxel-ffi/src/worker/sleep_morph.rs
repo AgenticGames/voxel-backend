@@ -199,16 +199,19 @@ pub(super) fn handle_sleep(ctx: &super::HandlerCtx<'_>, player_chunk: (i32, i32,
             });
             let result_sent_ms = t_worker_start.elapsed().as_secs_f64() * 1000.0;
 
-            // Drain solidified lava from the real fluid system — AFTER the
-            // completion result (2026-08-18). Sent before it, the fluid thread
-            // pumped ~471 chunks of fluid-mesh results into the bounded result
-            // queue AHEAD of SleepComplete, and UE's budgeted drain took ~3.3s
-            // to reach it — pure added black-screen wait. The drain itself is
-            // invisible (screen is black; the montage spawns its own lava mesh
-            // from LavaCells and runs its own drain envelope).
-            if sleep_result.lava_solidified > 0 {
-                let lava_chunks: Vec<(i32, i32, i32)> = fluid_snapshot.chunks.keys().copied().collect();
-                let _ = fluid_event_tx.send(voxel_fluid::FluidEvent::DrainLavaChunks { chunks: lava_chunks });
+            // Evaporate the fluid system — AFTER the completion result
+            // (2026-08-18). Sent before it, the fluid thread pumped ~471
+            // chunks of fluid-mesh results into the bounded result queue
+            // AHEAD of SleepComplete, and UE's budgeted drain took ~3.3s to
+            // reach it — pure added black-screen wait. The drain itself is
+            // invisible (screen is black; the montage spawns its own lava
+            // mesh from LavaCells and runs its own drain envelope).
+            // 2026-08-20: fires on EVERY sleep with fluid (not just when lava
+            // solidified) — dormancy is 1.25Ma of geological time and
+            // evaporates standing water along with the lava (user directive).
+            if !fluid_snapshot.chunks.is_empty() {
+                let fluid_chunks: Vec<(i32, i32, i32)> = fluid_snapshot.chunks.keys().copied().collect();
+                let _ = fluid_event_tx.send(voxel_fluid::FluidEvent::DrainLavaChunks { chunks: fluid_chunks });
             }
 
             // Collapse events ride right behind the completion result (tiny).
@@ -411,10 +414,11 @@ pub(super) fn handle_aureole_only(ctx: &super::HandlerCtx<'_>, player_chunk: (i3
                 player_chunk,
             );
 
-            // Drain solidified lava if any
-            if sleep_result.lava_solidified > 0 {
-                let lava_chunks: Vec<(i32, i32, i32)> = fluid_snapshot.chunks.keys().copied().collect();
-                let _ = fluid_event_tx.send(voxel_fluid::FluidEvent::DrainLavaChunks { chunks: lava_chunks });
+            // Evaporate all standing fluid (2026-08-20: water goes with the
+            // lava — dormancy is geological time), same as the Sleep handler.
+            if !fluid_snapshot.chunks.is_empty() {
+                let fluid_chunks: Vec<(i32, i32, i32)> = fluid_snapshot.chunks.keys().copied().collect();
+                let _ = fluid_event_tx.send(voxel_fluid::FluidEvent::DrainLavaChunks { chunks: fluid_chunks });
             }
 
             // Remesh dirty chunks (same pattern as Sleep)

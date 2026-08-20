@@ -681,36 +681,33 @@ fn handle_event(
             for chunk_key in drain_chunks {
                 if let Some(grid) = chunks.get_mut(&chunk_key) {
                     let total = grid.size * grid.size * grid.size;
+                    // Dormancy evaporates ALL standing fluid — water included
+                    // (user directive 2026-08-20: 1.25Ma of geological time
+                    // leaves neither lava nor pools). No level guard: a
+                    // fall-feeding source's post-tick level is 0.0 (free-fall
+                    // gulps the whole refill), so gating on level left
+                    // is_source alive and the stream re-pumped seconds after
+                    // the "drained" montage (World_1991).
                     for idx in 0..total {
-                        // No level guard: a fall-feeding source's post-tick
-                        // level is 0.0 (free-fall gulps the whole refill), so
-                        // gating on level left is_source alive and the stream
-                        // re-pumped seconds after the "drained" montage
-                        // (2026-08-20, World_1991).
-                        if grid.cells[idx].fluid_type.is_lava() {
-                            grid.cells[idx].level = 0.0;
-                            grid.cells[idx].is_source = false;
-                            grid.cells[idx].grace_ticks = 0;
-                            // Render-state clear (round 2): ribbon/fringe
-                            // stream marks mesh at STREAM_FLOOR with no
-                            // raw-level gate, and they only decay inside
-                            // tick_chunk — which a drained lava-only chunk
-                            // never enters again. Left alone, pool rims and
-                            // falls (the flux-carrying cells) freeze as
-                            // burning ghost meshes.
-                            if idx < grid.render_level.len() { grid.render_level[idx] = 0.0; }
-                            if idx < grid.flux_ema.len() { grid.flux_ema[idx] = 0.0; }
-                            if idx < grid.stream_mark.len() { grid.stream_mark[idx] = false; }
-                            if idx < grid.mesh_sticky.len() { grid.mesh_sticky[idx] = false; }
-                            if idx < grid.influx_hold.len() { grid.influx_hold[idx] = 0; }
-                            if idx < grid.momentum.len() { grid.momentum[idx] = [0.0, 0.0]; }
-                        }
+                        grid.cells[idx].level = 0.0;
+                        grid.cells[idx].is_source = false;
+                        grid.cells[idx].grace_ticks = 0;
                     }
-                    // All lava in this chunk is drained — clear the flag so the
-                    // per-tick quench scan stops visiting it. (next tick_chunk
-                    // would also recompute it, but clearing here means we save
-                    // the next scan immediately.)
+                    // Render-state clear (round 2): ribbon/fringe stream
+                    // marks mesh at STREAM_FLOOR with no raw-level gate, and
+                    // they only decay inside tick_chunk — which a drained
+                    // empty chunk never enters again. Left alone, pool rims
+                    // and falls (the flux-carrying cells) freeze as burning
+                    // ghost meshes.
+                    grid.render_level.fill(0.0);
+                    grid.flux_ema.fill(0.0);
+                    grid.stream_mark.fill(false);
+                    grid.mesh_sticky.fill(false);
+                    grid.influx_hold.fill(0);
+                    grid.momentum.fill([0.0, 0.0]);
+                    grid.has_fluid = false;
                     grid.has_lava = false;
+                    grid.has_sources = false;
                     grid.dirty = true;
                     live_chunks += 1;
                 }
@@ -718,24 +715,18 @@ fn handle_event(
                 // chunks keep their fluid in pending_fluid at FULL level with
                 // LIVE is_source flags — the drain only touched live grids, so
                 // any chunk fluid-unloaded at drain time (montage pin/unpin
-                // churn guarantees some) resurrected its whole lava pool,
-                // sources included, the moment it re-streamed. Purge lava from
-                // the stash too; water entries are untouched.
-                if let Some(pending) = pending_fluid.get_mut(&chunk_key) {
-                    let before = pending.len();
-                    pending.retain(|p| !p.fluid_type.is_lava());
-                    purged_pending += (before - pending.len()) as u32;
-                    if pending.is_empty() {
-                        pending_fluid.remove(&chunk_key);
-                    }
+                // churn guarantees some) resurrected its whole pool, sources
+                // included, the moment it re-streamed. Evaporate the stash too.
+                if let Some(pending) = pending_fluid.remove(&chunk_key) {
+                    purged_pending += pending.len() as u32;
                 }
                 // 2026-08-20 residual of the above: with no live grid there is
                 // nothing to re-mesh, so the dirty→mesh-pass→empty-send path
-                // never fires and the UE actor keeps its last non-empty lava
-                // mesh — visible, and burning via #248 contact — until the
-                // actor recycles. Send the clearing empty mesh from here; the
-                // tracker gate keeps never-meshed chunks from spamming empties.
-                // Surviving stashed water re-meshes on re-stream as before.
+                // never fires and the UE actor keeps its last non-empty fluid
+                // mesh — visible, and burning via #248 contact if lava — until
+                // the actor recycles. Send the clearing empty mesh from here;
+                // the tracker gate keeps never-meshed chunks from spamming
+                // empties.
                 if !chunks.contains_key(&chunk_key) && active_fluid_meshes.remove(&chunk_key) {
                     let _ = result_tx.send(FluidResult::FluidMesh {
                         chunk: chunk_key,
@@ -752,7 +743,7 @@ fn handle_event(
                 }
             }
             eprintln!(
-                "[LAVA-DRAIN] drained {} live chunks, purged {} stashed lava cells, cleared {} stale meshes on unloaded chunks",
+                "[FLUID-DRAIN] evaporated {} live chunks (all fluid), purged {} stashed cells, cleared {} stale meshes on unloaded chunks",
                 live_chunks, purged_pending, cleared_unloaded
             );
         }
@@ -1223,9 +1214,10 @@ mod tests {
 
     /// 2026-08-13 regression ("lava popped back and burned me"): DrainLavaChunks
     /// only touched LIVE grids — a chunk fluid-unloaded at drain time kept its
-    /// lava in pending_fluid at FULL level with is_source=true, and re-streaming
-    /// re-injected the whole pool, sources included. The drain must purge
-    /// stashed lava too; water entries stay untouched.
+    /// fluid in pending_fluid at FULL level with is_source=true, and
+    /// re-streaming re-injected the whole pool, sources included. The drain
+    /// must purge the stash too. (2026-08-20 round 3: water evaporates along
+    /// with the lava — the whole entry goes, not just lava cells.)
     #[test]
     fn drain_lava_purges_pending_stash() {
         let mut config = FluidConfig::default();
@@ -1237,7 +1229,6 @@ mod tests {
             PendingFluidCell { idx: 5, fluid_type: crate::cell::FluidType::Lava, level: 1.0, is_source: true, max_flow_dist: 12 },
             PendingFluidCell { idx: 9, fluid_type: crate::cell::FluidType::Water, level: 0.5, is_source: false, max_flow_dist: 0 },
         ]);
-        // A chunk whose stash is lava-only must be removed entirely.
         pending.insert((4, -4, 0), vec![
             PendingFluidCell { idx: 1, fluid_type: crate::cell::FluidType::Lava, level: 1.0, is_source: true, max_flow_dist: 12 },
         ]);
@@ -1248,9 +1239,7 @@ mod tests {
             &mut chunks, &mut densities, &mut pending, &mut placed,
             config.chunk_size, &mut config, &result_tx, &mut active_meshes,
         );
-        let kept = pending.get(&(3, -4, 0)).expect("water entry must survive the drain");
-        assert_eq!(kept.len(), 1);
-        assert!(!kept[0].fluid_type.is_lava());
+        assert!(!pending.contains_key(&(3, -4, 0)), "mixed stash evaporates entirely (water included)");
         assert!(!pending.contains_key(&(4, -4, 0)), "lava-only stash must be removed");
     }
 
@@ -1261,7 +1250,7 @@ mod tests {
     /// send an explicit empty FluidMesh for every drained key that has no live
     /// grid but a previously-sent mesh (active_fluid_meshes gates the send so
     /// never-meshed chunks don't spam empties). Live grids stay on the normal
-    /// dirty→re-mesh path, which also handles surviving water correctly.
+    /// dirty→re-mesh path.
     #[test]
     fn drain_lava_sends_empty_mesh_for_unloaded_chunks() {
         let mut config = FluidConfig::default();
@@ -1361,6 +1350,60 @@ mod tests {
             !cell.is_source,
             "zero-level lava source must be extinguished by the drain (it re-pumps the stream otherwise)"
         );
+    }
+
+    /// 2026-08-20 round 3 (user directive): "the water is supposed to
+    /// evaporate with the dormancy along with the lava" — 1.25Ma of
+    /// geological time leaves no standing fluid. The dormancy drain must
+    /// remove water (cells, sources, stash, render state) exactly like lava.
+    #[test]
+    fn dormancy_drain_evaporates_water_too() {
+        let mut config = FluidConfig::default();
+        let size = config.chunk_size;
+        let total = size * size * size;
+        let mut chunks = HashMap::new();
+        let mut densities = HashMap::new();
+        let mut placed = HashSet::new();
+        let mut pending: HashMap<(i32, i32, i32), Vec<PendingFluidCell>> = HashMap::new();
+        let (result_tx, _result_rx) = crossbeam_channel::unbounded();
+        let mut active_meshes = HashSet::new();
+
+        let mut grid = ChunkFluidGrid::new(size);
+        {
+            let cell = grid.get_mut(3, 3, 3);
+            cell.fluid_type = crate::cell::FluidType::Water;
+            cell.level = 0.8;
+        }
+        {
+            // A spring: sources must not survive and re-pump the pool.
+            let cell = grid.get_mut(5, 2, 5);
+            cell.fluid_type = crate::cell::FluidType::Water;
+            cell.level = 1.0;
+            cell.is_source = true;
+        }
+        grid.has_fluid = true;
+        grid.has_sources = true;
+        let pool_idx = grid.index(3, 3, 3);
+        grid.stream_mark = vec![false; total];
+        grid.stream_mark[pool_idx] = true;
+        chunks.insert((1, 0, 1), grid);
+        // Fluid-unloaded chunk: stashed water must evaporate too.
+        pending.insert((2, 0, 1), vec![
+            PendingFluidCell { idx: 4, fluid_type: crate::cell::FluidType::Water, level: 0.9, is_source: true, max_flow_dist: 0 },
+        ]);
+
+        handle_event(
+            FluidEvent::DrainLavaChunks { chunks: vec![(1, 0, 1), (2, 0, 1)] },
+            &mut chunks, &mut densities, &mut pending, &mut placed,
+            size, &mut config, &result_tx, &mut active_meshes,
+        );
+
+        let grid = &chunks[&(1, 0, 1)];
+        assert_eq!(grid.get(3, 3, 3).level, 0.0, "standing water must evaporate in the dormancy drain");
+        assert!(!grid.get(5, 2, 5).is_source, "water sources must not survive to re-fill the pool");
+        assert_eq!(grid.get(5, 2, 5).level, 0.0);
+        assert!(!grid.stream_mark[grid.index(3, 3, 3)], "water render state clears like lava's");
+        assert!(!pending.contains_key(&(2, 0, 1)), "stashed water must evaporate too");
     }
 
     /// 2026-08-20 round 2 (user verify: "pool interiors drained, but the
