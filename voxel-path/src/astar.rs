@@ -115,6 +115,16 @@ pub fn compute_path<G: CellGrid>(grid: &G, request: PathRequest) -> PathOutcome 
     let mut touched_unloaded = false;
     let mut nodes_expanded: u32 = 0;
 
+    // Best-effort tracking: the expanded cell that got closest to the goal.
+    // When the search fails — budget exhausted or frontier dry — the path to
+    // THIS cell is returned alongside the failure status instead of nothing,
+    // so a guidance consumer (sense trail) can draw "as far as the search
+    // got" and announce the shortfall honestly. AI consumers are unaffected:
+    // UVoxelPathFollower discards nodes on every non-Success/PartiallyUnloaded
+    // status, so only readers that opt in ever see the partial.
+    let mut best_cell = request.from;
+    let mut best_h = heuristic(request.from, request.to);
+
     // Clearance cost for wide agents (radius ≥ 1 cell, same gate as the
     // traversability shell): a soft penalty per solid SECOND-shell face
     // neighbor, so where a passage is wider than the legal minimum the route
@@ -148,6 +158,12 @@ pub fn compute_path<G: CellGrid>(grid: &G, request: PathRequest) -> PathOutcome 
             }
         }
 
+        let cur_h = heuristic(current, request.to);
+        if cur_h < best_h {
+            best_h = cur_h;
+            best_cell = current;
+        }
+
         if current == request.to {
             // Reconstruct path
             let raw_path = reconstruct(&came_from, current);
@@ -175,7 +191,7 @@ pub fn compute_path<G: CellGrid>(grid: &G, request: PathRequest) -> PathOutcome 
         if nodes_expanded >= request.max_nodes {
             return PathOutcome {
                 status: PathStatus::MaxNodesReached,
-                nodes: Vec::new(),
+                nodes: partial_nodes(grid, &came_from, best_cell, &request),
             };
         }
 
@@ -239,7 +255,27 @@ pub fn compute_path<G: CellGrid>(grid: &G, request: PathRequest) -> PathOutcome 
                 let unit = if let Some(&p) = clearance_cache.get(&neighbor) {
                     p
                 } else {
-                    let p = clearance_pressure(grid, neighbor) + ground_penalty(grid, neighbor);
+                    // Epistemic tax: a grid may expose UNLOADED cells as
+                    // traversable (opt-in guidance grids — ChunkStoreGrid
+                    // `unknown_open`). Assumed-open space costs a LITTLE
+                    // extra so the route prefers grounded cave the store
+                    // actually KNOWS, threading unknown only where knowledge
+                    // runs out; the crossing is reported PartiallyUnloaded.
+                    // The tax REPLACES the ground/clearance terms out there
+                    // (every unknown probe would read airborne + clear) and
+                    // is deliberately small: per-cell cost above the
+                    // euclidean heuristic inflates the A* frontier roughly
+                    // cubically with the slack, and a multi-km sense solve
+                    // must cross thousands of unknown cells inside its node
+                    // budget. Grids that keep unloaded solid never reach
+                    // here with an unloaded neighbor (can_traverse already
+                    // rejected it).
+                    let p = if !grid.is_loaded(neighbor) {
+                        touched_unloaded = true;
+                        clearance_pressure(grid, neighbor) + 0.35
+                    } else {
+                        clearance_pressure(grid, neighbor) + ground_penalty(grid, neighbor)
+                    };
                     clearance_cache.insert(neighbor, p);
                     p
                 };
@@ -336,7 +372,13 @@ pub fn compute_path<G: CellGrid>(grid: &G, request: PathRequest) -> PathOutcome 
                     let unit = if let Some(&p) = clearance_cache.get(&neighbor) {
                         p
                     } else {
-                        let p = clearance_pressure(grid, neighbor) + ground_penalty(grid, neighbor);
+                        // Same epistemic tax as the base neighbor loop.
+                        let p = if !grid.is_loaded(neighbor) {
+                            touched_unloaded = true;
+                            clearance_pressure(grid, neighbor) + 0.35
+                        } else {
+                            clearance_pressure(grid, neighbor) + ground_penalty(grid, neighbor)
+                        };
                         clearance_cache.insert(neighbor, p);
                         p
                     };
@@ -360,8 +402,35 @@ pub fn compute_path<G: CellGrid>(grid: &G, request: PathRequest) -> PathOutcome 
 
     PathOutcome {
         status: PathStatus::NoPath,
-        nodes: Vec::new(),
+        nodes: partial_nodes(grid, &came_from, best_cell, &request),
     }
+}
+
+/// Best-effort partial: reconstruct the route to the closest-approach cell.
+/// Returns an empty list when the search made no progress at all (a
+/// start-only "path" is no guidance), preserving the old empty-on-failure
+/// behavior for that case.
+fn partial_nodes<G: CellGrid>(
+    grid: &G,
+    came_from: &HashMap<IVec3, IVec3>,
+    end: IVec3,
+    request: &PathRequest,
+) -> Vec<PathNode> {
+    let raw_path = reconstruct(came_from, end);
+    if raw_path.len() < 2 {
+        return Vec::new();
+    }
+    let mut nodes: Vec<PathNode> = raw_path
+        .into_iter()
+        .map(|cell| PathNode {
+            cell,
+            surface_normal: maybe_normal(grid, cell, request.mode),
+        })
+        .collect();
+    if request.smooth {
+        nodes = smooth_path(grid, request.mode, nodes);
+    }
+    nodes
 }
 
 // ─── Internals ───────────────────────────────────────────────────

@@ -58,6 +58,7 @@ pub fn compose_for_scene(
         cell_factor: 2,
         occupied_cells: None,
         requester_cell: None,
+        unknown_open: false,
     };
 
     // Surface probe closure — wraps `surface_probe::probe_surface` and

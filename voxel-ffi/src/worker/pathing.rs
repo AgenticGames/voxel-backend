@@ -119,6 +119,7 @@ fn handle_path_request(
         cell_factor,
         occupied_cells: occupied_for_grid,
         requester_cell: Some(requester_cell),
+        unknown_open: request.unknown_open,
     };
 
     let (path_req, _mode) = crate::pathing::to_path_request(&request, cell_factor);

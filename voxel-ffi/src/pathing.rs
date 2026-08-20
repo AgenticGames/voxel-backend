@@ -40,6 +40,16 @@ pub struct ChunkStoreGrid<'a> {
     pub cell_factor: i32,
     pub occupied_cells: Option<&'a HashSet<(i32, i32, i32)>>,
     pub requester_cell: Option<IVec3>,
+    /// Treat cells in UNLOADED chunks as open instead of solid. Opt-in for
+    /// guidance queries (the sense trail): the dormancy bank keeps only a
+    /// small bubble of chunks resident around the player, so with the default
+    /// "unloaded = solid" a long route dies against a wall of ignorance a few
+    /// hundred UU out. Open-unknown lets the search assume cave where it has
+    /// no data — A* taxes those cells (epistemic penalty) so KNOWN cave is
+    /// preferred, and the result is flagged PartiallyUnloaded so callers can
+    /// replan as reality streams in. AI requests never set this: an enemy
+    /// must not chase through rock it merely hopes is open.
+    pub unknown_open: bool,
 }
 
 impl<'a> ChunkStoreGrid<'a> {
@@ -82,7 +92,9 @@ impl<'a> CellGrid for ChunkStoreGrid<'a> {
         let (chunk_key, (lx, ly, lz)) = self.cell_to_chunk_local(cell);
         let static_solid = match self.store.density_fields.get(&chunk_key) {
             Some(field) => field.get(lx, ly, lz).material.is_solid(),
-            None => true, // unloaded → impassable barrier
+            // Unloaded: impassable barrier by default; assumed-open for
+            // opt-in guidance queries (see `unknown_open` above).
+            None => !self.unknown_open,
         };
         if static_solid {
             return true;
@@ -156,6 +168,7 @@ pub struct PathRequestInternal {
     pub max_nodes: u32,
     pub smooth: bool,
     pub fine_cells: bool,
+    pub unknown_open: bool,
 }
 
 /// Build the internal request from UE-space inputs. Caller supplies
@@ -168,6 +181,7 @@ pub fn build_request_from_ue(
     movement_mode: u8,
     smooth_disable: u8,
     fine_cells: u8,
+    unknown_open: u8,
     max_nodes: u32,
     world_scale: f32,
 ) -> PathRequestInternal {
@@ -180,6 +194,7 @@ pub fn build_request_from_ue(
         max_nodes,
         smooth: smooth_disable == 0,
         fine_cells: fine_cells != 0,
+        unknown_open: unknown_open != 0,
     }
 }
 
@@ -299,7 +314,11 @@ pub struct FfiPathRequest {
     /// the cross-species occupancy layer (quantized at the coarse factor,
     /// and a guidance ribbon shouldn't dodge wasps anyway).
     pub fine_cells: u8,
-    pub _pad: [u8; 1],       // explicit padding to match C layout
+    /// 1 = treat unloaded chunks as OPEN (taxed) instead of solid — see
+    /// `ChunkStoreGrid::unknown_open`. Sense-trail guidance only; carved
+    /// from the last `_pad` byte, so the C layout is unchanged and
+    /// zero-initialized callers (all AI) keep unloaded-as-solid.
+    pub unknown_open: u8,
     pub max_nodes: u32,
 }
 

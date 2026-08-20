@@ -44,6 +44,7 @@ impl VoxelEngine {
             request.movement_mode,
             request.smooth_disable,
             request.fine_cells,
+            request.unknown_open,
             request.max_nodes,
             self.world_scale,
         );

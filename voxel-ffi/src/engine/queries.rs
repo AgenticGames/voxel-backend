@@ -669,6 +669,7 @@ impl VoxelEngine {
         agent_radius_ue: f32,
         movement_mode: u8,
         fine_cells: u8,
+        unknown_open: u8,
         max_nodes: u32,
     ) -> Option<u8> {
         let chunk_size = self.chunk_size();
@@ -682,6 +683,7 @@ impl VoxelEngine {
             movement_mode,
             1, // smoothing irrelevant here (and explicitly forced off below)
             fine_cells,
+            unknown_open,
             if max_nodes == 0 { 10_000 } else { max_nodes },
             world_scale,
         );
@@ -702,6 +704,7 @@ impl VoxelEngine {
             cell_factor,
             occupied_cells: None,
             requester_cell: None,
+            unknown_open: internal.unknown_open,
         };
         let (path_req, _mode) = crate::pathing::to_path_request(&internal, cell_factor);
         // smooth = false — we only care whether a path exists; we don't
