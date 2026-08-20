@@ -374,7 +374,13 @@ pub unsafe extern "C" fn voxel_free_overstressed_list(list: FfiOverstressedList)
 /// Returns the raw `voxel_path::PathStatus` u8:
 ///   0 = Success, 1 = NoPath, 2 = MaxNodesReached,
 ///   3 = PartiallyUnloaded, 4 = InvalidEndpoint.
-/// Returns 1 (NoPath) on engine-pointer null or store lock contention.
+/// Returns 1 (NoPath) on engine-pointer null; returns 255 on store lock
+/// contention (the sync probe uses try_read and CANNOT wait — during a
+/// streaming burst every probe in a burst-window used to come back as a
+/// counterfeit NoPath, which made sense-trail endpoint resolution reject
+/// every column right after a teleport). 255 means "could not check":
+/// callers should defer to an async solve, whose worker blocks on the lock
+/// properly, rather than treat the cell as invalid.
 #[no_mangle]
 pub unsafe extern "C" fn voxel_query_path_exists(
     engine: *mut c_void,
@@ -400,7 +406,7 @@ pub unsafe extern "C" fn voxel_query_path_exists(
             unknown_open,
             max_nodes,
         )
-        .unwrap_or(1)
+        .unwrap_or(255)
 }
 
 /// Place a support structure at a UE world position.
