@@ -682,7 +682,12 @@ fn handle_event(
                 if let Some(grid) = chunks.get_mut(&chunk_key) {
                     let total = grid.size * grid.size * grid.size;
                     for idx in 0..total {
-                        if grid.cells[idx].fluid_type.is_lava() && grid.cells[idx].level > 0.001 {
+                        // No level guard: a fall-feeding source's post-tick
+                        // level is 0.0 (free-fall gulps the whole refill), so
+                        // gating on level left is_source alive and the stream
+                        // re-pumped seconds after the "drained" montage
+                        // (2026-08-20, World_1991).
+                        if grid.cells[idx].fluid_type.is_lava() {
                             grid.cells[idx].level = 0.0;
                             grid.cells[idx].is_source = false;
                         }
@@ -735,6 +740,42 @@ fn handle_event(
             eprintln!(
                 "[LAVA-DRAIN] drained {} live chunks, purged {} stashed lava cells, cleared {} stale meshes on unloaded chunks",
                 live_chunks, purged_pending, cleared_unloaded
+            );
+        }
+        FluidEvent::RemeshAllFluid => {
+            // Dirty every live grid — the mesh pass re-sends non-empty truth
+            // and sends the clearing empty for tracked grids that emptied.
+            let mut swept = 0u32;
+            for grid in chunks.values_mut() {
+                grid.dirty = true;
+                swept += 1;
+            }
+            // Tracked chunks with NO live grid can never re-mesh on their own;
+            // clear them explicitly so a wiped UE component doesn't stay blank
+            // while the tracker still claims it has a mesh.
+            let gridless: Vec<(i32, i32, i32)> = active_fluid_meshes
+                .iter()
+                .filter(|k| !chunks.contains_key(k))
+                .copied()
+                .collect();
+            let cleared = gridless.len();
+            for chunk_key in gridless {
+                active_fluid_meshes.remove(&chunk_key);
+                let _ = result_tx.send(FluidResult::FluidMesh {
+                    chunk: chunk_key,
+                    mesh: crate::mesh::FluidMeshData {
+                        positions: Vec::new(),
+                        normals: Vec::new(),
+                        fluid_types: Vec::new(),
+                        indices: Vec::new(),
+                        uvs: Vec::new(),
+                        flow_directions: Vec::new(),
+                    },
+                });
+            }
+            eprintln!(
+                "[FLUID-REMESH-ALL] dirty-swept {} grids, cleared {} tracked gridless meshes",
+                swept, cleared
             );
         }
         FluidEvent::PlaceGeologicalSprings { chunk, springs } => {
@@ -1260,6 +1301,104 @@ mod tests {
         assert!(!active_meshes.contains(&(3, -4, 0)), "cleared chunk must leave the tracker");
         assert!(active_meshes.contains(&(5, -4, 0)), "live-grid chunk stays tracked for the mesh pass");
         assert!(chunks[&(5, -4, 0)].dirty, "live-grid chunk must be dirty so the mesh pass re-sends truth");
+    }
+
+    /// 2026-08-20 live-run regression (World_1991, first montage after the
+    /// 08-20 teardown fixes): the drain predicate `is_lava() && level > 0.001`
+    /// skips lava SOURCE cells sitting at ~0 level. Since free-fall lifted the
+    /// gravity rate cap, a source feeding an open shaft moves its ENTIRE level
+    /// out every lava tick — its post-tick level IS 0.0 — so the drain left
+    /// `is_source=true` and regen re-pumped the "drained" lavafall within
+    /// seconds of the montage ending (and slowly re-filled the pool below).
+    /// The drain must extinguish every lava-typed cell regardless of level.
+    #[test]
+    fn drain_lava_extinguishes_zero_level_sources() {
+        let mut config = FluidConfig::default();
+        let size = config.chunk_size;
+        let mut chunks = HashMap::new();
+        let mut densities = HashMap::new();
+        let mut placed = HashSet::new();
+        let mut pending = HashMap::new();
+        let (result_tx, _result_rx) = crossbeam_channel::unbounded();
+        let mut active_meshes = HashSet::new();
+
+        let mut grid = ChunkFluidGrid::new(size);
+        {
+            // Fall-feeding source in post-tick state: regen refilled it, the
+            // free-fall gulp emptied it — level 0, is_source still true.
+            let cell = grid.get_mut(2, 2, 2);
+            cell.fluid_type = crate::cell::FluidType::Lava;
+            cell.level = 0.0;
+            cell.is_source = true;
+            cell.max_flow_dist = 12;
+        }
+        grid.has_lava = true;
+        grid.has_sources = true;
+        chunks.insert((1, 1, 1), grid);
+
+        handle_event(
+            FluidEvent::DrainLavaChunks { chunks: vec![(1, 1, 1)] },
+            &mut chunks, &mut densities, &mut pending, &mut placed,
+            size, &mut config, &result_tx, &mut active_meshes,
+        );
+
+        let cell = chunks[&(1, 1, 1)].get(2, 2, 2);
+        assert!(
+            !cell.is_source,
+            "zero-level lava source must be extinguished by the drain (it re-pumps the stream otherwise)"
+        );
+    }
+
+    /// 2026-08-20 companion to the montage teardown: RestoreMontageFluidState
+    /// wipes every montage-touched fluid component and needs a RELIABLE truth
+    /// re-send. The old "unchanged UpdateConfig push" swept nothing (the
+    /// UpdateFluidMeshFlags handler only sweeps when a flag changes), so
+    /// settled water/lava stayed invisible until the next organic dirty —
+    /// the user's mine made it all "pop back in" at once. RemeshAllFluid must
+    /// dirty every live grid and explicitly clear tracked-but-gridless meshes.
+    #[test]
+    fn remesh_all_fluid_sweeps_grids_and_clears_gridless_tracked() {
+        let mut config = FluidConfig::default();
+        let size = config.chunk_size;
+        let mut chunks = HashMap::new();
+        let mut densities = HashMap::new();
+        let mut placed = HashSet::new();
+        let mut pending = HashMap::new();
+        let (result_tx, result_rx) = crossbeam_channel::unbounded();
+        let mut active_meshes: HashSet<(i32, i32, i32)> = HashSet::new();
+
+        // Settled water pool: live grid, not dirty, previously meshed.
+        let mut grid = ChunkFluidGrid::new(size);
+        {
+            let cell = grid.get_mut(3, 3, 3);
+            cell.fluid_type = crate::cell::FluidType::Water;
+            cell.level = 0.8;
+        }
+        grid.has_fluid = true;
+        grid.dirty = false;
+        chunks.insert((0, 0, 0), grid);
+        active_meshes.insert((0, 0, 0));
+        // Tracked mesh whose grid is gone: must get the explicit empty.
+        active_meshes.insert((7, -2, 3));
+
+        handle_event(
+            FluidEvent::RemeshAllFluid,
+            &mut chunks, &mut densities, &mut pending, &mut placed,
+            size, &mut config, &result_tx, &mut active_meshes,
+        );
+
+        assert!(chunks[&(0, 0, 0)].dirty, "live grid must be dirty so the mesh pass re-sends its truth");
+        assert!(active_meshes.contains(&(0, 0, 0)), "live tracked chunk stays tracked (mesh pass owns it)");
+        assert!(!active_meshes.contains(&(7, -2, 3)), "gridless tracked chunk must leave the tracker");
+        let results: Vec<FluidResult> = result_rx.try_iter().collect();
+        assert_eq!(results.len(), 1, "exactly one explicit empty for the gridless tracked chunk");
+        match &results[0] {
+            FluidResult::FluidMesh { chunk, mesh } => {
+                assert_eq!(*chunk, (7, -2, 3));
+                assert!(mesh.positions.is_empty() && mesh.indices.is_empty());
+            }
+            _ => panic!("expected FluidResult::FluidMesh"),
+        }
     }
 
     /// 2026-08-19 regression ("fluid pick lava sometimes doesn't survive a

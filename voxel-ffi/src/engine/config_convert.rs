@@ -87,6 +87,16 @@ impl VoxelEngine {
             source_grace_ticks,
         });
     }
+
+    /// Ask the fluid thread to re-send world truth for every fluid chunk
+    /// (dirty-sweep all grids + explicit empties for tracked gridless keys).
+    /// Non-blocking by the never-block rule (the fluid thread can itself be
+    /// blocked on the bounded result channel that only the game thread
+    /// drains); returns false when the event channel is full — the caller
+    /// retries next tick.
+    pub fn fluid_remesh_all(&self) -> bool {
+        self.fluid_event_tx.try_send(FluidEvent::RemeshAllFluid).is_ok()
+    }
 }
 
 /// Convert FFI config struct to internal GenerationConfig.

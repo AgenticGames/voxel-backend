@@ -280,6 +280,15 @@ pub enum FluidEvent {
         chunk: (i32, i32, i32),
         cells: Vec<PendingFluidCell>,
     },
+    /// Re-send world truth for every fluid chunk: dirty-sweep all live grids
+    /// (the mesh pass then re-sends their meshes) and send an explicit empty
+    /// mesh for every tracked-but-gridless chunk. The montage teardown clears
+    /// the montage-touched fluid components wholesale and needs a reliable
+    /// re-send; it used to piggyback on an unchanged UpdateConfig push, but
+    /// the UpdateFluidMeshFlags handler only sweeps when a flag CHANGES — so
+    /// settled water/lava stayed invisible until something else dirtied the
+    /// grid (2026-08-20, World_1991 "water gone until I mined").
+    RemeshAllFluid,
 }
 
 /// One fluid cell waiting to be applied once the chunk's density arrives.

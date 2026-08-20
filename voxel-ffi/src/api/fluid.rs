@@ -34,6 +34,21 @@ pub unsafe extern "C" fn voxel_add_fluid(
     engine.add_fluid(world_x, world_y, world_z, fluid_type, is_source != 0, world_scale, max_flow_dist)
 }
 
+/// Ask the fluid thread to re-send world truth for every fluid chunk:
+/// dirty-sweep all live grids and send explicit empty meshes for tracked
+/// chunks with no live grid. Used by the montage teardown after it wipes the
+/// montage-touched fluid components. Non-blocking: returns 1 when the event
+/// was queued, 0 when the bounded event channel was full — the caller must
+/// retry on a later tick (never block the game thread on this channel).
+#[no_mangle]
+pub unsafe extern "C" fn voxel_fluid_remesh_all(engine: *mut c_void) -> u32 {
+    if engine.is_null() {
+        return 0;
+    }
+    let engine = &*(engine as *const VoxelEngine);
+    if engine.fluid_remesh_all() { 1 } else { 0 }
+}
+
 /// Find the best cavern spring location near the player.
 /// Returns 1 if found (out pointers written), 0 if no suitable location.
 /// All coordinates are UE world space.
