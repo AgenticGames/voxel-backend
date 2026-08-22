@@ -144,7 +144,9 @@ impl Default for StressConfig {
             cross_section_min_faces: 2,  // Need 2+ air faces before penalty applies
             surface_y: 200,             // Approximate world surface level
             depth_pressure_scale: 99999.0, // Effectively disabled for now — tune after span gradient is dialed in
-            mining_stress_scan_buffer: 7, // Tightened 22 -> 7 (2026-07-31); configurable since 2026-05
+            mining_stress_scan_buffer: 4, // 22 -> 7 (2026-07-31), 7 -> 4 (2026-08-22: total scan
+                                          // radius cut 35%, 2.2+7=9.2 -> ~6.0 voxels at r=65 UU /
+                                          // WorldScale 30); configurable since 2026-05
         }
     }
 }
