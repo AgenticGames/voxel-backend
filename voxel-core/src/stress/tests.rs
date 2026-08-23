@@ -79,7 +79,10 @@ fn strut_hp_storage_and_decay() {
     // Same-type re-set preserves HP (doesn't refill).
     sf.set(2, 2, 2, SupportType::Iron);
     let hp_after_reset = sf.get_hp(2, 2, 2);
-    assert_eq!(hp_after_reset, 100); // 150 - 50
+    // Derived from the table, not a literal: this asserts "re-set PRESERVES hp"
+    // and must not care what Iron's max_hp happens to be. It was hardcoded to
+    // 100 (== the old 150 - 50) and broke the moment Iron was retuned to 200.
+    assert_eq!(hp_after_reset, STRUT_TUNING[SupportType::Iron as usize].max_hp - 50);
     // Replacing with a different type refills HP for the new tier.
     sf.set(2, 2, 2, SupportType::Crystal);
     assert_eq!(sf.get_hp(2, 2, 2), STRUT_TUNING[SupportType::Crystal as usize].max_hp);
@@ -95,6 +98,46 @@ fn strut_hp_storage_and_decay() {
     sf.set(2, 2, 2, SupportType::None);
     assert_eq!(sf.get_hp(2, 2, 2), 0);
     assert!(sf.is_empty());
+}
+
+/// 2026-08-23 (user): "give iron strut 200 hp but 70% more resistance to stress
+/// dmg". Resistance is a SECOND knob beside max_hp, so this pins both — and the
+/// staying-power comparison is the part that would actually regress silently if
+/// someone folded resistance back into HP.
+#[test]
+fn iron_strut_resists_bracing_damage() {
+    let copper = STRUT_TUNING[SupportType::Copper as usize];
+    let iron = STRUT_TUNING[SupportType::Iron as usize];
+
+    // Same HP pool...
+    assert_eq!(iron.max_hp, 200);
+    assert_eq!(copper.max_hp, 200);
+    // ...but Iron takes 30% of the bracing damage ("70% more resistant").
+    assert!((iron.damage_taken_scale - 0.30).abs() < 1e-6);
+    assert!((copper.damage_taken_scale - 1.0).abs() < 1e-6);
+
+    // Every other tier is untouched at full rate — resistance is Iron-only.
+    for t in [SupportType::Steel, SupportType::Crystal, SupportType::Mithril] {
+        assert!((STRUT_TUNING[t as usize].damage_taken_scale - 1.0).abs() < 1e-6,
+            "{:?} should still take full bracing damage", t);
+    }
+
+    // The formula the collapse BFS actually calls.
+    let blocked = 100.0_f32;
+    let dmg_copper = bfs_halt_damage(SupportType::Copper, blocked);
+    let dmg_iron = bfs_halt_damage(SupportType::Iron, blocked);
+    assert!((dmg_copper - 50.0).abs() < 1e-4);   // 100 * 0.5 * 1.0
+    assert!((dmg_iron - 15.0).abs() < 1e-4);     // 100 * 0.5 * 0.30
+
+    // Net staying power: at equal HP, Iron braces 1/0.3 as much slab as Copper.
+    let voxels_copper = copper.max_hp as f32 / dmg_copper * blocked;
+    let voxels_iron = iron.max_hp as f32 / dmg_iron * blocked;
+    assert!(voxels_iron > voxels_copper * 3.0,
+        "iron {voxels_iron} should outlast copper {voxels_copper} by >3x");
+
+    // A None strut must never be charged damage (the call site skips it, but
+    // the helper indexes the table by type — index 0 has to stay harmless).
+    assert_eq!(bfs_halt_damage(SupportType::None, blocked), 0.0);
 }
 
 fn make_density_field(size: usize, fill_solid: bool) -> DensityField {

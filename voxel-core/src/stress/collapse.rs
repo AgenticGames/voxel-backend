@@ -13,9 +13,10 @@ use crate::material::Material;
 
 use super::config::StressConfig;
 use super::types::{
+    bfs_halt_damage,
     BrokenStrutEvent, CollapseEvent, CollapseEventV2,
     CollapseSlab, CollapsedVoxel, OverstressedVoxel, PendingPilePlacement,
-    RubbleVoxel, StressField, SupportField, SupportType, BFS_HALT_DAMAGE_SCALE,
+    RubbleVoxel, StressField, SupportField, SupportType,
     MAX_STRUT_RADIUS, STRUT_TUNING,
 };
 use super::calc::{sample_world, world_to_chunk_local};
@@ -975,12 +976,16 @@ pub fn detect_and_execute_collapses_v2_with_force_deadline(
     // StrutBroken events to UE.
     if halt_at_struts && !strut_halt_counts.is_empty() {
         for ((chunk_key, lx, ly, lz), count) in strut_halt_counts {
-            let damage = count * BFS_HALT_DAMAGE_SCALE;
             let stype = support_fields
                 .get(&chunk_key)
                 .map(|sf| sf.get(lx, ly, lz))
                 .unwrap_or(SupportType::None);
             if stype == SupportType::None { continue; }
+            // Per-tier resistance (2026-08-23): the global rate times the tier's
+            // own `damage_taken_scale`, via the shared helper. Resolved AFTER
+            // `stype` — the type has to be known first, which is why the lookup
+            // moved above the damage calc.
+            let damage = bfs_halt_damage(stype, count);
             if let Some(sf) = support_fields.get_mut(&chunk_key) {
                 if sf.damage_hp(lx, ly, lz, damage) {
                     sf.set(lx, ly, lz, SupportType::None);

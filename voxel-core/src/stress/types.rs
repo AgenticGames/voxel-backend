@@ -229,6 +229,14 @@ pub struct StrutTuning {
     pub radius: u8,
     pub max_hp: u16,
     pub hp_decay_threshold: f32,
+    /// Multiplier on incoming BFS-halt bracing damage. 1.0 = takes it in full,
+    /// 0.30 = "70% more resistant". Added 2026-08-23 (user) because resistance
+    /// had to be tunable PER TIER and the only knob was the global
+    /// `BFS_HALT_DAMAGE_SCALE`, which would have buffed all five at once.
+    /// Distinct from `max_hp` on purpose: HP is the number the player reads off
+    /// the strut's bar, resistance is how fast it drains. Applied at the single
+    /// damage site in collapse.rs.
+    pub damage_taken_scale: f32,
 }
 
 /// Default per-tier tuning table. Indexed by `SupportType as usize`.
@@ -252,7 +260,11 @@ pub struct StrutTuning {
 // so wider coverage needs a proportionally higher idle-tolerable load.
 pub const STRUT_TUNING: [StrutTuning; 6] = [
     // None
-    StrutTuning { hardness: 0.0, radius: 0, max_hp: 0,    hp_decay_threshold: 0.0 },
+    // damage_taken_scale 0.0, not 1.0: index 0 is the "no strut here" row, and
+    // every other field in it is already zero. Keeping it 0 makes
+    // bfs_halt_damage() safe by construction — a None strut can never be
+    // charged HP even if a caller forgets to skip it.
+    StrutTuning { hardness: 0.0, radius: 0, max_hp: 0,    hp_decay_threshold: 0.0, damage_taken_scale: 0.0 },
     // hp_decay_threshold recalibrated for the linear-cone relief model
     // (hardness x radius x 10 — PROVISIONAL, tune from live [stress] debug
     // load telemetry): per-voxel contributions are ~10x the old 1/d values,
@@ -271,15 +283,21 @@ pub const STRUT_TUNING: [StrutTuning; 6] = [
     // for. ⚠️ Mirror in AVoxelSupportActor::GetTuning (VoxelSupportActor.cpp).
     // Struts already placed in a save keep their stored HP; the new ceiling
     // applies to newly placed ones.
-    StrutTuning { hardness:  8.0, radius: 17, max_hp:  200, hp_decay_threshold: 1360.0 },
+    StrutTuning { hardness:  8.0, radius: 17, max_hp:  200, hp_decay_threshold: 1360.0, damage_taken_scale: 1.0 },
     // Iron (T2)
-    StrutTuning { hardness: 14.0, radius: 22, max_hp:  150, hp_decay_threshold: 3080.0 },
+    // 2026-08-23 (user): "give iron strut 200 hp but 70% more resistance to
+    // stress dmg". Two separate knobs by design — 150 -> 200 max_hp is the
+    // number on the bar, and 0.30 damage_taken_scale means bracing damage
+    // drains it at 30% rate. Net staying power vs the old 150/1.0 is
+    // (200/0.30) / 150 = 4.4x, and vs the new Copper (200/1.0) it is 3.3x —
+    // Iron is now clearly the tier you plant under something that matters.
+    StrutTuning { hardness: 14.0, radius: 22, max_hp:  200, hp_decay_threshold: 3080.0, damage_taken_scale: 0.30 },
     // Steel (T3) — wide radius for area coverage
-    StrutTuning { hardness: 18.0, radius: 31, max_hp:  300, hp_decay_threshold: 5580.0 },
+    StrutTuning { hardness: 18.0, radius: 31, max_hp:  300, hp_decay_threshold: 5580.0, damage_taken_scale: 1.0 },
     // Crystal (T4) — HP tank
-    StrutTuning { hardness: 25.0, radius: 22, max_hp:  800, hp_decay_threshold: 5500.0 },
+    StrutTuning { hardness: 25.0, radius: 22, max_hp:  800, hp_decay_threshold: 5500.0, damage_taken_scale: 1.0 },
     // Mithril (T5) — endgame
-    StrutTuning { hardness: 35.0, radius: 39, max_hp: 2000, hp_decay_threshold: 13650.0 },
+    StrutTuning { hardness: 35.0, radius: 39, max_hp: 2000, hp_decay_threshold: 13650.0, damage_taken_scale: 1.0 },
 ];
 
 /// Maximum `radius` value across all tiers — bounds the chunk box the
@@ -302,6 +320,16 @@ pub const HP_DAMAGE_SCALE: f32 = 0.0;
 /// One mine event that would have peeled 200 voxels into a single Crystal Strut
 /// (HP 800) chews through 200 * 0.5 = 100 HP — strut survives ~8 such saves.
 pub const BFS_HALT_DAMAGE_SCALE: f32 = 0.5;
+
+/// HP a strut of `stype` loses for bracing `blocked_voxels` of would-be slab.
+///
+/// THE one place BFS-halt bracing damage is computed: the global rate above
+/// times the tier's own `damage_taken_scale`. Extracted 2026-08-23 when
+/// resistance became per-tier — inlining the multiply at the call site would
+/// have left the feature with no unit test and no single home.
+pub fn bfs_halt_damage(stype: SupportType, blocked_voxels: f32) -> f32 {
+    blocked_voxels * BFS_HALT_DAMAGE_SCALE * STRUT_TUNING[stype as u8 as usize].damage_taken_scale
+}
 
 /// Per-voxel support data for a chunk.
 ///
