@@ -260,7 +260,18 @@ pub const STRUT_TUNING: [StrutTuning; 6] = [
     // 2026-08-03 live-tuned: 4x zone resize then -30% on playtest feel
     // (24/32/44/32/56 -> 17/22/31/22/39).
     // Copper (T1)
-    StrutTuning { hardness:  8.0, radius: 17, max_hp:   50, hp_decay_threshold: 1360.0 },
+    // 2026-08-23 (user): "increase the amount of weight a copper strut can take
+    // by 300%, or reduce the damage it takes". max_hp 50 -> 200 (x4 = +300%).
+    // max_hp IS the weight budget in practice: load-decay is off
+    // (HP_DAMAGE_SCALE = 0.0), so the only wear that lands is BFS-halt bracing
+    // damage at BFS_HALT_DAMAGE_SCALE = 0.5 HP per voxel the strut refuses to
+    // let collapse. 50 HP bought ~100 voxels of held roof; 200 buys ~400.
+    // Chosen over lowering BFS_HALT_DAMAGE_SCALE because that constant is
+    // global — it would have buffed all five tiers, and only Copper was asked
+    // for. ⚠️ Mirror in AVoxelSupportActor::GetTuning (VoxelSupportActor.cpp).
+    // Struts already placed in a save keep their stored HP; the new ceiling
+    // applies to newly placed ones.
+    StrutTuning { hardness:  8.0, radius: 17, max_hp:  200, hp_decay_threshold: 1360.0 },
     // Iron (T2)
     StrutTuning { hardness: 14.0, radius: 22, max_hp:  150, hp_decay_threshold: 3080.0 },
     // Steel (T3) — wide radius for area coverage
