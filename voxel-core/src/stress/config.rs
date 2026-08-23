@@ -144,14 +144,22 @@ impl Default for StressConfig {
             cross_section_min_faces: 2,  // Need 2+ air faces before penalty applies
             surface_y: 200,             // Approximate world surface level
             depth_pressure_scale: 99999.0, // Effectively disabled for now — tune after span gradient is dialed in
-            mining_stress_scan_buffer: 14, // 22 -> 14 (2026-08-22): a 35% cut off the 22 that
-                                           // main, the slots AND the shipped demo were actually
-                                           // running. Player mine r=65 UU / WorldScale 30 = 2.2
-                                           // -> trunc 2, so the scan sphere goes 2+22=24 ->
-                                           // 2+14=16 voxels. The 2026-07-31 "22 -> 7" tuning only
-                                           // ever landed in the code defaults, never in the live
-                                           // JSONs, so 7 was never the real baseline.
-                                           // Configurable since 2026-05.
+            mining_stress_scan_buffer: 9,  // 14 -> 9 (2026-08-24): a second 35% cut, user —
+                                           // "currently its larger than the struts are visually
+                                           // supporting so mining even next to a strut causes
+                                           // collapses". A Copper strut relieves r=17 voxels and
+                                           // draws a 510 UU coverage sphere (17 x WorldScale 30),
+                                           // while the scan sphere was 65 + 14x40 = 625 UU — so
+                                           // the mine could stress rock the player could SEE was
+                                           // braced. Player mine r=65 UU / WorldScale 30 = 2.2
+                                           // -> trunc 2, so the sphere goes 2+14=16 -> 2+9=11
+                                           // voxels (~425 UU), back inside the brace.
+                                           // ⚠️ The 22 -> 14 cut (2026-08-22) had the same shape.
+                                           // ⚠️ A code default alone does NOTHING here: the live
+                                           // Saved/StressConfig.json wins, which is why the
+                                           // 2026-07-31 "22 -> 7" never actually shipped. Change
+                                           // this, VoxelConfigPersistence.cpp's default, AND the
+                                           // JSON together. Configurable since 2026-05.
         }
     }
 }
