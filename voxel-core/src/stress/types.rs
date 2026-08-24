@@ -535,7 +535,15 @@ pub const DEFAULT_MATERIAL_HARDNESS: [f32; 50] = [
     0.55,  // Pyrite
     0.60,  // Amethyst
     0.70,  // Crystal
-    0.30,  // Coal (soft sedimentary)
+    // 0.30 -> 0.40 (2026-08-24, user). Stress is DIVIDED by hardness, so coal
+    // at 0.30 was a 3.3x amplifier: a flat seam voxel with air below and two
+    // open sides (the ordinary edge-of-pocket shape) landed on exactly 1.00 =
+    // the collapse threshold, so flat coal patches caved after a few swings.
+    // 0.40 puts that case at 0.75. Verified by grep: material_hardness has NO
+    // consumer outside the stress model — despite the name it does not affect
+    // mining speed. ⚠️ Mirrored in Saved/StressConfig.json (which WINS at
+    // runtime); the JSON is the one that actually ships.
+    0.40,  // Coal (soft sedimentary)
     0.30,  // Graphite
     0.40,  // Opal
     0.75,  // Hornfels (hard metamorphic)

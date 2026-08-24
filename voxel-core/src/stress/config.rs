@@ -125,9 +125,16 @@ impl Default for StressConfig {
             max_collapse_volume: 8000,
             rubble_enabled: true,
             rubble_fill_ratio: 0.5,
-            warn_dust_threshold: 0.4,
-            warn_creak_threshold: 0.6,
-            warn_shake_threshold: 0.8,
+            // 2026-08-24 (user): dust 0.65 -> shake 0.74 -> creak 0.85, so the
+            // warning actually ESCALATES. They were 0.80 / 0.80 / 0.84 live,
+            // i.e. dust and shake fired together with creak a hair later —
+            // one lump of feedback at 0.80 rather than a build-up. Cracks now
+            // land at 0.85 too (COLLAPSE_IMMINENT_STRESS), so the loudest
+            // audio tier and the visible cracks arrive together, just under
+            // the 1.0 collapse.
+            warn_dust_threshold: 0.65,
+            warn_shake_threshold: 0.74,
+            warn_creak_threshold: 0.85,
             #[allow(deprecated)]
             support_hardness: SUPPORT_HARDNESS,
             // V2 defaults

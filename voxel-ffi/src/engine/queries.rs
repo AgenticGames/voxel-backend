@@ -479,11 +479,104 @@ impl VoxelEngine {
         let (cx, cy, cz) = chunk_rust;
         let mut out = Vec::new();
 
+        // ── Coherence gate (2026-08-24, user) ──────────────────────────
+        // "Show cracks only if it's coherent enough to fall, or within one
+        // voxel of meeting it." Now that COLLAPSE_IMMINENT_STRESS sits BELOW
+        // the collapse threshold, the old "red but stable cells wear cracks
+        // forever" complaint would come straight back — an isolated stressed
+        // voxel can never form a slab, so cracking it is a lie. The collapse
+        // pass needs `min_collapse_region` connected cells before it will
+        // drop anything, so that is the honest test for "this is going to
+        // fall": a cluster within one cell of the bar cracks, anything
+        // smaller stays clean.
+        //
+        // Clusters are walked ACROSS chunk boundaries (the store holds every
+        // stress field) — a 20-cell slab split 10/10 down a chunk seam would
+        // otherwise read as two rejected 10-cell clusters and the seam would
+        // silently lose its cracks.
+        let needed = {
+            let cfg = self.stress_config.read().unwrap();
+            (cfg.min_collapse_region.saturating_sub(1)).max(1) as usize
+        };
+
+        // eff at an arbitrary RUST WORLD cell, or None when that chunk has no
+        // stress field yet (ungenerated / never recalculated).
+        let eff_at = |wx: i32, wy: i32, wz: i32| -> Option<f32> {
+            let c = (wx.div_euclid(cs), wy.div_euclid(cs), wz.div_euclid(cs));
+            let f = store.stress_fields.get(&c)?;
+            Some(f.effective(
+                wx.rem_euclid(cs) as usize,
+                wy.rem_euclid(cs) as usize,
+                wz.rem_euclid(cs) as usize,
+            ))
+        };
+
+        // world cell -> is it part of a cluster big enough to fall?
+        let mut cluster_verdict: std::collections::HashMap<(i32, i32, i32), bool> =
+            std::collections::HashMap::new();
+
+        // Flood the connected overstressed cluster containing `seed` and record
+        // one verdict for every member. Bounded: a pathological region-wide
+        // sheet stops at CLUSTER_SCAN_CAP and is treated as "definitely big
+        // enough" rather than walking the whole world on the game thread.
+        const CLUSTER_SCAN_CAP: usize = 4096;
+        let mut flood = |seed: (i32, i32, i32),
+                         verdict: &mut std::collections::HashMap<(i32, i32, i32), bool>| {
+            let mut members: Vec<(i32, i32, i32)> = Vec::new();
+            let mut seen: std::collections::HashSet<(i32, i32, i32)> =
+                std::collections::HashSet::new();
+            let mut queue = std::collections::VecDeque::new();
+            seen.insert(seed);
+            queue.push_back(seed);
+            let mut capped = false;
+            while let Some((wx, wy, wz)) = queue.pop_front() {
+                members.push((wx, wy, wz));
+                if members.len() >= CLUSTER_SCAN_CAP {
+                    capped = true;
+                    break;
+                }
+                for (dx, dy, dz) in [
+                    (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
+                ] {
+                    let n = (wx + dx, wy + dy, wz + dz);
+                    if seen.contains(&n) {
+                        continue;
+                    }
+                    if let Some(e) = eff_at(n.0, n.1, n.2) {
+                        if e >= COLLAPSE_IMMINENT_STRESS {
+                            seen.insert(n);
+                            queue.push_back(n);
+                        }
+                    }
+                }
+            }
+            let ok = capped || members.len() >= needed;
+            for m in members {
+                verdict.insert(m, ok);
+            }
+            // Anything still queued when capped shares the verdict.
+            for m in queue {
+                verdict.insert(m, ok);
+            }
+        };
+
         for lz in 0..chunk_size {
             for ly in 0..chunk_size {
                 for lx in 0..chunk_size {
                     let eff = sf.effective(lx, ly, lz);
                     if eff < COLLAPSE_IMMINENT_STRESS {
+                        continue;
+                    }
+                    // Coherence: only cracks where a slab could actually form.
+                    let world_cell = (
+                        cx * cs + lx as i32,
+                        cy * cs + ly as i32,
+                        cz * cs + lz as i32,
+                    );
+                    if !cluster_verdict.contains_key(&world_cell) {
+                        flood(world_cell, &mut cluster_verdict);
+                    }
+                    if !cluster_verdict.get(&world_cell).copied().unwrap_or(false) {
                         continue;
                     }
                     let surface_kind = unpack_surface(sf.get_class(lx, ly, lz));

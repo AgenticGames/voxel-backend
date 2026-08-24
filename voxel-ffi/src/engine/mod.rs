@@ -58,7 +58,20 @@ pub(crate) use helpers::{aabb_center, aabb_to_ffi, fluid_sim_loop_wrapper, num_c
 /// down" and "red" as "stressed but stable." So warning FX fire at the higher
 /// "white-bright" threshold, not the bare collapse-pass threshold — keeps the
 /// promise that anywhere with visible cracks/dust is genuinely a collapse risk.
-pub const COLLAPSE_IMMINENT_STRESS: f32 = 1.5;
+///
+/// ⚠️ 2026-08-24 (user): 1.5 -> 0.85, i.e. BELOW the 1.0 collapse threshold.
+/// Sitting above it made cracks structurally incapable of warning anyone —
+/// anything that actually collapsed did so without ever showing one, and the
+/// only cells that DID crack were those too incoherent to drop. Cracks are a
+/// telegraph now: they appear in the band before the fall.
+///
+/// The confusion that originally pushed this to 1.5 ("red but stable" cells
+/// wearing cracks forever) is now handled where it belongs — by COHERENCE,
+/// not by raising the bar. `enumerate_overstressed_in_chunk` only emits cells
+/// whose connected overstressed cluster is within one cell of
+/// `min_collapse_region`, so a lone stressed voxel that can never form a slab
+/// stays clean while a patch big enough to fall starts cracking first.
+pub const COLLAPSE_IMMINENT_STRESS: f32 = 0.85;
 
 /// TTL (seconds) for stashed path results UE never collected. Prunes once per
 /// poll to bound memory growth from dead agents.
