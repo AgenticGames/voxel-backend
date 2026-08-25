@@ -22,9 +22,16 @@
 //! everything else from ~5. Narrow corridors (span <= 2-3) survive
 //! everywhere — wide rooms, domes and caverns are what come down.
 //!
-//! Building pads are exempt (chunks holding terraced cells + 1-chunk halo)
-//! so a dormancy can't bury the factory. Player-DUG tunnels are fair game
-//! (user call 2026-08-25): strut them or lose them.
+//! Seeding is a UNION of two classes: (a) the span recipe over air-below
+//! ceiling/deck cells, and (b) the CRACK TIER — any cell whose STORED
+//! play-effective stress crosses the threshold (what the player saw
+//! cracking before the sleep falls, whatever its geometry; the cascade's
+//! grounded filter handles the rest).
+//!
+//! Building pads are exempt (chunks holding terraced cells + the vertical
+//! column dy -1..=2 — NOT a lateral halo) so a dormancy can't bury the
+//! factory, while base-adjacent tunnels stay fair game. Player-DUG tunnels
+//! are fair game (user call 2026-08-25): strut them or lose them.
 //!
 //! ## Two phases (montage-timer protection)
 //!
@@ -306,6 +313,16 @@ pub(crate) fn try_run_phase2(
                     }
                     None => return false,
                 };
+                // Crack-tier union, mirroring the scan: stored effective
+                // crossing the threshold validates regardless of geometry.
+                let stored_eff = s
+                    .stress_fields
+                    .get(&key)
+                    .map(|sf| sf.effective(lx, ly, lz))
+                    .unwrap_or(0.0);
+                if stored_eff >= DORMANCY_COLLAPSE_THRESHOLD {
+                    return true;
+                }
                 // Same air-below rule as the scan: only cells that can fall.
                 let below_air = matches!(
                     sample_world(&s.density_fields, v.world_x, v.world_y - 1, v.world_z, chunk_size),
@@ -640,7 +657,12 @@ fn dormancy_cell_stress(
     ((span_stress + xsec_stress) / hardness, span)
 }
 
-/// Chunk keys containing terraced (building-pad) cells, plus a 1-chunk halo.
+/// Chunk keys containing terraced (building-pad) cells, plus the VERTICAL
+/// column around them (dy -1..=2): nothing may fall INTO a pad from above
+/// or drop the deck out from under it. Deliberately NOT a lateral halo —
+/// the first cut's 26-halo exempted ~87 chunks of base-adjacent tunnels,
+/// which the user wants fair game (2026-08-25: "not even pre stressed
+/// cracking tunnels" fell near the base).
 fn terraced_chunk_halo(
     terraced_cells: &HashSet<(i32, i32, i32)>,
     chunk_size: usize,
@@ -648,12 +670,8 @@ fn terraced_chunk_halo(
     let mut out = HashSet::new();
     for &(wx, wy, wz) in terraced_cells {
         let (k, _, _, _) = world_to_chunk_local(wx, wy, wz, chunk_size);
-        for dx in -1i32..=1 {
-            for dy in -1i32..=1 {
-                for dz in -1i32..=1 {
-                    out.insert((k.0 + dx, k.1 + dy, k.2 + dz));
-                }
-            }
+        for dy in -1i32..=2 {
+            out.insert((k.0, k.1 + dy, k.2));
         }
     }
     out
@@ -739,9 +757,31 @@ fn collect_dormancy_seeds(
                             let wx = key.0 * cs as i32 + x as i32;
                             let wy = key.1 * cs as i32 + y as i32;
                             let wz = key.2 * cs as i32 + z as i32;
-                            // Only cells with AIR BELOW can fall (ceilings,
-                            // bridge decks). Floors and walls could never
-                            // pass the cascade's grounded filter anyway.
+                            // CRACK TIER (union, restored 2026-08-25 after
+                            // the span rework dropped it): any cell whose
+                            // STORED play-effective stress crosses the
+                            // threshold seeds regardless of geometry —
+                            // "it was cracking before I slept" must fall,
+                            // same as the first live-verified builds. The
+                            // cascade's grounded/min-region filters handle
+                            // fallability; stored stress is already
+                            // strut-relief-aware (relief is baked in as
+                            // negative stored surplus).
+                            let stored_eff =
+                                sf_painted.map(|s| s.effective(x, y, z)).unwrap_or(0.0);
+                            if stored_eff >= DORMANCY_COLLAPSE_THRESHOLD {
+                                out.push(OverstressedVoxel {
+                                    world_x: wx,
+                                    world_y: wy,
+                                    world_z: wz,
+                                    stress: stored_eff,
+                                });
+                                continue;
+                            }
+                            // SPAN RECIPE: only cells with AIR BELOW can
+                            // fall (ceilings, bridge decks). Floors and
+                            // walls could never pass the cascade's
+                            // grounded filter anyway.
                             let below_air = if y > 0 {
                                 !df.get(x, y - 1, z).material.is_solid()
                             } else {
@@ -953,6 +993,42 @@ mod tests {
         assert_eq!(
             (seeds[0].world_x, seeds[0].world_y, seeds[0].world_z),
             (9, 7, 9)
+        );
+    }
+
+    #[test]
+    fn stored_crack_tier_seeds_regardless_of_geometry() {
+        // A FLOOR cell (solid below — the span recipe would never touch it)
+        // whose STORED play-effective stress crosses the threshold must
+        // still seed: "it was cracking before I slept" falls.
+        let (df, mut sf, su) = room_world(Material::Granite);
+        {
+            let f = sf.get_mut(&(0, 0, 0)).unwrap();
+            f.set(5, 2, 5, 0.74); // floor cell, just under — must NOT seed
+            f.set(9, 2, 9, 0.80); // floor cell, over — must seed via union
+        }
+        let dead = cfg(0.001, 333);
+        let none = HashSet::new();
+        let (seeds, _, _) = scan(&df, &sf, &su, &dead, &none, &none, (10, 10, 10));
+        assert_eq!(seeds.len(), 1, "only the 0.80 stored-stress cell seeds");
+        assert_eq!(
+            (seeds[0].world_x, seeds[0].world_y, seeds[0].world_z),
+            (9, 2, 9)
+        );
+    }
+
+    #[test]
+    fn terraced_exemption_is_vertical_column_only() {
+        let mut terraced = HashSet::new();
+        terraced.insert((8 * CHUNK_SIZE as i32 + 4, 4, 4)); // chunk (8,0,0)
+        let exempt = terraced_chunk_halo(&terraced, CHUNK_SIZE);
+        assert!(exempt.contains(&(8, 0, 0)), "pad chunk exempt");
+        assert!(exempt.contains(&(8, 1, 0)), "above exempt (falls INTO pad)");
+        assert!(exempt.contains(&(8, 2, 0)), "two above exempt");
+        assert!(exempt.contains(&(8, -1, 0)), "deck below exempt");
+        assert!(
+            !exempt.contains(&(7, 0, 0)) && !exempt.contains(&(9, 0, 0)),
+            "lateral neighbors are FAIR GAME"
         );
     }
 
