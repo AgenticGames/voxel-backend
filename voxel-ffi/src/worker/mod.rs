@@ -342,6 +342,12 @@ pub fn worker_loop(
             if did_phase2 {
                 continue;
             }
+            // Priority 1.7: trickle-feed parked dormancy recalc events into
+            // the live stress queue (a few per interval — the burst version
+            // was a top source of the post-montage lag).
+            if dormancy_collapse::try_trickle_dormancy_recalcs(&store) {
+                continue;
+            }
         }
 
         // Reveal pause: while a sleep-montage morph reveal is on screen, UE pauses

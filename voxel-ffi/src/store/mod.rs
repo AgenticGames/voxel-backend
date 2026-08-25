@@ -81,6 +81,15 @@ pub struct ChunkStore {
     /// plumbing threads through the worker loop.
     pub dormancy_phase2_pending: Option<DormancyPhase2Pending>,
     pub dormancy_phase2_go: bool,
+    /// Dormancy recalc TRICKLE backlog (2026-08-25 after-lag fix): phase 2
+    /// parks its ~700 collapse-site recalc events here and worker 0's idle
+    /// path feeds them into the live stress queue a few at a time — dumping
+    /// them at once made the stress worker recalc one giant batch and the
+    /// warning/crack/FX wave was a top source of the ~12s post-montage lag.
+    pub dormancy_recalc_backlog: Vec<((i32, i32, i32), i32)>,
+    pub dormancy_recalc_last_feed: Option<std::time::Instant>,
+    pub dormancy_recalc_total: usize,
+    pub dormancy_recalc_started: Option<std::time::Instant>,
     /// Per-chunk seam data (DC vertices + boundary edges) for seam stitching.
     /// Arc-wrapped so seam passes can snapshot the entries they need under a
     /// brief read lock and run quad generation WITHOUT holding the store lock
@@ -162,6 +171,10 @@ impl ChunkStore {
             montage_protected: HashSet::new(),
             dormancy_phase2_pending: None,
             dormancy_phase2_go: false,
+            dormancy_recalc_backlog: Vec::new(),
+            dormancy_recalc_last_feed: None,
+            dormancy_recalc_total: 0,
+            dormancy_recalc_started: None,
             chunk_seam_data: HashMap::new(),
             base_meshes: HashMap::new(),
             stress_fields: HashMap::new(),

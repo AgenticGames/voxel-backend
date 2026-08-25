@@ -80,11 +80,12 @@ use crate::types::{FfiStrutBroken, WorkerResult};
 
 use super::seam::batched_seam_pass_mine;
 
-// ── "WRATHFUL PEAK" preset (user-tuned 2026-08-25, between Angry Mountain
-// and Long Night, leaning Long Night): every unstrutted passage in every
-// rock except granite span-1 corridors collapses; 4-voxel-thick slabs;
-// single events to 20k voxels; piles keep 85% of the mass. STRUT TIERS
-// (user spec): COPPER struts ALL break during the event but posthumously
+// ── "ANGRY MOUNTAIN, 4-LAYER" preset (user final 2026-08-25 — Wrathful
+// Peak "kills it", dialed back): every material's roofs fall from
+// ~4-voxel-wide passages except granite (granite corridors are the only
+// safe unstrutted digs); V-overlay green-yellow+ (stored >= 0.45) falls;
+// 4-voxel-thick slabs; single events to 12k voxels. STRUT TIERS (user
+// spec): COPPER struts ALL break during the event but posthumously
 // soften their braced radius to a-little-safer-than-Geological dials;
 // IRON AND ABOVE never break and make their radius fully immune.
 // Buildings have NO immunity (pads collapse like anywhere else).
@@ -95,17 +96,16 @@ const DORMANCY_COLLAPSE_THRESHOLD: f32 = 0.75;
 /// Crack-tier threshold on STORED play-effective stress (the V-overlay
 /// value: green 0 → yellow 0.5 → red 1.0). 0.40 = green-yellow and
 /// hotter falls — what the player can SEE straining comes down.
-const DORMANCY_STORED_THRESHOLD: f32 = 0.40;
+const DORMANCY_STORED_THRESHOLD: f32 = 0.45;
 
 /// Span model, dormancy overlay (play config has this at 0.001 — dead).
-/// 0.55 with min_safe 0: span-1 falls in coal (1.38) and limestone
-/// (0.85); granite span-1 holds (0.69) — granite corridors are the world's
-/// only safe unstrutted digs.
-const DORMANCY_SPAN_WEIGHT: f32 = 0.55;
+/// 0.50 with min_safe 1: span-2 falls in coal (1.25) and limestone
+/// (0.77); granite holds until span 3 (1.25) — granite corridors are the
+/// safe digs, narrow passages survive everywhere.
+const DORMANCY_SPAN_WEIGHT: f32 = 0.50;
 
 /// Spans at or below this many voxels are safe regardless of material.
-/// 0 = every measurable span counts.
-const DORMANCY_MIN_SAFE_SPAN: u32 = 0;
+const DORMANCY_MIN_SAFE_SPAN: u32 = 1;
 
 /// Roof slab thickness: an over-threshold exposed ceiling cell also seeds
 /// this many cells straight up (stopping at air or the chunk top). 4-layer
@@ -144,6 +144,16 @@ const PLAYER_EXCLUDE_CHEB: i32 = 2;
 /// montages end ~15s after arming; 45s clears the slowest multi-play runs.
 const PHASE2_STRANDED_FALLBACK: Duration = Duration::from_secs(45);
 
+/// Recalc trickle pacing: events fed per interval ≈ 40/s, so a ~700-event
+/// wave spreads over ~17s of background instead of one burst.
+const RECALC_TRICKLE_PER_FEED: usize = 8;
+const RECALC_TRICKLE_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Per-event [DORMANCY-COLLAPSE-EVENT] notes are capped (top N by volume +
+/// a summary line): 668 formatted lines produced 300-400ms log-flush
+/// stalls in the 2026-08-25 trace.
+const EVENT_LOG_CAP: usize = 20;
+
 /// The dormancy stress recipe: clone the LIVE config (keeps the material
 /// hardness table + every cascade parameter the designers tuned) and wake
 /// the span model up. The support-propagation trio + ground threshold are
@@ -160,9 +170,9 @@ fn dormancy_stress_config(live: &StressConfig) -> StressConfig {
     // Angry Mountain cascade overrides (dormancy-only; live play values
     // untouched): smaller clusters qualify, single events can be dome-sized,
     // and piles keep most of the fallen mass so the aftermath reads.
-    c.min_collapse_region = 5;
-    c.max_collapse_volume = 20000;
-    c.rubble_fill_ratio = 0.85;
+    c.min_collapse_region = 6;
+    c.max_collapse_volume = 12000;
+    c.rubble_fill_ratio = 0.80;
     c
 }
 
@@ -488,8 +498,12 @@ pub(crate) fn try_run_phase2(
     }
     let remesh_ms = t_remesh.elapsed().as_secs_f64() * 1000.0;
 
-    // Queue the deferred stress recalcs — phase-1's stash plus phase-2's
-    // own — now that the montage can't be delayed by the recalc batch.
+    // Park the deferred stress recalcs — phase-1's stash plus phase-2's
+    // own — in the TRICKLE BACKLOG rather than the live queue: dumping
+    // ~700 events at once made the stress worker recalc them as one giant
+    // batch, and the warning/crack/FX wave that followed was a top source
+    // of the ~12s post-montage lag (traced 2026-08-25). Worker 0's idle
+    // path (`try_trickle_dormancy_recalcs`) feeds them in gradually.
     {
         let mut recalcs = pending.pending_recalcs;
         if let Some(o) = &out {
@@ -497,9 +511,10 @@ pub(crate) fn try_run_phase2(
         }
         if !recalcs.is_empty() {
             let mut s = store.write().unwrap();
-            for (center, radius) in recalcs {
-                s.queue_stress_dirty_no_collapse(center, radius);
-            }
+            s.dormancy_recalc_total = recalcs.len();
+            s.dormancy_recalc_started = Some(Instant::now());
+            s.dormancy_recalc_backlog = recalcs; // nearest-first already
+            s.dormancy_recalc_last_feed = None;
         }
     }
 
@@ -517,6 +532,51 @@ pub(crate) fn try_run_phase2(
         )),
     }
 
+    true
+}
+
+/// Feed a few parked recalc events into the live stress queue (worker 0
+/// idle path). Paced by `RECALC_TRICKLE_*`; held while a dormancy's phase 2
+/// is still pending (montage in progress). Returns true if it fed.
+pub(crate) fn try_trickle_dormancy_recalcs(store: &Arc<RwLock<ChunkStore>>) -> bool {
+    {
+        let s = match store.read() {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        if s.dormancy_recalc_backlog.is_empty() {
+            return false;
+        }
+        if s.dormancy_phase2_pending.is_some() {
+            return false;
+        }
+        if let Some(t) = s.dormancy_recalc_last_feed {
+            if t.elapsed() < RECALC_TRICKLE_INTERVAL {
+                return false;
+            }
+        }
+    }
+    let mut s = store.write().unwrap();
+    if s.dormancy_recalc_backlog.is_empty() {
+        return false;
+    }
+    let n = RECALC_TRICKLE_PER_FEED.min(s.dormancy_recalc_backlog.len());
+    let batch: Vec<((i32, i32, i32), i32)> = s.dormancy_recalc_backlog.drain(..n).collect();
+    for (center, radius) in batch {
+        s.queue_stress_dirty_no_collapse(center, radius);
+    }
+    s.dormancy_recalc_last_feed = Some(Instant::now());
+    if s.dormancy_recalc_backlog.is_empty() {
+        let total = s.dormancy_recalc_total;
+        let secs = s
+            .dormancy_recalc_started
+            .map(|t| t.elapsed().as_secs_f64())
+            .unwrap_or(0.0);
+        crate::panic_log::note(&format!(
+            "[DORMANCY-COLLAPSE] recalc trickle complete: {} events fed over {:.1}s",
+            total, secs
+        ));
+    }
     true
 }
 
@@ -684,15 +744,28 @@ fn run_dormancy_cascade(
     }
 
     // Per-event locations (UE coords) — verification + forensics: Ghost +
-    // BugItGo to center_ue and the cave-in should be visible.
-    for (i, ev) in events.iter().enumerate() {
-        let vox: usize = ev.slabs.iter().map(|sl| sl.voxels.len()).sum();
+    // BugItGo to center_ue and the cave-in should be visible. Capped to the
+    // top EVENT_LOG_CAP by volume (see the const's rationale).
+    let ev_vox = |ev: &voxel_core::stress::CollapseEventV2| -> usize {
+        ev.slabs.iter().map(|sl| sl.voxels.len()).sum()
+    };
+    let mut order: Vec<usize> = (0..events.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(ev_vox(&events[i])));
+    for &i in order.iter().take(EVENT_LOG_CAP) {
+        let ev = &events[i];
         let fall = ev.slabs.first().map(|sl| sl.fall_distance).unwrap_or(0);
         crate::panic_log::note(&format!(
             "[DORMANCY-COLLAPSE-EVENT] {} {}: center_rust=({:.0},{:.0},{:.0}) center_ue=({:.0},{:.0},{:.0}) voxels={} fall={} chunks={}",
             label, i, ev.center.0, ev.center.1, ev.center.2,
             ev.center.0 * world_scale, -ev.center.2 * world_scale, ev.center.1 * world_scale,
-            vox, fall, ev.affected_chunks.len()
+            ev_vox(ev), fall, ev.affected_chunks.len()
+        ));
+    }
+    if events.len() > EVENT_LOG_CAP {
+        let rest_vox: usize = order.iter().skip(EVENT_LOG_CAP).map(|&i| ev_vox(&events[i])).sum();
+        crate::panic_log::note(&format!(
+            "[DORMANCY-COLLAPSE-EVENT] {}: ... and {} smaller events ({} voxels) not listed",
+            label, events.len() - EVENT_LOG_CAP, rest_vox
         ));
     }
 
@@ -1202,18 +1275,18 @@ mod tests {
     #[test]
     fn painted_stress_seeds_surface_cells() {
         // Span dead — only the painted overlay drives (via stored
-        // effective, so the STORED threshold applies). Painted 0.39 stays
-        // under, 0.41 seeds.
+        // effective, so the STORED threshold applies). Painted 0.44 stays
+        // under, 0.46 seeds.
         let (df, mut sf, su) = room_world(Material::Granite);
         {
             let f = sf.get_mut(&(0, 0, 0)).unwrap();
-            f.set_painted(5, 7, 5, 0.39);
-            f.set_painted(9, 7, 9, 0.41);
+            f.set_painted(5, 7, 5, 0.44);
+            f.set_painted(9, 7, 9, 0.46);
         }
         let dead = cfg(0.001, 333);
         let none = HashSet::new();
         let (seeds, _, _) = scan(&df, &sf, &su, &dead, &none, (10, 10, 10));
-        assert_eq!(seeds.len(), 1, "only the 0.41 painted cell should seed");
+        assert_eq!(seeds.len(), 1, "only the 0.46 painted cell should seed");
         assert_eq!(
             (seeds[0].world_x, seeds[0].world_y, seeds[0].world_z),
             (9, 7, 9)
@@ -1228,13 +1301,13 @@ mod tests {
         let (df, mut sf, su) = room_world(Material::Granite);
         {
             let f = sf.get_mut(&(0, 0, 0)).unwrap();
-            f.set(5, 2, 5, 0.39); // floor cell, just under — must NOT seed
-            f.set(9, 2, 9, 0.41); // floor cell, over — must seed via union
+            f.set(5, 2, 5, 0.44); // floor cell, just under — must NOT seed
+            f.set(9, 2, 9, 0.46); // floor cell, over — must seed via union
         }
         let dead = cfg(0.001, 333);
         let none = HashSet::new();
         let (seeds, _, _) = scan(&df, &sf, &su, &dead, &none, (10, 10, 10));
-        assert_eq!(seeds.len(), 1, "only the 0.41 stored-stress cell seeds");
+        assert_eq!(seeds.len(), 1, "only the 0.46 stored-stress cell seeds");
         assert_eq!(
             (seeds[0].world_x, seeds[0].world_y, seeds[0].world_z),
             (9, 2, 9)
@@ -1311,6 +1384,43 @@ mod tests {
             seeds.iter().all(|v| v.world_x >= 12 * CHUNK_SIZE as i32),
             "eligible seeds come only from the non-zone chunk"
         );
+    }
+
+    #[test]
+    fn recalc_trickle_paces_and_respects_pending() {
+        use crate::store::{ChunkStore, DormancyPhase2Pending};
+        let store = Arc::new(RwLock::new(ChunkStore::new(6)));
+        {
+            let mut s = store.write().unwrap();
+            s.dormancy_recalc_backlog = (0..20).map(|i| ((i, 0, 0), 10)).collect();
+            s.dormancy_recalc_total = 20;
+            s.dormancy_recalc_started = Some(Instant::now());
+        }
+        // Feeds immediately when never fed before.
+        assert!(try_trickle_dormancy_recalcs(&store));
+        assert_eq!(store.read().unwrap().dormancy_recalc_backlog.len(), 12);
+        // Within the interval: no feed.
+        assert!(!try_trickle_dormancy_recalcs(&store));
+        assert_eq!(store.read().unwrap().dormancy_recalc_backlog.len(), 12);
+        // Force the interval to have elapsed.
+        store.write().unwrap().dormancy_recalc_last_feed =
+            Some(Instant::now() - Duration::from_secs(1));
+        assert!(try_trickle_dormancy_recalcs(&store));
+        assert_eq!(store.read().unwrap().dormancy_recalc_backlog.len(), 4);
+        // A pending phase 2 (montage in progress) holds the trickle.
+        {
+            let mut s = store.write().unwrap();
+            s.dormancy_recalc_last_feed = Some(Instant::now() - Duration::from_secs(1));
+            s.dormancy_phase2_pending = Some(DormancyPhase2Pending {
+                seeds: Vec::new(),
+                pending_remesh: Vec::new(),
+                pending_recalcs: Vec::new(),
+                player_chunk: (0, 0, 0),
+                armed_at: Instant::now(),
+            });
+        }
+        assert!(!try_trickle_dormancy_recalcs(&store));
+        assert_eq!(store.read().unwrap().dormancy_recalc_backlog.len(), 4);
     }
 
     #[test]
