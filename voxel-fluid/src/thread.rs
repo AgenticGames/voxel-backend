@@ -240,17 +240,35 @@ pub fn fluid_sim_loop(
         // Locally drain the lava cells we're turning into solid voxels and
         // the water cells we're vaporizing — keeps the fluid grid consistent
         // with what the worker is about to write into density_fields.
+        //
+        // 2026-08-25 ("i made scoria and it was still ouching me"): quenched
+        // cells also clear their RENDER state — the same frozen-ribbon class
+        // the montage drain hit (render_level/flux_ema/stream_mark mesh at
+        // STREAM_FLOOR with no raw-level gate and only decay inside
+        // tick_chunk, which a chunk whose lava just all solidified may never
+        // meaningfully enter again). Left alone, the quenched rim kept a
+        // ghost lava mesh over the new scoria and the #248 contact burn read
+        // it as live lava.
         for (key, x, y, z) in plan.obsidian.iter().chain(plan.scoria.iter()) {
             if let Some(grid) = chunks.get_mut(key) {
-                let cell = grid.get_mut(*x, *y, *z);
-                cell.level = 0.0;
+                let idx = grid.index(*x, *y, *z);
+                grid.cells[idx].level = 0.0;
+                grid.cells[idx].is_source = false;
+                if idx < grid.render_level.len() { grid.render_level[idx] = 0.0; }
+                if idx < grid.flux_ema.len() { grid.flux_ema[idx] = 0.0; }
+                if idx < grid.stream_mark.len() { grid.stream_mark[idx] = false; }
+                if idx < grid.mesh_sticky.len() { grid.mesh_sticky[idx] = false; }
+                if idx < grid.influx_hold.len() { grid.influx_hold[idx] = 0; }
+                if idx < grid.momentum.len() { grid.momentum[idx] = [0.0, 0.0]; }
                 grid.dirty = true;
             }
         }
         for (key, x, y, z) in &plan.drained_water {
             if let Some(grid) = chunks.get_mut(key) {
-                let cell = grid.get_mut(*x, *y, *z);
-                cell.level = 0.0;
+                let idx = grid.index(*x, *y, *z);
+                grid.cells[idx].level = 0.0;
+                if idx < grid.render_level.len() { grid.render_level[idx] = 0.0; }
+                if idx < grid.mesh_sticky.len() { grid.mesh_sticky[idx] = false; }
                 grid.dirty = true;
             }
         }

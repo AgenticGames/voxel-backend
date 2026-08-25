@@ -20,6 +20,7 @@ use voxel_fluid::FluidSnapshot;
 
 use crate::phases::aureole::build_heat_map;
 use crate::systems::priority::{classify_chunks, ChunkTier};
+use crate::systems::minerals::apply_mineral_growth;
 use crate::phases::reaction::apply_reaction;
 use crate::phases::aureole::apply_aureole;
 use crate::phases::veins::apply_veins;
@@ -745,6 +746,50 @@ pub fn execute_sleep(
             collapse_chunks.len() as u32, collapse_chunks.len() as u32, None, 0, String::new());
     }
     let t_p4_elapsed = t_p4.elapsed();
+
+    // ═══ Phase 5: Mineral Growth — the outskirts' own rolls (2026-08-25) ═══
+    // The aureole and veins only touch lava-heat shells and water+heat
+    // convergences, so the parts of the filmed morph zone away from the heat
+    // always woke unchanged ("outskirts of dormancy morph zone... always
+    // empty" — playtest). This pass grows secondary minerals (crystal
+    // clusters, malachite stalactites, quartz extensions, calcite infill,
+    // pyrite crusts) from existing hosts into adjacent air, heat-FREE, so
+    // every corner of the zone rolls something. The system + its config
+    // predate this wiring (minerals.rs had only test callers).
+    let t_p5 = Instant::now();
+    let mut total_minerals_grown = 0u32;
+    trace(&format!("Phase 5 (mineral growth) start minerals_enabled={}", config.minerals_enabled));
+    if config.minerals_enabled {
+        // Nearest-player-first with a hard chunk cap: the scan is per-voxel
+        // over the list and the pass is cosmetic — a huge procedural snapshot
+        // must not buy it unbounded time. The cap drop is traced, not silent.
+        const MINERAL_GROWTH_CHUNK_CAP: usize = 150;
+        let mut growth_chunks = mineral_chunks.clone();
+        growth_chunks.sort_by_key(|&(cx, cy, cz)| {
+            let dx = cx - player_chunk.0;
+            let dy = cy - player_chunk.1;
+            let dz = cz - player_chunk.2;
+            dx * dx + dy * dy + dz * dz
+        });
+        if growth_chunks.len() > MINERAL_GROWTH_CHUNK_CAP {
+            trace(&format!("Phase 5: capping growth chunks {} -> {}",
+                growth_chunks.len(), MINERAL_GROWTH_CHUNK_CAP));
+            growth_chunks.truncate(MINERAL_GROWTH_CHUNK_CAP);
+        }
+        let growth_result = apply_mineral_growth(
+            &config.minerals, density_fields, &growth_chunks, chunk_size, &mut rng,
+        );
+        total_minerals_grown = growth_result.minerals_grown;
+        total_formations += growth_result.minerals_grown;
+        result_manifest.merge_sleep_changes(&growth_result.manifest);
+        transform_log.extend(growth_result.transform_log);
+        for key in growth_result.manifest.chunk_deltas.keys() {
+            all_dirty.insert(*key);
+        }
+    }
+    let t_p5_elapsed = t_p5.elapsed();
+    trace(&format!("Phase 5 (mineral growth) end in {:.2}ms ({} grown)",
+        t_p5_elapsed.as_secs_f64() * 1000.0, total_minerals_grown));
 
     // ═══ Accumulation Pass (re-runs Phase 1-3 with scaled params) ═══
     let t_accum = Instant::now();
