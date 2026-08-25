@@ -12,15 +12,16 @@
 //! the stored play-stress: it RECOMPUTES stress with a dormancy-only
 //! overlay (span model alive, see `dormancy_stress_config`) into scratch,
 //! per surface-shell cell, and seeds cells whose
-//! `recomputed + painted - strut_relief >= 0.75`. Roofs and wide tunnel
-//! ceilings become seeds; strutted spans read relieved and survive
-//! (plus the cascade's halt_at_struts backstop). The play-time stress
-//! fields, crack overlays and warnings are untouched.
+//! `recomputed + painted >= 0.75`. Roofs and wide tunnel ceilings become
+//! seeds. The play-time stress fields, crack overlays and warnings are
+//! untouched.
 //!
-//! Tier intuition at span_weight 0.20 / min_safe_span 2 (span search caps
-//! at 20; hardness divides): coal roofs fall from ~4 voxels of clear span,
-//! everything else from ~5. Narrow corridors (span <= 2-3) survive
-//! everywhere — wide rooms, domes and caverns are what come down.
+//! STRUT TIERS (user spec 2026-08-25) replace the old relief math:
+//! COPPER struts are all SACRIFICED at event start (broken + reported to
+//! UE) but their radius keeps a posthumous shadow — evaluated at
+//! a-little-safer-than-Geological dials, so big domes still fall there
+//! while rooms/corridors survive. IRON AND ABOVE never break and make
+//! their radius fully immune (seed-skip + cascade halt + break-restore).
 //!
 //! Seeding is a UNION of two classes: (a) the span recipe over air-below
 //! ceiling/deck cells, and (b) the CRACK TIER — any cell whose STORED
@@ -28,10 +29,9 @@
 //! cracking before the sleep falls, whatever its geometry; the cascade's
 //! grounded filter handles the rest).
 //!
-//! Building pads are exempt (chunks holding terraced cells + the vertical
-//! column dy -1..=2 — NOT a lateral halo) so a dormancy can't bury the
-//! factory, while base-adjacent tunnels stay fair game. Player-DUG tunnels
-//! are fair game (user call 2026-08-25): strut them or lose them.
+//! Buildings have NO immunity (user call 2026-08-25): pads collapse like
+//! anywhere else — iron+ struts are the only real protection. Player-DUG
+//! tunnels are fair game: strut them or lose them.
 //!
 //! ## Two phases (montage-timer protection)
 //!
@@ -69,8 +69,8 @@ use rayon::prelude::*;
 use voxel_core::density::DensityField;
 use voxel_core::stress::{
     detect_and_execute_collapses_v2_with_force_deadline, measure_span_from_air, sample_world,
-    strut_relief_final_v2, world_to_chunk_local,
-    BrokenStrutEvent, OverstressedVoxel, StressField, SupportField,
+    world_to_chunk_local,
+    BrokenStrutEvent, OverstressedVoxel, StressField, SupportField, SupportType, STRUT_TUNING,
 };
 use voxel_fluid::FluidEvent;
 use voxel_gen::config::{GenerationConfig, StressConfig};
@@ -80,20 +80,47 @@ use crate::types::{FfiStrutBroken, WorkerResult};
 
 use super::seam::batched_seam_pass_mine;
 
-/// Dormancy-effective-stress threshold at which a cell seeds a collapse.
-/// 0.75 (user call 2026-08-25, was 0.85).
+// ── "WRATHFUL PEAK" preset (user-tuned 2026-08-25, between Angry Mountain
+// and Long Night, leaning Long Night): every unstrutted passage in every
+// rock except granite span-1 corridors collapses; 4-voxel-thick slabs;
+// single events to 20k voxels; piles keep 85% of the mass. STRUT TIERS
+// (user spec): COPPER struts ALL break during the event but posthumously
+// soften their braced radius to a-little-safer-than-Geological dials;
+// IRON AND ABOVE never break and make their radius fully immune.
+// Buildings have NO immunity (pads collapse like anywhere else).
+
+/// Span-recipe threshold at which a recomputed ceiling cell seeds.
 const DORMANCY_COLLAPSE_THRESHOLD: f32 = 0.75;
 
-/// Span model, dormancy overlay: penalty per voxel of clear span beyond
-/// `DORMANCY_MIN_SAFE_SPAN` (play config has this at 0.001 — dead).
-/// 0.20 (histogram-tuned 08-25: at 0.15 the span-5-6 dome bucket was
-/// material-gated) puts every material at threshold from ~5 voxels of
-/// clear span, coal from ~4; narrow corridors (span <= 2-3) never seed.
-const DORMANCY_SPAN_WEIGHT: f32 = 0.20;
+/// Crack-tier threshold on STORED play-effective stress (the V-overlay
+/// value: green 0 → yellow 0.5 → red 1.0). 0.40 = green-yellow and
+/// hotter falls — what the player can SEE straining comes down.
+const DORMANCY_STORED_THRESHOLD: f32 = 0.40;
 
-/// Spans at or below this many voxels are safe regardless of material —
-/// narrow corridors hold; rooms and caverns don't.
-const DORMANCY_MIN_SAFE_SPAN: u32 = 2;
+/// Span model, dormancy overlay (play config has this at 0.001 — dead).
+/// 0.55 with min_safe 0: span-1 falls in coal (1.38) and limestone
+/// (0.85); granite span-1 holds (0.69) — granite corridors are the world's
+/// only safe unstrutted digs.
+const DORMANCY_SPAN_WEIGHT: f32 = 0.55;
+
+/// Spans at or below this many voxels are safe regardless of material.
+/// 0 = every measurable span counts.
+const DORMANCY_MIN_SAFE_SPAN: u32 = 0;
+
+/// Roof slab thickness: an over-threshold exposed ceiling cell also seeds
+/// this many cells straight up (stopping at air or the chunk top). 4-layer
+/// slabs make "giant hole in the roof + obvious pile" instead of a peeled
+/// 1-voxel sheet. Upper layers deliberately ignore the play model's
+/// air-decay — thickness IS the point.
+const DORMANCY_SEED_DEPTH_LAYERS: usize = 4;
+
+/// Copper shadow — the posthumous protection a sacrificed copper strut
+/// leaves over its radius: "a little safer than Geological" (Geological
+/// was span_w .30 / min_safe 1 / stored .55). Big domes still fall in a
+/// copper zone; rooms and corridors survive.
+const DORMANCY_COPPER_SPAN_WEIGHT: f32 = 0.25;
+const DORMANCY_COPPER_MIN_SAFE_SPAN: u32 = 1;
+const DORMANCY_COPPER_STORED_THRESHOLD: f32 = 0.60;
 
 /// Wall-clock budget for the SCAN (support pass + per-cell recompute).
 /// Nearest-first, sliced; chunks not reached simply survive this dormancy
@@ -104,7 +131,7 @@ const DORMANCY_SCAN_BUDGET: Duration = Duration::from_secs(4);
 /// behind the reveal; phase 2 holds the store write lock on worker 0
 /// post-montage, so the deadline bounds how long the mine lane can stall.
 /// Partial processing is safe: unprocessed areas stay standing.
-const DORMANCY_COLLAPSE_BUDGET: Duration = Duration::from_secs(6);
+const DORMANCY_COLLAPSE_BUDGET: Duration = Duration::from_secs(10);
 
 /// Chunks within this Chebyshev radius of the player are exempt in both
 /// phases. Dropping a slab (or burying the floor in its rubble pile) at the
@@ -130,6 +157,12 @@ fn dormancy_stress_config(live: &StressConfig) -> StressConfig {
     c.vertical_transfer_factor = 0.95;
     c.support_propagation_iterations = 2;
     c.ground_threshold = 0.80;
+    // Angry Mountain cascade overrides (dormancy-only; live play values
+    // untouched): smaller clusters qualify, single events can be dome-sized,
+    // and piles keep most of the fallen mass so the aftermath reads.
+    c.min_collapse_region = 5;
+    c.max_collapse_volume = 20000;
+    c.rubble_fill_ratio = 0.85;
     c
 }
 
@@ -163,6 +196,37 @@ pub(crate) fn apply_dormancy_world_collapse(
     };
     let mut used_fallback = false;
 
+    // ── Strut census, then the COPPER SACRIFICE ─────────────────────
+    // Index alive struts BEFORE breaking copper: the scan needs the copper
+    // positions for the posthumous shadow protection.
+    let strut_idx = {
+        let s = ctx.store.read().unwrap();
+        build_strut_index(&s.support_fields, chunk_size)
+    };
+    let copper_broken: usize = if strut_idx.copper.is_empty() {
+        0
+    } else {
+        let broken = {
+            let mut s = ctx.store.write().unwrap();
+            break_all_copper(&mut s.support_fields)
+        };
+        let cs_i = chunk_size as i32;
+        let ffi_struts: Vec<FfiStrutBroken> = broken
+            .iter()
+            .map(|&(ck, lx, ly, lz)| FfiStrutBroken {
+                world_x: ck.0 * cs_i + lx as i32,
+                world_y: ck.1 * cs_i + ly as i32,
+                world_z: ck.2 * cs_i + lz as i32,
+                support_type: SupportType::Copper as u8,
+                source: 1,
+                _pad: [0; 2],
+            })
+            .collect();
+        let count = ffi_struts.len();
+        let _ = ctx.result_tx.send(WorkerResult::StrutsBroken { struts: ffi_struts });
+        count
+    };
+
     // ── Scan: sliced read locks, rayon per slice, budget-capped ─────────
     let scan_deadline = Instant::now() + DORMANCY_SCAN_BUDGET;
     let (eligible, deferred, stats) = {
@@ -173,16 +237,12 @@ pub(crate) fn apply_dormancy_world_collapse(
         } else {
             &filmed
         };
-        // Building pads: chunks holding terraced (placement-flattened)
-        // cells + a 1-chunk halo. A dormancy must not bury the factory.
-        let exempt = terraced_chunk_halo(&s.terraced_cells, chunk_size);
         collect_dormancy_seeds(
             &s.density_fields,
             &s.stress_fields,
-            &s.support_fields,
             &dcfg,
+            &strut_idx,
             zone,
-            &exempt,
             player_chunk,
             chunk_size,
             scan_deadline,
@@ -208,12 +268,17 @@ pub(crate) fn apply_dormancy_world_collapse(
     let phase1_dirty: Vec<(i32, i32, i32)> =
         out.as_ref().map(|o| o.dirty.clone()).unwrap_or_default();
 
-    // Stash for phase 2: the filmed-block seeds AND the phase-1 remesh work.
+    // Stash for phase 2: the filmed-block seeds, the phase-1 remesh work,
+    // AND the phase-1 stress recalcs (queueing those during the reveal put
+    // a worker-0 recalc batch in front of the montage resync = black hold).
+    let phase1_recalcs: Vec<((i32, i32, i32), i32)> =
+        out.as_ref().map(|o| o.recalcs.clone()).unwrap_or_default();
     if deferred_count > 0 || !phase1_dirty.is_empty() {
         let mut s = ctx.store.write().unwrap();
         s.dormancy_phase2_pending = Some(DormancyPhase2Pending {
             seeds: deferred,
             pending_remesh: phase1_dirty,
+            pending_recalcs: phase1_recalcs,
             player_chunk,
             armed_at: Instant::now(),
         });
@@ -221,11 +286,13 @@ pub(crate) fn apply_dormancy_world_collapse(
     }
 
     let ctx_line = format!(
-        "recipe span_w={:.2} min_span={} thr={:.2}; {} chunks scanned ({} unscanned/budget), skipped: {} player-adjacent, {} terraced, {} filmed{}; {} seeds deferred; ceiling span hist 0-2:{} 3-4:{} 5-6:{} 7-9:{} 10-14:{} 15+:{}",
+        "recipe span_w={:.2} min_span={} thr={:.2} stored_thr={:.2} layers={}; {} chunks scanned ({} unscanned/budget), skipped: {} player-adjacent, {} filmed{}; copper struts sacrificed: {}, iron+ shields: {}; {} seeds deferred; ceiling span hist 0-2:{} 3-4:{} 5-6:{} 7-9:{} 10-14:{} 15+:{}",
         DORMANCY_SPAN_WEIGHT, DORMANCY_MIN_SAFE_SPAN, DORMANCY_COLLAPSE_THRESHOLD,
+        DORMANCY_STORED_THRESHOLD, DORMANCY_SEED_DEPTH_LAYERS,
         stats.chunks_scanned, stats.chunks_unscanned,
-        stats.skipped_player, stats.skipped_terraced, stats.skipped_zone,
+        stats.skipped_player, stats.skipped_zone,
         if used_fallback { " [fallback: full protected set]" } else { "" },
+        copper_broken, strut_idx.ironplus.len(),
         deferred_count,
         stats.span_hist[0], stats.span_hist[1], stats.span_hist[2],
         stats.span_hist[3], stats.span_hist[4], stats.span_hist[5]
@@ -297,10 +364,19 @@ pub(crate) fn try_run_phase2(
     let stashed = pending.seeds.len();
     let seeds: Vec<OverstressedVoxel> = {
         let s = store.read().unwrap();
+        // Post-copper-sacrifice index: only iron+ remains alive, and its
+        // radius is immune. Copper shadow zones ceased with their struts;
+        // deferred seeds already passed the shadow rules at phase-1 time.
+        let strut_idx = build_strut_index(&s.support_fields, chunk_size);
         pending
             .seeds
             .into_iter()
             .filter(|v| {
+                if strut_cover(&strut_idx, v.world_x, v.world_y, v.world_z)
+                    == StrutCover::IronPlus
+                {
+                    return false;
+                }
                 let (key, lx, ly, lz) =
                     world_to_chunk_local(v.world_x, v.world_y, v.world_z, chunk_size);
                 let mat = match s.density_fields.get(&key) {
@@ -320,33 +396,51 @@ pub(crate) fn try_run_phase2(
                     .get(&key)
                     .map(|sf| sf.effective(lx, ly, lz))
                     .unwrap_or(0.0);
-                if stored_eff >= DORMANCY_COLLAPSE_THRESHOLD {
+                if stored_eff >= DORMANCY_STORED_THRESHOLD {
                     return true;
                 }
-                // Same air-below rule as the scan: only cells that can fall.
-                let below_air = matches!(
-                    sample_world(&s.density_fields, v.world_x, v.world_y - 1, v.world_z, chunk_size),
-                    Some((_, m)) if !m.is_solid()
-                );
-                if !below_air {
-                    return false;
+                // Span seeds may be UPPER slab layers (no air directly
+                // below): walk down up to the layer depth to find the
+                // exposed ceiling cell this seed rode on, and re-evaluate
+                // the recipe there.
+                let mut exposed_y = None;
+                for dy in 0..DORMANCY_SEED_DEPTH_LAYERS as i32 {
+                    let cy = v.world_y - dy;
+                    let solid_here = matches!(
+                        sample_world(&s.density_fields, v.world_x, cy, v.world_z, chunk_size),
+                        Some((_, m)) if m.is_solid()
+                    );
+                    if !solid_here {
+                        break;
+                    }
+                    let below_air = matches!(
+                        sample_world(&s.density_fields, v.world_x, cy - 1, v.world_z, chunk_size),
+                        Some((_, m)) if !m.is_solid()
+                    );
+                    if below_air {
+                        exposed_y = Some(cy);
+                        break;
+                    }
                 }
+                let Some(ey) = exposed_y else { return false };
+                let emat = match sample_world(&s.density_fields, v.world_x, ey, v.world_z, chunk_size)
+                {
+                    Some((_, m)) => m,
+                    None => return false,
+                };
+                let _ = mat;
                 let air_faces =
-                    count_air_faces(&s.density_fields, v.world_x, v.world_y, v.world_z, chunk_size);
+                    count_air_faces(&s.density_fields, v.world_x, ey, v.world_z, chunk_size);
                 let (stress, _) = dormancy_cell_stress(
-                    &s.density_fields, &dcfg, mat,
-                    v.world_x, v.world_y, v.world_z, chunk_size, air_faces,
+                    &s.density_fields, &dcfg, emat,
+                    v.world_x, ey, v.world_z, chunk_size, air_faces,
                 );
                 let painted = s
                     .stress_fields
                     .get(&key)
                     .map(|sf| sf.painted(lx, ly, lz))
                     .unwrap_or(0.0);
-                let eff = stress + painted
-                    - strut_relief_final_v2(
-                        &s.density_fields, &s.support_fields, &dcfg,
-                        v.world_x, v.world_y, v.world_z, chunk_size,
-                    );
+                let eff = stress + painted;
                 eff >= DORMANCY_COLLAPSE_THRESHOLD
             })
             .collect()
@@ -394,6 +488,21 @@ pub(crate) fn try_run_phase2(
     }
     let remesh_ms = t_remesh.elapsed().as_secs_f64() * 1000.0;
 
+    // Queue the deferred stress recalcs — phase-1's stash plus phase-2's
+    // own — now that the montage can't be delayed by the recalc batch.
+    {
+        let mut recalcs = pending.pending_recalcs;
+        if let Some(o) = &out {
+            recalcs.extend(o.recalcs.iter().copied());
+        }
+        if !recalcs.is_empty() {
+            let mut s = store.write().unwrap();
+            for (center, radius) in recalcs {
+                s.queue_stress_dirty_no_collapse(center, radius);
+            }
+        }
+    }
+
     match &out {
         None => crate::panic_log::note(&format!(
             "[DORMANCY-COLLAPSE] phase2: 0 of {} stashed seeds still valid ({:.0}ms after arming); published {} deferred phase-1 chunks (remesh+seam {:.0}ms)",
@@ -417,6 +526,9 @@ pub(crate) fn try_run_phase2(
 
 struct CascadeOutcome {
     dirty: Vec<(i32, i32, i32)>,
+    /// Deferred stress-recalc events for the collapse sites — the CALLER
+    /// queues these (phase 1 stashes for phase 2; phase 2 queues at once).
+    recalcs: Vec<((i32, i32, i32), i32)>,
     seed_count: usize,
     events: usize,
     voxels: usize,
@@ -498,33 +610,59 @@ fn run_dormancy_cascade(
             let dirty_vec: Vec<(i32, i32, i32)> = dirty.iter().copied().collect();
             // Save persistence — without this the cave-ins evaporate on reload.
             s.modification_tracker.mark_dirty_many(&dirty_vec);
-            // Collapsed cells carry stale stress (they are air now) and the
-            // new cavity edges carry fresh spans: queue deferred position
-            // recalcs so warnings + crack decals re-evaluate on the normal
-            // deferred path (PLAY config — dormancy stress never persists).
-            // no_collapse: this pass IS the collapse.
-            for ev in &events {
-                let center = (
-                    ev.center.0.round() as i32,
-                    ev.center.1.round() as i32,
-                    ev.center.2.round() as i32,
-                );
-                let mut max_cheb = 0i32;
-                for slab in &ev.slabs {
-                    for cv in &slab.voxels {
-                        let d = (cv.world_x - center.0)
-                            .abs()
-                            .max((cv.world_y - center.1).abs())
-                            .max((cv.world_z - center.2).abs());
-                        max_cheb = max_cheb.max(d + slab.fall_distance.abs());
-                    }
-                }
-                let radius = (max_cheb + 6).min(chunk_size as i32 * 3);
-                s.queue_stress_dirty_no_collapse(center, radius);
-            }
         }
+
+        // Iron+ never breaks during dormancy (user spec): restore any the
+        // BFS-halt damage felled and drop them from the report. Copper was
+        // sacrificed before the cascade, so anything here is iron-and-above.
+        broken.retain(|ev| {
+            if (ev.support_type as u8) >= SupportType::Iron as u8 {
+                if let Some(sf) = s.support_fields.get_mut(&ev.chunk) {
+                    sf.set(
+                        ev.lx as usize,
+                        ev.ly as usize,
+                        ev.lz as usize,
+                        ev.support_type,
+                    );
+                }
+                false
+            } else {
+                true
+            }
+        });
         (events, hit_deadline)
     };
+
+    // Collapsed cells carry stale stress (they are air now) and the new
+    // cavity edges carry fresh spans: compute deferred position recalcs so
+    // warnings + crack decals re-evaluate on the normal deferred path
+    // (PLAY config — dormancy stress never persists). no_collapse: this
+    // pass IS the collapse. NOT queued here — the caller decides when:
+    // phase 1 stashes them for phase 2 (queueing 500+ events during the
+    // reveal put a multi-second worker-0 recalc batch in front of the
+    // montage resync and stretched the black hold ~5s); phase 2 queues
+    // immediately (montage over).
+    let recalcs: Vec<((i32, i32, i32), i32)> = events
+        .iter()
+        .map(|ev| {
+            let center = (
+                ev.center.0.round() as i32,
+                ev.center.1.round() as i32,
+                ev.center.2.round() as i32,
+            );
+            let mut max_cheb = 0i32;
+            for slab in &ev.slabs {
+                for cv in &slab.voxels {
+                    let d = (cv.world_x - center.0)
+                        .abs()
+                        .max((cv.world_y - center.1).abs())
+                        .max((cv.world_z - center.2).abs());
+                    max_cheb = max_cheb.max(d + slab.fall_distance.abs());
+                }
+            }
+            (center, (max_cheb + 6).min(chunk_size as i32 * 3))
+        })
+        .collect();
 
     // Struts that broke bracing slabs ride the existing StrutsBroken result
     // so UE's placed-strut visuals + crack overlays stay in sync (dedup by
@@ -560,6 +698,7 @@ fn run_dormancy_cascade(
 
     CascadeOutcome {
         dirty: dirty.into_iter().collect(),
+        recalcs,
         seed_count,
         events: events.len(),
         voxels: voxels_collapsed,
@@ -578,7 +717,6 @@ struct ScanStats {
     chunks_unscanned: usize,
     skipped_player: usize,
     skipped_zone: usize,
-    skipped_terraced: usize,
     /// Span histogram over every air-below (ceiling/deck) cell scanned —
     /// buckets 0-2 / 3-4 / 5-6 / 7-9 / 10-14 / 15-20. THE tuning
     /// instrument for `DORMANCY_SPAN_WEIGHT` / `DORMANCY_MIN_SAFE_SPAN`.
@@ -657,45 +795,115 @@ fn dormancy_cell_stress(
     ((span_stress + xsec_stress) / hardness, span)
 }
 
-/// Chunk keys containing terraced (building-pad) cells, plus the VERTICAL
-/// column around them (dy -1..=2): nothing may fall INTO a pad from above
-/// or drop the deck out from under it. Deliberately NOT a lateral halo —
-/// the first cut's 26-halo exempted ~87 chunks of base-adjacent tunnels,
-/// which the user wants fair game (2026-08-25: "not even pre stressed
-/// cracking tunnels" fell near the base).
-fn terraced_chunk_halo(
-    terraced_cells: &HashSet<(i32, i32, i32)>,
+/// Alive struts indexed for the dormancy tier rules (world coords + r²).
+struct StrutIndex {
+    /// Copper: sacrificed at event start; radius keeps the posthumous
+    /// "a little safer than Geological" shadow.
+    copper: Vec<(i32, i32, i32, i64)>,
+    /// Iron and above: unbreakable, radius fully immune.
+    ironplus: Vec<(i32, i32, i32, i64)>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum StrutCover {
+    Open,
+    Copper,
+    IronPlus,
+}
+
+fn build_strut_index(
+    support_fields: &HashMap<(i32, i32, i32), SupportField>,
     chunk_size: usize,
-) -> HashSet<(i32, i32, i32)> {
-    let mut out = HashSet::new();
-    for &(wx, wy, wz) in terraced_cells {
-        let (k, _, _, _) = world_to_chunk_local(wx, wy, wz, chunk_size);
-        for dy in -1i32..=2 {
-            out.insert((k.0, k.1 + dy, k.2));
+) -> StrutIndex {
+    let cs = chunk_size as i32;
+    let mut idx = StrutIndex { copper: Vec::new(), ironplus: Vec::new() };
+    for (&key, sf) in support_fields.iter() {
+        for &(lx, ly, lz) in sf.strut_cells() {
+            let (lx, ly, lz) = (lx as usize, ly as usize, lz as usize);
+            let ty = sf.get(lx, ly, lz);
+            if ty == SupportType::None || !sf.is_strut_alive(lx, ly, lz) {
+                continue;
+            }
+            let r = STRUT_TUNING[ty as u8 as usize].radius as i64;
+            let entry = (
+                key.0 * cs + lx as i32,
+                key.1 * cs + ly as i32,
+                key.2 * cs + lz as i32,
+                r * r,
+            );
+            if ty == SupportType::Copper {
+                idx.copper.push(entry);
+            } else {
+                idx.ironplus.push(entry);
+            }
         }
     }
-    out
+    idx
+}
+
+fn strut_cover(idx: &StrutIndex, wx: i32, wy: i32, wz: i32) -> StrutCover {
+    let hit = |s: &(i32, i32, i32, i64)| -> bool {
+        let dx = (wx - s.0) as i64;
+        let dy = (wy - s.1) as i64;
+        let dz = (wz - s.2) as i64;
+        dx * dx + dy * dy + dz * dz <= s.3
+    };
+    if idx.ironplus.iter().any(hit) {
+        return StrutCover::IronPlus;
+    }
+    if idx.copper.iter().any(hit) {
+        return StrutCover::Copper;
+    }
+    StrutCover::Open
+}
+
+/// The copper sacrifice: every alive copper strut breaks at dormancy.
+/// Returns (chunk, lx, ly, lz) of each broken strut for the UE report.
+/// `set()` maintains the strut-cell list, so no manual rebuild is needed.
+fn break_all_copper(
+    support_fields: &mut HashMap<(i32, i32, i32), SupportField>,
+) -> Vec<((i32, i32, i32), usize, usize, usize)> {
+    let mut broken = Vec::new();
+    for (&key, sf) in support_fields.iter_mut() {
+        let cells: Vec<(u8, u8, u8)> = sf.strut_cells().to_vec();
+        for (lx, ly, lz) in cells {
+            let (lx, ly, lz) = (lx as usize, ly as usize, lz as usize);
+            if sf.get(lx, ly, lz) == SupportType::Copper && sf.is_strut_alive(lx, ly, lz) {
+                sf.set(lx, ly, lz, SupportType::None);
+                broken.push((key, lx, ly, lz));
+            }
+        }
+    }
+    broken
 }
 
 /// Dormancy scan: recompute stress under the dormancy recipe for every
 /// surface-shell cell of every loaded chunk (nearest-first, sliced, rayon
-/// per slice, budget-capped) and seed cells at
-/// `recomputed + painted - strut_relief >= threshold`. Player-adjacent and
-/// terraced chunks are DROPPED; cells inside `deferred_zone` chunks are
-/// returned separately for the post-montage phase. Stored play-stress is
-/// never read (except the painted overlay) and never written.
+/// per slice, budget-capped). Strut tiers apply per cell: iron+ radius is
+/// skipped outright, copper radius evaluates under the softer shadow
+/// dials (copper itself was already sacrificed by the caller). The
+/// player-adjacent chunks are DROPPED; cells inside `deferred_zone`
+/// chunks are returned separately for the post-montage phase. Stored
+/// play-stress feeds only the crack tier + painted overlay; never written.
 #[allow(clippy::too_many_arguments)]
 fn collect_dormancy_seeds(
     density_fields: &HashMap<(i32, i32, i32), DensityField>,
     stress_fields: &HashMap<(i32, i32, i32), StressField>,
-    support_fields: &HashMap<(i32, i32, i32), SupportField>,
     dcfg: &StressConfig,
+    strut_idx: &StrutIndex,
     deferred_zone: &HashSet<(i32, i32, i32)>,
-    exempt_chunks: &HashSet<(i32, i32, i32)>,
     player_chunk: (i32, i32, i32),
     chunk_size: usize,
     deadline: Instant,
 ) -> (Vec<OverstressedVoxel>, Vec<OverstressedVoxel>, ScanStats) {
+    // Copper-shadow recipe: same live-derived config, softer span dials.
+    let copper_shadow = {
+        let mut c = dcfg.clone();
+        c.span_weight = DORMANCY_COPPER_SPAN_WEIGHT;
+        c.min_safe_span = DORMANCY_COPPER_MIN_SAFE_SPAN;
+        c
+    };
+    let copper_shadow = &copper_shadow;
     let mut eligible = Vec::new();
     let mut deferred = Vec::new();
     let mut stats = ScanStats {
@@ -703,7 +911,6 @@ fn collect_dormancy_seeds(
         chunks_unscanned: 0,
         skipped_player: 0,
         skipped_zone: 0,
-        skipped_terraced: 0,
         span_hist: [0; 6],
     };
 
@@ -720,10 +927,6 @@ fn collect_dormancy_seeds(
     for &key in density_fields.keys() {
         if cheb(&key) <= PLAYER_EXCLUDE_CHEB {
             stats.skipped_player += 1;
-            continue;
-        }
-        if exempt_chunks.contains(&key) {
-            stats.skipped_terraced += 1;
             continue;
         }
         candidates.push(key);
@@ -767,9 +970,21 @@ fn collect_dormancy_seeds(
                             // fallability; stored stress is already
                             // strut-relief-aware (relief is baked in as
                             // negative stored surplus).
+                            // Strut tiers: iron+ radius is immune; copper
+                            // radius evaluates under the softer shadow.
+                            let cover = strut_cover(strut_idx, wx, wy, wz);
+                            if cover == StrutCover::IronPlus {
+                                continue;
+                            }
+                            let (stored_thr, cell_cfg) = match cover {
+                                StrutCover::Copper => {
+                                    (DORMANCY_COPPER_STORED_THRESHOLD, copper_shadow)
+                                }
+                                _ => (DORMANCY_STORED_THRESHOLD, dcfg),
+                            };
                             let stored_eff =
                                 sf_painted.map(|s| s.effective(x, y, z)).unwrap_or(0.0);
-                            if stored_eff >= DORMANCY_COLLAPSE_THRESHOLD {
+                            if stored_eff >= stored_thr {
                                 out.push(OverstressedVoxel {
                                     world_x: wx,
                                     world_y: wy,
@@ -795,20 +1010,13 @@ fn collect_dormancy_seeds(
                             }
                             let air_faces = count_air_faces(density_fields, wx, wy, wz, cs);
                             let (stress, span) = dormancy_cell_stress(
-                                density_fields, dcfg, cell.material, wx, wy, wz, cs, air_faces,
+                                density_fields, cell_cfg, cell.material, wx, wy, wz, cs,
+                                air_faces,
                             );
                             hist[span_bucket(span)] += 1;
                             let painted =
                                 sf_painted.map(|s| s.painted(x, y, z)).unwrap_or(0.0);
-                            let mut eff = stress + painted;
-                            if eff < DORMANCY_COLLAPSE_THRESHOLD {
-                                continue;
-                            }
-                            // Relief only lowers — evaluated after the cheap
-                            // threshold gate (the sweep probes struts).
-                            eff -= strut_relief_final_v2(
-                                density_fields, support_fields, dcfg, wx, wy, wz, cs,
-                            );
+                            let eff = stress + painted;
                             if eff < DORMANCY_COLLAPSE_THRESHOLD {
                                 continue;
                             }
@@ -818,6 +1026,22 @@ fn collect_dormancy_seeds(
                                 world_z: wz,
                                 stress: eff,
                             });
+                            // Slab thickness: seed straight up into the
+                            // roof (same chunk; stop at air = thin roof).
+                            // Duplicates with a stored-tier push of the
+                            // same cell are harmless (cascade dedups).
+                            for dy in 1..DORMANCY_SEED_DEPTH_LAYERS {
+                                let uy = y + dy;
+                                if uy >= cs || !df.get(x, uy, z).material.is_solid() {
+                                    break;
+                                }
+                                out.push(OverstressedVoxel {
+                                    world_x: wx,
+                                    world_y: wy + dy as i32,
+                                    world_z: wz,
+                                    stress: eff,
+                                });
+                            }
                         }
                     }
                 }
@@ -911,11 +1135,11 @@ mod tests {
         su: &HashMap<(i32, i32, i32), SupportField>,
         c: &StressConfig,
         zone: &HashSet<(i32, i32, i32)>,
-        exempt: &HashSet<(i32, i32, i32)>,
         player: (i32, i32, i32),
     ) -> (Vec<OverstressedVoxel>, Vec<OverstressedVoxel>, ScanStats) {
+        let idx = build_strut_index(su, CHUNK_SIZE);
         collect_dormancy_seeds(
-            df, sf, su, c, zone, exempt, player, CHUNK_SIZE,
+            df, sf, c, &idx, zone, player, CHUNK_SIZE,
             Instant::now() + FAR_FUTURE,
         )
     }
@@ -928,7 +1152,7 @@ mod tests {
         // Span model alive (cranked so material hardness can't matter):
         // the roof over the wide room must produce seeds.
         let alive = cfg(0.5, 2);
-        let (seeds, _, _) = scan(&df, &sf, &su, &alive, &none, &none, (10, 10, 10));
+        let (seeds, _, _) = scan(&df, &sf, &su, &alive, &none, (10, 10, 10));
         assert!(
             !seeds.is_empty(),
             "wide room roof should seed under the span recipe"
@@ -945,7 +1169,7 @@ mod tests {
 
         // Play-like config (span dead): the same geometry produces nothing.
         let dead = cfg(0.001, 333);
-        let (seeds, _, _) = scan(&df, &sf, &su, &dead, &none, &none, (10, 10, 10));
+        let (seeds, _, _) = scan(&df, &sf, &su, &dead, &none, (10, 10, 10));
         assert!(
             seeds.is_empty(),
             "with the span model dead the roof must not seed (got {})",
@@ -967,7 +1191,7 @@ mod tests {
 
         let alive = cfg(0.5, 2);
         let none = HashSet::new();
-        let (seeds, _, _) = scan(&df_map, &sf_map, &su_map, &alive, &none, &none, (10, 10, 10));
+        let (seeds, _, _) = scan(&df_map, &sf_map, &su_map, &alive, &none, (10, 10, 10));
         assert!(
             seeds.is_empty(),
             "narrow corridor roof must stay below threshold (got {} seeds)",
@@ -977,19 +1201,19 @@ mod tests {
 
     #[test]
     fn painted_stress_seeds_surface_cells() {
-        // Span dead — only the painted overlay drives. Painted 0.74 stays
-        // under threshold, 0.76 seeds. Cells must be on the surface shell
-        // (roof over the room) for the scan to consider them at all.
+        // Span dead — only the painted overlay drives (via stored
+        // effective, so the STORED threshold applies). Painted 0.39 stays
+        // under, 0.41 seeds.
         let (df, mut sf, su) = room_world(Material::Granite);
         {
             let f = sf.get_mut(&(0, 0, 0)).unwrap();
-            f.set_painted(5, 7, 5, 0.74);
-            f.set_painted(9, 7, 9, 0.76);
+            f.set_painted(5, 7, 5, 0.39);
+            f.set_painted(9, 7, 9, 0.41);
         }
         let dead = cfg(0.001, 333);
         let none = HashSet::new();
-        let (seeds, _, _) = scan(&df, &sf, &su, &dead, &none, &none, (10, 10, 10));
-        assert_eq!(seeds.len(), 1, "only the 0.76 painted cell should seed");
+        let (seeds, _, _) = scan(&df, &sf, &su, &dead, &none, (10, 10, 10));
+        assert_eq!(seeds.len(), 1, "only the 0.41 painted cell should seed");
         assert_eq!(
             (seeds[0].world_x, seeds[0].world_y, seeds[0].world_z),
             (9, 7, 9)
@@ -1004,13 +1228,13 @@ mod tests {
         let (df, mut sf, su) = room_world(Material::Granite);
         {
             let f = sf.get_mut(&(0, 0, 0)).unwrap();
-            f.set(5, 2, 5, 0.74); // floor cell, just under — must NOT seed
-            f.set(9, 2, 9, 0.80); // floor cell, over — must seed via union
+            f.set(5, 2, 5, 0.39); // floor cell, just under — must NOT seed
+            f.set(9, 2, 9, 0.41); // floor cell, over — must seed via union
         }
         let dead = cfg(0.001, 333);
         let none = HashSet::new();
-        let (seeds, _, _) = scan(&df, &sf, &su, &dead, &none, &none, (10, 10, 10));
-        assert_eq!(seeds.len(), 1, "only the 0.80 stored-stress cell seeds");
+        let (seeds, _, _) = scan(&df, &sf, &su, &dead, &none, (10, 10, 10));
+        assert_eq!(seeds.len(), 1, "only the 0.41 stored-stress cell seeds");
         assert_eq!(
             (seeds[0].world_x, seeds[0].world_y, seeds[0].world_z),
             (9, 2, 9)
@@ -1018,17 +1242,20 @@ mod tests {
     }
 
     #[test]
-    fn terraced_exemption_is_vertical_column_only() {
-        let mut terraced = HashSet::new();
-        terraced.insert((8 * CHUNK_SIZE as i32 + 4, 4, 4)); // chunk (8,0,0)
-        let exempt = terraced_chunk_halo(&terraced, CHUNK_SIZE);
-        assert!(exempt.contains(&(8, 0, 0)), "pad chunk exempt");
-        assert!(exempt.contains(&(8, 1, 0)), "above exempt (falls INTO pad)");
-        assert!(exempt.contains(&(8, 2, 0)), "two above exempt");
-        assert!(exempt.contains(&(8, -1, 0)), "deck below exempt");
+    fn roof_seeds_pull_upper_layers() {
+        // An over-threshold ceiling cell also seeds cells straight up
+        // (slab thickness). The room roof is at y=7; layers land at 8, 9.
+        let (df, sf, su) = room_world(Material::Granite);
+        let alive = cfg(0.5, 2);
+        let none = HashSet::new();
+        let (seeds, _, _) = scan(&df, &sf, &su, &alive, &none, (10, 10, 10));
         assert!(
-            !exempt.contains(&(7, 0, 0)) && !exempt.contains(&(9, 0, 0)),
-            "lateral neighbors are FAIR GAME"
+            seeds.iter().any(|v| v.world_y == 8),
+            "second slab layer (y=8) should be seeded"
+        );
+        assert!(
+            seeds.iter().any(|v| v.world_y == 9),
+            "third slab layer (y=9) should be seeded"
         );
     }
 
@@ -1047,7 +1274,7 @@ mod tests {
         // chunk (5,0,0) is cheb 4 -> eligible.
         let alive = cfg(0.5, 2);
         let none = HashSet::new();
-        let (seeds, deferred, stats) = scan(&df, &sf, &su, &alive, &none, &none, (1, 0, 0));
+        let (seeds, deferred, stats) = scan(&df, &sf, &su, &alive, &none, (1, 0, 0));
         assert_eq!(stats.skipped_player, 1);
         assert!(deferred.is_empty());
         assert!(!seeds.is_empty());
@@ -1058,12 +1285,12 @@ mod tests {
     }
 
     #[test]
-    fn zone_seeds_deferred_and_terraced_dropped() {
+    fn zone_seeds_deferred() {
         let (dfa, sfa, sua) = room_world(Material::Granite);
         let mut df: HashMap<_, _> = HashMap::new();
         let mut sf = HashMap::new();
         let mut su = HashMap::new();
-        for &k in &[(4, 0, 0), (8, 0, 0), (12, 0, 0)] {
+        for &k in &[(4, 0, 0), (12, 0, 0)] {
             df.insert(k, dfa[&(0, 0, 0)].clone());
             sf.insert(k, sfa[&(0, 0, 0)].clone());
             su.insert(k, sua[&(0, 0, 0)].clone());
@@ -1071,16 +1298,9 @@ mod tests {
         let alive = cfg(0.5, 2);
         let mut zone = HashSet::new();
         zone.insert((4, 0, 0));
-        // Terraced cell inside chunk (8,0,0) -> that chunk + halo exempt.
-        let mut terraced = HashSet::new();
-        terraced.insert((8 * CHUNK_SIZE as i32 + 4, 4, 4));
-        let exempt = terraced_chunk_halo(&terraced, CHUNK_SIZE);
-        assert!(exempt.contains(&(8, 0, 0)));
 
-        let (seeds, deferred, stats) =
-            scan(&df, &sf, &su, &alive, &zone, &exempt, (40, 40, 40));
+        let (seeds, deferred, stats) = scan(&df, &sf, &su, &alive, &zone, (40, 40, 40));
         assert_eq!(stats.skipped_zone, 1);
-        assert_eq!(stats.skipped_terraced, 1);
         assert!(!deferred.is_empty(), "zone chunk's roof seeds are deferred");
         assert!(
             deferred.iter().all(|v| v.world_x < 5 * CHUNK_SIZE as i32),
@@ -1089,7 +1309,65 @@ mod tests {
         assert!(!seeds.is_empty(), "the plain chunk still seeds");
         assert!(
             seeds.iter().all(|v| v.world_x >= 12 * CHUNK_SIZE as i32),
-            "eligible seeds come only from the non-zone, non-terraced chunk"
+            "eligible seeds come only from the non-zone chunk"
         );
+    }
+
+    #[test]
+    fn iron_strut_radius_is_immune() {
+        let (df, sf, mut su) = room_world(Material::Granite);
+        // Iron strut in the roof over the room center.
+        su.get_mut(&(0, 0, 0)).unwrap().set(8, 8, 8, SupportType::Iron);
+        let alive = cfg(0.5, 2);
+        let none = HashSet::new();
+        let (seeds, _, _) = scan(&df, &sf, &su, &alive, &none, (10, 10, 10));
+        let r = STRUT_TUNING[SupportType::Iron as u8 as usize].radius as i64;
+        let r2 = r * r;
+        assert!(
+            seeds.iter().all(|v| {
+                let dx = (v.world_x - 8) as i64;
+                let dy = (v.world_y - 8) as i64;
+                let dz = (v.world_z - 8) as i64;
+                dx * dx + dy * dy + dz * dz > r2
+            }),
+            "no seed may sit inside the iron strut's radius"
+        );
+    }
+
+    #[test]
+    fn copper_shadow_softens_and_copper_breaks() {
+        // 6-wide corridor: span ~3 from roof center. At cfg(0.6, 1) the
+        // open roof seeds ((3-1)*0.6/0.8 = 1.5); under the copper shadow
+        // ((3-1)*0.25/0.8 = 0.625) it survives.
+        let mut df_map = HashMap::new();
+        let mut df = solid_density(Material::Granite);
+        carve(&mut df, (5, 3, 2), (10, 6, 13));
+        df_map.insert((0, 0, 0), df);
+        let mut sf_map = HashMap::new();
+        sf_map.insert((0, 0, 0), StressField::new(FIELD_SIZE));
+        let mut su_map = HashMap::new();
+        su_map.insert((0, 0, 0), SupportField::new(FIELD_SIZE));
+
+        let alive = cfg(0.6, 1);
+        let none = HashSet::new();
+        let (seeds, _, _) = scan(&df_map, &sf_map, &su_map, &alive, &none, (10, 10, 10));
+        assert!(!seeds.is_empty(), "unstrutted corridor roof must seed");
+
+        // Copper strut mid-corridor: its (large) radius shadows the roof.
+        su_map.get_mut(&(0, 0, 0)).unwrap().set(8, 5, 8, SupportType::Copper);
+        let (seeds, _, _) = scan(&df_map, &sf_map, &su_map, &alive, &none, (10, 10, 10));
+        assert!(
+            seeds.is_empty(),
+            "copper shadow must hold the corridor roof (got {} seeds)",
+            seeds.len()
+        );
+
+        // And the sacrifice: break_all_copper clears copper, spares iron.
+        su_map.get_mut(&(0, 0, 0)).unwrap().set(2, 2, 2, SupportType::Iron);
+        let broken = break_all_copper(&mut su_map);
+        assert_eq!(broken.len(), 1, "exactly the copper strut breaks");
+        let sf = su_map.get(&(0, 0, 0)).unwrap();
+        assert_eq!(sf.get(8, 5, 8), SupportType::None, "copper cleared");
+        assert_eq!(sf.get(2, 2, 2), SupportType::Iron, "iron untouched");
     }
 }

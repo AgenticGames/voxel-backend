@@ -44,6 +44,11 @@ pub struct DormancyPhase2Pending {
     /// Phase 1 writes density only; phase 2 publishes everything after the
     /// montage, where the normal streamed-apply budget absorbs it unseen.
     pub pending_remesh: Vec<(i32, i32, i32)>,
+    /// Deferred stress-recalc events (center, radius) for phase-1 collapse
+    /// sites, queued only in phase 2: queueing them during the reveal put a
+    /// multi-second worker-0 recalc batch in front of the montage's resync
+    /// request and stretched the black hold (~5s at Angry Mountain volume).
+    pub pending_recalcs: Vec<((i32, i32, i32), i32)>,
     pub player_chunk: (i32, i32, i32),
     pub armed_at: std::time::Instant,
 }
