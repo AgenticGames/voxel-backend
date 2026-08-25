@@ -448,7 +448,7 @@ fn min_lateral_distance_to_grounded(
 ///
 /// This handles both ceiling voxels (air below → search laterally at cave level)
 /// and wall voxels (air to the side → search laterally through cave).
-pub(crate) fn measure_span_from_air(
+pub fn measure_span_from_air(
     density_fields: &HashMap<(i32, i32, i32), DensityField>,
     wx: i32, wy: i32, wz: i32,
     chunk_size: usize,

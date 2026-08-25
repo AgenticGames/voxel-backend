@@ -201,7 +201,7 @@ pub fn calc_voxel_stress_v2(
 /// in the stress field on purpose so `effective = stress + painted` lets
 /// struts offset map-authored painted stress. Every effective-stress read
 /// clamps the SUM at zero (`StressField::effective`), never the parts.
-pub(crate) fn strut_relief_final_v2(
+pub fn strut_relief_final_v2(
     density_fields: &HashMap<(i32, i32, i32), DensityField>,
     support_fields: &HashMap<(i32, i32, i32), SupportField>,
     config: &StressConfig,
