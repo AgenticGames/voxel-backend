@@ -18,6 +18,7 @@ use crate::store::ChunkStore;
 use crate::types::{WorkerRequest, WorkerResult};
 
 mod brush;
+mod dormancy_collapse;
 mod generate;
 pub mod heartbeat;
 mod pathing;
