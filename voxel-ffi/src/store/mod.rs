@@ -32,6 +32,22 @@ mod tests;
 pub(crate) use boundary::sync_boundary_density;
 
 
+/// Dormancy-collapse work deferred from the reveal window to post-montage
+/// (see `worker/dormancy_collapse.rs`). Seeds are cells at >= the dormancy
+/// threshold inside the filmed block at phase-1 time; phase 2 re-validates
+/// them before cascading (the world may have moved under them).
+pub struct DormancyPhase2Pending {
+    pub seeds: Vec<voxel_core::stress::OverstressedVoxel>,
+    /// Phase-1 collapse-dirty chunks whose REMESH is deferred to phase 2:
+    /// publishing ~100+ collapse meshes during the reveal window measurably
+    /// stretched the black hold (+0.6s) by contending with the resync drain.
+    /// Phase 1 writes density only; phase 2 publishes everything after the
+    /// montage, where the normal streamed-apply budget absorbs it unseen.
+    pub pending_remesh: Vec<(i32, i32, i32)>,
+    pub player_chunk: (i32, i32, i32),
+    pub armed_at: std::time::Instant,
+}
+
 /// Result from combined cavern location search.
 pub struct CavernLocations {
     pub spring: Vec3,
@@ -52,6 +68,14 @@ pub struct ChunkStore {
     /// QuerySurface reporting "unloaded" (=solid) and the planner blind. Set via
     /// `voxel_montage_set_protected_chunks`, cleared at montage end. Rust coords.
     pub montage_protected: HashSet<(i32, i32, i32)>,
+    /// Dormancy-collapse phase 2 (2026-08-25): seeds inside the FILMED block
+    /// that phase 1 (curtain-up) skipped so it wouldn't fight the morph.
+    /// Armed by phase 1 in the sleep handler; `dormancy_phase2_go` is raised
+    /// by `voxel_montage_clear_protected` (CleanupMontage) and worker 0's
+    /// idle path then runs the deferred cascade. Both live here so no new
+    /// plumbing threads through the worker loop.
+    pub dormancy_phase2_pending: Option<DormancyPhase2Pending>,
+    pub dormancy_phase2_go: bool,
     /// Per-chunk seam data (DC vertices + boundary edges) for seam stitching.
     /// Arc-wrapped so seam passes can snapshot the entries they need under a
     /// brief read lock and run quad generation WITHOUT holding the store lock
@@ -131,6 +155,8 @@ impl ChunkStore {
             hermite_data: HashMap::new(),
             generated_regions: HashSet::new(),
             montage_protected: HashSet::new(),
+            dormancy_phase2_pending: None,
+            dormancy_phase2_go: false,
             chunk_seam_data: HashMap::new(),
             base_meshes: HashMap::new(),
             stress_fields: HashMap::new(),

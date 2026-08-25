@@ -156,7 +156,22 @@ pub unsafe extern "C" fn voxel_sleep_far_work_go(engine: *mut c_void) -> u32 {
     if engine.is_null() {
         return 0;
     }
-    crate::worker::sleep_morph::SLEEP_FAR_GO.store(true, std::sync::atomic::Ordering::Relaxed);
+    let was_open = crate::worker::sleep_morph::SLEEP_FAR_GO
+        .swap(true, std::sync::atomic::Ordering::Relaxed);
+    // Second call while the gate is already open = the CleanupMontage
+    // backstop = the montage is over. That is dormancy-collapse phase 2's
+    // release signal: UE's normal cleanup path never calls
+    // voxel_montage_clear_protected (PushProtectedUnion re-pushes the
+    // residency-only set instead), so this is the reliable Rust-visible
+    // "montage ended" edge. Idempotent; arming twice is harmless.
+    if was_open {
+        let engine = &*(engine as *const VoxelEngine);
+        if let Ok(mut s) = engine.store_arc().write() {
+            if s.dormancy_phase2_pending.is_some() {
+                s.dormancy_phase2_go = true;
+            }
+        }
+    }
     1
 }
 

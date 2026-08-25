@@ -331,6 +331,17 @@ pub fn worker_loop(
             if did_stress {
                 continue;
             }
+            // Priority 1.6: dormancy-collapse phase 2 — the filmed-block
+            // seeds deferred at curtain-up, released when CleanupMontage
+            // clears montage protection (voxel_montage_clear_protected).
+            hb.enter(heartbeat::activity::STRESS, (0, 0, 0));
+            let did_phase2 = dormancy_collapse::try_run_phase2(
+                &store, &stress_config, &config, &result_tx, &fluid_event_tx, world_scale,
+            );
+            hb.idle();
+            if did_phase2 {
+                continue;
+            }
         }
 
         // Reveal pause: while a sleep-montage morph reveal is on screen, UE pauses

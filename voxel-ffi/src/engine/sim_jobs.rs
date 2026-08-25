@@ -102,6 +102,11 @@ impl VoxelEngine {
     pub fn clear_montage_protected(&self) {
         if let Ok(mut s) = self.store.write() {
             s.montage_protected.clear();
+            // Dormancy-collapse phase 2: the montage is over — release the
+            // deferred filmed-block cascade (worker 0's idle path runs it).
+            if s.dormancy_phase2_pending.is_some() {
+                s.dormancy_phase2_go = true;
+            }
         }
     }
 

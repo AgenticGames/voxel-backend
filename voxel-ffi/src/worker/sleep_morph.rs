@@ -353,39 +353,21 @@ pub(super) fn handle_sleep(ctx: &super::HandlerCtx<'_>, player_chunk: (i32, i32,
                     t_wait.elapsed().as_secs_f64() * 1000.0));
             }
 
-            // ── DORMANCY WORLD COLLAPSE (2026-08-25) ────────────────────
+            // ── DORMANCY WORLD COLLAPSE phase 1 (2026-08-25) ────────────
             // Behind the curtain-up gate, so it costs the montage nothing:
-            // every loaded area at >= 85% effective stress collapses to its
-            // end state (no animation). Its dirty chunks join the FAR remesh
-            // + seam pass below so meshing rides the existing pipeline.
-            let collapse_dirty =
-                super::dormancy_collapse::apply_dormancy_world_collapse(ctx, player_chunk);
-            let mut far_vec: Vec<(i32, i32, i32)> = far_keys.to_vec();
-            if !collapse_dirty.is_empty() {
-                let mut have: std::collections::HashSet<(i32, i32, i32)> =
-                    far_vec.iter().copied().collect();
-                for &ck in &collapse_dirty {
-                    for dx in -1i32..=1 {
-                        for dy in -1i32..=1 {
-                            for dz in -1i32..=1 {
-                                let nk = (ck.0 + dx, ck.1 + dy, ck.2 + dz);
-                                // Collapse chunks re-mesh even if the NEAR
-                                // phase already sent them — the collapse
-                                // happened after that send.
-                                if loaded_keys.contains(&nk) && have.insert(nk) {
-                                    far_vec.push(nk);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            // every loaded area at >= 75% effective stress collapses to its
+            // end state (no animation) — DENSITY WRITES ONLY. The remesh of
+            // every collapse chunk is deferred to phase 2 (post-montage):
+            // publishing ~100+ collapse meshes here stretched the black hold
+            // by contending with the resync drain. Filmed-block seeds are
+            // likewise stashed for phase 2. See worker/dormancy_collapse.rs.
+            super::dormancy_collapse::apply_dormancy_world_collapse(ctx, player_chunk);
 
             // FAR phase: sliced write locks so morph-step snapshot reads (and
             // mine traffic) interleave between slices.
             let t_far = Instant::now();
             let mut far_meshed_count = 0usize;
-            for slice in far_vec.chunks(24) {
+            for slice in far_keys.chunks(24) {
                 let meshed: Vec<(i32, i32, i32)> = {
                     let mut s = store.write().unwrap();
                     s.remesh_dirty(&full_bounds(slice), &cfg, world_scale)
@@ -395,9 +377,8 @@ pub(super) fn handle_sleep(ctx: &super::HandlerCtx<'_>, player_chunk: (i32, i32,
                 send_meshed(&meshed);
             }
             crate::panic_log::note(&format!(
-                "[SLEEP_TRACE] far-remesh done ({} meshes of {} keys in {} slices, {:.0}ms incl send/backpressure; {} collapse-dirty folded in)",
-                far_meshed_count, far_vec.len(), (far_vec.len() + 23) / 24, t_far.elapsed().as_secs_f64() * 1000.0,
-                collapse_dirty.len()));
+                "[SLEEP_TRACE] far-remesh done ({} meshes of {} keys in {} slices, {:.0}ms incl send/backpressure)",
+                far_meshed_count, far_keys.len(), (far_keys.len() + 23) / 24, t_far.elapsed().as_secs_f64() * 1000.0));
 
             // [SLEEP_SEAM DBG 2026-05-29] Verify the post-sleep remesh carries
             // seams. If chunks_with_seams is high and seams are STILL missing
@@ -409,15 +390,12 @@ pub(super) fn handle_sleep(ctx: &super::HandlerCtx<'_>, player_chunk: (i32, i32,
             // Final seam pass over the FULL dirty set — authoritative stitch;
             // re-sends dirty + neighbors. Montage-filmed chunks among them are
             // DROPPED UE-side while the montage is filming; the post-montage
-            // resync restores them with fresh seams + collision. Dormancy
-            // collapse chunks are included so cave-in edges stitch too.
+            // resync restores them with fresh seams + collision. (Dormancy
+            // collapse chunks are NOT included — their remesh + seams publish
+            // in phase 2, post-montage.)
             let t_seam = Instant::now();
-            let mut seam_dirty = sleep_result.dirty_chunks.clone();
-            seam_dirty.extend(collapse_dirty.iter().copied());
-            seam_dirty.sort();
-            seam_dirty.dedup();
-            let seam_count = seam_dirty.len();
-            batched_seam_pass(&seam_dirty, &cfg, store, result_tx, fluid_event_tx, world_scale);
+            let seam_count = sleep_result.dirty_chunks.len();
+            batched_seam_pass(&sleep_result.dirty_chunks, &cfg, store, result_tx, fluid_event_tx, world_scale);
             crate::panic_log::note(&format!(
                 "[SLEEP_TRACE] seam pass done ({} chunks, {:.0}ms) — worker total {:.0}ms (SleepComplete was sent at {:.0}ms)",
                 seam_count, t_seam.elapsed().as_secs_f64() * 1000.0,
