@@ -24,10 +24,12 @@ use voxel_core::stress::{
 use crate::types::{FfiStrutBroken, WorkerResult};
 
 /// Effective-stress threshold at which an area collapses during dormancy.
-/// 0.85 matches `COLLAPSE_IMMINENT_STRESS` (the crack-decal / creak tier):
-/// anything the player saw cracking before the sleep has fallen by the time
-/// they wake.
-const DORMANCY_COLLAPSE_THRESHOLD: f32 = 0.85;
+/// 0.75 (user call 2026-08-25, was 0.85): deliberately BELOW the 0.85
+/// crack-decal / creak tier, so dormancy also drops marginal rock that never
+/// showed cracks — geological time is dramatic. Also matches the default
+/// `slab_cohesion_threshold` (0.75), so seed clusters and their cohesion
+/// expansion agree.
+const DORMANCY_COLLAPSE_THRESHOLD: f32 = 0.75;
 
 /// Wall-clock budget for scan + cascade. The pass runs behind the reveal,
 /// so this deadline is not a UX budget — it only bounds how long the mine
@@ -301,14 +303,14 @@ mod tests {
         let (mut sf, df) = world(&[(0, 0, 0)]);
         {
             let f = sf.get_mut(&(0, 0, 0)).unwrap();
-            f.set(3, 3, 3, 0.84); // just under — must NOT seed
-            f.set(5, 5, 5, 0.86); // over — must seed
+            f.set(3, 3, 3, 0.74); // just under — must NOT seed
+            f.set(5, 5, 5, 0.76); // over — must seed
         }
         let (seeds, scanned, _, _) = collect_dormancy_seeds(
             &sf, &df, &HashSet::new(), (10, 10, 10), CHUNK_SIZE,
         );
         assert_eq!(scanned, 1);
-        assert_eq!(seeds.len(), 1, "only the 0.86 cell should seed");
+        assert_eq!(seeds.len(), 1, "only the 0.76 cell should seed");
         assert_eq!(
             (seeds[0].world_x, seeds[0].world_y, seeds[0].world_z),
             (5, 5, 5)
