@@ -892,22 +892,25 @@ pub struct MineralConfig {
 
 impl Default for MineralConfig {
     fn default() -> Self {
+        // 08-25: caps raised for the Phase 5 wiring (the old 2/1/1/1/1 = at
+        // most 6 growths per sleep read as "the outskirts are always empty",
+        // which is the playtest report that wired this system in at all).
         Self {
-            crystal_growth_max: 2,
+            crystal_growth_max: 12,
             crystal_growth_enabled: true,
             crystal_growth_prob: 0.3,
-            malachite_stalactite_max: 1,
+            malachite_stalactite_max: 6,
             malachite_stalactite_enabled: true,
             malachite_stalactite_prob: 0.2,
             quartz_extension_prob: 0.10,
-            quartz_extension_max: 1,
+            quartz_extension_max: 8,
             quartz_extension_enabled: true,
-            calcite_infill_max: 1,
+            calcite_infill_max: 6,
             calcite_infill_depth: -30.0,
             calcite_infill_min_faces: 3,
             calcite_infill_enabled: true,
             calcite_infill_prob: 0.15,
-            pyrite_crust_max: 1,
+            pyrite_crust_max: 8,
             pyrite_crust_min_solid: 2,
             pyrite_crust_enabled: true,
             pyrite_crust_prob: 0.1,
