@@ -114,9 +114,13 @@ fn iron_strut_resists_bracing_damage() {
     assert_eq!(copper.max_hp, 200);
     // ...but Iron takes 30% of the bracing damage ("70% more resistant").
     assert!((iron.damage_taken_scale - 0.30).abs() < 1e-6);
-    assert!((copper.damage_taken_scale - 1.0).abs() < 1e-6);
+    // 2026-08-26 (user): Copper takes 30% LESS than it used to — 1.0 -> 0.70.
+    // Iron stays the clearly tougher tier (0.30 vs 0.70).
+    assert!((copper.damage_taken_scale - 0.70).abs() < 1e-6);
+    assert!(iron.damage_taken_scale < copper.damage_taken_scale,
+        "Iron must still resist more bracing damage than Copper");
 
-    // Every other tier is untouched at full rate — resistance is Iron-only.
+    // Every other tier is untouched at full rate — resistance is a T1/T2 thing.
     for t in [SupportType::Steel, SupportType::Crystal, SupportType::Mithril] {
         assert!((STRUT_TUNING[t as usize].damage_taken_scale - 1.0).abs() < 1e-6,
             "{:?} should still take full bracing damage", t);
@@ -126,14 +130,18 @@ fn iron_strut_resists_bracing_damage() {
     let blocked = 100.0_f32;
     let dmg_copper = bfs_halt_damage(SupportType::Copper, blocked);
     let dmg_iron = bfs_halt_damage(SupportType::Iron, blocked);
-    assert!((dmg_copper - 50.0).abs() < 1e-4);   // 100 * 0.5 * 1.0
+    assert!((dmg_copper - 35.0).abs() < 1e-4);   // 100 * 0.5 * 0.70
     assert!((dmg_iron - 15.0).abs() < 1e-4);     // 100 * 0.5 * 0.30
 
-    // Net staying power: at equal HP, Iron braces 1/0.3 as much slab as Copper.
+    // Net staying power: at equal HP, the ratio is copper_scale / iron_scale.
+    // 2026-08-26: the copper buff (1.0 -> 0.70) deliberately NARROWS Iron's
+    // lead from 3.33x to 0.70/0.30 = 2.33x. That is the cost the user accepted
+    // by asking for copper specifically; the ordering is what must not break,
+    // so the bar moved to 2x rather than being deleted.
     let voxels_copper = copper.max_hp as f32 / dmg_copper * blocked;
     let voxels_iron = iron.max_hp as f32 / dmg_iron * blocked;
-    assert!(voxels_iron > voxels_copper * 3.0,
-        "iron {voxels_iron} should outlast copper {voxels_copper} by >3x");
+    assert!(voxels_iron > voxels_copper * 2.0,
+        "iron {voxels_iron} should outlast copper {voxels_copper} by >2x");
 
     // A None strut must never be charged damage (the call site skips it, but
     // the helper indexes the table by type — index 0 has to stay harmless).

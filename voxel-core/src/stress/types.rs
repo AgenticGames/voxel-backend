@@ -283,7 +283,13 @@ pub const STRUT_TUNING: [StrutTuning; 6] = [
     // for. ⚠️ Mirror in AVoxelSupportActor::GetTuning (VoxelSupportActor.cpp).
     // Struts already placed in a save keep their stored HP; the new ceiling
     // applies to newly placed ones.
-    StrutTuning { hardness:  8.0, radius: 17, max_hp:  200, hp_decay_threshold: 1360.0, damage_taken_scale: 1.0 },
+    // 2026-08-26 (user): "make copper struts take 30% less durability damage
+    // than they currently do". Second knob again, not a third HP bump — 1.0 ->
+    // 0.70 on damage_taken_scale, so 100 blocked voxels now cost 35 HP instead
+    // of 50. Net staying power vs the 08-23 copper is 1/0.70 = 1.43x, which
+    // still leaves Iron (200/0.30) 2.3x tougher than Copper — the tier order
+    // the 08-23 pass established is preserved.
+    StrutTuning { hardness:  8.0, radius: 17, max_hp:  200, hp_decay_threshold: 1360.0, damage_taken_scale: 0.70 },
     // Iron (T2)
     // 2026-08-23 (user): "give iron strut 200 hp but 70% more resistance to
     // stress dmg". Two separate knobs by design — 150 -> 200 max_hp is the
