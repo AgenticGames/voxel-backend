@@ -26,7 +26,9 @@ use crate::store::ChunkStore;
 use crate::types::*;
 use crate::worker::{path_worker_loop, worker_loop};
 
-use super::{VoxelEngine, COLLAPSE_IMMINENT_STRESS};
+use super::{
+    crack_stress_threshold, VoxelEngine, COLLAPSE_IMMINENT_STRESS, MIN_CRACK_STRESS,
+};
 
 impl VoxelEngine {
     /// Find the best spring location near the player.
@@ -428,8 +430,15 @@ impl VoxelEngine {
     /// isn't coherent enough or the region's median landing offset is <= 0.
     /// Players reasonably read "red but not white" as "stressed but stable"
     /// and find dust there confusing. Filtering at [`COLLAPSE_IMMINENT_STRESS`]
-    /// (1.5) aligns warning FX with the visual "pure white" core where slabs
-    /// actually form.
+    /// aligns warning FX with the visual "pure white" core where slabs
+    /// actually form. (That constant has since moved to 0.85 — read its own
+    /// doc comment, not the numbers in this paragraph.)
+    ///
+    /// ⚠️ 2026-08-30: the bar is PER-MATERIAL now — see
+    /// [`crack_stress_threshold`]. Only coal differs, and only here: this
+    /// function is the crack-decal source, so a material can be made to crack
+    /// earlier without touching collapse, the warn-audio tiers or
+    /// `enumerate_overstressed_in_sphere`.
     ///
     /// Interior (fully-enclosed) cells are skipped: they have no visible
     /// surface to decorate.
@@ -499,6 +508,29 @@ impl VoxelEngine {
             (cfg.min_collapse_region.saturating_sub(1)).max(1) as usize
         };
 
+        debug_assert!(MIN_CRACK_STRESS <= COLLAPSE_IMMINENT_STRESS);
+
+        // Crack threshold at an arbitrary RUST WORLD cell — per-MATERIAL since
+        // 2026-08-30 so coal cracks a band earlier than the rock around it
+        // (see COAL_CRACK_STRESS). Falls back to the shared threshold when the
+        // density chunk is not resident: stress fields outlive density in a few
+        // streaming orders, and guessing "coal" for an unknown cell would crack
+        // rock by accident.
+        let threshold_at = |wx: i32, wy: i32, wz: i32| -> f32 {
+            let c = (wx.div_euclid(cs), wy.div_euclid(cs), wz.div_euclid(cs));
+            match store.density_fields.get(&c) {
+                Some(d) => crack_stress_threshold(
+                    d.get(
+                        wx.rem_euclid(cs) as usize,
+                        wy.rem_euclid(cs) as usize,
+                        wz.rem_euclid(cs) as usize,
+                    )
+                    .material,
+                ),
+                None => COLLAPSE_IMMINENT_STRESS,
+            }
+        };
+
         // eff at an arbitrary RUST WORLD cell, or None when that chunk has no
         // stress field yet (ungenerated / never recalculated).
         let eff_at = |wx: i32, wy: i32, wz: i32| -> Option<f32> {
@@ -543,7 +575,11 @@ impl VoxelEngine {
                         continue;
                     }
                     if let Some(e) = eff_at(n.0, n.1, n.2) {
-                        if e >= COLLAPSE_IMMINENT_STRESS {
+                        // Each neighbour is judged against ITS OWN material's
+                        // bar, so a coal seam floods as one cluster instead of
+                        // breaking into sub-threshold fragments that the
+                        // coherence gate would then reject.
+                        if e >= threshold_at(n.0, n.1, n.2) {
                             seen.insert(n);
                             queue.push_back(n);
                         }
@@ -564,15 +600,21 @@ impl VoxelEngine {
             for ly in 0..chunk_size {
                 for lx in 0..chunk_size {
                     let eff = sf.effective(lx, ly, lz);
-                    if eff < COLLAPSE_IMMINENT_STRESS {
+                    // Cheap pre-filter on the lowest bar any material can have,
+                    // so the per-cell density lookup below only runs for cells
+                    // that could crack whatever they turn out to be made of.
+                    if eff < MIN_CRACK_STRESS {
                         continue;
                     }
-                    // Coherence: only cracks where a slab could actually form.
                     let world_cell = (
                         cx * cs + lx as i32,
                         cy * cs + ly as i32,
                         cz * cs + lz as i32,
                     );
+                    if eff < threshold_at(world_cell.0, world_cell.1, world_cell.2) {
+                        continue;
+                    }
+                    // Coherence: only cracks where a slab could actually form.
                     if !cluster_verdict.contains_key(&world_cell) {
                         flood(world_cell, &mut cluster_verdict);
                     }

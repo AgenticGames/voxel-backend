@@ -73,6 +73,57 @@ pub(crate) use helpers::{aabb_center, aabb_to_ffi, fluid_sim_loop_wrapper, num_c
 /// stays clean while a patch big enough to fall starts cracking first.
 pub const COLLAPSE_IMMINENT_STRESS: f32 = 0.85;
 
+/// Crack-visibility threshold for COAL only.
+///
+/// 2026-08-30 (user): "I need the stress threshold for Cracks showing up to be
+/// reduced so coal on a wall is likely to be cracked out." Coal came out of the
+/// 2026-08-24 pass in a dead band: its hardness was raised 0.30 -> 0.40
+/// precisely so flat seams would stop caving, and that same change put the
+/// ordinary exposed-seam voxel at ~0.75 effective (see the note on Coal in
+/// `DEFAULT_MATERIAL_HARDNESS`) — just under the 0.85 crack bar. So coal
+/// reliably sat one notch below cracking while the rock around it cracked.
+///
+/// **0.25 is measured, not guessed.** Same save, same fixed pose, same single
+/// `mine` at (-2791,1167,595), only this constant varied — coal cells entering
+/// the crack list in the coal-bearing chunk (-2,-1,0):
+///
+/// | this const | qualifying cells | of which coal |
+/// |------------|------------------|---------------|
+/// | 0.85 (old) | 22               | 0             |
+/// | 0.45       | 35               | 13            |
+/// | 0.25       | 50               | 28            |
+/// | 0.05       | 69               | 47 (all of it)|
+///
+/// So the stressed-coal population in that chunk is 47 and it is bottom-heavy:
+/// 0.25 takes ~60% of it while still leaving the least-loaded coal clean, and
+/// the coherence gate below still refuses clusters too small to form a slab.
+/// Push it lower only if coal should read as cracked essentially everywhere.
+///
+/// ⚠️ This is a LOOK, not a stability change. It is read only by
+/// `enumerate_overstressed_in_chunk`, which is the crack-decal source and
+/// nothing else. The collapse pass, the warn-dust/shake/creak tiers and
+/// `enumerate_overstressed_in_sphere` (mining dust bursts + the strut-braced
+/// quest probe) all still use the shared threshold, so cracked coal is not
+/// newly unstable and no audio or quest trigger moved.
+pub const COAL_CRACK_STRESS: f32 = 0.25;
+
+/// Lowest crack threshold ANY material can have — the cheap pre-filter that
+/// lets the per-cell scan skip its material lookup for cells that could not
+/// crack whatever they are made of. Keep it equal to the smallest value
+/// `crack_stress_threshold` can return (debug-asserted at the call site).
+pub const MIN_CRACK_STRESS: f32 = COAL_CRACK_STRESS;
+
+/// Effective stress at which a cell of `mat` starts wearing crack decals.
+/// Per-material since 2026-08-30; everything except coal keeps the shared
+/// [`COLLAPSE_IMMINENT_STRESS`] telegraph band.
+#[inline]
+pub fn crack_stress_threshold(mat: voxel_core::material::Material) -> f32 {
+    match mat {
+        voxel_core::material::Material::Coal => COAL_CRACK_STRESS,
+        _ => COLLAPSE_IMMINENT_STRESS,
+    }
+}
+
 /// TTL (seconds) for stashed path results UE never collected. Prunes once per
 /// poll to bound memory growth from dead agents.
 const PATH_RESULT_TTL_SECS: u64 = 10;
