@@ -4,6 +4,33 @@
     // Resolve API URLs via origin to avoid Firefox "embedded credentials" error on bare IPs
     function apiUrl(path) { return new URL(path, window.location.origin).href; }
 
+    // ---- Engagement beacons ------------------------------------------------
+    // track.js loads deferred and refuses to run at all under Global Privacy
+    // Control, so it may never exist. Every call site goes through here and a
+    // missing tracker is simply a no-op.
+    //
+    // Only milestones, never per-frame or per-slider events: track.js caps a
+    // session at 60 beacons and the edge rate limiter blocks at 60 requests per
+    // ten seconds, which a WASM demo could trip on its own.
+    function px(path, repeat) {
+        try { if (window.mithrilTrack) window.mithrilTrack(path, { repeat: !!repeat }); }
+        catch (e) {}
+    }
+
+    // Shared with track.js so the demo's timings read the same way as the
+    // marketing site's dwell buckets.
+    // Reported at milestones rather than once per press. Someone who
+    // regenerates ten caves is a different visitor from someone who pressed the
+    // button once, and that gap is the whole point of the demo.
+    var genCount = 0;
+    var GEN_MILESTONES = [1, 2, 3, 5, 10, 25];
+
+    function secsBucket(ms) {
+        var s = Math.round(ms / 1000);
+        return s < 5 ? '0-5' : s < 15 ? '5-15' : s < 30 ? '15-30'
+             : s < 60 ? '30-60' : s < 120 ? '60-120' : '120plus';
+    }
+
     // ---- WASM transport ---------------------------------------------------
     // The cave generator runs in the visitor's browser (Web Worker + WASM),
     // not on a server. apiFetch mimics fetch()'s Response surface so the
@@ -804,6 +831,12 @@
             var mode = mineMode.value;
             var radius = parseInt(mineRadius.value, 10);
 
+            // Hooked to the click, not to /api/mine, because the showcase
+            // pre-warms that endpoint on load and those calls are not a person
+            // doing anything. Once per mode: sphere, lava and water are three
+            // different things to have discovered.
+            px('demo/mine/' + String(mode).replace(/[^a-z0-9]+/gi, '-').toLowerCase());
+
             if (mode === "water-place" || mode === "lava-carve") {
                 var isLava = mode === "lava-carve";
                 // Mine first (carve sphere), then fill with fluid
@@ -1003,6 +1036,9 @@
     }
 
     async function performSleep() {
+        // Dormancy is the thing the whole game is pitched on. Someone who runs
+        // it in the demo has understood the pitch and gone looking for it.
+        px('demo/dormancy');
         sleepBtn.disabled = true;
         sleepStatus.textContent = "Simulating deep sleep...";
         toggleBeforeAfterBtn.style.display = "none";
@@ -1804,6 +1840,9 @@
             var result = await resp.json();
             if (!result.ok) throw new Error(result.error || "Unknown error");
 
+            genCount++;
+            if (GEN_MILESTONES.indexOf(genCount) !== -1) px('gen/' + genCount);
+
             genStatus.textContent = "Done! Loading mesh...";
             viewerPlaceholder.style.display = "none";
 
@@ -1901,6 +1940,10 @@
     if (advToggle && advPanel) {
         advToggle.addEventListener('click', () => {
             const visible = advPanel.style.display !== 'none';
+            // Opening this is the strongest interest signal the demo has short
+            // of mining: it means they want to change the geology, not just
+            // look at it.
+            if (!visible) px('demo/advanced');
             advPanel.style.display = visible ? 'none' : 'block';
             advToggle.textContent = visible ? 'Show Advanced Settings' : 'Hide Advanced Settings';
         });
@@ -2028,6 +2071,13 @@
             clearInterval(factTimer);
             clearInterval(elapsedTimer);
 
+            // The single most important number this demo can report. Everything
+            // else assumes the generator ran; only this proves it booted on a
+            // stranger's actual machine, and how long they had to wait for it.
+            // A visitor whose WASM never starts is otherwise indistinguishable
+            // from one who loaded the page and left.
+            px('demo/ready/' + secsBucket(Date.now() - startTime));
+
             if (result.mesh) {
                 viewerPlaceholder.style.display = "none";
                 displayJsonMesh(result.mesh, { resetCamera: true });
@@ -2062,6 +2112,10 @@
         } catch (err) {
             clearInterval(factTimer);
             clearInterval(elapsedTimer);
+            // Counterpart to demo/ready. If these two ever stop roughly
+            // matching the page/demo count, the demo is broken for a class of
+            // visitor and nothing else on the site would say so.
+            px('demo/failed/' + secsBucket(Date.now() - startTime));
             genStatus.textContent = "Error: " + err.message;
         } finally {
             genBtn.disabled = false;

@@ -491,5 +491,10 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/OBJLoader.js"></script>
     <script src="app.js"></script>
+    <!-- Engagement beacons. Served from the root of cave.playmithril.com, so it
+         has to name itself or it reports as the marketing homepage. app.js adds
+         the demo's own milestones through window.mithrilTrack. -->
+    <script>window.MITHRIL_PAGE = 'demo';</script>
+    <script src="track.js" defer></script>
 </body>
 </html>
