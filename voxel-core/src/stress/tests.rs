@@ -112,26 +112,39 @@ fn iron_strut_resists_bracing_damage() {
     // Same HP pool...
     assert_eq!(iron.max_hp, 200);
     assert_eq!(copper.max_hp, 200);
-    // ...but Iron takes 30% of the bracing damage ("70% more resistant").
-    assert!((iron.damage_taken_scale - 0.30).abs() < 1e-6);
-    // 2026-08-26 (user): Copper takes 30% LESS than it used to — 1.0 -> 0.70.
-    // Iron stays the clearly tougher tier (0.30 vs 0.70).
-    assert!((copper.damage_taken_scale - 0.70).abs() < 1e-6);
+    // ...but Iron takes far less of the bracing damage than Copper.
+    // 2026-08-30 (user): "increase its resistence to taking dmg from stress by
+    // whatever will give it like 35% more effective health" — EVERY tier's
+    // damage_taken_scale was divided by 1.35, so resistance stopped being a
+    // T1/T2-only thing. Effective health is max_hp / damage_taken_scale, which
+    // is what the ratio check below actually pins.
+    assert!((iron.damage_taken_scale - 0.2222).abs() < 1e-4);
+    assert!((copper.damage_taken_scale - 0.5185).abs() < 1e-4);
     assert!(iron.damage_taken_scale < copper.damage_taken_scale,
         "Iron must still resist more bracing damage than Copper");
 
-    // Every other tier is untouched at full rate — resistance is a T1/T2 thing.
-    for t in [SupportType::Steel, SupportType::Crystal, SupportType::Mithril] {
-        assert!((STRUT_TUNING[t as usize].damage_taken_scale - 1.0).abs() < 1e-6,
-            "{:?} should still take full bracing damage", t);
+    // The 08-30 pass is a UNIFORM +35% effective health. Pin the RATIO rather
+    // than the raw scales: that is the property the user asked for, and it is
+    // what silently regresses if someone retunes one tier in isolation.
+    for (t, prev) in [
+        (SupportType::Copper,  0.70_f32),
+        (SupportType::Iron,    0.30),
+        (SupportType::Steel,   1.0),
+        (SupportType::Crystal, 1.0),
+        (SupportType::Mithril, 1.0),
+    ] {
+        let now = STRUT_TUNING[t as usize].damage_taken_scale;
+        let gain = prev / now;   // effective-health multiplier at fixed max_hp
+        assert!((gain - 1.35).abs() < 0.01,
+            "{:?} effective health should be 1.35x the pre-08-30 value, got {:.3}x", t, gain);
     }
 
     // The formula the collapse BFS actually calls.
     let blocked = 100.0_f32;
     let dmg_copper = bfs_halt_damage(SupportType::Copper, blocked);
     let dmg_iron = bfs_halt_damage(SupportType::Iron, blocked);
-    assert!((dmg_copper - 35.0).abs() < 1e-4);   // 100 * 0.5 * 0.70
-    assert!((dmg_iron - 15.0).abs() < 1e-4);     // 100 * 0.5 * 0.30
+    assert!((dmg_copper - 25.925).abs() < 1e-3);  // 100 * 0.5 * 0.5185
+    assert!((dmg_iron - 11.11).abs() < 1e-3);     // 100 * 0.5 * 0.2222
 
     // Net staying power: at equal HP, the ratio is copper_scale / iron_scale.
     // 2026-08-26: the copper buff (1.0 -> 0.70) deliberately NARROWS Iron's

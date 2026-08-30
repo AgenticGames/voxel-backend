@@ -289,7 +289,7 @@ pub const STRUT_TUNING: [StrutTuning; 6] = [
     // of 50. Net staying power vs the 08-23 copper is 1/0.70 = 1.43x, which
     // still leaves Iron (200/0.30) 2.3x tougher than Copper — the tier order
     // the 08-23 pass established is preserved.
-    StrutTuning { hardness:  8.0, radius: 17, max_hp:  200, hp_decay_threshold: 1360.0, damage_taken_scale: 0.70 },
+    StrutTuning { hardness:  8.0, radius: 21, max_hp:  200, hp_decay_threshold: 1680.0, damage_taken_scale: 0.5185 },
     // Iron (T2)
     // 2026-08-23 (user): "give iron strut 200 hp but 70% more resistance to
     // stress dmg". Two separate knobs by design — 150 -> 200 max_hp is the
@@ -297,19 +297,19 @@ pub const STRUT_TUNING: [StrutTuning; 6] = [
     // drains it at 30% rate. Net staying power vs the old 150/1.0 is
     // (200/0.30) / 150 = 4.4x, and vs the new Copper (200/1.0) it is 3.3x —
     // Iron is now clearly the tier you plant under something that matters.
-    StrutTuning { hardness: 14.0, radius: 22, max_hp:  200, hp_decay_threshold: 3080.0, damage_taken_scale: 0.30 },
+    StrutTuning { hardness: 14.0, radius: 28, max_hp:  200, hp_decay_threshold: 3920.0, damage_taken_scale: 0.2222 },
     // Steel (T3) — wide radius for area coverage
-    StrutTuning { hardness: 18.0, radius: 31, max_hp:  300, hp_decay_threshold: 5580.0, damage_taken_scale: 1.0 },
+    StrutTuning { hardness: 18.0, radius: 39, max_hp:  300, hp_decay_threshold: 7020.0, damage_taken_scale: 0.7407 },
     // Crystal (T4) — HP tank
-    StrutTuning { hardness: 25.0, radius: 22, max_hp:  800, hp_decay_threshold: 5500.0, damage_taken_scale: 1.0 },
+    StrutTuning { hardness: 25.0, radius: 28, max_hp:  800, hp_decay_threshold: 7000.0, damage_taken_scale: 0.7407 },
     // Mithril (T5) — endgame
-    StrutTuning { hardness: 35.0, radius: 39, max_hp: 2000, hp_decay_threshold: 13650.0, damage_taken_scale: 1.0 },
+    StrutTuning { hardness: 35.0, radius: 49, max_hp: 2000, hp_decay_threshold: 17150.0, damage_taken_scale: 0.7407 },
 ];
 
 /// Maximum `radius` value across all tiers — bounds the chunk box the
 /// strut sweeps (`strut_relief_raw`, load accumulate, BFS halt) walk when
 /// gathering nearby struts. Recompute if STRUT_TUNING changes.
-pub const MAX_STRUT_RADIUS: u8 = 39;
+pub const MAX_STRUT_RADIUS: u8 = 49;
 
 /// Per-recalc HP-damage scale applied after subtracting `hp_decay_threshold`.
 /// 0.0 = load-decay DISABLED (2026-08-03, #214 round 3): under the linear-cone
