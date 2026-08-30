@@ -36,9 +36,10 @@
     if (navigator.globalPrivacyControl === true) return;
 
     // Raised from 30 when the press kit went up. That page has nine sections,
-    // thirty copy buttons and forty downloadable assets, so a journalist working
-    // through it properly could exhaust a thirty event budget before reaching
-    // the downloads, and the events lost would be the only ones worth having.
+    // twenty-two copy buttons and forty-six downloadable assets, so a
+    // journalist working through it properly could exhaust a thirty event
+    // budget before reaching the downloads, and the events lost would be the
+    // only ones worth having.
     // The rate limiter is unaffected: it caps requests per ten seconds, and
     // MIN_GAP_MS already holds beacons to 25 per ten seconds no matter how many
     // are queued. A page load spends about 15 more on assets, so the ceiling
@@ -402,7 +403,7 @@
             });
         });
 
-        // Copy buttons, by what was copied. The press page has thirty of them,
+        // Copy buttons, by what was copied. The press page has twenty-two of them,
         // one per boilerplate block, description length, feature, angle and
         // quote. Which one a journalist lifts tells us which pitch actually
         // works, and the old copy/click threw exactly that away. Both class
