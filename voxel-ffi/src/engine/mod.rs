@@ -324,7 +324,16 @@ impl VoxelEngine {
         crate::thread_priority::init_rayon_below_normal();
         // Install panic hook + log file as early as possible. Idempotent
         // across engine creation; first install wins.
-        crate::panic_log::install("D:/Unreal Projects/Mithril2026/Saved/voxel_panic.log");
+        // 2026-09-07: exe-relative. The hard-coded dev path meant no other machine
+        // ever wrote this file - PC2 had "no voxel_panic.log" through three stalled
+        // loads while the stall monitor was reporting into the void. The deployed
+        // demo runs from <install>/Mithril2026/Binaries/Win64/, so on PC2 the file
+        // lands under the MithrilDeploy share where the dev box can read it.
+        let panic_path = std::env::current_exe().ok()
+            .and_then(|e| e.parent().map(|d| d.join("Saved").join("voxel_panic.log")))
+            .unwrap_or_else(|| std::path::PathBuf::from("D:/Unreal Projects/Mithril2026/Saved/voxel_panic.log"));
+        if let Some(dir) = panic_path.parent() { let _ = std::fs::create_dir_all(dir); }
+        crate::panic_log::install(panic_path);
 
         debug_log_pool_config(ffi_config);
         let config = ffi_config_to_generation(ffi_config);
