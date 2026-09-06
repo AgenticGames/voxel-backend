@@ -63,8 +63,13 @@ pub const WAVE_MAX_DH: f32 = 0.50;
 /// water surface.
 pub const WAVE_SEARCH_UP: i32 = 3;
 pub const WAVE_SEARCH_DOWN: i32 = 3;
-/// Two impacts closer than this share one region.
-pub const WAVE_MERGE_DIST: i32 = 8;
+/// Two impacts closer than this share one region. Equal to the region
+/// radius: overlapping regions each pushed the same columns (three
+/// stalactites landing within 0.5 s), which is how water got destroyed at
+/// the rim. Impacts further apart than a region are different pools.
+pub const WAVE_MERGE_DIST: i32 = WAVE_REGION_RADIUS;
+/// How many cells above a column's top cell overflow may stack into.
+pub const WAVE_STACK_ABOVE: i32 = 3;
 /// Below this crest amplitude (cells) a region is considered calm and
 /// released early so equalize can take over.
 pub const WAVE_CALM_AMPLITUDE: f32 = 0.004;
@@ -92,6 +97,14 @@ impl WaveRegion {
 }
 
 static REGIONS: Mutex<Vec<WaveRegion>> = Mutex::new(Vec::new());
+/// Diagnostics: volume the step could not place (overflow with no room
+/// above) / had to invent (deficit with nothing below). Both should stay
+/// ~0 with the in/out limiters; the ledger prints them.
+static LOST_OVERFLOW: Mutex<f32> = Mutex::new(0.0);
+static CREATED_DEFICIT: Mutex<f32> = Mutex::new(0.0);
+
+pub fn lost_overflow_total() -> f32 { *LOST_OVERFLOW.lock().unwrap() }
+pub fn created_deficit_total() -> f32 { *CREATED_DEFICIT.lock().unwrap() }
 /// Columns (wx, wz) currently owned by a wave region - `equalize_horizontal`
 /// leaves these alone. Rebuilt every step.
 static MASK: Mutex<Vec<(i32, i32)>> = Mutex::new(Vec::new());
@@ -110,6 +123,31 @@ pub fn region_count() -> usize {
 pub fn reset() {
     REGIONS.lock().unwrap().clear();
     MASK.lock().unwrap().clear();
+    *LOST_OVERFLOW.lock().unwrap() = 0.0;
+    *CREATED_DEFICIT.lock().unwrap() = 0.0;
+}
+
+/// Room a column can still take: the rest of its top cell plus up to
+/// `WAVE_STACK_ABOVE` open cells above it.
+fn column_room(
+    chunks: &HashMap<(i32, i32, i32), ChunkFluidGrid>,
+    cs: i32,
+    wx: i32, wz: i32,
+    col: &Col,
+) -> f32 {
+    let mut room = (col.cap - col.level).max(0.0);
+    for k in 1..=WAVE_STACK_ABOVE {
+        let (key, lx, ly, lz) = cell_key(cs, wx, col.top_y + k, wz);
+        let Some(grid) = chunks.get(&key) else { break };
+        let idx = grid.index(lx, ly, lz);
+        let cap = grid.cell_cap[idx];
+        let cell = &grid.cells[idx];
+        if cap <= MIN_LEVEL || (cell.level > MIN_LEVEL && !cell.fluid_type.is_water()) {
+            break;
+        }
+        room += (cap - cell.level).max(0.0);
+    }
+    room
 }
 
 /// Seed (or re-energise) a wave region for an impact at `center` that
@@ -317,33 +355,43 @@ fn apply_dh(
         dirty.insert(col.key);
     }
     if delta > MIN_LEVEL {
-        // Overflow into the cell above if it can hold water.
-        let (k, x, y, z) = cell_key(cs, wx, col.top_y + 1, wz);
-        if let Some(grid) = chunks.get_mut(&k) {
+        // Overflow stacks upward through open cells above the top cell.
+        for k in 1..=WAVE_STACK_ABOVE {
+            if delta <= MIN_LEVEL { break; }
+            let (key, x, y, z) = cell_key(cs, wx, col.top_y + k, wz);
+            let Some(grid) = chunks.get_mut(&key) else { break };
             let i = grid.index(x, y, z);
             let cap = grid.cell_cap[i];
-            if cap > MIN_LEVEL {
-                let cell = &mut grid.cells[i];
-                if cell.level <= MIN_LEVEL || cell.fluid_type.is_water() {
-                    if cell.level <= MIN_LEVEL { cell.fluid_type = ft; }
-                    cell.level = (cell.level + delta).min(cap);
-                    grid.dirty = true;
-                    dirty.insert(k);
-                }
-            }
+            if cap <= MIN_LEVEL { break; }
+            let cell = &mut grid.cells[i];
+            if cell.level > MIN_LEVEL && !cell.fluid_type.is_water() { break; }
+            if cell.level <= MIN_LEVEL { cell.fluid_type = ft; }
+            let take = delta.min((cap - cell.level).max(0.0));
+            cell.level += take;
+            delta -= take;
+            grid.dirty = true;
+            dirty.insert(key);
         }
-        // Whatever still does not fit stays with the top cell (already clamped): lost.
+        if delta > MIN_LEVEL {
+            *LOST_OVERFLOW.lock().unwrap() += delta;
+        }
     } else if delta < -MIN_LEVEL {
-        // Draw the deficit from the cell below.
-        let (k, x, y, z) = cell_key(cs, wx, col.top_y - 1, wz);
-        if let Some(grid) = chunks.get_mut(&k) {
+        // Draw the deficit from the cells below.
+        for k in 1..=2 {
+            if delta >= -MIN_LEVEL { break; }
+            let (key, x, y, z) = cell_key(cs, wx, col.top_y - k, wz);
+            let Some(grid) = chunks.get_mut(&key) else { break };
             let i = grid.index(x, y, z);
             let cell = &mut grid.cells[i];
-            if cell.level > MIN_LEVEL && cell.fluid_type.is_water() {
-                cell.level = (cell.level + delta).max(0.0);
-                grid.dirty = true;
-                dirty.insert(k);
-            }
+            if cell.level <= MIN_LEVEL || !cell.fluid_type.is_water() { break; }
+            let give = (-delta).min(cell.level);
+            cell.level -= give;
+            delta += give;
+            grid.dirty = true;
+            dirty.insert(key);
+        }
+        if delta < -MIN_LEVEL {
+            *CREATED_DEFICIT.lock().unwrap() += -delta;
         }
     }
 }
@@ -458,7 +506,49 @@ pub fn step_waves(
             }
         }
 
-        // 4. Height change = inflow - outflow; apply.
+        // 3b. Inflow limiting: a column cannot take more than the room above
+        //     its surface, so scale the fluxes FEEDING it before anything is
+        //     committed. Without this, neighbours were debited for water the
+        //     receiver then clamped away - the leak the three-stalactite drop
+        //     exposed at the rim.
+        let mut inscale: Vec<f32> = vec![1.0; w * w];
+        for iz in 0..w {
+            for ix in 0..w {
+                let c = iz * w + ix;
+                if !cols[c].has { continue; }
+                let mut inflow = 0.0f32;
+                if ix + 1 < w { inflow += (-region.flux_x[c]).max(0.0); }
+                if ix > 0 { inflow += region.flux_x[c - 1].max(0.0); }
+                if iz + 1 < w { inflow += (-region.flux_z[c]).max(0.0); }
+                if iz > 0 { inflow += region.flux_z[c - w].max(0.0); }
+                if inflow <= 1e-6 { continue; }
+                let wx = cx - r + ix as i32;
+                let wz = cz - r + iz as i32;
+                let room = column_room(chunks, cs_i, wx, wz, &cols[c]);
+                if inflow > room {
+                    inscale[c] = room / inflow;
+                }
+            }
+        }
+        for iz in 0..w {
+            for ix in 0..w {
+                let c = iz * w + ix;
+                if ix + 1 < w {
+                    let f = region.flux_x[c];
+                    let dst = if f > 0.0 { c + 1 } else { c };
+                    region.flux_x[c] = f * inscale[dst];
+                }
+                if iz + 1 < w {
+                    let f = region.flux_z[c];
+                    let dst = if f > 0.0 { c + w } else { c };
+                    region.flux_z[c] = f * inscale[dst];
+                }
+            }
+        }
+
+        // 4. Height change = inflow - outflow; apply. Exact: every unit that
+        //    leaves a column lands in a neighbour (limiters above), so no
+        //    clamp here - a clamp would be a leak.
         let mut amplitude = 0.0f32;
         for iz in 0..w {
             for ix in 0..w {
@@ -469,7 +559,6 @@ pub fn step_waves(
                 if ix > 0 { dh += region.flux_x[c - 1]; }
                 if iz + 1 < w { dh -= region.flux_z[c]; }
                 if iz > 0 { dh += region.flux_z[c - w]; }
-                let dh = dh.clamp(-WAVE_MAX_DH, WAVE_MAX_DH);
                 amplitude = amplitude.max((cols[c].h + dh - mean_h).abs());
                 let wx = cx - r + ix as i32;
                 let wz = cz - r + iz as i32;
@@ -585,6 +674,37 @@ mod tests {
         for _ in 0..WAVE_LIFE_TICKS { step_waves(&mut chunks, size); }
         assert_eq!(region_count(), 0, "region did not release");
         assert!(masked_columns().is_none());
+        reset();
+    }
+
+    /// Three impacts inside one region within a few ticks (a row of
+    /// stalactites) must not destroy or invent water: total volume holds to
+    /// 0.1% over ten seconds of sloshing, and the ledger counters stay ~0.
+    #[test]
+    fn three_simultaneous_impacts_conserve_volume() {
+        let _s = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        let size = 30usize;
+        let floor = 3usize;
+        let mut chunks: HashMap<(i32, i32, i32), ChunkFluidGrid> = HashMap::new();
+        chunks.insert((0, 0, 0), pool_grid(size, floor, 2, 28, 0.5));
+        let before = total(&chunks[&(0, 0, 0)]);
+        let y = (floor + 2) as i32;
+        spawn_impact((9, y, 15), 40.0);
+        for _ in 0..5 { step_waves(&mut chunks, size); }
+        spawn_impact((15, y, 15), 40.0);
+        for _ in 0..5 { step_waves(&mut chunks, size); }
+        spawn_impact((21, y, 15), 40.0);
+        assert_eq!(region_count(), 1, "impacts in one pool must share a region");
+        for _ in 0..300 { step_waves(&mut chunks, size); }
+        let after = total(&chunks[&(0, 0, 0)]);
+        assert!(
+            (after - before).abs() < before * 1e-3,
+            "volume drifted: {before} -> {after} (lost {} created {})",
+            lost_overflow_total(), created_deficit_total()
+        );
+        assert!(lost_overflow_total() < before * 1e-3, "overflow lost {}", lost_overflow_total());
+        assert!(created_deficit_total() < before * 1e-3, "deficit created {}", created_deficit_total());
         reset();
     }
 

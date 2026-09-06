@@ -15,6 +15,35 @@ use std::collections::VecDeque;
 use crate::sim::{detect_lava_water_quench_with_scratch, equalize_horizontal, regen_sources, squeeze_excess_fluid_collect, tick_fluid, try_grow_pillow_voxel, QuenchScratch};
 use crate::sim::displacement::{queue_displacement, spill_displacements};
 
+/// Collapse-into-water ledger (2026-09-06): appended to Saved/fluid_debug.txt
+/// (same convention as stress_debug.txt / collapse_log.txt) whenever a
+/// displacement or wave region is active, so "the water vanished" can be
+/// answered from a file instead of a guess.
+fn fluid_debug(msg: String) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true).append(true)
+        .open("D:/Unreal Projects/Mithril2026/Saved/fluid_debug.txt")
+    {
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64() % 10000.0;
+        let _ = writeln!(f, "[{:.2}] {}", t, msg);
+    }
+}
+
+/// Total water level over every loaded fluid grid (the ledger's "how much
+/// water exists" number).
+fn total_water(chunks: &HashMap<(i32, i32, i32), ChunkFluidGrid>) -> f32 {
+    let mut sum = 0.0f32;
+    for grid in chunks.values() {
+        if !grid.has_fluid { continue; }
+        for c in &grid.cells {
+            if c.fluid_type.is_water() { sum += c.level; }
+        }
+    }
+    sum
+}
+
 /// Bounds on the sim tick rate (Hz). The low end keeps the tick interval a
 /// finite `Duration`; the high end stops a fat-fingered menu value from
 /// spinning the fluid thread flat out.
@@ -172,6 +201,7 @@ pub fn fluid_sim_loop(
 
     let mut last_tick = Instant::now();
     let mut last_wave_tick = Instant::now();
+    let mut wave_ticks: u64 = 0;
     let wave_interval = Duration::from_secs_f32(1.0 / crate::sim::wave::WAVE_TICK_HZ);
     let mut tick_count: u64 = 0;
     // Track chunks that have active (non-empty) fluid meshes so we can send
@@ -209,10 +239,21 @@ pub fn fluid_sim_loop(
             && now.duration_since(last_wave_tick) >= wave_interval
         {
             last_wave_tick = now;
+            wave_ticks += 1;
             let mut wave_dirty = spill_displacements(&mut chunks, chunk_size);
             wave_dirty.extend(crate::sim::wave::step_waves(&mut chunks, chunk_size));
             if !wave_dirty.is_empty() {
                 mesh_and_send(&mut chunks, &wave_dirty, chunk_size, &config, &result_tx, &mut active_fluid_meshes);
+            }
+            if wave_ticks % 15 == 0 {
+                fluid_debug(format!(
+                    "wave tick {}: water in grids {:.1} | regions {} | displacement pending {} dropped {:.2} | wave overflow-lost {:.2} deficit-created {:.2}",
+                    wave_ticks, total_water(&chunks),
+                    crate::sim::wave::region_count(),
+                    crate::sim::displacement::pending_count(),
+                    crate::sim::displacement::dropped_total(),
+                    crate::sim::wave::lost_overflow_total(),
+                    crate::sim::wave::created_deficit_total()));
             }
         }
 
@@ -653,11 +694,21 @@ fn handle_event(
             // squeeze cannot place locally is queued as a displacement and
             // re-injected around the impact over the next ticks (2026-09-06)
             // instead of evaporating - rock landing in a pool used to eat it.
+            let before = if chunks.contains_key(&chunk) { Some(total_water(chunks)) } else { None };
+            let mut lost_total = 0.0f32;
             if let Some(grid) = chunks.get_mut(&chunk) {
                 grid.update_density(&densities);
                 let lost = squeeze_excess_fluid_collect(grid);
                 grid.dirty = true;
+                lost_total = lost.iter().map(|r| r.lost).sum();
                 queue_displacement(chunk, chunk_size, &lost);
+            }
+            if lost_total > 0.0 {
+                let after = total_water(chunks);
+                fluid_debug(format!(
+                    "terrain {:?}: squeeze displaced {:.2} cells | water in grids {:.1} -> {:.1} (displacement pending {}, wave regions {})",
+                    chunk, lost_total, before.unwrap_or(0.0), after,
+                    crate::sim::displacement::pending_count(), crate::sim::wave::region_count()));
             }
 
             // Drain any save-load pending fluid for this chunk now that the
