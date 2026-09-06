@@ -19,6 +19,11 @@ use crate::sim::displacement::{queue_displacement, spill_displacements};
 /// (same convention as stress_debug.txt / collapse_log.txt) whenever a
 /// displacement or wave region is active, so "the water vanished" can be
 /// answered from a file instead of a guess.
+/// 2026-09-07: how often a fluid mesh could not be handed to the relay because
+/// its bounded channel was full (the chunk stays dirty and retries). Exposed
+/// through the engine stats so a stalled-drain machine shows up in telemetry.
+pub static FLUID_MESH_BACKPRESSURE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn fluid_debug(msg: String) {
     use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -650,18 +655,25 @@ fn mesh_and_send(
             let mesh = mesh_fluid(grid, &boundary, config);
             grid.dirty = false;
 
-            if !mesh.positions.is_empty() {
-                active_fluid_meshes.insert(*key);
-                let _ = result_tx.send(FluidResult::FluidMesh {
-                    chunk: *key,
-                    mesh,
-                });
-            } else if active_fluid_meshes.remove(key) {
-                // Was previously non-empty — send empty mesh to clear visual
-                let _ = result_tx.send(FluidResult::FluidMesh {
-                    chunk: *key,
-                    mesh,
-                });
+            // 2026-09-07: NEVER block here. `send` on the bounded(128) relay
+            // channel stalled this thread whenever UE drained slowly, and the
+            // workers then stalled behind it (see engine/mod.rs). On Full the
+            // chunk simply stays dirty and is meshed again next tick; a mesh
+            // that never got out is re-derived, not lost.
+            let was_active = active_fluid_meshes.contains(key);
+            let is_empty = mesh.positions.is_empty();
+            if !is_empty || was_active {
+                match result_tx.try_send(FluidResult::FluidMesh { chunk: *key, mesh }) {
+                    Ok(()) => {
+                        if is_empty { active_fluid_meshes.remove(key); }
+                        else { active_fluid_meshes.insert(*key); }
+                    }
+                    Err(crossbeam_channel::TrySendError::Full(_)) => {
+                        grid.dirty = true;
+                        FLUID_MESH_BACKPRESSURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    Err(crossbeam_channel::TrySendError::Disconnected(_)) => {}
+                }
             }
         }
     }

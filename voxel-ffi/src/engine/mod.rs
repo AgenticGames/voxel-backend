@@ -351,7 +351,13 @@ impl VoxelEngine {
         let (result_tx, result_rx) = bounded::<WorkerResult>(2048);
 
         // Fluid event channel
-        let (fluid_event_tx, fluid_event_rx) = bounded::<FluidEvent>(512);
+        // 2026-09-07: UNBOUNDED. This was bounded(512) with blocking sends from
+        // every worker: once the fluid sim stalled on ITS full result channel,
+        // the event queue filled and every worker blocked on its next send -
+        // chunk generation froze at a fixed count with no panic anywhere
+        // (PC2, session 619D51C7: 205 chunks for 120 s). Memory only grows if
+        // the sim is wedged, and the sim can no longer wedge (see thread.rs).
+        let (fluid_event_tx, fluid_event_rx) = crossbeam_channel::unbounded::<FluidEvent>();
 
         let region_size = config.region_size;
         let store = Arc::new(RwLock::new(ChunkStore::new(region_size)));

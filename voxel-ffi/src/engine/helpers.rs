@@ -58,10 +58,25 @@ pub(crate) fn fluid_sim_loop_wrapper(
             Ok(fluid_result) => match fluid_result {
                 FluidResult::FluidMesh { chunk, mesh } => {
                     let converted = convert_fluid_mesh_to_ue(&mesh, chunk, chunk_size, world_scale);
-                    let _ = result_tx.send(WorkerResult::FluidMesh {
-                        chunk,
-                        mesh: converted,
-                    });
+                    // 2026-09-07: try, wait a little, try again - but never sit on a
+                    // blocking send. If UE's result queue stays full for ~0.5 s the
+                    // mesh is dropped; the sim re-meshes any chunk that changes and
+                    // a stale water surface beats a frozen world.
+                    let mut msg = WorkerResult::FluidMesh { chunk, mesh: converted };
+                    let mut delivered = false;
+                    for _ in 0..10 {
+                        match result_tx.try_send(msg) {
+                            Ok(()) => { delivered = true; break; }
+                            Err(crossbeam_channel::TrySendError::Full(m)) => {
+                                msg = m;
+                                std::thread::sleep(std::time::Duration::from_millis(50));
+                            }
+                            Err(crossbeam_channel::TrySendError::Disconnected(_)) => break,
+                        }
+                    }
+                    if !delivered {
+                        voxel_fluid::thread::FLUID_MESH_BACKPRESSURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                 }
                 FluidResult::SolidifyRequest { positions } => {
                     // Legacy single-list path. Treat as Obsidian-only quench
