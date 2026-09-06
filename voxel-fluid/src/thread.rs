@@ -279,8 +279,17 @@ pub fn fluid_sim_loop(
             continue;
         }
 
+        // Ledger (2026-09-07): while collapse water is in play, record the
+        // total after every phase of this pool tick so a bulk loss names
+        // its phase instead of "somewhere in the automaton".
+        let ledger_on = crate::sim::wave::region_count() > 0
+            || crate::sim::displacement::pending_count() > 0
+            || crate::sim::wave::foam_active();
+        let lt0 = if ledger_on { total_water(&chunks) } else { 0.0 };
+
         // Regenerate sources
         regen_sources(&mut chunks);
+        let lt_regen = if ledger_on { total_water(&chunks) } else { 0.0 };
 
         // Tick water every tick with multiple substeps, lava every N ticks (single step)
         let is_lava_tick = tick_count % lava_divisor == 0;
@@ -292,10 +301,13 @@ pub fn fluid_sim_loop(
         // to create gradients toward drains (prevents equalization from undoing drainage)
         let dirty_eq = equalize_horizontal(&mut chunks, chunk_size, false);
         dirty_water.extend(dirty_eq);
+        let lt_eq = if ledger_on { total_water(&chunks) } else { 0.0 };
+        let mut lt_sub: Vec<f32> = Vec::new();
         for i in 0..substeps {
             let decrement_grace = i == substeps - 1; // only on last substep
             let dirty = tick_fluid(&mut chunks, &chunk_densities, chunk_size, false, &config, decrement_grace);
             dirty_water.extend(dirty);
+            if ledger_on { lt_sub.push(total_water(&chunks)); }
         }
 
         let dirty_lava = if is_lava_tick {
@@ -303,6 +315,19 @@ pub fn fluid_sim_loop(
         } else {
             HashSet::new()
         };
+        if ledger_on {
+            let lt_lava = total_water(&chunks);
+            let subs: Vec<String> = lt_sub.iter().map(|v| format!("{:.1}", v)).collect();
+            let worst = [("regen", lt_regen - lt0), ("equalize", lt_eq - lt_regen),
+                         ("water", lt_sub.last().copied().unwrap_or(lt_eq) - lt_eq),
+                         ("lava", lt_lava - lt_sub.last().copied().unwrap_or(lt_eq))]
+                .iter().cloned().min_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).unwrap();
+            if (lt_lava - lt0).abs() > 0.5 {
+                fluid_debug(format!(
+                    "pool tick {}: start {:.1} | regen {:.1} | equalize {:.1} | water substeps [{}] | lava {:.1} | biggest drop: {} {:+.1}",
+                    tick_count, lt0, lt_regen, lt_eq, subs.join(" "), lt_lava, worst.0, worst.1));
+            }
+        }
 
         // ── Live lava↔water quench ───────────────────────────────────────
         // Detect contact zones and build a structured plan (obsidian rim +
@@ -664,10 +689,21 @@ fn handle_event(
                 .or_insert_with(|| ChunkDensityCache::new(chunk_size));
             cache.update_density(&densities);
 
-            // If a grid already exists (fluid was placed before density arrived), update it too
+            // If a grid already exists (fluid was placed before density arrived),
+            // update it too - and SQUEEZE like TerrainModified does (2026-09-07):
+            // a capacity drop with no squeeze left level > cap, which the next
+            // pool tick zeroes for solid cells with no accounting at all.
             if let Some(grid) = chunks.get_mut(&chunk) {
+                let before: f32 = grid.cells.iter().map(|c| c.level).sum();
                 grid.update_density(&densities);
+                let lost = squeeze_excess_fluid_collect(grid);
                 grid.dirty = true;
+                let after: f32 = grid.cells.iter().map(|c| c.level).sum();
+                let lost_total: f32 = lost.iter().map(|r| r.lost).sum();
+                if before > 0.5 {
+                    fluid_debug(format!("density-update {:?}: grid water {:.1} -> {:.1}, squeeze remainder {:.2}", chunk, before, after, lost_total));
+                }
+                queue_displacement(chunk, chunk_size, &lost);
             }
 
             // Drain any save-load pending fluid for this chunk now that the
@@ -726,6 +762,12 @@ fn handle_event(
             apply_pending_fluid(chunks, chunk_densities, pending_fluid, chunk, chunk_size, config);
         }
         FluidEvent::ChunkUnloaded { chunk } => {
+            if let Some(grid) = chunks.get(&chunk) {
+                let w: f32 = grid.cells.iter().map(|c| c.level).sum();
+                if w > 0.5 {
+                    fluid_debug(format!("chunk-unloaded {:?}: grid held {:.1} water (preserved to pending)", chunk, w));
+                }
+            }
             // Preserve worth-saving fluid into pending_fluid BEFORE dropping
             // the grid. When the chunk later re-streams, the DensityUpdate
             // event drains pending_fluid back into the new grid via

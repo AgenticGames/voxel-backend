@@ -68,7 +68,7 @@ pub const WAVE_SEARCH_DOWN: i32 = 3;
 /// radius: overlapping regions each pushed the same columns (three
 /// stalactites landing within 0.5 s), which is how water got destroyed at
 /// the rim. Impacts further apart than a region are different pools.
-pub const WAVE_MERGE_DIST: i32 = WAVE_REGION_RADIUS;
+pub const WAVE_MERGE_DIST: i32 = WAVE_REGION_RADIUS * 2;
 /// How many cells above a column's top cell overflow may stack into.
 pub const WAVE_STACK_ABOVE: i32 = 3;
 
@@ -159,7 +159,8 @@ fn column_room(
     wx: i32, wz: i32,
     col: &Col,
 ) -> f32 {
-    let mut room = (col.cap - col.level).max(0.0);
+    // Height units: each cell can take (1 - fraction filled) of a cell height.
+    let mut room = if col.cap > MIN_LEVEL { (1.0 - col.level / col.cap).max(0.0) } else { 0.0 };
     for k in 1..=WAVE_STACK_ABOVE {
         let (key, lx, ly, lz) = cell_key(cs, wx, col.top_y + k, wz);
         let Some(grid) = chunks.get(&key) else { break };
@@ -169,7 +170,7 @@ fn column_room(
         if cap <= MIN_LEVEL || (cell.level > MIN_LEVEL && !cell.fluid_type.is_water()) {
             break;
         }
-        room += (cap - cell.level).max(0.0);
+        room += (1.0 - cell.level / cap).max(0.0);
     }
     room
 }
@@ -286,13 +287,19 @@ fn sample_column(
         if cell.level <= MIN_LEVEL || cap <= MIN_LEVEL || !cell.fluid_type.is_water() || cell.is_source() {
             continue;
         }
-        // Top water cell found. Depth below: one more cell if it is water too.
-        let below_has = {
+        // Top water cell found. Depth below in HEIGHT units: the fraction the
+        // cell beneath actually holds (a rubble-adjacent cell with cap 0.3
+        // holds at most 0.3 of a cell, not 1.0 - counting it as 1.0 was the
+        // deficit-created leak next to piles).
+        let below_frac = {
             let (bk, bx, by, bz) = cell_key(cs, wx, wy - 1, wz);
             chunks.get(&bk).map(|g| {
                 let bi = g.index(bx, by, bz);
-                g.cells[bi].level > MIN_LEVEL && g.cell_cap[bi] > MIN_LEVEL
-            }).unwrap_or(false)
+                let bc = g.cell_cap[bi];
+                if bc > MIN_LEVEL && g.cells[bi].level > MIN_LEVEL && g.cells[bi].fluid_type.is_water() {
+                    (g.cells[bi].level / bc).min(1.0)
+                } else { 0.0 }
+            }).unwrap_or(0.0)
         };
         let frac = (cell.level / cap).min(1.0);
         return Col {
@@ -303,7 +310,7 @@ fn sample_column(
             cap,
             level: cell.level,
             h: wy as f32 + frac,
-            avail: frac + if below_has { 1.0 } else { 0.0 },
+            avail: frac + below_frac,
             open_px: !face_blocked(&grid.cell_corners, idx, 1, 0, 0),
             open_pz: !face_blocked(&grid.cell_corners, idx, 0, 0, 1),
         };
@@ -364,7 +371,10 @@ fn apply_dh(
     if dh.abs() < 1e-5 {
         return;
     }
-    let mut delta = dh * col.cap; // in level units of the top cell
+    // Everything here is in HEIGHT units (fractions of a cell); each cell's
+    // level is fraction * its own capacity, so fractional-capacity cells next
+    // to rubble exchange the right amount of water.
+    let mut delta = dh;
     let mut ft = crate::cell::FluidType::WaterPool;
     // Top cell.
     if let Some(grid) = chunks.get_mut(&col.key) {
@@ -373,17 +383,20 @@ fn apply_dh(
             cell.fluid_type = crate::cell::FluidType::WaterPool; // flooding a dry floor cell
         }
         ft = cell.fluid_type;
-        let new_level = cell.level + delta;
-        let clamped = new_level.clamp(0.0, col.cap);
-        delta = new_level - clamped; // leftover: >0 overflow, <0 deficit
-        cell.level = clamped;
-        grid.dirty = true;
-        dirty.insert(col.key);
+        if col.cap > MIN_LEVEL {
+            let frac = cell.level / col.cap;
+            let new_frac = frac + delta;
+            let clamped = new_frac.clamp(0.0, 1.0);
+            delta = new_frac - clamped; // leftover height: >0 overflow, <0 deficit
+            cell.level = clamped * col.cap;
+            grid.dirty = true;
+            dirty.insert(col.key);
+        }
     }
-    if delta > MIN_LEVEL {
+    if delta > 1e-4 {
         // Overflow stacks upward through open cells above the top cell.
         for k in 1..=WAVE_STACK_ABOVE {
-            if delta <= MIN_LEVEL { break; }
+            if delta <= 1e-4 { break; }
             let (key, x, y, z) = cell_key(cs, wx, col.top_y + k, wz);
             let Some(grid) = chunks.get_mut(&key) else { break };
             let i = grid.index(x, y, z);
@@ -392,31 +405,34 @@ fn apply_dh(
             let cell = &mut grid.cells[i];
             if cell.level > MIN_LEVEL && !cell.fluid_type.is_water() { break; }
             if cell.level <= MIN_LEVEL { cell.fluid_type = ft; }
-            let take = delta.min((cap - cell.level).max(0.0));
-            cell.level += take;
+            let frac = cell.level / cap;
+            let take = delta.min((1.0 - frac).max(0.0));
+            cell.level += take * cap;
             delta -= take;
             grid.dirty = true;
             dirty.insert(key);
         }
-        if delta > MIN_LEVEL {
+        if delta > 1e-4 {
             *LOST_OVERFLOW.lock().unwrap() += delta;
         }
-    } else if delta < -MIN_LEVEL {
+    } else if delta < -1e-4 {
         // Draw the deficit from the cells below.
         for k in 1..=2 {
-            if delta >= -MIN_LEVEL { break; }
+            if delta >= -1e-4 { break; }
             let (key, x, y, z) = cell_key(cs, wx, col.top_y - k, wz);
             let Some(grid) = chunks.get_mut(&key) else { break };
             let i = grid.index(x, y, z);
+            let cap = grid.cell_cap[i];
             let cell = &mut grid.cells[i];
-            if cell.level <= MIN_LEVEL || !cell.fluid_type.is_water() { break; }
-            let give = (-delta).min(cell.level);
-            cell.level -= give;
+            if cap <= MIN_LEVEL || cell.level <= MIN_LEVEL || !cell.fluid_type.is_water() { break; }
+            let frac = cell.level / cap;
+            let give = (-delta).min(frac);
+            cell.level -= give * cap;
             delta += give;
             grid.dirty = true;
             dirty.insert(key);
         }
-        if delta < -MIN_LEVEL {
+        if delta < -1e-4 {
             *CREATED_DEFICIT.lock().unwrap() += -delta;
         }
     }
