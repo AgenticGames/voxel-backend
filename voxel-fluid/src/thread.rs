@@ -171,6 +171,8 @@ pub fn fluid_sim_loop(
     let chunk_size = config.chunk_size;
 
     let mut last_tick = Instant::now();
+    let mut last_wave_tick = Instant::now();
+    let wave_interval = Duration::from_secs_f32(1.0 / crate::sim::wave::WAVE_TICK_HZ);
     let mut tick_count: u64 = 0;
     // Track chunks that have active (non-empty) fluid meshes so we can send
     // an empty mesh when they transition to empty (e.g. after DrainLavaChunks).
@@ -197,8 +199,24 @@ pub fn fluid_sim_loop(
             Duration::from_secs_f32(1.0 / config.tick_rate.clamp(MIN_TICK_RATE, MAX_TICK_RATE));
         let lava_divisor = config.lava_tick_divisor.max(1) as u64;
 
-        // Check if it's time for a tick
         let now = Instant::now();
+
+        // ── Collapse impact fast path (2026-09-06) ──
+        // Displacement spill + wave regions run at WAVE_TICK_HZ on their own
+        // clock and remesh only the chunks they touched, so a crest moves
+        // and renders at 30 Hz even while the pool automaton ticks at 3.
+        if (crate::sim::wave::region_count() > 0 || crate::sim::displacement::pending_count() > 0)
+            && now.duration_since(last_wave_tick) >= wave_interval
+        {
+            last_wave_tick = now;
+            let mut wave_dirty = spill_displacements(&mut chunks, chunk_size);
+            wave_dirty.extend(crate::sim::wave::step_waves(&mut chunks, chunk_size));
+            if !wave_dirty.is_empty() {
+                mesh_and_send(&mut chunks, &wave_dirty, chunk_size, &config, &result_tx, &mut active_fluid_meshes);
+            }
+        }
+
+        // Check if it's time for a tick
         if now.duration_since(last_tick) < tick_interval {
             std::thread::sleep(Duration::from_millis(1));
             continue;
@@ -217,12 +235,8 @@ pub fn fluid_sim_loop(
         let is_lava_tick = tick_count % lava_divisor == 0;
         let substeps = config.water_substeps.max(1) as usize;
         let mut dirty_water = HashSet::new();
-        // Collapse displacement: spill queued volume back into the pool as an
-        // expanding ring before the flow step smooths it (2026-09-06).
-        dirty_water.extend(spill_displacements(&mut chunks, chunk_size));
-        // Collapse impact waves: shallow-water step over live impact regions
-        // (equalize skips their columns while they are alive).
-        dirty_water.extend(crate::sim::wave::step_waves(&mut chunks, chunk_size));
+        // (Collapse displacement spill + impact waves run on the fast path
+        // above at WAVE_TICK_HZ; equalize below skips wave-owned columns.)
         // Equalize first: set flat baseline, then slope flow gets the final word
         // to create gradients toward drains (prevents equalization from undoing drainage)
         let dirty_eq = equalize_horizontal(&mut chunks, chunk_size, false);
@@ -496,68 +510,82 @@ pub fn fluid_sim_loop(
             }
         }
 
-        // A dirty chunk's render field feeds its neighbors' boundary
-        // sampling. When the shared face is wet on either side, the neighbor
-        // must re-mesh THIS pass too, or the two sides of the seam show
-        // different ticks (falls "skip a line" at chunk boundaries).
-        let mut mesh_set = all_dirty.clone();
-        for key in &all_dirty {
-            let dirs: [((i32, i32, i32), usize, bool); 6] = [
-                ((1, 0, 0), 0, true),
-                ((-1, 0, 0), 0, false),
-                ((0, 1, 0), 1, true),
-                ((0, -1, 0), 1, false),
-                ((0, 0, 1), 2, true),
-                ((0, 0, -1), 2, false),
-            ];
-            for (d, axis, hi) in dirs {
-                let nkey = (key.0 + d.0, key.1 + d.1, key.2 + d.2);
-                if mesh_set.contains(&nkey) {
-                    continue;
-                }
-                let Some(nbr) = chunks.get(&nkey) else { continue };
-                let me = chunks.get(key).unwrap();
-                if face_row_wet(me, axis, hi, chunk_size) || face_row_wet(nbr, axis, !hi, chunk_size) {
-                    mesh_set.insert(nkey);
-                }
+        mesh_and_send(&mut chunks, &all_dirty, chunk_size, &config, &result_tx, &mut active_fluid_meshes);
+    }
+}
+
+/// Mesh every chunk in `dirty` (plus wet-seam neighbours) and send the
+/// results. Factored out of the tick loop (2026-09-06) so the collapse-wave
+/// fast path can remesh its few chunks between pool ticks.
+fn mesh_and_send(
+    chunks: &mut HashMap<(i32, i32, i32), ChunkFluidGrid>,
+    dirty: &HashSet<(i32, i32, i32)>,
+    chunk_size: usize,
+    config: &FluidConfig,
+    result_tx: &Sender<FluidResult>,
+    active_fluid_meshes: &mut HashSet<(i32, i32, i32)>,
+) {
+    // A dirty chunk's render field feeds its neighbors' boundary
+    // sampling. When the shared face is wet on either side, the neighbor
+    // must re-mesh THIS pass too, or the two sides of the seam show
+    // different ticks (falls "skip a line" at chunk boundaries).
+    let mut mesh_set = dirty.clone();
+    for key in dirty {
+        let dirs: [((i32, i32, i32), usize, bool); 6] = [
+            ((1, 0, 0), 0, true),
+            ((-1, 0, 0), 0, false),
+            ((0, 1, 0), 1, true),
+            ((0, -1, 0), 1, false),
+            ((0, 0, 1), 2, true),
+            ((0, 0, -1), 2, false),
+        ];
+        for (d, axis, hi) in dirs {
+            let nkey = (key.0 + d.0, key.1 + d.1, key.2 + d.2);
+            if mesh_set.contains(&nkey) {
+                continue;
+            }
+            let Some(nbr) = chunks.get(&nkey) else { continue };
+            let me = chunks.get(key).unwrap();
+            if face_row_wet(me, axis, hi, chunk_size) || face_row_wet(nbr, axis, !hi, chunk_size) {
+                mesh_set.insert(nkey);
             }
         }
+    }
 
-        // Phase 1: refresh render state (EMA field + ribbon/fringe flags —
-        // or legacy hysteresis) for EVERY chunk being meshed, BEFORE any
-        // boundary sampling. Updating mid-loop made seam continuity depend
-        // on HashSet iteration order: one side sampled the other one tick
-        // stale.
-        for key in &mesh_set {
-            if let Some(grid) = chunks.get_mut(key) {
-                grid.update_render_field(
-                    config.mesh_sticky_release,
-                    config.mesh_flux_render,
-                    config.mesh_stream_ribbon,
-                );
-            }
+    // Phase 1: refresh render state (EMA field + ribbon/fringe flags —
+    // or legacy hysteresis) for EVERY chunk being meshed, BEFORE any
+    // boundary sampling. Updating mid-loop made seam continuity depend
+    // on HashSet iteration order: one side sampled the other one tick
+    // stale.
+    for key in &mesh_set {
+        if let Some(grid) = chunks.get_mut(key) {
+            grid.update_render_field(
+                config.mesh_sticky_release,
+                config.mesh_flux_render,
+                config.mesh_stream_ribbon,
+            );
         }
+    }
 
-        // Phase 2: mesh and send.
-        for key in &mesh_set {
-            let boundary = build_boundary_levels(*key, &chunks, chunk_size);
-            if let Some(grid) = chunks.get_mut(key) {
-                let mesh = mesh_fluid(grid, &boundary, &config);
-                grid.dirty = false;
+    // Phase 2: mesh and send.
+    for key in &mesh_set {
+        let boundary = build_boundary_levels(*key, chunks, chunk_size);
+        if let Some(grid) = chunks.get_mut(key) {
+            let mesh = mesh_fluid(grid, &boundary, config);
+            grid.dirty = false;
 
-                if !mesh.positions.is_empty() {
-                    active_fluid_meshes.insert(*key);
-                    let _ = result_tx.send(FluidResult::FluidMesh {
-                        chunk: *key,
-                        mesh,
-                    });
-                } else if active_fluid_meshes.remove(key) {
-                    // Was previously non-empty — send empty mesh to clear visual
-                    let _ = result_tx.send(FluidResult::FluidMesh {
-                        chunk: *key,
-                        mesh,
-                    });
-                }
+            if !mesh.positions.is_empty() {
+                active_fluid_meshes.insert(*key);
+                let _ = result_tx.send(FluidResult::FluidMesh {
+                    chunk: *key,
+                    mesh,
+                });
+            } else if active_fluid_meshes.remove(key) {
+                // Was previously non-empty — send empty mesh to clear visual
+                let _ = result_tx.send(FluidResult::FluidMesh {
+                    chunk: *key,
+                    mesh,
+                });
             }
         }
     }

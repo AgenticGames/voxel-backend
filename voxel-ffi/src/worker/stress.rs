@@ -1094,6 +1094,25 @@ pub(crate) fn try_process_stress_queue(
                         log_line(format!("total pile_chunks (deduped)={}, total written_cells={}",
                             pile_chunks.len(), all_written.len()));
 
+                        // Fluid reacts at IMPACT (2026-09-06): the seam pass below only
+                        // runs after the preview reveal + remesh rate-limit (1.5-2.5 s),
+                        // which is when the fluid thread used to first hear that rock had
+                        // landed in its pool. Send the terrain update now; the later one
+                        // from the seam pass is idempotent.
+                        {
+                            let s = store_c.read().unwrap();
+                            for key in &pile_chunks {
+                                if let Some(density) = s.density_fields.get(key) {
+                                    let densities: Vec<f32> = density.samples.iter().map(|s| s.density).collect();
+                                    let _ = fluid_tx_c.send(FluidEvent::TerrainModified {
+                                        chunk: *key,
+                                        densities,
+                                    });
+                                }
+                            }
+                        }
+                        log_line(format!("fluid notified at impact for {} pile chunk(s)", pile_chunks.len()));
+
                         if pile_chunks.is_empty() {
                             log_line("⚠ pile_chunks is empty — nothing to remesh".to_string());
                             return;

@@ -33,6 +33,12 @@ use std::sync::Mutex;
 use crate::cell::{face_blocked, ChunkFluidGrid, MIN_LEVEL};
 
 // ── Tunables ──────────────────────────────────────────────────────────
+/// Wave regions step and remesh at THIS rate, independent of the pool
+/// automaton's `tick_rate` (live config runs the pool at 3 Hz, which would
+/// make a crest crawl at ~1 cell/s and update its mesh three times a
+/// second). The region is a few hundred columns, so stepping it at 30 Hz
+/// is cheap; the pool itself stays on its own cadence.
+pub const WAVE_TICK_HZ: f32 = 30.0;
 /// Half-width of the wave region in columns (region is (2R+1)²).
 pub const WAVE_REGION_RADIUS: i32 = 16;
 /// Ticks a region stays active after its last impulse (150 = 5 s @ 30 Hz).
