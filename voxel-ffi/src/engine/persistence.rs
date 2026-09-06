@@ -145,6 +145,11 @@ impl VoxelEngine {
     pub fn import_save_data(&self, bytes: &[u8]) -> bool {
         match crate::delta::WorldSaveData::deserialize(bytes) {
             Ok(data) => {
+                // 2026-09-07: Shipping has no stderr - the stall log is the only
+                // witness a player machine keeps of whether the world came back.
+                crate::panic_log::note(&format!(
+                    "[SAVE-IMPORT] ok: {} bytes, {} chunk snapshots",
+                    bytes.len(), data.chunk_snapshots.len()));
                 let anchor_json = data.crystal_anchors_json.clone();
                 let world_memory_blob = data.world_memory_blob.clone();
                 {
@@ -166,6 +171,7 @@ impl VoxelEngine {
             }
             Err(e) => {
                 eprintln!("[voxel-ffi] Failed to import save data: {e}");
+                crate::panic_log::note(&format!("[SAVE-IMPORT] FAILED: {} bytes: {e}", bytes.len()));
                 false
             }
         }
