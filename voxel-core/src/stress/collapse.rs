@@ -5,6 +5,7 @@
 //! Behavior-preserving split of the former `stress.rs` god file.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use voxel_noise::{simplex::Simplex3D, NoiseSource};
 
@@ -20,6 +21,23 @@ use super::types::{
     MAX_STRUT_RADIUS, STRUT_TUNING,
 };
 use super::calc::{sample_world, world_to_chunk_local};
+
+/// Why candidate regions were REJECTED by the natural pass, accumulated since
+/// the last `take_collapse_skip_stats()` (2026-09-06). Debug readout only -
+/// the worker prints them into stress_debug.txt so a "seeds but no event"
+/// recalc names its filter instead of leaving a floating sheet unexplained.
+static SKIP_MIN_REGION: AtomicU32 = AtomicU32::new(0);
+static SKIP_NO_FALLABLE: AtomicU32 = AtomicU32::new(0);
+static SKIP_GROUNDED: AtomicU32 = AtomicU32::new(0);
+
+/// (below min_collapse_region, no fallable column, median-grounded) since the last call.
+pub fn take_collapse_skip_stats() -> (u32, u32, u32) {
+    (
+        SKIP_MIN_REGION.swap(0, Ordering::Relaxed),
+        SKIP_NO_FALLABLE.swap(0, Ordering::Relaxed),
+        SKIP_GROUNDED.swap(0, Ordering::Relaxed),
+    )
+}
 
 /// Detect contiguous overstressed regions via flood-fill (6-connected BFS)
 /// and execute collapses: convert to Air, place rubble, mark dirty chunks.
@@ -494,9 +512,16 @@ pub fn detect_and_execute_collapses_v2_with_force_deadline(
                                 .get(&nkey)
                                 .map(|df| df.get(nlx, nly, nlz).material.is_solid())
                                 .unwrap_or(false);
+                            // EFFECTIVE stress (base + painted overlay), 2026-09-06.
+                            // Reading the stored base alone meant a painted band
+                            // sitting at 0.85-0.99 (cracked on screen) could never
+                            // ride along with the slab above and below it - the
+                            // seed test uses base+painted, cohesion did not, and
+                            // the mismatch left floating sheets inside painted
+                            // set pieces.
                             let stress_val = stress_fields
                                 .get(&nkey)
-                                .map(|sf| sf.get(nlx, nly, nlz))
+                                .map(|sf| sf.effective(nlx, nly, nlz))
                                 .unwrap_or(0.0);
                             is_solid && stress_val >= config.slab_cohesion_threshold
                         };
@@ -512,6 +537,7 @@ pub fn detect_and_execute_collapses_v2_with_force_deadline(
 
         // Minimum region filter
         if (region.len() as u32) < config.min_collapse_region {
+            SKIP_MIN_REGION.fetch_add(1, Ordering::Relaxed);
             continue;
         }
 
@@ -575,6 +601,7 @@ pub fn detect_and_execute_collapses_v2_with_force_deadline(
             .collect();
 
         if fallable_columns.is_empty() && !force_collapse {
+            SKIP_NO_FALLABLE.fetch_add(1, Ordering::Relaxed);
             continue; // No columns can fall — entire region is embedded in solid.
             // Scripted triggers (force_collapse=true) still proceed: the
             // grounding bypass below applies a default fall distance so the
@@ -625,6 +652,7 @@ pub fn detect_and_execute_collapses_v2_with_force_deadline(
                 // rather than tunneling far below into solid rock.
                 landing_offset = 4;
             } else {
+                SKIP_GROUNDED.fetch_add(1, Ordering::Relaxed);
                 continue; // Median says slab is grounded
             }
         }

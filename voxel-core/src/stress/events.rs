@@ -34,6 +34,12 @@ pub struct StressDirtyEvent {
     /// skips the collapse pass when NO drained event allows it (stress and
     /// crack decals still rewrite).
     pub allow_collapse: bool,
+    /// Collapse cascade depth (2026-09-06). 0 = queued by a mine/removal/
+    /// trigger; N>0 = queued by the worker after a natural collapse to
+    /// re-score the rock the slab just exposed (fresh air faces raise the
+    /// cross-section term, so painted/cracked leftovers can now cross the
+    /// line). The worker stops re-queueing at MAX_COLLAPSE_CASCADE_ROUNDS.
+    pub cascade_depth: u8,
 }
 
 impl StressDirtyEvent {

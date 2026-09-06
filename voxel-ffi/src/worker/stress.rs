@@ -3,6 +3,16 @@
 //! Pure code-movement out of the former monolithic `worker.rs`; behavior is
 //! unchanged. Visibility widened to `pub(crate)` so the worker loop can call it.
 
+/// Collapse cascade rounds after a player-caused recalc (2026-09-06). A mine
+/// is depth 0; each natural collapse queues a depth+1 recalc over its slab
+/// box so the newly exposed rock is re-scored and may fall in turn. Two
+/// rounds = a swing can bring a formation down in up to three waves.
+pub const MAX_COLLAPSE_CASCADE_ROUNDS: u8 = 2;
+/// Voxels added around the slab's half-extent for the follow-up recalc sphere.
+pub const COLLAPSE_CASCADE_MARGIN: i32 = 4;
+/// Cap on the follow-up sphere (a chunk) so a 2000-voxel slab cannot queue a world scan.
+pub const COLLAPSE_CASCADE_MAX_RADIUS: i32 = 30;
+
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -84,7 +94,7 @@ pub(crate) fn try_process_stress_queue(
     dbg(format!("=== STRESS RECALC START === events={} derived_chunks={} chunk_size={}",
         events.len(), dirty_chunks.len(), chunk_size));
     for (i, e) in events.iter().enumerate() {
-        dbg(format!("  event[{}]: center=({},{},{}) radius={}", i, e.center.0, e.center.1, e.center.2, e.radius));
+        dbg(format!("  event[{}]: center=({},{},{}) radius={} cascade_depth={}", i, e.center.0, e.center.1, e.center.2, e.radius, e.cascade_depth));
     }
     dbg(format!("  config: span_w={:.3} min_safe_span={} min_collapse={} slab_cohesion={:.2} max_vol={} depth_scale={:.0}",
         stress_cfg.span_weight, stress_cfg.min_safe_span,
@@ -413,6 +423,11 @@ pub(crate) fn try_process_stress_queue(
         // passes — forwarded as a `StrutsBroken` result so UE can play the
         // breaking VFX + refresh crack overlay around each broken strut.
         let mut broken_struts: Vec<voxel_core::stress::BrokenStrutEvent> = Vec::new();
+        // Collapse cascade (2026-09-06): every natural event seeds a follow-up
+        // recalc over its slab box (+margin) so the rock it just exposed gets
+        // re-scored on the next drain. Depth-capped - see MAX_COLLAPSE_CASCADE_ROUNDS.
+        let batch_cascade_depth: u8 = mined_dirty_events.iter().map(|e| e.cascade_depth).max().unwrap_or(0);
+        let mut cascade_seeds: Vec<((i32, i32, i32), i32)> = Vec::new();
         // Natural collapse pass: only stress-recalc'd overstressed cells.
         // Filters (size / grounding / cohesion) apply normally so player
         // mining doesn't trigger spurious cave-ins on supported rock.
@@ -435,6 +450,20 @@ pub(crate) fn try_process_stress_queue(
                 true,  // halt_at_struts — alive struts brace the slab
                 &mut broken_struts,
             );
+            let (sk_min, sk_nofall, sk_ground) = voxel_core::stress::take_collapse_skip_stats();
+            dbg(format!("  natural pass: {} seeds -> {} event(s); regions skipped: {} below min_collapse_region, {} no fallable column, {} median-grounded",
+                result.overstressed.len(), natural.len(), sk_min, sk_nofall, sk_ground));
+            for ev in &natural {
+                let mut half = 0i32;
+                for slab in &ev.slabs {
+                    let dx = slab.bb_max.0 - slab.bb_min.0 + 1;
+                    let dy = slab.bb_max.1 - slab.bb_min.1 + 1;
+                    let dz = slab.bb_max.2 - slab.bb_min.2 + 1;
+                    half = half.max(dx.max(dy).max(dz) / 2);
+                }
+                let c = (ev.center.0.round() as i32, ev.center.1.round() as i32, ev.center.2.round() as i32);
+                cascade_seeds.push((c, (half + COLLAPSE_CASCADE_MARGIN).min(COLLAPSE_CASCADE_MAX_RADIUS)));
+            }
             events.extend(natural);
         }
         // Scripted-trigger pass: force_collapse=true. Bypasses the
@@ -514,6 +543,19 @@ pub(crate) fn try_process_stress_queue(
             // Mark collapse-modified chunks for save persistence
             let collapse_keys: Vec<_> = all_dirty.iter().map(|&(k, ..)| k).collect();
             s.modification_tracker.mark_dirty_many(&collapse_keys);
+
+            if !cascade_seeds.is_empty() {
+                if batch_cascade_depth < MAX_COLLAPSE_CASCADE_ROUNDS {
+                    for &(c, r) in &cascade_seeds {
+                        s.queue_stress_dirty_cascade(c, r, batch_cascade_depth + 1);
+                    }
+                    dbg(format!("  cascade: queued {} follow-up recalc(s) at depth {} of {} (radii {:?})",
+                        cascade_seeds.len(), batch_cascade_depth + 1, MAX_COLLAPSE_CASCADE_ROUNDS,
+                        cascade_seeds.iter().map(|&(_, r)| r).collect::<Vec<_>>()));
+                } else {
+                    dbg(format!("  cascade: depth cap {} reached, no follow-up queued", MAX_COLLAPSE_CASCADE_ROUNDS));
+                }
+            }
 
             let _base_meshes = s.remesh_dirty(&all_dirty, &cfg, world_scale);
             drop(s);

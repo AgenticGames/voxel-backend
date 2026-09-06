@@ -351,7 +351,7 @@ impl ChunkStore {
     /// Queue a localized stress recalculation event (called after mining).
     /// center: mine point in world voxel coords, radius: effective stress radius in voxels.
     pub fn queue_stress_dirty(&mut self, center: (i32, i32, i32), radius: i32) {
-        self.stress_dirty_events.push(voxel_core::stress::StressDirtyEvent { center, radius, allow_collapse: true });
+        self.stress_dirty_events.push(voxel_core::stress::StressDirtyEvent { center, radius, allow_collapse: true, cascade_depth: 0 });
         self.stress_dirty_time = Some(std::time::Instant::now());
     }
 
@@ -359,7 +359,16 @@ impl ChunkStore {
     /// strut placement, where stress only goes DOWN and any overstress the
     /// recalc surfaces is pre-existing latent state, not a new hazard.
     pub fn queue_stress_dirty_no_collapse(&mut self, center: (i32, i32, i32), radius: i32) {
-        self.stress_dirty_events.push(voxel_core::stress::StressDirtyEvent { center, radius, allow_collapse: false });
+        self.stress_dirty_events.push(voxel_core::stress::StressDirtyEvent { center, radius, allow_collapse: false, cascade_depth: 0 });
+        self.stress_dirty_time = Some(std::time::Instant::now());
+    }
+
+    /// Queue a collapse-cascade follow-up recalc (2026-09-06): the worker calls this
+    /// after a natural collapse so the rock the slab just exposed gets re-scored
+    /// (and may fall) on the next drain. `depth` is the round number; the worker
+    /// caps it so a pathological region cannot chain forever.
+    pub fn queue_stress_dirty_cascade(&mut self, center: (i32, i32, i32), radius: i32, depth: u8) {
+        self.stress_dirty_events.push(voxel_core::stress::StressDirtyEvent { center, radius, allow_collapse: true, cascade_depth: depth });
         self.stress_dirty_time = Some(std::time::Instant::now());
     }
 
@@ -370,7 +379,7 @@ impl ChunkStore {
         let radius = chunk_size as i32 + 22; // Full chunk + span search + air decay
         for &(cx, cy, cz) in chunk_keys {
             let center = (cx * chunk_size as i32 + half, cy * chunk_size as i32 + half, cz * chunk_size as i32 + half);
-            self.stress_dirty_events.push(voxel_core::stress::StressDirtyEvent { center, radius, allow_collapse: true });
+            self.stress_dirty_events.push(voxel_core::stress::StressDirtyEvent { center, radius, allow_collapse: true, cascade_depth: 0 });
         }
         self.stress_dirty_time = Some(std::time::Instant::now());
     }
