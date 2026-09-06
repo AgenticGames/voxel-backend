@@ -1078,6 +1078,10 @@ pub(crate) fn try_process_stress_queue(
                                         fi, fr.volume, ly, fr.center_y, fr.dominant_material,
                                         fr.columns_total, fr.columns_void, fx, fz,
                                         voxel_core::density_ops::column_profile(&s.density_fields, cs_c as i32, fx, fz, ly + 16, ly - 24)));
+                                    let row: Vec<String> = fr.surface_row.iter()
+                                        .map(|h| if h.is_nan() { "-".to_string() } else { format!("{:.1}", h) })
+                                        .collect();
+                                    log_line(format!("      surface along x (z={}): {}", fz, row.join(" ")));
                                 }
                                 for k in pr.affected_chunks {
                                     pile_chunks.push(k);

@@ -85,7 +85,7 @@ const AOR_MIN_CHANGE: f32 = 0.01;
 /// different height had no gradient and the mesher produced unit terraces
 /// ("square piles"). Writing density = clamp(dist_to_surface / band) gives
 /// every edge a crossing that tracks the heightfield slope.
-const SURFACE_BAND: f32 = 1.5;
+const SURFACE_BAND: f32 = 2.0;
 
 // ── Public types ──────────────────────────────────────────────────────────
 
@@ -101,6 +101,9 @@ pub struct FragmentInfo {
     /// because no natural floor was found (void, wall interior, unloaded).
     pub columns_total: u32,
     pub columns_void: u32,
+    /// Probe: settled surface height (floor + pile) along X through the
+    /// fragment centre row; NaN where the column has no floor.
+    pub surface_row: Vec<f32>,
 }
 
 /// One dust event per fragment impact. UE polls these and spawns Niagara.
@@ -576,6 +579,37 @@ fn place_fragment_pile(
         if max_change < AOR_MIN_CHANGE { break; }
     }
 
+    // ── Lateral smoothing (2026-09-06) ──
+    // Two 3x3 passes over the settled SURFACE (floor + pile), floor-less
+    // columns excluded, so residual solver roughness and the per-column
+    // allocation grid do not read as terraces once meshed.
+    for _pass in 0..2 {
+        let src = pile_height.clone();
+        for iz in 0..nz {
+            for ix in 0..nx {
+                let i = iz * nx + ix;
+                if !has_floor[i] { continue; }
+                let mut sum = 0.0f32;
+                let mut cnt = 0.0f32;
+                for dz in -1..=1i32 {
+                    for dx in -1..=1i32 {
+                        let jx = ix as i32 + dx;
+                        let jz = iz as i32 + dz;
+                        if jx < 0 || jx >= nx as i32 || jz < 0 || jz >= nz as i32 { continue; }
+                        let j = jz as usize * nx + jx as usize;
+                        if !has_floor[j] { continue; }
+                        let w = if dx == 0 && dz == 0 { 2.0 } else { 1.0 };
+                        sum += (natural_floor[j] + src[j]) * w;
+                        cnt += w;
+                    }
+                }
+                if cnt > 0.0 {
+                    pile_height[i] = (sum / cnt - natural_floor[i]).max(0.0);
+                }
+            }
+        }
+    }
+
     // ── Impact crater under fragment center (5C) ──
     let crater_depth = ((frag.volume as f32).sqrt() * CRATER_DEPTH_PER_FRAGMENT_VOLUME)
         .round() as i32;
@@ -600,6 +634,8 @@ fn place_fragment_pile(
                 let nat_y = natural_floor[ci];
                 let nat_int = nat_y.floor() as i32;
                 for k in 0..depth {
+                    // Never bite through a thin floor into whatever is under it.
+                    if !solid_below(density_fields, cs, wx, nat_int - k, wz) { break; }
                     density_ops::write_lower(
                         density_fields, cs, wx, nat_int - k, wz, -1.0,
                         affected_chunks, written, changed_count,
@@ -638,7 +674,10 @@ fn place_fragment_pile(
             let nat_int = nat_y.floor() as i32;
             let y_hi = (top + SURFACE_BAND).ceil() as i32;
             let total_h = (top - nat_y).max(0.05);
-            for wy in nat_int..=y_hi {
+            // Start ABOVE the floor's own iso cell: raising that cell to 1.0
+            // moved the crossing with the cell beneath it, which bulged the
+            // underside of a thin floor into the space below (2026-09-06).
+            for wy in (nat_int + 1)..=y_hi {
                 let signed = top - (wy as f32 + 0.5);
                 let d = (signed / SURFACE_BAND).clamp(-1.0, 1.0);
                 if d > 0.0 {
@@ -709,10 +748,18 @@ fn place_fragment_pile(
         let radius = BOULDER_RADIUS_MIN
             + (size_n * 0.5 + 0.5) * (BOULDER_RADIUS_MAX - BOULDER_RADIUS_MIN);
 
-        // Stamp boulder.
+        // Stamp boulder - clamped to cells at/above each column's own natural
+        // floor, and only in columns that have one. A 2.7-radius sphere
+        // half-buried at a pile edge used to write solid rock up to three
+        // cells BELOW the floor: the isolated blobs seen from underneath.
+        let floor_min_y = |x: i32, z: i32| -> Option<i32> {
+            let i = bbi_for(x, z, cx_i, cz_i, zone_rx, zone_rz, nx, nz)?;
+            if !has_floor[i] { return None; }
+            Some(natural_floor[i].floor() as i32 + 1)
+        };
         place_boulder(
             density_fields, cs, bx, by, bz, radius,
-            frag.dominant_material, boulder_noise,
+            frag.dominant_material, boulder_noise, &floor_min_y,
             affected_chunks, written, changed_count,
         );
 
@@ -733,6 +780,7 @@ fn place_fragment_pile(
             let Some(ti) = bbi_for(tx, tz, cx_i, cz_i, zone_rx, zone_rz, nx, nz) else { continue };
             if !has_floor[ti] { continue; }
             let surf_y = (natural_floor[ti] + pile_height[ti]).floor() as i32;
+            if !solid_below(density_fields, cs, tx, surf_y, tz) { continue; }
             // Light depression in the surface cell.
             density_ops::write_lower(
                 density_fields, cs, tx, surf_y, tz, 0.2,
@@ -763,6 +811,7 @@ fn place_fragment_pile(
             let Some(ci) = bbi_for(tx, tz, cx_i, cz_i, zone_rx, zone_rz, nx, nz) else { continue };
             if !has_floor[ci] { continue; }
             let surf_y = natural_floor[ci].floor() as i32;
+            if !solid_below(density_fields, cs, tx, surf_y, tz) { continue; }
             density_ops::write_lower(
                 density_fields, cs, tx, surf_y, tz, CRACK_DEPTH_DENSITY,
                 affected_chunks, written, changed_count,
@@ -813,6 +862,10 @@ fn place_fragment_pile(
         dominant_material: frag.dominant_material,
         columns_total: (nx * nz) as u32,
         columns_void: has_floor.iter().filter(|f| !**f).count() as u32,
+        surface_row: (0..nx).map(|ix| {
+            let i = center_idx_z * nx + ix;
+            if has_floor[i] { natural_floor[i] + pile_height[i] } else { f32::NAN }
+        }).collect(),
     }
 }
 
@@ -823,6 +876,22 @@ fn place_fragment_pile(
 /// assigned and render as matte black if used in a mesh. Filter those out
 /// of pile material selection — substitute Granite as a safe fallback rock.
 const MAX_RENDERABLE_MATERIAL: u8 = 41;
+
+/// True when the cell directly BELOW (wx, wy, wz) is loaded solid rock.
+/// Every density-LOWERING write in the pile pass (crater, cracks, boulder
+/// tracks) is gated on this (2026-09-06) so a thin floor shell over a cavity
+/// is never breached from above - a 2-voxel crater through a 1-voxel floor
+/// was a hole the player could fall through, and the pile's underside showed
+/// from the space below.
+#[inline]
+fn solid_below(
+    density_fields: &HashMap<(i32, i32, i32), DensityField>,
+    cs: i32,
+    wx: i32, wy: i32, wz: i32,
+) -> bool {
+    density_ops::chunk_loaded(density_fields, cs, wx, wy - 1, wz)
+        && density_ops::read_density(density_fields, cs, wx, wy - 1, wz) > 0.0
+}
 
 #[inline]
 fn safe_pile_material(m: Material) -> Material {
@@ -882,6 +951,7 @@ fn place_boulder(
     radius: f32,
     material: Material,
     boulder_noise: &Simplex3D,
+    floor_min_y: &dyn Fn(i32, i32) -> Option<i32>,
     affected_chunks: &mut HashSet<(i32, i32, i32)>,
     written: &mut Vec<WrittenCell>,
     changed_count: &mut u32,
@@ -912,6 +982,13 @@ fn place_boulder(
                 let wx_b = bx + ox;
                 let wy_b = cy as i32 + oy;
                 let wz_b = bz + oz;
+
+                // Only cells at/above this column's natural floor, and only in
+                // columns that have a floor at all.
+                match floor_min_y(wx_b, wz_b) {
+                    Some(min_y) if wy_b >= min_y => {}
+                    _ => continue,
+                }
 
                 density_ops::write_raise(
                     density_fields, cs, wx_b, wy_b, wz_b, 1.0, material,
