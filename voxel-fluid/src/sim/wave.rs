@@ -28,6 +28,7 @@
 //! only - lava is viscous and runs on its own divided tick.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use crate::cell::{face_blocked, ChunkFluidGrid, MIN_LEVEL};
@@ -70,6 +71,18 @@ pub const WAVE_SEARCH_DOWN: i32 = 3;
 pub const WAVE_MERGE_DIST: i32 = WAVE_REGION_RADIUS;
 /// How many cells above a column's top cell overflow may stack into.
 pub const WAVE_STACK_ABOVE: i32 = 3;
+
+// ── Whitewash (vertex alpha) ──
+/// Foam retention per wave tick (0.975 @ 30 Hz ≈ 0.9 s half-life).
+pub const FOAM_DECAY: f32 = 0.975;
+/// Foam from surface vertical speed: |dh| per tick × this (0.15 cells/tick → full).
+pub const FOAM_DH_GAIN: f32 = 6.5;
+/// Foam from the face flux running through a column.
+pub const FOAM_FLUX_GAIN: f32 = 2.5;
+/// Foam below this is zeroed (and stops the decay pass when nothing is above it).
+pub const FOAM_MIN: f32 = 0.02;
+/// Impact splash disc radius beyond the impulse disc.
+pub const FOAM_SPLASH_EXTRA: i32 = 1;
 /// Below this crest amplitude (cells) a region is considered calm and
 /// released early so equalize can take over.
 pub const WAVE_CALM_AMPLITUDE: f32 = 0.004;
@@ -87,6 +100,8 @@ pub struct WaveRegion {
     pub flux_z: Vec<f32>,
     /// Diagnostics: last tick's peak |h - mean| over the region.
     pub last_amplitude: f32,
+    /// Impact splashes not yet stamped into the foam field (centre, radius).
+    pub pending_splash: Vec<((i32, i32, i32), i32)>,
 }
 
 impl WaveRegion {
@@ -101,6 +116,11 @@ static REGIONS: Mutex<Vec<WaveRegion>> = Mutex::new(Vec::new());
 /// above) / had to invent (deficit with nothing below). Both should stay
 /// ~0 with the in/out limiters; the ledger prints them.
 static LOST_OVERFLOW: Mutex<f32> = Mutex::new(0.0);
+/// True while any grid holds foam above FOAM_MIN - keeps the fast path (and
+/// its remesh) running after the last region retires so the foam fades out.
+static FOAM_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+pub fn foam_active() -> bool { FOAM_ACTIVE.load(Ordering::Relaxed) }
 static CREATED_DEFICIT: Mutex<f32> = Mutex::new(0.0);
 
 pub fn lost_overflow_total() -> f32 { *LOST_OVERFLOW.lock().unwrap() }
@@ -123,6 +143,7 @@ pub fn region_count() -> usize {
 pub fn reset() {
     REGIONS.lock().unwrap().clear();
     MASK.lock().unwrap().clear();
+    FOAM_ACTIVE.store(false, Ordering::Relaxed);
     *LOST_OVERFLOW.lock().unwrap() = 0.0;
     *CREATED_DEFICIT.lock().unwrap() = 0.0;
 }
@@ -178,10 +199,12 @@ pub fn spawn_impact(center: (i32, i32, i32), volume: f32) {
                 flux_x: vec![0.0; w * w],
                 flux_z: vec![0.0; w * w],
                 last_amplitude: 0.0,
+                pending_splash: Vec::new(),
             });
             regions.last_mut().unwrap()
         }
     };
+    region.pending_splash.push((center, WAVE_IMPULSE_RADIUS + FOAM_SPLASH_EXTRA));
     // Outward radial flux on faces within the impulse disc, strongest at
     // the disc edge (the crest starts there), zero at the very centre.
     let w = region.width();
@@ -396,6 +419,62 @@ fn apply_dh(
     }
 }
 
+/// Raise the foam of a column's top cell and the cell above it to at least
+/// `val` (foam only ever rises here; `decay_foam` brings it down).
+fn raise_foam(
+    chunks: &mut HashMap<(i32, i32, i32), ChunkFluidGrid>,
+    cs: i32,
+    wx: i32, top_y: i32, wz: i32,
+    val: f32,
+    dirty: &mut HashSet<(i32, i32, i32)>,
+) {
+    if val < FOAM_MIN { return; }
+    for wy in [top_y, top_y + 1] {
+        let (key, lx, ly, lz) = cell_key(cs, wx, wy, wz);
+        let Some(grid) = chunks.get_mut(&key) else { continue };
+        let idx = grid.index(lx, ly, lz);
+        if grid.foam.is_empty() {
+            grid.foam = vec![0.0; grid.cells.len()];
+        }
+        if grid.foam[idx] + 0.01 < val {
+            grid.foam[idx] = val;
+            grid.dirty = true;
+            dirty.insert(key);
+            FOAM_ACTIVE.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Fade every grid's foam by FOAM_DECAY; zero what drops under FOAM_MIN.
+/// Returns the chunks whose foam changed (they need a remesh to show it).
+pub fn decay_foam(
+    chunks: &mut HashMap<(i32, i32, i32), ChunkFluidGrid>,
+) -> HashSet<(i32, i32, i32)> {
+    let mut dirty: HashSet<(i32, i32, i32)> = HashSet::new();
+    if !FOAM_ACTIVE.load(Ordering::Relaxed) {
+        return dirty;
+    }
+    let mut any_left = false;
+    for (key, grid) in chunks.iter_mut() {
+        if grid.foam.is_empty() { continue; }
+        let mut changed = false;
+        let mut left = false;
+        for f in grid.foam.iter_mut() {
+            if *f <= 0.0 { continue; }
+            *f *= FOAM_DECAY;
+            if *f < FOAM_MIN { *f = 0.0; } else { left = true; }
+            changed = true;
+        }
+        if changed {
+            grid.dirty = true;
+            dirty.insert(*key);
+        }
+        if left { any_left = true; } else { grid.foam = Vec::new(); }
+    }
+    FOAM_ACTIVE.store(any_left, Ordering::Relaxed);
+    dirty
+}
+
 /// One sim tick for every live region. Call after displacement spill and
 /// before `equalize_horizontal`. Returns the chunks touched.
 pub fn step_waves(
@@ -439,6 +518,26 @@ pub fn step_waves(
             continue;
         }
         let mean_h = sum_h / n_h as f32;
+
+        // Impact splash: full whitewash on every wet column in the disc.
+        let splashes = std::mem::take(&mut region.pending_splash);
+        for (sc, sr) in splashes {
+            for iz in 0..w {
+                for ix in 0..w {
+                    let c = iz * w + ix;
+                    if !cols[c].has || cols[c].avail <= 0.0 { continue; }
+                    let wx = cx - r + ix as i32;
+                    let wz = cz - r + iz as i32;
+                    let dx = (wx - sc.0) as f32;
+                    let dz = (wz - sc.2) as f32;
+                    let d = (dx * dx + dz * dz).sqrt();
+                    if d <= sr as f32 + 0.5 {
+                        let v = (1.0 - 0.5 * (d / (sr as f32 + 0.5))).clamp(0.4, 1.0);
+                        raise_foam(chunks, cs_i, wx, cols[c].top_y, wz, v, &mut dirty);
+                    }
+                }
+            }
+        }
 
         // 2. Flux update with inertia. A face is open when both columns hold
         //    water at (nearly) the same layer and the rendered surface does
@@ -563,6 +662,17 @@ pub fn step_waves(
                 let wx = cx - r + ix as i32;
                 let wz = cz - r + iz as i32;
                 apply_dh(chunks, cs_i, wx, wz, &cols[c], dh, &mut dirty);
+                // Whitewash from motion: fast vertical surface speed (crest
+                // face, splash rebound) and strong flux through the column.
+                let mut through = 0.0f32;
+                if ix + 1 < w { through += region.flux_x[c].abs(); }
+                if ix > 0 { through += region.flux_x[c - 1].abs(); }
+                if iz + 1 < w { through += region.flux_z[c].abs(); }
+                if iz > 0 { through += region.flux_z[c - w].abs(); }
+                let motion = (dh.abs() * FOAM_DH_GAIN + through * FOAM_FLUX_GAIN).min(1.0);
+                if motion >= FOAM_MIN * 2.0 {
+                    raise_foam(chunks, cs_i, wx, cols[c].top_y, wz, motion, &mut dirty);
+                }
             }
         }
         region.last_amplitude = amplitude;

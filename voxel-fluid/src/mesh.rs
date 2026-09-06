@@ -126,6 +126,8 @@ pub struct FluidMeshData {
     pub indices: Vec<u32>,
     pub uvs: Vec<[f32; 2]>,
     pub flow_directions: Vec<[f32; 3]>, // (dx, dz, magnitude) for UV scroll
+    /// Per-vertex whitewash 0..1 (collapse waves) -> UE vertex colour alpha.
+    pub foam: Vec<f32>,
 }
 
 /// Build fluid isosurface mesh via Marching Cubes.
@@ -142,6 +144,7 @@ pub fn mesh_fluid(grid: &ChunkFluidGrid, boundary: &BoundaryLevels, config: &Flu
             indices: Vec::new(),
             uvs: Vec::new(),
             flow_directions: Vec::new(),
+            foam: Vec::new(),
         };
     }
 
@@ -458,6 +461,7 @@ fn mesh_fluid_mc(grid: &ChunkFluidGrid, boundary: &BoundaryLevels, flags: MeshFl
         indices: Vec::new(),
         uvs: Vec::new(),
         flow_directions: Vec::new(),
+        foam: Vec::new(),
     };
 
     for z in 0..size {
@@ -514,6 +518,7 @@ fn mesh_fluid_mc(grid: &ChunkFluidGrid, boundary: &BoundaryLevels, flags: MeshFl
                 // Emit triangles from TRI_TABLE
                 let tri_row = &TRI_TABLE[cube_index];
                 let flow = compute_flow_direction(grid, x, y, z);
+                let foam = grid.foam_at(x, y, z);
                 let ft = dominant_fluid_type(grid, x, y, z) as u8;
                 let mut i = 0;
                 while i < 15 && tri_row[i] >= 0 {
@@ -543,6 +548,7 @@ fn mesh_fluid_mc(grid: &ChunkFluidGrid, boundary: &BoundaryLevels, flags: MeshFl
                             mesh.fluid_types.push(ft);
                             mesh.uvs.push([v[0], v[2]]);
                             mesh.flow_directions.push(flow);
+                            mesh.foam.push(foam);
                         }
 
                         mesh.indices.push(base);
@@ -603,6 +609,7 @@ fn cull_buried_triangles(mesh: &mut FluidMeshData, pinned: &mut Vec<bool>) {
     let mut fluid_types = Vec::with_capacity(kept);
     let mut uvs = Vec::with_capacity(kept);
     let mut flow_directions = Vec::with_capacity(kept);
+    let mut foam = Vec::with_capacity(kept);
     let mut new_pinned = Vec::with_capacity(kept);
     // remap assigns new ids in first-reference order; rebuild arrays in that order
     let mut order: Vec<(u32, usize)> = remap
@@ -618,6 +625,7 @@ fn cull_buried_triangles(mesh: &mut FluidMeshData, pinned: &mut Vec<bool>) {
         fluid_types.push(mesh.fluid_types[old]);
         uvs.push(mesh.uvs[old]);
         flow_directions.push(mesh.flow_directions[old]);
+        foam.push(mesh.foam[old]);
         new_pinned.push(pinned[old]);
     }
     for idx in &mut new_indices {
@@ -629,6 +637,7 @@ fn cull_buried_triangles(mesh: &mut FluidMeshData, pinned: &mut Vec<bool>) {
     mesh.fluid_types = fluid_types;
     mesh.uvs = uvs;
     mesh.flow_directions = flow_directions;
+    mesh.foam = foam;
     mesh.indices = new_indices;
     *pinned = new_pinned;
 }
@@ -692,6 +701,7 @@ fn weld_vertices(mesh: &mut FluidMeshData) {
     let mut new_fluid_types: Vec<u8> = Vec::new();
     let mut new_uvs: Vec<[f32; 2]> = Vec::new();
     let mut new_flow_directions: Vec<[f32; 3]> = Vec::new();
+    let mut new_foam: Vec<f32> = Vec::new();
 
     for i in 0..mesh.positions.len() {
         let pos = mesh.positions[i];
@@ -735,6 +745,7 @@ fn weld_vertices(mesh: &mut FluidMeshData) {
             new_fluid_types.push(mesh.fluid_types[i]);
             new_uvs.push(mesh.uvs[i]);
             new_flow_directions.push(mesh.flow_directions[i]);
+            new_foam.push(mesh.foam[i]);
             spatial.entry((gx, gy, gz)).or_default().push((idx, pos));
             idx
         };
@@ -751,6 +762,7 @@ fn weld_vertices(mesh: &mut FluidMeshData) {
     mesh.fluid_types = new_fluid_types;
     mesh.uvs = new_uvs;
     mesh.flow_directions = new_flow_directions;
+    mesh.foam = new_foam;
 }
 
 /// QEF vertex refinement: for each welded vertex, collect adjacent triangle normals,
@@ -1381,6 +1393,7 @@ mod tests {
         let mut new_fluid_types: Vec<u8> = Vec::new();
         let mut new_uvs: Vec<[f32; 2]> = Vec::new();
         let mut new_flow_directions: Vec<[f32; 3]> = Vec::new();
+        let mut new_foam: Vec<f32> = Vec::new();
         for i in 0..mesh.positions.len() {
             let pos = mesh.positions[i];
             let gx = (pos[0] * inv_cell).floor() as i32;
@@ -1414,6 +1427,7 @@ mod tests {
                 new_fluid_types.push(mesh.fluid_types[i]);
                 new_uvs.push(mesh.uvs[i]);
                 new_flow_directions.push(mesh.flow_directions[i]);
+            new_foam.push(mesh.foam[i]);
                 spatial.entry((gx, gy, gz)).or_default().push((idx, pos));
                 idx
             };
@@ -1427,6 +1441,7 @@ mod tests {
         mesh.fluid_types = new_fluid_types;
         mesh.uvs = new_uvs;
         mesh.flow_directions = new_flow_directions;
+    mesh.foam = new_foam;
     }
 
     #[test]
@@ -1518,6 +1533,7 @@ mod tests {
             indices: m.indices.clone(),
             uvs: m.uvs.clone(),
             flow_directions: m.flow_directions.clone(),
+            foam: m.foam.clone(),
         }
     }
 

@@ -493,6 +493,13 @@ pub unsafe extern "C" fn voxel_free_result(result: *mut FfiResult) {
                 fluid.vertex_count as usize,
             ));
         }
+        if !fluid.foam.is_null() {
+            drop(Vec::from_raw_parts(
+                fluid.foam,
+                fluid.vertex_count as usize,
+                fluid.vertex_count as usize,
+            ));
+        }
     }
     if fluid.index_count > 0 && !fluid.indices.is_null() {
         drop(Vec::from_raw_parts(

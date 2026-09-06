@@ -389,6 +389,11 @@ pub struct ChunkFluidGrid {
     /// mesh_level() knows which field to serve without a config reference.
     pub render_flux: bool,
     pub render_ribbon: bool,
+    /// Per-cell whitewash 0..1 (collapse waves, 2026-09-06): raised by the
+    /// impact splash and by surface speed in `sim::wave`, decayed every wave
+    /// tick, sampled per vertex by the mesher into vertex alpha. Lazily
+    /// allocated - empty means "no foam anywhere in this chunk".
+    pub foam: Vec<f32>,
 }
 
 impl ChunkFluidGrid {
@@ -419,6 +424,7 @@ impl ChunkFluidGrid {
             scratch_dir: Vec::new(),
             render_flux: false,
             render_ribbon: false,
+            foam: Vec::new(),
         }
     }
 
@@ -459,6 +465,7 @@ impl ChunkFluidGrid {
             scratch_dir: Vec::new(),
             render_flux: false,
             render_ribbon: false,
+            foam: Vec::new(),
         }
     }
 
@@ -706,6 +713,19 @@ impl ChunkFluidGrid {
         // All 8 corners share the same sign here, so fractional cap collapses
         // to the binary 0/1 it always was for set_density callers.
         self.cell_cap[idx] = if density > 0.0 { 0.0 } else { 1.0 };
+    }
+
+    /// Whitewash for the mesher: the strongest foam among this cell and the
+    /// cells directly above and below it (surface vertices are generated in
+    /// whichever of those the iso-surface crosses).
+    pub fn foam_at(&self, x: usize, y: usize, z: usize) -> f32 {
+        if self.foam.is_empty() {
+            return 0.0;
+        }
+        let mut f = self.foam[self.index(x, y, z)];
+        if y + 1 < self.size { f = f.max(self.foam[self.index(x, y + 1, z)]); }
+        if y > 0 { f = f.max(self.foam[self.index(x, y - 1, z)]); }
+        f
     }
 
     /// Get the 8 corner densities for a cell (for meshing/shoreline clipping).

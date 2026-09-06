@@ -156,6 +156,7 @@ fn convert_fluid_mesh_to_ue(
         indices: mesh.indices.clone(),
         uvs: mesh.uvs.clone(),
         flow_directions,
+        foam: mesh.foam.clone(),
     }
 }
 

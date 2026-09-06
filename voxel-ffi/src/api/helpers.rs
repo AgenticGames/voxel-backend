@@ -216,6 +216,7 @@ pub(crate) fn empty_fluid_mesh_data() -> FfiFluidMeshData {
         index_count: 0,
         uvs: ptr::null_mut(),
         flow_directions: ptr::null_mut(),
+        foam: ptr::null_mut(),
     }
 }
 
@@ -229,6 +230,7 @@ pub(crate) fn converted_fluid_mesh_to_ffi(mesh: ConvertedFluidMesh) -> FfiFluidM
     let mut indices = mesh.indices.into_boxed_slice();
     let mut uvs = mesh.uvs.into_boxed_slice();
     let mut flow_directions = mesh.flow_directions.into_boxed_slice();
+    let mut foam = mesh.foam.into_boxed_slice();
 
     let positions_ptr = positions.as_mut_ptr();
     let normals_ptr = normals.as_mut_ptr();
@@ -236,6 +238,7 @@ pub(crate) fn converted_fluid_mesh_to_ffi(mesh: ConvertedFluidMesh) -> FfiFluidM
     let indices_ptr = indices.as_mut_ptr();
     let uvs_ptr = uvs.as_mut_ptr();
     let flow_directions_ptr = flow_directions.as_mut_ptr();
+    let foam_ptr = foam.as_mut_ptr();
 
     std::mem::forget(positions);
     std::mem::forget(normals);
@@ -243,6 +246,7 @@ pub(crate) fn converted_fluid_mesh_to_ffi(mesh: ConvertedFluidMesh) -> FfiFluidM
     std::mem::forget(indices);
     std::mem::forget(uvs);
     std::mem::forget(flow_directions);
+    std::mem::forget(foam);
 
     FfiFluidMeshData {
         positions: positions_ptr,
@@ -253,6 +257,7 @@ pub(crate) fn converted_fluid_mesh_to_ffi(mesh: ConvertedFluidMesh) -> FfiFluidM
         index_count,
         uvs: uvs_ptr,
         flow_directions: flow_directions_ptr,
+        foam: foam_ptr,
     }
 }
 

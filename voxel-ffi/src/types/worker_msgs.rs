@@ -27,6 +27,8 @@ pub struct ConvertedFluidMesh {
     pub indices: Vec<u32>,
     pub uvs: Vec<[f32; 2]>,
     pub flow_directions: Vec<FfiVec3>,
+    /// Per-vertex whitewash 0..1 (collapse waves).
+    pub foam: Vec<f32>,
 }
 
 /// Messages sent to worker threads.

@@ -143,6 +143,9 @@ pub struct FfiFluidMeshData {
     pub index_count: u32,
     pub uvs: *mut [f32; 2],
     pub flow_directions: *mut FfiVec3,
+    /// Per-vertex whitewash 0..1 (collapse waves, 2026-09-06); one f32 per
+    /// vertex, may be null. APPENDED - UE's FVoxelFluidMeshData mirrors it.
+    pub foam: *mut f32,
 }
 
 #[repr(C)]

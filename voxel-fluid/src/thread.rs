@@ -235,12 +235,15 @@ pub fn fluid_sim_loop(
         // Displacement spill + wave regions run at WAVE_TICK_HZ on their own
         // clock and remesh only the chunks they touched, so a crest moves
         // and renders at 30 Hz even while the pool automaton ticks at 3.
-        if (crate::sim::wave::region_count() > 0 || crate::sim::displacement::pending_count() > 0)
+        if (crate::sim::wave::region_count() > 0
+            || crate::sim::displacement::pending_count() > 0
+            || crate::sim::wave::foam_active())
             && now.duration_since(last_wave_tick) >= wave_interval
         {
             last_wave_tick = now;
             wave_ticks += 1;
             let mut wave_dirty = spill_displacements(&mut chunks, chunk_size);
+            wave_dirty.extend(crate::sim::wave::decay_foam(&mut chunks));
             wave_dirty.extend(crate::sim::wave::step_waves(&mut chunks, chunk_size));
             if !wave_dirty.is_empty() {
                 mesh_and_send(&mut chunks, &wave_dirty, chunk_size, &config, &result_tx, &mut active_fluid_meshes);
@@ -845,6 +848,7 @@ fn handle_event(
                             indices: Vec::new(),
                             uvs: Vec::new(),
                             flow_directions: Vec::new(),
+                            foam: Vec::new(),
                         },
                     });
                     cleared_unloaded += 1;
@@ -883,6 +887,7 @@ fn handle_event(
                         indices: Vec::new(),
                         uvs: Vec::new(),
                         flow_directions: Vec::new(),
+                        foam: Vec::new(),
                     },
                 });
             }
