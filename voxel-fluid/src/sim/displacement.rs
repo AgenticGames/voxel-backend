@@ -112,8 +112,10 @@ pub fn queue_displacement(chunk: (i32, i32, i32), cs: usize, lost: &[SqueezedRem
                 ((d.center.2 as f32 * w_old + center.2 as f32 * w_new) / w).round() as i32,
             );
             d.remaining += total;
+            super::wave::spawn_impact(d.center, total);
             continue;
         }
+        super::wave::spawn_impact(center, total);
         pending.push(Displacement {
             fluid_type,
             remaining: total,

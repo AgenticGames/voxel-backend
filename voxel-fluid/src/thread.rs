@@ -220,6 +220,9 @@ pub fn fluid_sim_loop(
         // Collapse displacement: spill queued volume back into the pool as an
         // expanding ring before the flow step smooths it (2026-09-06).
         dirty_water.extend(spill_displacements(&mut chunks, chunk_size));
+        // Collapse impact waves: shallow-water step over live impact regions
+        // (equalize skips their columns while they are alive).
+        dirty_water.extend(crate::sim::wave::step_waves(&mut chunks, chunk_size));
         // Equalize first: set flat baseline, then slope flow gets the final word
         // to create gradients toward drains (prevents equalization from undoing drainage)
         let dirty_eq = equalize_horizontal(&mut chunks, chunk_size, false);

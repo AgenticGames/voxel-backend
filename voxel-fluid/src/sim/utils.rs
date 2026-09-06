@@ -102,6 +102,10 @@ pub fn equalize_horizontal(
 ) -> HashSet<(i32, i32, i32)> {
     let mut dirty = HashSet::new();
 
+    // Collapse-wave regions (sim::wave) own their columns while alive: the
+    // equalizer would flatten the crest every tick (2026-09-06).
+    let wave_mask = if is_lava { None } else { super::wave::masked_columns() };
+
     // Build global index: collect all water cells with level > MIN_LEVEL
     // Key: (world_x, world_y, world_z) → (chunk_key, local_x, local_y, local_z, level, capacity)
     let mut water_cells: HashMap<(i32, i32, i32), ((i32, i32, i32), usize, usize, usize, f32, f32, u8)> = HashMap::new();
@@ -132,6 +136,11 @@ pub fn equalize_horizontal(
                     let wx = chunk_key.0 * chunk_size as i32 + x as i32;
                     let wy = chunk_key.1 * chunk_size as i32 + y as i32;
                     let wz = chunk_key.2 * chunk_size as i32 + z as i32;
+                    if let Some(m) = &wave_mask {
+                        if m.contains(&(wx, wz)) {
+                            continue;
+                        }
+                    }
                     // Face gating (2026-08-04, bug #215): record which lateral
                     // faces are open so the BFS can't equalize THROUGH a
                     // rendered surface (thin walls were permeable membranes).
