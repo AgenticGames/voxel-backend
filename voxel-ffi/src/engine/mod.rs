@@ -329,9 +329,20 @@ impl VoxelEngine {
         // loads while the stall monitor was reporting into the void. The deployed
         // demo runs from <install>/Mithril2026/Binaries/Win64/, so on PC2 the file
         // lands under the MithrilDeploy share where the dev box can read it.
-        let panic_path = std::env::current_exe().ok()
-            .and_then(|e| e.parent().map(|d| d.join("Saved").join("voxel_panic.log")))
-            .unwrap_or_else(|| std::path::PathBuf::from("D:/Unreal Projects/Mithril2026/Saved/voxel_panic.log"));
+        // Order: the dev box's project Saved (exists only here) -> the per-user
+        // %LOCALAPPDATA%\Mithril2026\Saved that the Shipping demo already uses for
+        // demo_session.log (an install folder may not be writable for a standard
+        // user - PC2 produced no file next to the exe) -> exe-relative.
+        let dev_saved = std::path::PathBuf::from("D:/Unreal Projects/Mithril2026/Saved");
+        let panic_path = if dev_saved.is_dir() {
+            dev_saved.join("voxel_panic.log")
+        } else if let Some(la) = std::env::var_os("LOCALAPPDATA") {
+            std::path::PathBuf::from(la).join("Mithril2026").join("Saved").join("voxel_panic.log")
+        } else {
+            std::env::current_exe().ok()
+                .and_then(|e| e.parent().map(|d| d.join("Saved").join("voxel_panic.log")))
+                .unwrap_or_else(|| std::path::PathBuf::from("voxel_panic.log"))
+        };
         if let Some(dir) = panic_path.parent() { let _ = std::fs::create_dir_all(dir); }
         crate::panic_log::install(panic_path);
 
