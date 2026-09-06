@@ -21,6 +21,39 @@ use super::types::{
     MAX_STRUT_RADIUS, STRUT_TUNING,
 };
 use super::calc::{sample_world, world_to_chunk_local};
+use crate::density_ops::cell_locations;
+
+/// Clear one collapsed world cell in EVERY chunk that stores a copy of it
+/// (2026-09-06). Chunk grids are `chunk_size + 1` wide, so a cell on a chunk
+/// boundary lives in 2/4/8 chunks. Clearing only the canonical chunk (what
+/// `world_to_chunk_local` returns) left the neighbour's duplicate copy solid:
+/// the lower chunk still meshed a one-voxel sheet at y = 30 after everything
+/// around it fell, that sheet's painted stress re-seeded every recalc, and
+/// the phantom "slab" (all Air at the canonical copy) took the Granite
+/// dominant-material fallback for its rubble pile. Painted stress is wiped
+/// with the rock - paint belongs to the cell that fell, not to the air it
+/// leaves behind.
+fn clear_collapsed_cell(
+    density_fields: &mut HashMap<(i32, i32, i32), DensityField>,
+    stress_fields: &mut HashMap<(i32, i32, i32), StressField>,
+    chunk_size: usize,
+    wx: i32, wy: i32, wz: i32,
+    touched: &mut HashSet<(i32, i32, i32)>,
+) {
+    for slot in cell_locations(chunk_size as i32, wx, wy, wz).into_iter().flatten() {
+        let (key, lx, ly, lz) = slot;
+        if let Some(df) = density_fields.get_mut(&key) {
+            let sample = df.get_mut(lx, ly, lz);
+            sample.density = -1.0;
+            sample.material = Material::Air;
+            touched.insert(key);
+        }
+        if let Some(sf) = stress_fields.get_mut(&key) {
+            sf.set(lx, ly, lz, 0.0);
+            sf.clear_painted(lx, ly, lz);
+        }
+    }
+}
 
 /// Why candidate regions were REJECTED by the natural pass, accumulated since
 /// the last `take_collapse_skip_stats()` (2026-09-06). Debug readout only -
@@ -125,18 +158,8 @@ pub fn detect_and_execute_collapses(
                 Material::Air
             };
 
-            // Set to Air
-            if let Some(df) = density_fields.get_mut(&key) {
-                let sample = df.get_mut(lx, ly, lz);
-                sample.density = -1.0;
-                sample.material = Material::Air;
-            }
-
-            // Clear stress
-            if let Some(sf) = stress_fields.get_mut(&key) {
-                sf.set(lx, ly, lz, 0.0);
-            }
-
+            // Set to Air in every chunk that shares the cell (seam duplicates too)
+            clear_collapsed_cell(density_fields, stress_fields, chunk_size, wx, wy, wz, &mut affected_chunks_set);
             affected_chunks_set.insert(key);
             collapsed_voxels.push(CollapsedVoxel {
                 world_x: wx,
@@ -683,14 +706,14 @@ pub fn detect_and_execute_collapses_v2_with_force_deadline(
                 .map(|df| df.get(lx, ly, lz).material)
                 .unwrap_or(Material::Air);
 
-            // Set to Air (remove the slab from its original position)
-            if let Some(df) = density_fields.get_mut(&key) {
-                let sample = df.get_mut(lx, ly, lz);
-                sample.density = -1.0;
-                sample.material = Material::Air;
-            }
-            if let Some(sf) = stress_fields.get_mut(&key) {
-                sf.set(lx, ly, lz, 0.0);
+            // Set to Air (remove the slab from its original position) in EVERY
+            // chunk that shares the cell - boundary rows are duplicated across
+            // neighbours and the duplicate used to survive as a floating sheet.
+            let mut touched: HashSet<(i32, i32, i32)> = HashSet::new();
+            clear_collapsed_cell(density_fields, stress_fields, chunk_size, wx, wy, wz, &mut touched);
+            for k in touched {
+                slab_chunks_set.insert(k);
+                affected_chunks_set.insert(k);
             }
             slab_chunks_set.insert(key);
             affected_chunks_set.insert(key);
