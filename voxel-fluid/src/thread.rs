@@ -249,14 +249,21 @@ pub fn fluid_sim_loop(
                 mesh_and_send(&mut chunks, &wave_dirty, chunk_size, &config, &result_tx, &mut active_fluid_meshes);
             }
             if wave_ticks % 15 == 0 {
+                let (mut foam_cells, mut foam_max, mut foam_grids) = (0usize, 0.0f32, 0usize);
+                for g in chunks.values() {
+                    if g.foam.is_empty() { continue; }
+                    foam_grids += 1;
+                    for &f in &g.foam { if f > 0.1 { foam_cells += 1; } if f > foam_max { foam_max = f; } }
+                }
                 fluid_debug(format!(
-                    "wave tick {}: water in grids {:.1} | regions {} | displacement pending {} dropped {:.2} | wave overflow-lost {:.2} deficit-created {:.2}",
+                    "wave tick {}: water in grids {:.1} | regions {} | displacement pending {} dropped {:.2} | wave overflow-lost {:.2} deficit-created {:.2} | foam grids {} cells>0.1 {} max {:.2} | remeshed {}",
                     wave_ticks, total_water(&chunks),
                     crate::sim::wave::region_count(),
                     crate::sim::displacement::pending_count(),
                     crate::sim::displacement::dropped_total(),
                     crate::sim::wave::lost_overflow_total(),
-                    crate::sim::wave::created_deficit_total()));
+                    crate::sim::wave::created_deficit_total(),
+                    foam_grids, foam_cells, foam_max, wave_dirty.len()));
             }
         }
 
