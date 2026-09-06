@@ -83,6 +83,9 @@ pub const FOAM_FLUX_GAIN: f32 = 2.5;
 pub const FOAM_MIN: f32 = 0.02;
 /// Impact splash disc radius beyond the impulse disc.
 pub const FOAM_SPLASH_EXTRA: i32 = 1;
+/// Crest weighting: foam multiplier = clamp((h - mean)*gain + 0.5, floor, 1.5).
+pub const FOAM_CREST_GAIN: f32 = 2.5;
+pub const FOAM_TROUGH_FLOOR: f32 = 0.2;
 /// Below this crest amplitude (cells) a region is considered calm and
 /// released early so equalize can take over.
 pub const WAVE_CALM_AMPLITUDE: f32 = 0.004;
@@ -669,7 +672,10 @@ pub fn step_waves(
                 if ix > 0 { through += region.flux_x[c - 1].abs(); }
                 if iz + 1 < w { through += region.flux_z[c].abs(); }
                 if iz > 0 { through += region.flux_z[c - w].abs(); }
-                let motion = (dh.abs() * FOAM_DH_GAIN + through * FOAM_FLUX_GAIN).min(1.0);
+                // Whitecaps sit on crests: weight by height above the region
+                // mean so troughs stay dark and the ridges carry the foam.
+                let crest = ((cols[c].h + dh - mean_h) * FOAM_CREST_GAIN + 0.5).clamp(FOAM_TROUGH_FLOOR, 1.5);
+                let motion = ((dh.abs() * FOAM_DH_GAIN + through * FOAM_FLUX_GAIN) * crest).min(1.0);
                 if motion >= FOAM_MIN * 2.0 {
                     raise_foam(chunks, cs_i, wx, cols[c].top_y, wz, motion, &mut dirty);
                 }

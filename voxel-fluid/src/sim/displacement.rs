@@ -44,6 +44,11 @@ pub const DISPLACE_SEARCH_DOWN: i32 = 4;
 /// Two displacements of the same fluid closer than this merge (one collapse
 /// hits a pool across several TerrainModified chunk events).
 pub const DISPLACE_MERGE_DIST: i32 = 4;
+/// Squeezed cells are grouped into blobs of this many cells on X/Z before a
+/// centroid is taken, so each landing fragment of a slab gets its own
+/// displacement ring and wave impulse (interfering rings = choppier water)
+/// instead of one centroid for the whole chunk.
+pub const DISPLACE_BLOB_CELLS: i32 = 6;
 
 #[derive(Debug, Clone)]
 pub struct Displacement {
@@ -70,23 +75,25 @@ pub fn queue_displacement(chunk: (i32, i32, i32), cs: usize, lost: &[SqueezedRem
         return;
     }
     let cs_i = cs as i32;
-    // Group by fluid type (a quench boundary could squeeze both at once).
-    let mut by_type: HashMap<u8, (f32, f64, f64, f64)> = HashMap::new();
+    // Group by fluid type AND by X/Z blob, so each landing fragment becomes
+    // its own displacement + impulse.
+    let mut by_blob: HashMap<(u8, i32, i32), (f32, f64, f64, f64)> = HashMap::new();
     for r in lost {
         if r.lost < MIN_LEVEL {
             continue;
         }
-        let e = by_type.entry(r.fluid_type as u8).or_insert((0.0, 0.0, 0.0, 0.0));
         let wx = chunk.0 * cs_i + r.lx as i32;
         let wy = chunk.1 * cs_i + r.ly as i32;
         let wz = chunk.2 * cs_i + r.lz as i32;
+        let key = (r.fluid_type as u8, wx.div_euclid(DISPLACE_BLOB_CELLS), wz.div_euclid(DISPLACE_BLOB_CELLS));
+        let e = by_blob.entry(key).or_insert((0.0, 0.0, 0.0, 0.0));
         e.0 += r.lost;
         e.1 += wx as f64 * r.lost as f64;
         e.2 += wy as f64 * r.lost as f64;
         e.3 += wz as f64 * r.lost as f64;
     }
     let mut pending = PENDING.lock().unwrap();
-    for (ft, (total, sx, sy, sz)) in by_type {
+    for ((ft, _bx, _bz), (total, sx, sy, sz)) in by_blob {
         if total < MIN_LEVEL {
             continue;
         }
