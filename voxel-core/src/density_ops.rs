@@ -244,6 +244,57 @@ pub fn natural_floor_y_iso(
     None
 }
 
+/// True when the chunk holding world cell (wx, wy, wz) is loaded. `read_density`
+/// reports an UNLOADED chunk as solid (1.0); callers that must not mistake the
+/// edge of the loaded set for a floor check this first (2026-09-06).
+pub fn chunk_loaded(
+    fields: &HashMap<(i32, i32, i32), DensityField>,
+    cs: i32,
+    wx: i32, wy: i32, wz: i32,
+) -> bool {
+    fields.contains_key(&(wx.div_euclid(cs), wy.div_euclid(cs), wz.div_euclid(cs)))
+}
+
+/// Debug probe (2026-09-06): run-length material profile of one world column
+/// from `y_top` down to `y_bot`, e.g. `36..30 Air | 29..21 Limestone | 20..12 Air
+/// | 11..0 UNLOADED`. Air = density <= 0. Used by the collapse worker to show
+/// what is actually under a slab and under a pile landing.
+pub fn column_profile(
+    fields: &HashMap<(i32, i32, i32), DensityField>,
+    cs: i32,
+    wx: i32, wz: i32,
+    y_top: i32, y_bot: i32,
+) -> String {
+    let label = |y: i32| -> String {
+        match fields.get(&(wx.div_euclid(cs), y.div_euclid(cs), wz.div_euclid(cs))) {
+            None => "UNLOADED".to_string(),
+            Some(df) => {
+                let s = df.get(
+                    wx.rem_euclid(cs) as usize,
+                    y.rem_euclid(cs) as usize,
+                    wz.rem_euclid(cs) as usize,
+                );
+                if s.density > 0.0 { format!("{:?}", s.material) } else { "Air".to_string() }
+            }
+        }
+    };
+    let mut out = String::new();
+    let mut run_start = y_top;
+    let mut run_label = label(y_top);
+    let mut y = y_top - 1;
+    while y >= y_bot {
+        let l = label(y);
+        if l != run_label {
+            out.push_str(&format!("{}..{} {} | ", run_start, y + 1, run_label));
+            run_start = y;
+            run_label = l;
+        }
+        y -= 1;
+    }
+    out.push_str(&format!("{}..{} {}", run_start, y_bot, run_label));
+    out
+}
+
 // ── Density write primitives (seam-aware) ────────────────────────────────
 
 /// Apply a write decision to ALL chunks sharing this world cell. The decision

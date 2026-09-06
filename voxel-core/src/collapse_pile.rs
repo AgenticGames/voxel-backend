@@ -57,10 +57,10 @@ use crate::stress::{CollapsedVoxel, StressConfig};
 
 // ── Tunables ──────────────────────────────────────────────────────────────
 
-const APRON_EXTRA_RADIUS: i32 = 3;        // extends pile footprint for blend
+const APRON_EXTRA_RADIUS: i32 = 4;        // extends pile footprint for blend
 const SLOPE_LIMIT_TAN: f32 = 0.65;        // tan(33°), geological default
-const AOR_ITERATIONS: u32 = 8;
-const AOR_TRANSFER_RATE: f32 = 0.25;      // fraction of surplus moved per iter
+const AOR_ITERATIONS: u32 = 48;
+const AOR_TRANSFER_RATE: f32 = 0.5;       // fraction of surplus moved per iter
 const PILE_NOISE_AMP: f32 = 0.45;         // ± voxels of organic crest perturbation
 const CRATER_DEPTH_PER_FRAGMENT_VOLUME: f32 = 0.04; // multiply by sqrt(volume) for depth
 const CRATER_MAX_DEPTH: i32 = 2;
@@ -77,6 +77,15 @@ const CRACK_COUNT_PER_FRAGMENT: usize = 5;
 const CRACK_LENGTH_MAX: f32 = 4.5;
 const CRACK_DEPTH_DENSITY: f32 = 0.4;     // shallow crack: density 0.4 (mostly air)
 const FRAGMENT_COUNT_MAX: usize = 5;
+/// Angle-of-repose solver stops early once no column moved more than this.
+const AOR_MIN_CHANGE: f32 = 0.01;
+/// Half-width (voxels) of the signed-distance band written around the pile
+/// surface (2026-09-06). The old writer stamped 1.0 for every pile cell and a
+/// single sub-voxel iso cell on top, so lateral edges between columns of
+/// different height had no gradient and the mesher produced unit terraces
+/// ("square piles"). Writing density = clamp(dist_to_surface / band) gives
+/// every edge a crossing that tracks the heightfield slope.
+const SURFACE_BAND: f32 = 1.5;
 
 // ── Public types ──────────────────────────────────────────────────────────
 
@@ -88,6 +97,10 @@ pub struct FragmentInfo {
     pub landing_y: f32,
     pub leading_edge_dir: (f32, f32), // unit vector toward leading edge
     pub dominant_material: Material,
+    /// Probe (2026-09-06): footprint columns considered / columns refused
+    /// because no natural floor was found (void, wall interior, unloaded).
+    pub columns_total: u32,
+    pub columns_void: u32,
 }
 
 /// One dust event per fragment impact. UE polls these and spawns Niagara.
@@ -109,6 +122,9 @@ pub struct PlacementResult {
     /// Cells flagged as "may trigger secondary collapse next tick" — the
     /// caller should add these to the stress dirty set.
     pub settling_dirty_cells: Vec<(i32, i32, i32)>,
+    /// Fragments that had no landing floor at all (every column ended in
+    /// unloaded space / void) and were therefore NOT written (2026-09-06).
+    pub fragments_skipped_no_landing: u32,
 }
 
 // ── Public entry ──────────────────────────────────────────────────────────
@@ -135,6 +151,7 @@ pub fn place_collapse_pile(
             affected_chunks,
             written_cells: written,
             settling_dirty_cells: vec![],
+            fragments_skipped_no_landing: 0,
         };
     }
 
@@ -156,10 +173,17 @@ pub fn place_collapse_pile(
     let mut placement_metadata: Vec<FragmentInfo> = Vec::with_capacity(fragments.len());
     let mut dust_events: Vec<DustEvent> = Vec::with_capacity(fragments.len());
     let mut settling_dirty_cells: Vec<(i32, i32, i32)> = Vec::new();
+    let mut fragments_skipped_no_landing = 0u32;
 
     let total_volume = collapsed_voxels.len() as f32;
 
     for frag in &fragments {
+        if !frag.has_landing {
+            // Nothing solid under any column within reach (void / unloaded):
+            // there is nowhere for this debris to land, so it is NOT written.
+            fragments_skipped_no_landing += 1;
+            continue;
+        }
         let info = place_fragment_pile(
             density_fields, cs, config, frag,
             &crust_noise, &detail_noise, &boulder_noise,
@@ -205,6 +229,7 @@ pub fn place_collapse_pile(
         affected_chunks,
         written_cells: written,
         settling_dirty_cells,
+        fragments_skipped_no_landing,
     }
 }
 
@@ -220,6 +245,8 @@ struct Fragment<'a> {
     leading_edge_dir: (f32, f32),
     dominant_material: Material,
     material_counts: HashMap<Material, u32>,
+    /// False when no column found solid ground (see `fragments_skipped_no_landing`).
+    has_landing: bool,
 }
 
 fn fragment_slab<'a>(
@@ -332,6 +359,11 @@ fn build_fragment<'a>(
         // Find first solid below the column's slab bottom.
         let mut floor_y_for_col = min_yc - 1;
         for _ in 0..96 {
+            // The edge of the loaded chunk set is NOT a floor (read_density
+            // would report it as solid) - stop the scan, no landing here.
+            if !density_ops::chunk_loaded(density_fields, cs, x, floor_y_for_col, z) {
+                break;
+            }
             let d = density_ops::read_density(density_fields, cs, x, floor_y_for_col, z);
             if d > 0.0 {
                 column_floor_ys.push(floor_y_for_col + 1);
@@ -345,6 +377,7 @@ fn build_fragment<'a>(
         }
     }
     column_floor_ys.sort();
+    let has_landing = !column_floor_ys.is_empty();
     let landing_y = if column_floor_ys.is_empty() {
         min_y - landing_offset
     } else {
@@ -366,6 +399,7 @@ fn build_fragment<'a>(
         leading_edge_dir,
         dominant_material: dominant,
         material_counts: mat_counts,
+        has_landing,
     }
 }
 
@@ -437,6 +471,13 @@ fn place_fragment_pile(
     let nx = (zone_rx * 2 + 1) as usize;
     let nz = (zone_rz * 2 + 1) as usize;
     let mut natural_floor: Vec<f32> = vec![frag.floor_y as f32 + 0.5; nx * nz];
+    // Void-safety (2026-09-06): a column only receives debris, craters, cracks,
+    // tracks or boulders when a REAL air->solid floor was found under it in a
+    // loaded chunk. Columns that fail the scan (open void below, inside a wall,
+    // edge of the loaded set) used to fall back to the fragment's median
+    // landing height and were stamped anyway - that is where the floating
+    // rubble under the cave and the air pockets inside walls came from.
+    let mut has_floor: Vec<bool> = vec![false; nx * nz];
     let mut weight: Vec<f32> = vec![0.0; nx * nz];
     let target_volume = frag.volume as f32 * config.rubble_fill_ratio;
 
@@ -445,10 +486,16 @@ fn place_fragment_pile(
             let wx = cx_i - zone_rx + ix as i32;
             let wz = cz_i - zone_rz + iz as i32;
             // Natural floor — use scan around fragment landing Y.
-            if let Some(nat) = density_ops::natural_floor_y_iso(
-                density_fields, cs, wx, frag.floor_y, wz, 4, 16,
-            ) {
-                natural_floor[iz * nx + ix] = nat;
+            if density_ops::chunk_loaded(density_fields, cs, wx, frag.floor_y, wz) {
+                if let Some(nat) = density_ops::natural_floor_y_iso(
+                    density_fields, cs, wx, frag.floor_y, wz, 4, 16,
+                ) {
+                    natural_floor[iz * nx + ix] = nat;
+                    has_floor[iz * nx + ix] = true;
+                }
+            }
+            if !has_floor[iz * nx + ix] {
+                continue; // no floor here: weight stays 0, nothing is written
             }
 
             // Distance to fragment center XZ, normalized by elliptical radii.
@@ -480,31 +527,53 @@ fn place_fragment_pile(
         .collect();
 
     // ── Angle-of-repose iteration (the magic) ──
+    // 2026-09-06: 8-neighbour (diagonals at sqrt2 spacing), 48 iterations at
+    // half-rate with an early exit, instead of 4-neighbour x 8 x quarter-rate.
+    // The old solver moved ~6% of a column's surplus per pass, so crests kept
+    // their raw Gaussian allocation and meshed as stepped mesas. Columns
+    // without a floor take part as walls: nothing flows into or out of them.
+    const NBR: [(i32, i32, f32); 8] = [
+        (1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0),
+        (1, 1, std::f32::consts::SQRT_2), (1, -1, std::f32::consts::SQRT_2),
+        (-1, 1, std::f32::consts::SQRT_2), (-1, -1, std::f32::consts::SQRT_2),
+    ];
+    let mut delta_h: Vec<f32> = vec![0.0; nx * nz];
     for _iter in 0..AOR_ITERATIONS {
-        let mut changes: Vec<(usize, f32)> = Vec::new();
+        for d in delta_h.iter_mut() { *d = 0.0; }
+        let mut any = false;
         for iz in 0..nz {
             for ix in 0..nx {
                 let i = iz * nx + ix;
+                if !has_floor[i] || pile_height[i] <= 0.0 { continue; }
                 let here_top = natural_floor[i] + pile_height[i];
-                for &(dx, dz) in &[(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+                for &(dx, dz, dist) in &NBR {
                     let nix = ix as i32 + dx;
                     let niz = iz as i32 + dz;
                     if nix < 0 || nix >= nx as i32 || niz < 0 || niz >= nz as i32 { continue; }
                     let j = niz as usize * nx + nix as usize;
+                    if !has_floor[j] { continue; }
                     let neigh_top = natural_floor[j] + pile_height[j];
+                    let limit = SLOPE_LIMIT_TAN * dist;
                     let delta = here_top - neigh_top;
-                    if delta > SLOPE_LIMIT_TAN {
-                        let transfer = (delta - SLOPE_LIMIT_TAN) * AOR_TRANSFER_RATE * 0.25;
-                        changes.push((i, -transfer));
-                        changes.push((j, transfer));
+                    if delta > limit {
+                        // Move half the excess (split across up to 8 receivers).
+                        let transfer = ((delta - limit) * 0.5 * AOR_TRANSFER_RATE / 4.0)
+                            .min(pile_height[i] / 8.0);
+                        delta_h[i] -= transfer;
+                        delta_h[j] += transfer;
+                        any = true;
                     }
                 }
             }
         }
-        if changes.is_empty() { break; }
-        for (i, dh) in changes {
-            pile_height[i] = (pile_height[i] + dh).max(0.0);
+        if !any { break; }
+        let mut max_change = 0.0f32;
+        for i in 0..nx * nz {
+            let before = pile_height[i];
+            pile_height[i] = (pile_height[i] + delta_h[i]).max(0.0);
+            max_change = max_change.max((pile_height[i] - before).abs());
         }
+        if max_change < AOR_MIN_CHANGE { break; }
     }
 
     // ── Impact crater under fragment center (5C) ──
@@ -525,10 +594,10 @@ fn place_fragment_pile(
                 if depth <= 0 { continue; }
                 let wx = cx_i + dx;
                 let wz = cz_i + dz;
-                let nat_y = natural_floor[
-                    (((dz + zone_rz) as usize) * nx + ((dx + zone_rx) as usize))
-                    .min(nx * nz - 1)
-                ];
+                let ci = (((dz + zone_rz) as usize) * nx + ((dx + zone_rx) as usize))
+                    .min(nx * nz - 1);
+                if !has_floor[ci] { continue; }
+                let nat_y = natural_floor[ci];
                 let nat_int = nat_y.floor() as i32;
                 for k in 0..depth {
                     density_ops::write_lower(
@@ -545,7 +614,7 @@ fn place_fragment_pile(
         for ix in 0..nx {
             let i = iz * nx + ix;
             let h = pile_height[i];
-            if h < 0.05 { continue; }
+            if !has_floor[i] || h < 0.05 { continue; }
 
             let wx = cx_i - zone_rx + ix as i32;
             let wz = cz_i - zone_rz + iz as i32;
@@ -557,38 +626,37 @@ fn place_fragment_pile(
             let n_hi = detail_noise.sample(wx as f64 * 1.1, 5.0, wz as f64 * 1.1) as f32;
             let surface_jitter = (n_lo * 0.7 + n_hi * 0.3) * PILE_NOISE_AMP;
 
-            let target_y_float = nat_y + h + surface_jitter;
-            let (target_y, d_solid, d_air) =
-                density_ops::subvoxel_boundary_densities(target_y_float);
-
-            // Material stratification (5D): top 25% gets pulverized lighter
-            // material if available, bottom 25% gets densest material.
+            // Signed-distance band around the pile surface (2026-09-06).
+            // density = clamp((surface - cell_centre) / SURFACE_BAND): full
+            // solid deep inside, a graded skin across the top, and a graded
+            // air shell above it. Every write is RAISE-ONLY: solid writes only
+            // add rock, and the air-side writes only lift a cell's density
+            // towards 0 (an air cell stays air), so a wall or ceiling cell
+            // that was already solid is never turned into air the way the old
+            // forced iso write could.
+            let top = nat_y + h + surface_jitter;
             let nat_int = nat_y.floor() as i32;
-            let pile_voxels = (target_y - nat_int).max(0);
-
-            for k in 0..pile_voxels {
-                let wy = nat_int + k;
-                let frac_height = if pile_voxels > 0 {
-                    k as f32 / pile_voxels as f32
-                } else { 0.0 };
-                let material_at = stratified_material(&frag.material_counts, frac_height);
-                density_ops::write_raise(
-                    density_fields, cs, wx, wy, wz, 1.0, material_at,
-                    affected_chunks, written, changed_count,
-                );
+            let y_hi = (top + SURFACE_BAND).ceil() as i32;
+            let total_h = (top - nat_y).max(0.05);
+            for wy in nat_int..=y_hi {
+                let signed = top - (wy as f32 + 0.5);
+                let d = (signed / SURFACE_BAND).clamp(-1.0, 1.0);
+                if d > 0.0 {
+                    // Material stratification (5D): densest at the bottom,
+                    // dominant/lighter towards the crest.
+                    let frac_height = ((wy as f32 - nat_y) / total_h).clamp(0.0, 1.0);
+                    let material_at = stratified_material(&frag.material_counts, frac_height);
+                    density_ops::write_raise(
+                        density_fields, cs, wx, wy, wz, d, material_at,
+                        affected_chunks, written, changed_count,
+                    );
+                } else if d > -1.0 {
+                    density_ops::write_raise(
+                        density_fields, cs, wx, wy, wz, d, Material::Air,
+                        affected_chunks, written, changed_count,
+                    );
+                }
             }
-
-            // Boundary cells (sub-voxel iso placement).
-            density_ops::write_force(
-                density_fields, cs, wx, target_y, wz, d_solid,
-                stratified_material(&frag.material_counts, 1.0),
-                affected_chunks, written, changed_count,
-            );
-            density_ops::write_force(
-                density_fields, cs, wx, target_y + 1, wz, d_air,
-                Material::Air,
-                affected_chunks, written, changed_count,
-            );
         }
     }
 
@@ -628,10 +696,12 @@ fn place_fragment_pile(
         let bx = (cx + theta.cos() * frag.radius_x * radial_frac).round() as i32;
         let bz = (cz + theta.sin() * frag.radius_z * radial_frac).round() as i32;
 
-        // Boulder rests on top of the pile at this column.
-        let bb_idx = bbi_for(bx, bz, cx_i, cz_i, zone_rx, zone_rz, nx, nz);
-        let nat_y_at = bb_idx.map(|i| natural_floor[i]).unwrap_or(frag.floor_y as f32);
-        let pile_h_at = bb_idx.map(|i| pile_height[i]).unwrap_or(0.0);
+        // Boulder rests on top of the pile at this column - only where the
+        // column has a real floor (no boulders floating in void / in walls).
+        let Some(bi) = bbi_for(bx, bz, cx_i, cz_i, zone_rx, zone_rz, nx, nz) else { continue };
+        if !has_floor[bi] { continue; }
+        let nat_y_at = natural_floor[bi];
+        let pile_h_at = pile_height[bi];
         let by = (nat_y_at + pile_h_at - 0.5).round() as i32;
 
         // Boulder size noise.
@@ -660,10 +730,9 @@ fn place_fragment_pile(
             let tx = (cx + dirx * track_len * t).round() as i32;
             let tz = (cz + dirz * track_len * t).round() as i32;
             // Pile-surface Y at this column for the track.
-            let bbi = bbi_for(tx, tz, cx_i, cz_i, zone_rx, zone_rz, nx, nz);
-            let nat_y_tk = bbi.map(|i| natural_floor[i]).unwrap_or(frag.floor_y as f32);
-            let pile_h_tk = bbi.map(|i| pile_height[i]).unwrap_or(0.0);
-            let surf_y = (nat_y_tk + pile_h_tk).floor() as i32;
+            let Some(ti) = bbi_for(tx, tz, cx_i, cz_i, zone_rx, zone_rz, nx, nz) else { continue };
+            if !has_floor[ti] { continue; }
+            let surf_y = (natural_floor[ti] + pile_height[ti]).floor() as i32;
             // Light depression in the surface cell.
             density_ops::write_lower(
                 density_fields, cs, tx, surf_y, tz, 0.2,
@@ -691,9 +760,9 @@ fn place_fragment_pile(
             let tx = (cx + dirx * kf).round() as i32;
             let tz = (cz + dirz * kf).round() as i32;
             // Surface Y at this column = natural floor + maybe pile.
-            let bbi = bbi_for(tx, tz, cx_i, cz_i, zone_rx, zone_rz, nx, nz);
-            let nat_y_tk = bbi.map(|i| natural_floor[i]).unwrap_or(frag.floor_y as f32);
-            let surf_y = nat_y_tk.floor() as i32;
+            let Some(ci) = bbi_for(tx, tz, cx_i, cz_i, zone_rx, zone_rz, nx, nz) else { continue };
+            if !has_floor[ci] { continue; }
+            let surf_y = natural_floor[ci].floor() as i32;
             density_ops::write_lower(
                 density_fields, cs, tx, surf_y, tz, CRACK_DEPTH_DENSITY,
                 affected_chunks, written, changed_count,
@@ -742,6 +811,8 @@ fn place_fragment_pile(
         landing_y: frag.floor_y as f32,
         leading_edge_dir: frag.leading_edge_dir,
         dominant_material: frag.dominant_material,
+        columns_total: (nx * nz) as u32,
+        columns_void: has_floor.iter().filter(|f| !**f).count() as u32,
     }
 }
 

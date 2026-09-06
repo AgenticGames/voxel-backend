@@ -95,6 +95,13 @@ pub(crate) fn try_process_stress_queue(
         events.len(), dirty_chunks.len(), chunk_size));
     for (i, e) in events.iter().enumerate() {
         dbg(format!("  event[{}]: center=({},{},{}) radius={} cascade_depth={}", i, e.center.0, e.center.1, e.center.2, e.radius, e.cascade_depth));
+        // Probe (2026-09-06): what is actually under this event's centre column.
+        {
+            let s = store.read().unwrap();
+            dbg(format!("    column x={} z={}: {}", e.center.0, e.center.2,
+                voxel_core::density_ops::column_profile(&s.density_fields, chunk_size as i32,
+                    e.center.0, e.center.2, e.center.1 + 6, e.center.1 - 40)));
+        }
     }
     dbg(format!("  config: span_w={:.3} min_safe_span={} min_collapse={} slab_cohesion={:.2} max_vol={} depth_scale={:.0}",
         stress_cfg.span_weight, stress_cfg.min_safe_span,
@@ -1056,6 +1063,22 @@ pub(crate) fn try_process_stress_queue(
                                     p.bb_min.0, p.bb_min.1, p.bb_min.2,
                                     p.bb_max.0, p.bb_max.1, p.bb_max.2,
                                     pr.affected_chunks.len(), pr.written_cells.len()));
+                                // Probe (2026-09-06): per-fragment landing + what the
+                                // column under each fragment centre really holds.
+                                if pr.fragments_skipped_no_landing > 0 {
+                                    log_line(format!("    {} fragment(s) had NO landing floor (void/unloaded) and were not written",
+                                        pr.fragments_skipped_no_landing));
+                                }
+                                for (fi, fr) in pr.fragments.iter().enumerate() {
+                                    let fx = fr.center_xz.0.round() as i32;
+                                    let fz = fr.center_xz.1.round() as i32;
+                                    let ly = fr.landing_y as i32;
+                                    log_line(format!(
+                                        "    frag[{}]: vol={} landing_y={} pile_top_y={:.1} mat={:?} columns={} void_columns={} | column x={} z={}: {}",
+                                        fi, fr.volume, ly, fr.center_y, fr.dominant_material,
+                                        fr.columns_total, fr.columns_void, fx, fz,
+                                        voxel_core::density_ops::column_profile(&s.density_fields, cs_c as i32, fx, fz, ly + 16, ly - 24)));
+                                }
                                 for k in pr.affected_chunks {
                                     pile_chunks.push(k);
                                 }
