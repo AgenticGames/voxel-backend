@@ -40,25 +40,25 @@ use crate::cell::{face_blocked, ChunkFluidGrid, MIN_LEVEL};
 /// is cheap; the pool itself stays on its own cadence.
 pub const WAVE_TICK_HZ: f32 = 30.0;
 /// Half-width of the wave region in columns (region is (2R+1)²).
-pub const WAVE_REGION_RADIUS: i32 = 16;
+pub const WAVE_REGION_RADIUS: i32 = 24;
 /// Ticks a region stays active after its last impulse (150 = 5 s @ 30 Hz).
-pub const WAVE_LIFE_TICKS: u32 = 150;
+pub const WAVE_LIFE_TICKS: u32 = 300;
 /// Gravity term in cell units per tick²: flux gains G·Δh each tick.
 /// Wave speed ≈ sqrt(G·depth) cells/tick → ~0.35-0.5 cells/tick for a
 /// 1-2 cell deep pool (10-15 cells/s), which reads as a brisk ripple.
-pub const WAVE_G: f32 = 0.12;
+pub const WAVE_G: f32 = 0.05;
 /// Per-tick flux retention (inertia damping). 0.985 ≈ energy halves in ~1.5 s.
-pub const WAVE_DAMP: f32 = 0.985;
+pub const WAVE_DAMP: f32 = 0.994;
 /// A column may not lose more than this fraction of its available depth
 /// in one tick (keeps the scheme stable and levels non-negative).
-pub const WAVE_MAX_DRAIN: f32 = 0.45;
+pub const WAVE_MAX_DRAIN: f32 = 0.60;
 /// Radius of the initial outward flux disc.
-pub const WAVE_IMPULSE_RADIUS: i32 = 4;
+pub const WAVE_IMPULSE_RADIUS: i32 = 5;
 /// Initial face flux at the disc edge per unit of displaced volume, and its clamp.
-pub const WAVE_IMPULSE_PER_VOLUME: f32 = 0.015;
-pub const WAVE_IMPULSE_MAX: f32 = 0.18;
+pub const WAVE_IMPULSE_PER_VOLUME: f32 = 0.03;
+pub const WAVE_IMPULSE_MAX: f32 = 0.35;
 /// Cap on the surface-height change of one column in one tick (cells).
-pub const WAVE_MAX_DH: f32 = 0.30;
+pub const WAVE_MAX_DH: f32 = 0.50;
 /// How far above / below the region centre a column is searched for its
 /// water surface.
 pub const WAVE_SEARCH_UP: i32 = 3;
@@ -244,6 +244,46 @@ fn sample_column(
             open_pz: !face_blocked(&grid.cell_corners, idx, 0, 0, 1),
         };
     }
+    // No water in the window. A DRY column that still has an open cell
+    // sitting on solid within the window is a floor the wave can flood
+    // (inflow only: its surface is its floor, avail = 0). Without this an
+    // impact that drains a column completely left a permanent hole - a
+    // dry column used to be a wall, and nothing could flow back into it.
+    let mut solid_y: Option<i32> = None;
+    for wy in ((cy - WAVE_SEARCH_DOWN)..=(cy + WAVE_SEARCH_UP)).rev() {
+        let (key, lx, ly, lz) = cell_key(cs, wx, wy, wz);
+        let Some(grid) = chunks.get(&key) else { continue };
+        let idx = grid.index(lx, ly, lz);
+        if grid.cell_cap[idx] <= MIN_LEVEL {
+            solid_y = Some(wy);
+            break;
+        }
+    }
+    if let Some(ys) = solid_y {
+        let wy = ys + 1;
+        if wy <= cy + WAVE_SEARCH_UP {
+            let (key, lx, ly, lz) = cell_key(cs, wx, wy, wz);
+            if let Some(grid) = chunks.get(&key) {
+                let idx = grid.index(lx, ly, lz);
+                let cap = grid.cell_cap[idx];
+                let cell = &grid.cells[idx];
+                if cap > MIN_LEVEL && (cell.level <= MIN_LEVEL || cell.fluid_type.is_water()) && !cell.is_source() {
+                    return Col {
+                        has: true,
+                        key,
+                        idx,
+                        top_y: wy,
+                        cap,
+                        level: 0.0,
+                        h: wy as f32,
+                        avail: 0.0,
+                        open_px: !face_blocked(&grid.cell_corners, idx, 1, 0, 0),
+                        open_pz: !face_blocked(&grid.cell_corners, idx, 0, 0, 1),
+                    };
+                }
+            }
+        }
+    }
     Col::NONE
 }
 
@@ -265,6 +305,9 @@ fn apply_dh(
     // Top cell.
     if let Some(grid) = chunks.get_mut(&col.key) {
         let cell = &mut grid.cells[col.idx];
+        if cell.level <= MIN_LEVEL && !cell.fluid_type.is_water() {
+            cell.fluid_type = crate::cell::FluidType::WaterPool; // flooding a dry floor cell
+        }
         ft = cell.fluid_type;
         let new_level = cell.level + delta;
         let clamped = new_level.clamp(0.0, col.cap);
@@ -352,8 +395,11 @@ pub fn step_waves(
         // 2. Flux update with inertia. A face is open when both columns hold
         //    water at (nearly) the same layer and the rendered surface does
         //    not block it.
+        // A crest taller than a cell stacks into the layer above, and a trough
+        // can empty its top cell, so two neighbouring surfaces of one pool can
+        // sit two layers apart. Anything further is a real step (a fall).
         let face_open = |a: &Col, b: &Col, open_bit: bool| -> bool {
-            a.has && b.has && open_bit && (a.top_y - b.top_y).abs() <= 1
+            a.has && b.has && open_bit && (a.top_y - b.top_y).abs() <= 2
         };
         for iz in 0..w {
             for ix in 0..w {
@@ -461,6 +507,16 @@ mod tests {
                 // Physical pool: full lower layer, partial top layer.
                 g.cells[i].level = if y == floor_y + 1 { 1.0 } else { level };
                 g.cells[i].fluid_type = FluidType::WaterPool;
+            }
+        }}
+        // Rim: everything outside the pool footprint is solid up to three
+        // cells above the floor, like a real basin. Without it the pool sits
+        // on a flat floor and (correctly) floods outward, which is not what
+        // these tests measure.
+        for z in 0..size { for x in 0..size {
+            if x >= lo && x < hi && z >= lo && z < hi { continue; }
+            for y in (floor_y + 1)..=(floor_y + 3) {
+                g.set_density(x, y, z, 1.0);
             }
         }}
         g.has_fluid = true;

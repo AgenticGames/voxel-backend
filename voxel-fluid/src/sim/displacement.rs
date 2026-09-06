@@ -30,7 +30,7 @@ use crate::cell::{ChunkFluidGrid, FluidType, MIN_LEVEL};
 use super::utils::SqueezedRemainder;
 
 /// Ticks the injection front dwells on one ring before advancing.
-pub const DISPLACE_RING_TICKS: u32 = 2;
+pub const DISPLACE_RING_TICKS: u32 = 4;
 /// Outer limit of the ring walk (cells).
 pub const DISPLACE_MAX_RING: i32 = 12;
 /// Hard lifetime of one displacement (ticks; 90 = 3 s at 30 Hz).
