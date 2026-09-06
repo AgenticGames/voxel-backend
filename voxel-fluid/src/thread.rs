@@ -12,7 +12,8 @@ use rand_chacha::ChaCha8Rng;
 
 use std::collections::VecDeque;
 
-use crate::sim::{detect_lava_water_quench_with_scratch, equalize_horizontal, regen_sources, squeeze_excess_fluid, tick_fluid, try_grow_pillow_voxel, QuenchScratch};
+use crate::sim::{detect_lava_water_quench_with_scratch, equalize_horizontal, regen_sources, squeeze_excess_fluid_collect, tick_fluid, try_grow_pillow_voxel, QuenchScratch};
+use crate::sim::displacement::{queue_displacement, spill_displacements};
 
 /// Bounds on the sim tick rate (Hz). The low end keeps the tick interval a
 /// finite `Duration`; the high end stops a fat-fingered menu value from
@@ -216,6 +217,9 @@ pub fn fluid_sim_loop(
         let is_lava_tick = tick_count % lava_divisor == 0;
         let substeps = config.water_substeps.max(1) as usize;
         let mut dirty_water = HashSet::new();
+        // Collapse displacement: spill queued volume back into the pool as an
+        // expanding ring before the flow step smooths it (2026-09-06).
+        dirty_water.extend(spill_displacements(&mut chunks, chunk_size));
         // Equalize first: set flat baseline, then slope flow gets the final word
         // to create gradients toward drains (prevents equalization from undoing drainage)
         let dirty_eq = equalize_horizontal(&mut chunks, chunk_size, false);
@@ -614,11 +618,15 @@ fn handle_event(
                 .or_insert_with(|| ChunkDensityCache::new(chunk_size));
             cache.update_density(&densities);
 
-            // If grid exists, update its density and squeeze excess
+            // If grid exists, update its density and squeeze excess. What the
+            // squeeze cannot place locally is queued as a displacement and
+            // re-injected around the impact over the next ticks (2026-09-06)
+            // instead of evaporating - rock landing in a pool used to eat it.
             if let Some(grid) = chunks.get_mut(&chunk) {
                 grid.update_density(&densities);
-                squeeze_excess_fluid(grid);
+                let lost = squeeze_excess_fluid_collect(grid);
                 grid.dirty = true;
+                queue_displacement(chunk, chunk_size, &lost);
             }
 
             // Drain any save-load pending fluid for this chunk now that the

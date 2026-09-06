@@ -1,12 +1,32 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::cell::{ChunkFluidGrid, MIN_LEVEL, SOURCE_LEVEL};
+use crate::cell::{ChunkFluidGrid, FluidType, MIN_LEVEL, SOURCE_LEVEL};
+
+/// What a squeeze could NOT place in the six neighbours of a shrunk cell
+/// (2026-09-06). Chunk-local cell + the volume that would otherwise have
+/// evaporated. `sim::displacement` re-injects it as an expanding ring.
+#[derive(Debug, Clone, Copy)]
+pub struct SqueezedRemainder {
+    pub lx: usize,
+    pub ly: usize,
+    pub lz: usize,
+    pub lost: f32,
+    pub fluid_type: FluidType,
+}
 
 /// After a density update, squeeze excess fluid from cells whose capacity decreased.
 /// Excess is pushed to non-solid neighbors; any remainder is evaporated.
+/// (Legacy entry: callers that do not track displacement.)
 pub fn squeeze_excess_fluid(grid: &mut ChunkFluidGrid) {
+    let _ = squeeze_excess_fluid_collect(grid);
+}
+
+/// Same squeeze, but RETURNS the remainders instead of evaporating them so
+/// the caller can conserve the volume (collapse displacement, 2026-09-06).
+pub fn squeeze_excess_fluid_collect(grid: &mut ChunkFluidGrid) -> Vec<SqueezedRemainder> {
     let size = grid.size;
     let mut any_change = false;
+    let mut remainders: Vec<SqueezedRemainder> = Vec::new();
 
     for z in 0..size {
         for y in 0..size {
@@ -53,7 +73,11 @@ pub fn squeeze_excess_fluid(grid: &mut ChunkFluidGrid) {
                         remaining -= push;
                     }
                 }
-                // Any remaining excess evaporates (no neighbor space available)
+                // Whatever is left could not be placed locally - hand it to
+                // the caller instead of evaporating it.
+                if remaining >= MIN_LEVEL {
+                    remainders.push(SqueezedRemainder { lx: x, ly: y, lz: z, lost: remaining, fluid_type });
+                }
             }
         }
     }
@@ -61,6 +85,7 @@ pub fn squeeze_excess_fluid(grid: &mut ChunkFluidGrid) {
     if any_change {
         grid.dirty = true;
     }
+    remainders
 }
 
 /// Equalize water levels across connected horizontal regions at each Y level.
