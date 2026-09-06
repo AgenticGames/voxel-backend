@@ -57,11 +57,20 @@ pub(crate) fn fluid_sim_loop_wrapper(
         match internal_rx.recv_timeout(std::time::Duration::from_millis(50)) {
             Ok(fluid_result) => match fluid_result {
                 FluidResult::FluidMesh { chunk, mesh } => {
+                    // 2026-09-07 (PC2, session BA309E5C): with the sim no longer blocking,
+                    // a settling lake still FLOODED the shared result queue - 8 workers
+                    // alive, 16 requests pending for 120 s, because every ChunkMesh send
+                    // sat behind thousands of water meshes UE drained at ~1650-speed.
+                    // Water may never own more than half the queue: past 1024 queued
+                    // results a fluid mesh is dropped here (the sim re-meshes on the next
+                    // change) and terrain always has room to land.
+                    if result_tx.len() >= 1024 {
+                        voxel_fluid::thread::FLUID_MESH_BACKPRESSURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        continue;
+                    }
                     let converted = convert_fluid_mesh_to_ue(&mesh, chunk, chunk_size, world_scale);
-                    // 2026-09-07: try, wait a little, try again - but never sit on a
-                    // blocking send. If UE's result queue stays full for ~0.5 s the
-                    // mesh is dropped; the sim re-meshes any chunk that changes and
-                    // a stale water surface beats a frozen world.
+                    // try, wait a little, try again - but never sit on a blocking send.
+                    // If UE's result queue stays full for ~0.5 s the mesh is dropped.
                     let mut msg = WorkerResult::FluidMesh { chunk, mesh: converted };
                     let mut delivered = false;
                     for _ in 0..10 {
